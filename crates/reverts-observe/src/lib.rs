@@ -14,6 +14,7 @@ pub enum FindingCode {
     CallableEmittedAsNonCallable,
     DuplicateTopLevelBinding,
     SyntheticReferenceWithoutDeclaration,
+    UnparseableOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

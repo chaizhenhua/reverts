@@ -543,6 +543,7 @@ name = "reverts-output-core"
 version = "0.1.0"
 dependencies = [
  "reverts-ir",
+ "reverts-js",
  "reverts-observe",
 ]
 

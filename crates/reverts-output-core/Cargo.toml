@@ -9,6 +9,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+reverts-js = { path = "../reverts-js" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-observe = { path = "../reverts-observe" }
-
