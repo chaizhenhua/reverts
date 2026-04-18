@@ -1,0 +1,4 @@
+/target/
+/.reverts-runs/
+*.log
+
