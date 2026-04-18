@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/reverts-ir",
+    "crates/reverts-js",
     "crates/reverts-observe",
     "crates/reverts-output-core",
 ]
@@ -20,3 +21,8 @@ dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
 
+[workspace.dependencies]
+oxc_allocator = "0.42"
+oxc_codegen = "0.42"
+oxc_parser = "0.42"
+oxc_span = "0.42"
