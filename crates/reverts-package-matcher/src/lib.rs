@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use reverts_input::{
@@ -97,7 +97,7 @@ impl ExactPackageMatcher {
             };
 
             let hash = stable_hash(normalized.as_bytes());
-            let Some(candidates) = source_index.get(&hash) else {
+            let Some(candidates) = source_index.candidates_for_hash(hash.as_str()) else {
                 continue;
             };
 
@@ -180,15 +180,15 @@ fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
 fn index_package_sources<'a>(
     package_sources: &'a [PackageSource],
     audit: &mut AuditReport,
-) -> BTreeMap<String, Vec<&'a PackageSource>> {
-    let mut index = BTreeMap::<String, Vec<&PackageSource>>::new();
+) -> PackageSourceIndex<'a> {
+    let mut entries = Vec::new();
     for source in package_sources {
         match normalize_source(source.source_path.as_str(), source.source.as_str()) {
             Ok(normalized) => {
-                index
-                    .entry(stable_hash(normalized.as_bytes()))
-                    .or_default()
-                    .push(source);
+                entries.push(PackageSourceIndexEntry {
+                    normalized_source_hash: stable_hash(normalized.as_bytes()),
+                    source,
+                });
             }
             Err(message) => {
                 audit.push(
@@ -202,7 +202,55 @@ fn index_package_sources<'a>(
             }
         }
     }
-    index
+    entries.sort_by(|left, right| {
+        left.normalized_source_hash
+            .cmp(&right.normalized_source_hash)
+            .then_with(|| left.source.package_name.cmp(&right.source.package_name))
+            .then_with(|| {
+                left.source
+                    .package_version
+                    .cmp(&right.source.package_version)
+            })
+            .then_with(|| {
+                left.source
+                    .export_specifier
+                    .cmp(&right.source.export_specifier)
+            })
+            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+    });
+    PackageSourceIndex { entries }
+}
+
+#[derive(Debug)]
+struct PackageSourceIndex<'a> {
+    entries: Vec<PackageSourceIndexEntry<'a>>,
+}
+
+impl<'a> PackageSourceIndex<'a> {
+    fn candidates_for_hash(&self, hash: &str) -> Option<&[PackageSourceIndexEntry<'a>]> {
+        let index = self
+            .entries
+            .binary_search_by(|entry| entry.normalized_source_hash.as_str().cmp(hash))
+            .ok()?;
+
+        let mut start = index;
+        while start > 0 && self.entries[start - 1].normalized_source_hash == hash {
+            start -= 1;
+        }
+
+        let mut end = index + 1;
+        while end < self.entries.len() && self.entries[end].normalized_source_hash == hash {
+            end += 1;
+        }
+
+        Some(&self.entries[start..end])
+    }
+}
+
+#[derive(Debug)]
+struct PackageSourceIndexEntry<'a> {
+    normalized_source_hash: String,
+    source: &'a PackageSource,
 }
 
 fn normalize_source(path: &str, source: &str) -> Result<String, String> {
@@ -218,11 +266,11 @@ enum CandidateSelection<'a> {
 
 fn select_unique_candidate<'a>(
     module: &ModuleInput,
-    candidates: &[&'a PackageSource],
+    candidates: &[PackageSourceIndexEntry<'a>],
 ) -> CandidateSelection<'a> {
     let filtered = candidates
         .iter()
-        .copied()
+        .map(|candidate| candidate.source)
         .filter(|source| {
             module
                 .package_name
@@ -305,7 +353,7 @@ mod tests {
     use reverts_ir::ModuleId;
     use reverts_observe::FindingCode;
 
-    use super::{ExactPackageMatcher, PackageSource};
+    use super::{ExactPackageMatcher, PackageSource, index_package_sources};
 
     fn rows_with_package_source(source: &str) -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -429,5 +477,32 @@ mod tests {
         assert!(report.attributions.is_empty());
         assert!(report.matches.is_empty());
         assert!(report.audit.is_clean());
+    }
+
+    #[test]
+    fn package_source_index_uses_binary_lookup_over_sorted_hashes() {
+        let package_sources = [
+            PackageSource::external("pkg", "1.0.0", "pkg/a", "a.js", "export const a = 1;"),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/target",
+                "target.js",
+                "export const target = 42;",
+            ),
+            PackageSource::external("pkg", "3.0.0", "pkg/z", "z.js", "export const z = 26;"),
+        ];
+        let mut audit = Default::default();
+        let index = index_package_sources(&package_sources, &mut audit);
+        let rows = rows_with_package_source("export const target=42");
+        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+
+        assert!(audit.is_clean());
+        assert_eq!(index.entries.len(), 3);
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.attributions[0].package_version.as_deref(),
+            Some("2.0.0")
+        );
     }
 }

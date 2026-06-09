@@ -2,7 +2,7 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{CodeGenerator, CodegenOptions};
-use oxc_parser::Parser;
+use oxc_parser::{ParseOptions, Parser};
 use oxc_span::SourceType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +44,7 @@ pub fn source_type_candidates(path_hint: Option<&Path>, goal: ParseGoal) -> Vec<
             push_unique(&mut candidates, SourceType::ts());
             push_unique(&mut candidates, SourceType::mjs().with_typescript(true));
             push_unique(&mut candidates, SourceType::mjs());
+            push_unique(&mut candidates, SourceType::cjs());
             push_unique(&mut candidates, SourceType::jsx());
         }
     }
@@ -62,7 +63,9 @@ pub fn parse_source(source: &str, path_hint: Option<&Path>, goal: ParseGoal) -> 
     let mut errors = Vec::new();
 
     for source_type in source_type_candidates(path_hint, goal) {
-        let parsed = Parser::new(&allocator, source, source_type).parse();
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
         if parsed.errors.is_empty() && !parsed.panicked {
             return Ok(());
         }
@@ -84,7 +87,9 @@ pub fn format_source_pretty(
 
     for source_type in source_type_candidates(path_hint, goal) {
         let allocator = Allocator::default();
-        let parsed = Parser::new(&allocator, source, source_type).parse();
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
         if !parsed.errors.is_empty() || parsed.panicked {
             errors.push(ParseError {
                 source_type: format!("{source_type:?}"),
@@ -104,6 +109,13 @@ pub fn format_source_pretty(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+fn parse_options_for(source_type: SourceType) -> ParseOptions {
+    ParseOptions {
+        allow_return_outside_function: source_type.is_script(),
+        ..Default::default()
+    }
 }
 
 pub fn normalize_source_for_pipeline(source: &str, path_hint: Option<&Path>) -> Result<String> {
@@ -234,6 +246,17 @@ mod tests {
 
         assert!(normalized.contains("export function add(a, b)"));
         assert!(normalized.contains("return a + b;"));
+    }
+
+    #[test]
+    fn pipeline_normalization_accepts_commonjs_bin_sources() {
+        let normalized = normalize_source_for_pipeline(
+            "if (require.main === module) {\n  return;\n}\nmodule.exports = {};\n",
+            Some(Path::new("bin/which.js")),
+        )
+        .expect("commonjs package source should normalize");
+
+        assert!(normalized.contains("module.exports"));
     }
 
     #[test]

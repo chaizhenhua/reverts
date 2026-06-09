@@ -701,8 +701,13 @@ name = "reverts-cli"
 version = "0.1.0"
 dependencies = [
  "reverts-input",
+ "reverts-ir",
  "reverts-observe",
+ "reverts-package-matcher",
  "reverts-pipeline",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
