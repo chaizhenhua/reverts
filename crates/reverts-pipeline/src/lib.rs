@@ -47,8 +47,19 @@ fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
             continue;
         }
 
+        if has_module_source(program.model().input(), module.id) {
+            continue;
+        }
+
         let definitions = program.model().graph().definitions_for(module.id);
-        if definitions.is_empty() || has_module_source(program.model().input(), module.id) {
+        if definitions.is_empty() {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::MissingDefinition,
+                    "module has no real source body to emit",
+                )
+                .with_module(module.id.0.to_string()),
+            );
             continue;
         }
 
@@ -73,6 +84,17 @@ fn has_module_source(input: &InputBundle, module_id: ModuleId) -> bool {
 fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
     let module = input.modules.iter().find(|module| module.id == module_id)?;
     let source_file_id = module.source_file_id?;
+    let source = input
+        .source_files
+        .iter()
+        .find(|source_file| source_file.id == source_file_id)?
+        .source
+        .as_deref()?;
+
+    if let Some(span) = module.source_span {
+        return source.get(span.byte_start as usize..span.byte_end as usize);
+    }
+
     let module_count_for_source = input
         .modules
         .iter()
@@ -82,12 +104,7 @@ fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
         return None;
     }
 
-    input
-        .source_files
-        .iter()
-        .find(|source_file| source_file.id == source_file_id)?
-        .source
-        .as_deref()
+    Some(source)
 }
 
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
@@ -244,6 +261,21 @@ mod tests {
     }
 
     #[test]
+    fn module_without_source_is_reported_without_emitting_empty_file() {
+        let rows = rows_with_application_module();
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.findings().iter().any(|finding| {
+            finding.code == FindingCode::MissingDefinition
+                && finding.module.as_deref() == Some("1")
+                && finding.binding.is_none()
+        }));
+        assert!(run.project.files.is_empty());
+    }
+
+    #[test]
     fn duplicate_input_symbols_emit_single_missing_source_finding() {
         let mut rows = rows_with_application_module();
         rows.symbols.push(SymbolInput {
@@ -286,6 +318,7 @@ mod tests {
             original_name: "m2".to_string(),
             semantic_path: "modules/m2.ts".to_string(),
             source_file_id: Some(1),
+            source_span: None,
             package_name: None,
             package_version: None,
         });
@@ -303,5 +336,41 @@ mod tests {
 
         assert!(run.audit.has(FindingCode::MissingDefinition));
         assert!(run.project.files.is_empty());
+    }
+
+    #[test]
+    fn bundle_source_spans_emit_real_module_slices() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("export const one = 1;\nexport const two = 2;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "one", "modules/one.ts")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(0, 21)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "two", "modules/two.ts")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(22, 43)),
+        );
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "one".to_string(),
+        });
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(2),
+            name: "two".to_string(),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.project.files.len(), 2);
+        assert!(run.project.files[0].source.contains("export const one = 1"));
+        assert!(run.project.files[1].source.contains("export const two = 2"));
     }
 }

@@ -112,6 +112,17 @@ impl ImportExportPlanner {
 fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
     let module = input.modules.iter().find(|module| module.id == module_id)?;
     let source_file_id = module.source_file_id?;
+    let source = input
+        .source_files
+        .iter()
+        .find(|source_file| source_file.id == source_file_id)?
+        .source
+        .as_deref()?;
+
+    if let Some(span) = module.source_span {
+        return source.get(span.byte_start as usize..span.byte_end as usize);
+    }
+
     let module_count_for_source = input
         .modules
         .iter()
@@ -121,12 +132,7 @@ fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
         return None;
     }
 
-    input
-        .source_files
-        .iter()
-        .find(|source_file| source_file.id == source_file_id)?
-        .source
-        .as_deref()
+    Some(source)
 }
 
 #[cfg(test)]
@@ -161,5 +167,39 @@ mod tests {
         let plan = planner.plan_enriched_program(&enriched);
 
         assert_eq!(plan.files[0].body[0], "export const answer = 42;");
+    }
+
+    #[test]
+    fn enriched_program_plans_real_source_slice_from_bundle_span() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("export const one = 1;\nexport const two = 2;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "one", "modules/one.ts")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(0, 21)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "two", "modules/two.ts")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(22, 43)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner.plan_enriched_program(&enriched);
+
+        assert_eq!(plan.files[0].body[0], "export const one = 1;");
+        assert_eq!(plan.files[1].body[0], "export const two = 2;");
     }
 }

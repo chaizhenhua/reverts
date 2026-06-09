@@ -100,7 +100,9 @@ fn load_modules(
             m.semantic_name,
             m.module_category,
             m.package_name,
-            m.package_version
+            m.package_version,
+            m.byte_start,
+            m.byte_end
         FROM modules m
         JOIN project_files pf ON pf.file_id = m.file_id
         WHERE pf.project_id = ?1
@@ -122,6 +124,8 @@ fn load_modules(
             kind: module_kind_from_category(category.as_deref()),
             package_name: row.get(5)?,
             package_version: row.get(6)?,
+            byte_start: row.get(7)?,
+            byte_end: row.get(8)?,
         })
     })?;
 
@@ -465,7 +469,9 @@ mod tests {
                     semantic_name TEXT,
                     module_category TEXT,
                     package_name TEXT,
-                    package_version TEXT
+                    package_version TEXT,
+                    byte_start INTEGER,
+                    byte_end INTEGER
                 );
                 CREATE TABLE symbols (
                     id INTEGER PRIMARY KEY,
@@ -501,10 +507,10 @@ mod tests {
                 INSERT INTO source_files (id, file_path) VALUES (101, '{}');
                 INSERT INTO project_files (project_id, file_id) VALUES (7, 101);
                 INSERT INTO modules
-                    (id, file_id, original_name, semantic_name, module_category, package_name, package_version)
+                    (id, file_id, original_name, semantic_name, module_category, package_name, package_version, byte_start, byte_end)
                     VALUES
-                    (10, 101, 'app', 'entry/main', 'application', NULL, NULL),
-                    (11, 101, 'lodash_map', 'lodash/map', 'package', 'lodash', '4.17.21');
+                    (10, 101, 'app', 'entry/main', 'application', NULL, NULL, 0, 27),
+                    (11, 101, 'lodash_map', 'lodash/map', 'package', 'lodash', '4.17.21', 0, 0);
                 INSERT INTO symbols
                     (id, module_id, original_name, semantic_name, export_name, scope_level)
                     VALUES

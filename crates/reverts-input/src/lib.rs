@@ -47,8 +47,29 @@ pub struct ModuleInput {
     pub original_name: String,
     pub semantic_path: String,
     pub source_file_id: Option<u32>,
+    pub source_span: Option<SourceSpan>,
     pub package_name: Option<String>,
     pub package_version: Option<String>,
+}
+
+/// Byte range of a module inside its backing source file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSpan {
+    /// Inclusive UTF-8 byte offset where the module body starts.
+    pub byte_start: u32,
+    /// Exclusive UTF-8 byte offset where the module body ends.
+    pub byte_end: u32,
+}
+
+impl SourceSpan {
+    /// Creates a byte range for a module source slice.
+    #[must_use]
+    pub const fn new(byte_start: u32, byte_end: u32) -> Self {
+        Self {
+            byte_start,
+            byte_end,
+        }
+    }
 }
 
 impl ModuleInput {
@@ -64,6 +85,7 @@ impl ModuleInput {
             original_name: original_name.into(),
             semantic_path: semantic_path.into(),
             source_file_id: None,
+            source_span: None,
             package_name: None,
             package_version: None,
         }
@@ -83,6 +105,7 @@ impl ModuleInput {
             original_name: original_name.into(),
             semantic_path: semantic_path.into(),
             source_file_id: None,
+            source_span: None,
             package_name: Some(package_name.into()),
             package_version,
         }
@@ -91,6 +114,12 @@ impl ModuleInput {
     #[must_use]
     pub fn with_source_file(mut self, source_file_id: u32) -> Self {
         self.source_file_id = Some(source_file_id);
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_span(mut self, source_span: SourceSpan) -> Self {
+        self.source_span = Some(source_span);
         self
     }
 }
@@ -208,7 +237,7 @@ impl InputBundle {
         validate_project(&rows.project)?;
         let source_file_ids = collect_source_file_ids(&rows.source_files)?;
         let module_ids = collect_module_ids(&rows.modules)?;
-        validate_modules(&rows.modules, &source_file_ids)?;
+        validate_modules(&rows.modules, &rows.source_files, &source_file_ids)?;
         validate_symbols(&rows.symbols, &module_ids)?;
         validate_dependencies(&rows.dependencies, &module_ids)?;
         validate_package_attributions(&rows.modules, &rows.package_attributions, &module_ids)?;
@@ -287,6 +316,7 @@ impl InputRows {
                 .source_file_id
                 .map(|value| checked_u32_id(value, "module.source_file_id"))
                 .transpose()?;
+            let source_span = source_span_from_row(row.byte_start, row.byte_end, id)?;
             let kind = row
                 .kind
                 .to_module_kind()
@@ -297,6 +327,7 @@ impl InputRows {
                 original_name,
                 semantic_path,
                 source_file_id,
+                source_span,
                 package_name: normalize_optional(row.package_name),
                 package_version: normalize_optional(row.package_version),
             });
@@ -427,6 +458,8 @@ pub struct ModuleRow {
     pub kind: StoredModuleKind,
     pub package_name: Option<String>,
     pub package_version: Option<String>,
+    pub byte_start: Option<i64>,
+    pub byte_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -479,6 +512,11 @@ pub enum InputBundleError {
     },
     UnsupportedModuleKind {
         module_id: ModuleId,
+    },
+    InvalidSourceSpan {
+        module_id: ModuleId,
+        byte_start: i64,
+        byte_end: i64,
     },
     UnknownModule {
         module_id: ModuleId,
@@ -539,6 +577,15 @@ impl fmt::Display for InputBundleError {
                     module_id.0
                 )
             }
+            Self::InvalidSourceSpan {
+                module_id,
+                byte_start,
+                byte_end,
+            } => write!(
+                formatter,
+                "module {} has invalid source span {byte_start}..{byte_end}",
+                module_id.0
+            ),
             Self::UnknownModule { module_id, owner } => {
                 write!(
                     formatter,
@@ -620,8 +667,14 @@ fn collect_module_ids(modules: &[ModuleInput]) -> Result<BTreeSet<ModuleId>, Inp
 
 fn validate_modules(
     modules: &[ModuleInput],
+    source_files: &[SourceFileInput],
     source_file_ids: &BTreeSet<u32>,
 ) -> Result<(), InputBundleError> {
+    let source_files_by_id: BTreeMap<u32, &SourceFileInput> = source_files
+        .iter()
+        .map(|source_file| (source_file.id, source_file))
+        .collect();
+
     for module in modules {
         if let Some(source_file_id) = module.source_file_id
             && !source_file_ids.contains(&source_file_id)
@@ -630,6 +683,28 @@ fn validate_modules(
                 source_file_id,
                 owner: "module",
             });
+        }
+
+        let Some(source_span) = module.source_span else {
+            continue;
+        };
+        if source_span.byte_end <= source_span.byte_start {
+            return Err(invalid_source_span(module.id, source_span));
+        }
+        let Some(source_file_id) = module.source_file_id else {
+            return Err(invalid_source_span(module.id, source_span));
+        };
+        let Some(source_file) = source_files_by_id.get(&source_file_id) else {
+            continue;
+        };
+        let Some(source) = source_file.source.as_deref() else {
+            return Err(invalid_source_span(module.id, source_span));
+        };
+        if source
+            .get(source_span.byte_start as usize..source_span.byte_end as usize)
+            .is_none()
+        {
+            return Err(invalid_source_span(module.id, source_span));
         }
     }
     Ok(())
@@ -773,6 +848,55 @@ fn checked_u32_id(value: i64, field: &'static str) -> Result<u32, InputBundleErr
     u32::try_from(value).map_err(|_error| InputBundleError::InvalidId { field, value })
 }
 
+fn source_span_from_row(
+    byte_start: Option<i64>,
+    byte_end: Option<i64>,
+    module_id: ModuleId,
+) -> Result<Option<SourceSpan>, InputBundleError> {
+    match (byte_start, byte_end) {
+        (Some(start), Some(end)) if start == 0 && end == 0 => Ok(None),
+        (Some(start), Some(end)) if start >= 0 && end > start => {
+            let byte_start =
+                u32::try_from(start).map_err(|_error| InputBundleError::InvalidSourceSpan {
+                    module_id,
+                    byte_start: start,
+                    byte_end: end,
+                })?;
+            let byte_end =
+                u32::try_from(end).map_err(|_error| InputBundleError::InvalidSourceSpan {
+                    module_id,
+                    byte_start: start,
+                    byte_end: end,
+                })?;
+            Ok(Some(SourceSpan::new(byte_start, byte_end)))
+        }
+        (None, None) => Ok(None),
+        (Some(start), Some(end)) => Err(InputBundleError::InvalidSourceSpan {
+            module_id,
+            byte_start: start,
+            byte_end: end,
+        }),
+        (Some(start), None) => Err(InputBundleError::InvalidSourceSpan {
+            module_id,
+            byte_start: start,
+            byte_end: -1,
+        }),
+        (None, Some(end)) => Err(InputBundleError::InvalidSourceSpan {
+            module_id,
+            byte_start: -1,
+            byte_end: end,
+        }),
+    }
+}
+
+fn invalid_source_span(module_id: ModuleId, source_span: SourceSpan) -> InputBundleError {
+    InputBundleError::InvalidSourceSpan {
+        module_id,
+        byte_start: i64::from(source_span.byte_start),
+        byte_end: i64::from(source_span.byte_end),
+    }
+}
+
 fn non_empty(value: String, field: &'static str) -> Result<String, InputBundleError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -813,8 +937,8 @@ mod tests {
     use super::{
         DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleInput, ModuleRow,
         PackageAttributionInput, PackageAttributionRow, PackageAttributionStatus,
-        PackageEmissionMode, ProjectInput, ProjectRow, SourceFileRow, StoredModuleKind,
-        SymbolInput, SymbolRow,
+        PackageEmissionMode, ProjectInput, ProjectRow, SourceFileInput, SourceFileRow, SourceSpan,
+        StoredModuleKind, SymbolInput, SymbolRow,
     };
 
     #[test]
@@ -856,6 +980,8 @@ mod tests {
             kind: StoredModuleKind::Application,
             package_name: None,
             package_version: None,
+            byte_start: Some(0),
+            byte_end: Some(18),
         });
         rows.symbols.push(SymbolRow {
             module_id: 17,
@@ -868,6 +994,7 @@ mod tests {
         assert_eq!(bundle.source_files[0].id, 11);
         assert_eq!(bundle.modules[0].original_name, "m17");
         assert_eq!(bundle.modules[0].source_file_id, Some(11));
+        assert_eq!(bundle.modules[0].source_span, Some(SourceSpan::new(0, 18)));
         assert_eq!(bundle.symbols[0].name, "answer");
     }
 
@@ -933,6 +1060,8 @@ mod tests {
             kind: StoredModuleKind::Package,
             package_name: Some("axios".to_string()),
             package_version: Some("1.6.0".to_string()),
+            byte_start: None,
+            byte_end: None,
         });
         rows.package_attributions.push(PackageAttributionRow {
             module_id: 10,
@@ -975,6 +1104,52 @@ mod tests {
     }
 
     #[test]
+    fn module_source_span_requires_backing_source_file() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "m10", "src/index.ts")
+                .with_source_span(SourceSpan::new(0, 5)),
+        );
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::InvalidSourceSpan {
+                module_id: ModuleId(10),
+                byte_start: 0,
+                byte_end: 5
+            })
+        ));
+    }
+
+    #[test]
+    fn module_source_span_must_resolve_to_real_source_slice() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("export const value = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "m10", "src/index.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(0, 200)),
+        );
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::InvalidSourceSpan {
+                module_id: ModuleId(10),
+                byte_start: 0,
+                byte_end: 200
+            })
+        ));
+    }
+
+    #[test]
     fn unknown_database_module_kind_is_rejected() {
         let mut rows = DatabaseRows::new(ProjectRow {
             id: 1,
@@ -988,6 +1163,8 @@ mod tests {
             kind: StoredModuleKind::Unknown,
             package_name: None,
             package_version: None,
+            byte_start: None,
+            byte_end: None,
         });
 
         let error = InputBundle::from_database_rows(rows);
@@ -1009,6 +1186,7 @@ mod tests {
             original_name: "asset".to_string(),
             semantic_path: "assets/package-file.js".to_string(),
             source_file_id: None,
+            source_span: None,
             package_name: Some("lodash".to_string()),
             package_version: Some("4.17.21".to_string()),
         });
