@@ -6,6 +6,8 @@ failure-mode tests, and an implementation plan.
 
 Crate ownership and allowed dependency directions are defined separately in
 [module-boundaries.md](module-boundaries.md).
+The input-side data model is defined in
+[input-data-model.md](input-data-model.md).
 
 ## Background
 
@@ -84,7 +86,8 @@ InputBundle
 `InputBundle` is the clean boundary between data sources and the output core. It
 contains project metadata, source files, modules, symbols, dependencies, package
 attribution, and optional raw source fragments. It does not perform output
-repair.
+repair. Its detailed field and validation contract is documented in
+[input-data-model.md](input-data-model.md).
 
 ### AstFactExtractor
 

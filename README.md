@@ -14,6 +14,8 @@ The detailed output architecture is maintained in
 [docs/architecture/decompilation-output-v2.md](docs/architecture/decompilation-output-v2.md).
 Crate responsibilities and allowed dependency directions are defined in
 [docs/architecture/module-boundaries.md](docs/architecture/module-boundaries.md).
+The input-side data model is documented in
+[docs/architecture/input-data-model.md](docs/architecture/input-data-model.md).
 The shorter invariant summary remains in
 [docs/architecture/output-core.md](docs/architecture/output-core.md).
 

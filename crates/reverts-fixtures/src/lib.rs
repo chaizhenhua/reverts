@@ -1,5 +1,5 @@
 use reverts_input::{InputBundle, InputBundleError, InputRows, ModuleInput, ProjectInput};
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_ir::ModuleId;
 
 #[must_use]
 pub fn project(name: impl Into<String>) -> ProjectInput {
@@ -11,12 +11,7 @@ pub fn project(name: impl Into<String>) -> ProjectInput {
 
 #[must_use]
 pub fn application_module(id: u32, semantic_path: impl Into<String>) -> ModuleInput {
-    ModuleInput {
-        id: ModuleId(id),
-        kind: ModuleKind::Application,
-        semantic_path: semantic_path.into(),
-        source_file_id: None,
-    }
+    ModuleInput::application(ModuleId(id), format!("m{id}"), semantic_path)
 }
 
 #[must_use]

@@ -134,7 +134,7 @@ impl ImportExportGraph {
 #[cfg(test)]
 mod tests {
     use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SymbolInput};
-    use reverts_ir::{ModuleId, ModuleKind};
+    use reverts_ir::ModuleId;
 
     use super::RevertsGraph;
 
@@ -144,12 +144,8 @@ mod tests {
             id: 1,
             name: "fixture".to_string(),
         });
-        rows.modules.push(ModuleInput {
-            id: ModuleId(1),
-            kind: ModuleKind::Application,
-            semantic_path: "src/index.ts".to_string(),
-            source_file_id: None,
-        });
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
         rows.symbols.push(SymbolInput {
             module_id: ModuleId(1),
             name: "main".to_string(),
@@ -167,12 +163,8 @@ mod tests {
             id: 1,
             name: "fixture".to_string(),
         });
-        rows.modules.push(ModuleInput {
-            id: ModuleId(1),
-            kind: ModuleKind::Application,
-            semantic_path: "src/index.ts".to_string(),
-            source_file_id: None,
-        });
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
         let mut graph = RevertsGraph::from_input(&input);
 

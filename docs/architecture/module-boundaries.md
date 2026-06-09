@@ -61,6 +61,9 @@ reverts-observe
 `reverts-fixtures` is test-only support. Production crates must not depend on
 it as a normal dependency.
 
+The `InputBundle` field-level contract is documented in
+[input-data-model.md](input-data-model.md).
+
 ```text
 crate tests / integration tests
   -> reverts-fixtures
