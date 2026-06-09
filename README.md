@@ -12,6 +12,8 @@ copied behind the new crate boundaries and covered by self-contained tests.
 
 The detailed output architecture is maintained in
 [docs/architecture/decompilation-output-v2.md](docs/architecture/decompilation-output-v2.md).
+Crate responsibilities and allowed dependency directions are defined in
+[docs/architecture/module-boundaries.md](docs/architecture/module-boundaries.md).
 The shorter invariant summary remains in
 [docs/architecture/output-core.md](docs/architecture/output-core.md).
 

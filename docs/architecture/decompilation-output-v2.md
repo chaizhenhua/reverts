@@ -4,6 +4,9 @@ This document defines the target architecture for Reverts Next. It turns the
 research basis and observed failure modes into module boundaries, invariants,
 failure-mode tests, and an implementation plan.
 
+Crate ownership and allowed dependency directions are defined separately in
+[module-boundaries.md](module-boundaries.md).
+
 ## Background
 
 The previous output path exposed several classes of defects only after files had

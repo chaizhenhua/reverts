@@ -1,9 +1,16 @@
 [workspace]
 members = [
+    "crates/reverts-cli",
+    "crates/reverts-emitter",
+    "crates/reverts-fixtures",
+    "crates/reverts-graph",
+    "crates/reverts-input",
     "crates/reverts-ir",
     "crates/reverts-js",
     "crates/reverts-observe",
     "crates/reverts-output-core",
+    "crates/reverts-package",
+    "crates/reverts-planner",
 ]
 resolver = "3"
 
