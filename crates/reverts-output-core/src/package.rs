@@ -5,8 +5,6 @@ use reverts_ir::{PackageSurface, is_valid_package_name, split_bare_specifier};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportDecision {
     External(String),
-    LocalModule(String),
-    LocalShim(String),
     Rejected(String),
 }
 
@@ -27,7 +25,7 @@ impl PackageImportResolver {
     }
 
     #[must_use]
-    pub fn resolve(&self, specifier: &str, local_fallback: Option<&str>) -> ImportDecision {
+    pub fn resolve(&self, specifier: &str) -> ImportDecision {
         let Some((package_name, _subpath)) = split_bare_specifier(specifier) else {
             return ImportDecision::Rejected("specifier is not a bare package import".to_string());
         };
@@ -44,19 +42,8 @@ impl PackageImportResolver {
             return ImportDecision::External(specifier.to_string());
         }
 
-        local_fallback.map_or_else(
-            || ImportDecision::LocalShim(specifier_to_shim_path(specifier)),
-            |path| ImportDecision::LocalModule(path.to_string()),
-        )
+        ImportDecision::Rejected(format!("package surface does not accept '{specifier}'"))
     }
-}
-
-fn specifier_to_shim_path(specifier: &str) -> String {
-    let sanitized = specifier
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect::<String>();
-    format!("./__package_shims__/{sanitized}.js")
 }
 
 #[cfg(test)]
@@ -70,13 +57,13 @@ mod tests {
         let resolver =
             PackageImportResolver::new([PackageSurface::new("lodash").with_root_importable()]);
 
-        let decision = resolver.resolve("lodash/_mapCacheProto.js", None);
+        let decision = resolver.resolve("lodash/_mapCacheProto.js");
 
         assert!(!matches!(
             &decision,
             ImportDecision::External(specifier) if specifier == "lodash/_mapCacheProto.js"
         ));
-        assert!(matches!(decision, ImportDecision::LocalShim(_)));
+        assert!(matches!(decision, ImportDecision::Rejected(_)));
     }
 
     #[test]
@@ -86,7 +73,7 @@ mod tests {
             .with_subpath("dist-es/index.js")]);
 
         assert_eq!(
-            resolver.resolve("@smithy/protocol-http/dist-es/index.js", None),
+            resolver.resolve("@smithy/protocol-http/dist-es/index.js"),
             ImportDecision::External("@smithy/protocol-http/dist-es/index.js".to_string())
         );
     }
@@ -96,7 +83,7 @@ mod tests {
         let resolver = PackageImportResolver::default();
 
         assert!(matches!(
-            resolver.resolve("@smithy/XY7", None),
+            resolver.resolve("@smithy/XY7"),
             ImportDecision::Rejected(reason) if reason.contains("invalid package name")
         ));
     }

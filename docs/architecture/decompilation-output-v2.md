@@ -44,7 +44,11 @@ upstream pipeline.
 
 - Do not include post-write repair, final sweep, rescue, or string-rewrite
   passes in the output core.
-- Do not hide upstream emit defects behind silent fallback behavior.
+- Do not hide upstream emit defects behind generated substitute
+  implementations.
+- Do not emit placeholder declarations, generated no-op functions, empty
+  object/class bodies, package shims, or inferred local substitutes when the
+  original implementation has not been recovered.
 - Do not make `node`, `npm`, a real SQLite database, or `node_modules` part of
   required unit or integration coverage.
 - Do not optimize readability before correctness. Name recovery can be layered
@@ -62,7 +66,7 @@ The architectural consequences are:
 | Semantics-preserving structuring | Emit through an AST-oriented planner and code generator | Reduces text-level fixes and keeps transformations tied to program structure |
 | Compiler-aware recovery | Treat bundlers, minifiers, TypeScript, Babel, and package managers as compilation targets | Bundler artifacts feed explicit decisions rather than generic repairs |
 | Unified program graphs | Store AST facts, module dependencies, definitions, reads, calls, imports, exports, and package decisions in queryable records | Audits can report missing definitions, duplicate bindings, and unresolved package imports directly |
-| Type and shape constraints | Solve a binding-shape lattice before materializing placeholders | Prevents call sites from receiving plain objects and preserves enum/class/namespace intent |
+| Type and shape constraints | Solve a binding-shape lattice before materializing recovered definitions | Prevents call sites from receiving values with the wrong structural shape |
 | Readability prediction | Run naming and readability improvements after correctness | Avoids readable output that breaks imports, exports, or binding shapes |
 | AST clone matching | Use normalized AST/function signatures for package and function candidates | Improves matching under minified names without coupling matching to final emission |
 
@@ -155,8 +159,7 @@ Audits validate emitted files and planner invariants:
 - every read must have a definition, import, or finding;
 - every synthetic reference must have a matching same-file declaration or import;
 - every bare import must have a package-surface decision;
-- duplicate top-level bindings must be reported;
-- any allowed fallback marker must remain visible as an audit signal.
+- duplicate top-level bindings must be reported.
 
 ### ProjectWriter
 
@@ -240,8 +243,8 @@ validation suite.
 ### Slice 4: Package Surface Resolution
 
 - Separate package-surface decisions from network or filesystem access.
-- Add tests for accepted subpaths, absent subpaths, invalid names, and local
-  module fallback decisions.
+- Add tests for accepted subpaths, absent subpaths, invalid names, and rejected
+  package decisions.
 
 ### Slice 5: Emit Planning
 
@@ -252,8 +255,7 @@ validation suite.
 
 - Emit source through AST/codegen boundaries.
 - Run parse audit on every emitted file.
-- Add synthesis audit tests for missing synthetic declarations and fallback
-  visibility.
+- Add synthesis audit tests for missing synthetic declarations.
 
 ### Slice 7: Project Writer
 

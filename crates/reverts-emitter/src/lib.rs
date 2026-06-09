@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use reverts_ir::{BindingName, BindingShape};
+use reverts_ir::BindingName;
 use reverts_js::{JsError, ParseGoal, format_source_pretty, sanitize_identifier};
 use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
@@ -37,14 +37,6 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
                 specifier
             ));
         }
-    }
-
-    for declaration in &file.declarations {
-        lines.push(format!(
-            "const {}: any = {};",
-            emit_binding_name(&declaration.binding),
-            initializer_for(declaration.shape)
-        ));
     }
 
     for line in &file.body {
@@ -93,17 +85,6 @@ fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
 }
 
-fn initializer_for(shape: BindingShape) -> &'static str {
-    match shape {
-        BindingShape::Callable => "(..._args: any[]) => undefined",
-        BindingShape::Constructor | BindingShape::ClassLike => "class {}",
-        BindingShape::NamespaceObject | BindingShape::PlainObject | BindingShape::EnumObject => {
-            "{}"
-        }
-        BindingShape::Unknown | BindingShape::Value => "undefined as any",
-    }
-}
-
 fn parse_error_message(error: &JsError) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
@@ -139,25 +120,21 @@ impl Error for EmitError {}
 
 #[cfg(test)]
 mod tests {
-    use reverts_ir::BindingShape;
-    use reverts_planner::{EmitPlan, ImportExportPlanner, SyntheticBindingUse};
+    use reverts_planner::{EmitPlan, PlannedFile};
 
     use super::emit_project;
 
     #[test]
-    fn planned_callable_binding_emits_parseable_source() {
-        let planner = ImportExportPlanner;
-        let file = planner.plan_synthetic_file(
-            "src/index.ts",
-            [SyntheticBindingUse::new("zz", BindingShape::Callable)],
-        );
+    fn planned_source_body_emits_parseable_source_without_synthetic_implementation() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.push_source("export const answer = 42;");
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
         let project = emit_project(&plan).expect("planned file should emit");
 
         assert_eq!(project.files[0].path, "src/index.ts");
-        assert!(project.files[0].source.contains("=> undefined"));
-        assert!(!project.files[0].source.contains("= {};"));
+        assert!(project.files[0].source.contains("export const answer = 42"));
+        assert!(!project.files[0].source.contains("undefined as any"));
     }
 }

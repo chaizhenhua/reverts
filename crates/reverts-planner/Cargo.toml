@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 reverts-graph = { path = "../reverts-graph" }
+reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-model = { path = "../reverts-model" }
 reverts-package = { path = "../reverts-package" }

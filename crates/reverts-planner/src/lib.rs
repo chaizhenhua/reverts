@@ -1,5 +1,6 @@
 use reverts_graph::RevertsGraph;
-use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+use reverts_input::InputBundle;
+use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
 use reverts_package::PackageResolution;
 
@@ -18,7 +19,6 @@ impl EmitPlan {
 pub struct PlannedFile {
     pub path: String,
     pub imports: Vec<PlannedImport>,
-    pub declarations: Vec<PlannedDeclaration>,
     pub exports: Vec<PlannedExport>,
     pub body: Vec<String>,
 }
@@ -29,15 +29,9 @@ impl PlannedFile {
         Self {
             path: path.into(),
             imports: Vec::new(),
-            declarations: Vec::new(),
             exports: Vec::new(),
             body: Vec::new(),
         }
-    }
-
-    pub fn declare(&mut self, binding: BindingName, shape: BindingShape) {
-        self.declarations
-            .push(PlannedDeclaration { binding, shape });
     }
 
     pub fn add_import(&mut self, import: PlannedImport) {
@@ -47,18 +41,16 @@ impl PlannedFile {
     pub fn add_export(&mut self, binding: BindingName) {
         self.exports.push(PlannedExport { binding });
     }
+
+    pub fn push_source(&mut self, source: impl Into<String>) {
+        self.body.push(source.into());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedImport {
     pub namespace: BindingName,
     pub resolution: PackageResolution,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedDeclaration {
-    pub binding: BindingName,
-    pub shape: BindingShape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,18 +84,8 @@ impl ImportExportPlanner {
                 });
             }
 
-            for original_binding in program.model().graph().definitions_for(module.id) {
-                let binding = program
-                    .semantic_names()
-                    .binding_name(module.id, original_binding.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| BindingName::new(original_binding.as_str()));
-                let shape = match program.binding_shape(module.id, original_binding.as_str()) {
-                    BindingShape::Unknown => BindingShape::Value,
-                    shape => shape,
-                };
-                file.declare(binding.clone(), shape);
-                file.add_export(binding);
+            if let Some(source) = module_source(program.model().input(), module.id) {
+                file.push_source(source);
             }
 
             plan.push_file(file);
@@ -121,60 +103,63 @@ impl ImportExportPlanner {
     ) -> PlannedFile {
         let mut file = PlannedFile::new(path);
         for binding in graph.definitions_for(module_id) {
-            file.declare(binding, BindingShape::Value);
-        }
-        file
-    }
-
-    #[must_use]
-    pub fn plan_synthetic_file(
-        self,
-        path: impl Into<String>,
-        bindings: impl IntoIterator<Item = SyntheticBindingUse>,
-    ) -> PlannedFile {
-        let mut file = PlannedFile::new(path);
-        for binding in bindings {
-            file.declare(binding.binding, binding.shape);
+            file.add_export(binding);
         }
         file
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SyntheticBindingUse {
-    pub binding: BindingName,
-    pub shape: BindingShape,
-}
-
-impl SyntheticBindingUse {
-    #[must_use]
-    pub fn new(binding: impl Into<String>, shape: BindingShape) -> Self {
-        Self {
-            binding: BindingName::new(binding),
-            shape,
-        }
+fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
+    let module = input.modules.iter().find(|module| module.id == module_id)?;
+    let source_file_id = module.source_file_id?;
+    let module_count_for_source = input
+        .modules
+        .iter()
+        .filter(|candidate| candidate.source_file_id == Some(source_file_id))
+        .count();
+    if module_count_for_source != 1 {
+        return None;
     }
+
+    input
+        .source_files
+        .iter()
+        .find(|source_file| source_file.id == source_file_id)?
+        .source
+        .as_deref()
 }
 
 #[cfg(test)]
 mod tests {
-    use reverts_ir::BindingShape;
+    use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput};
+    use reverts_ir::ModuleId;
+    use reverts_model::ProgramModel;
 
-    use super::{ImportExportPlanner, SyntheticBindingUse};
+    use super::ImportExportPlanner;
 
     #[test]
-    fn synthetic_usage_is_planned_with_a_declaration() {
+    fn enriched_program_plans_real_source_without_synthetic_declarations() {
         let planner = ImportExportPlanner;
-
-        let file = planner.plan_synthetic_file(
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
             "src/index.ts",
-            [SyntheticBindingUse::new(
-                "__reverts_ns_pkg",
-                BindingShape::NamespaceObject,
-            )],
+            Some("export const answer = 42;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
         );
 
-        assert_eq!(file.declarations.len(), 1);
-        assert_eq!(file.declarations[0].binding.as_str(), "__reverts_ns_pkg");
+        let plan = planner.plan_enriched_program(&enriched);
+
+        assert_eq!(plan.files[0].body[0], "export const answer = 42;");
     }
 }

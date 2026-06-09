@@ -8,19 +8,15 @@ pub struct BindingMaterialization {
 }
 
 #[must_use]
-pub fn materialize_binding(binding: &str, shape: BindingShape) -> BindingMaterialization {
-    let initializer = match shape {
-        BindingShape::Callable => "(..._args: any[]) => undefined",
-        BindingShape::Constructor | BindingShape::ClassLike => "class {}",
-        BindingShape::NamespaceObject | BindingShape::PlainObject | BindingShape::EnumObject => {
-            "{}"
-        }
-        BindingShape::Unknown | BindingShape::Value => "undefined as any",
-    };
+pub fn materialize_binding_from_source(
+    binding: &str,
+    shape: BindingShape,
+    source: impl Into<String>,
+) -> BindingMaterialization {
     BindingMaterialization {
         binding: binding.to_string(),
         shape,
-        source: format!("const {binding}: any = {initializer};"),
+        source: source.into(),
     }
 }
 
@@ -28,23 +24,18 @@ pub fn materialize_binding(binding: &str, shape: BindingShape) -> BindingMateria
 mod tests {
     use reverts_ir::BindingShape;
 
-    use super::materialize_binding;
+    use super::materialize_binding_from_source;
 
     #[test]
-    fn callable_placeholder_is_not_emitted_as_object() {
-        let emitted = materialize_binding("zz", BindingShape::Callable);
-
-        assert!(emitted.source.contains("=>"));
-        assert!(!emitted.source.contains("= {};"));
-    }
-
-    #[test]
-    fn enum_initializer_is_emitted_as_initialized_object_binding() {
-        let emitted = materialize_binding("NativeModuleType", BindingShape::EnumObject);
-
-        assert_eq!(
-            emitted.source,
-            "const NativeModuleType: any = {};".to_string()
+    fn binding_materialization_preserves_real_source() {
+        let emitted = materialize_binding_from_source(
+            "fetchUser",
+            BindingShape::Callable,
+            "export function fetchUser() { return 42; }",
         );
+
+        assert_eq!(emitted.binding, "fetchUser");
+        assert!(emitted.source.contains("function fetchUser"));
+        assert!(!emitted.source.contains("undefined"));
     }
 }

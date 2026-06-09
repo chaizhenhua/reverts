@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -36,7 +36,6 @@ pub fn load_project_bundle_from_connection(
     rows.symbols = load_module_symbols(connection, project_id)?;
     rows.dependencies = load_module_dependencies(connection, project_id)?;
     rows.package_attributions = load_package_attributions(connection, project_id)?;
-    synthesize_missing_package_attributions(&mut rows);
     InputBundle::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
 }
 
@@ -70,11 +69,18 @@ fn load_source_files(
         ",
     )?;
     let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        let path = row.get::<_, String>(2)?;
+        let source = fs::read_to_string(path.as_str()).map_err(|source| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(ReadSourceError {
+                path: PathBuf::from(path.clone()),
+                source,
+            }))
+        })?;
         Ok(SourceFileRow {
             id: row.get(0)?,
             project_id: row.get(1)?,
-            path: row.get(2)?,
-            source: None,
+            path,
+            source: Some(source),
         })
     })?;
 
@@ -224,35 +230,6 @@ fn load_package_attributions(
     collect_sqlite_rows(rows)
 }
 
-fn synthesize_missing_package_attributions(rows: &mut DatabaseRows) {
-    let attributed_modules = rows
-        .package_attributions
-        .iter()
-        .map(|attribution| attribution.module_id)
-        .collect::<BTreeSet<_>>();
-
-    for module in &rows.modules {
-        if module.kind != StoredModuleKind::Package || attributed_modules.contains(&module.id) {
-            continue;
-        }
-
-        let Some(package_name) = module.package_name.as_ref() else {
-            continue;
-        };
-
-        rows.package_attributions.push(PackageAttributionRow {
-            module_id: module.id,
-            package_name: package_name.clone(),
-            package_version: module.package_version.clone(),
-            subpath: None,
-            export_specifier: None,
-            emission_mode: PackageEmissionMode::ExternalImport,
-            status: PackageAttributionStatus::Proposed,
-            rejection_reason: None,
-        });
-    }
-}
-
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, SqliteInputError> {
     let exists = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -396,9 +373,35 @@ impl From<rusqlite::Error> for SqliteInputError {
     }
 }
 
+#[derive(Debug)]
+struct ReadSourceError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+impl fmt::Display for ReadSourceError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to read {}: {}",
+            self.path.display(),
+            self.source
+        )
+    }
+}
+
+impl Error for ReadSourceError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use rusqlite::Connection;
+    use tempfile::tempdir;
 
     use reverts_ir::{ModuleId, ModuleKind};
 
@@ -409,7 +412,11 @@ mod tests {
     fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
         create_schema(&connection);
-        insert_fixture_project(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
 
         let bundle = load_project_bundle_from_connection(&connection, 7)
             .expect("fixture database should load");
@@ -426,7 +433,11 @@ mod tests {
         ));
         assert_eq!(
             bundle.package_attributions[0].status,
-            PackageAttributionStatus::Proposed
+            PackageAttributionStatus::Accepted
+        );
+        assert_eq!(
+            bundle.source_files[0].source.as_deref(),
+            Some("export const activate = 42;")
         );
     }
 
@@ -468,17 +479,26 @@ mod tests {
                     module_id INTEGER NOT NULL,
                     dependency_id INTEGER NOT NULL
                 );
+                CREATE TABLE package_attributions (
+                    module_id INTEGER NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT,
+                    package_subpath TEXT,
+                    export_specifier TEXT,
+                    emission_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    rejection_reason TEXT
+                );
                 ",
             )
             .expect("fixture schema should be created");
     }
 
-    fn insert_fixture_project(connection: &Connection) {
-        connection
-            .execute_batch(
-                r"
+    fn insert_fixture_project(connection: &Connection, source_path: &str) {
+        let sql = format!(
+            r"
                 INSERT INTO projects (id, name) VALUES (7, 'fixture-project');
-                INSERT INTO source_files (id, file_path) VALUES (101, 'bundle.js');
+                INSERT INTO source_files (id, file_path) VALUES (101, '{}');
                 INSERT INTO project_files (project_id, file_id) VALUES (7, 101);
                 INSERT INTO modules
                     (id, file_id, original_name, semantic_name, module_category, package_name, package_version)
@@ -492,8 +512,15 @@ mod tests {
                     (1002, 10, 'activate', 'activate', NULL, 'module'),
                     (1003, 10, 'inner', 'inner', NULL, 'local');
                 INSERT INTO module_dependencies (module_id, dependency_id) VALUES (10, 11);
+                INSERT INTO package_attributions
+                    (module_id, package_name, package_version, package_subpath, export_specifier, emission_mode, status, rejection_reason)
+                    VALUES
+                    (11, 'lodash', '4.17.21', 'map', 'lodash/map', 'external_import', 'accepted', NULL);
                 ",
-            )
+            source_path.replace('\'', "''")
+        );
+        connection
+            .execute_batch(sql.as_str())
             .expect("fixture rows should be inserted");
     }
 }

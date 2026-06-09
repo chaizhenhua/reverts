@@ -5,8 +5,9 @@ use std::path::Path;
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
 use reverts_input::InputBundle;
+use reverts_ir::{ModuleId, ModuleKind};
 use reverts_js::{JsError, ParseGoal, parse_source};
-use reverts_model::ProgramModel;
+use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::ImportExportPlanner;
 
@@ -21,14 +22,72 @@ pub struct OutputRun {
 pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, PipelineError> {
     let model = ProgramModel::from_input(input);
     let enrichment = enrich_program(model);
+    let mut audit = enrichment.audit;
+    audit.extend(audit_required_sources(&enrichment.program));
+    if !audit.is_clean() {
+        return Ok(OutputRun {
+            project: EmittedProject::default(),
+            audit,
+        });
+    }
+
     let planner = ImportExportPlanner;
     let plan = planner.plan_enriched_program(&enrichment.program);
     let project = emit_project(&plan).map_err(PipelineError::Emit)?;
 
-    let mut audit = enrichment.audit;
     audit.extend(audit_emitted_project_parse(&project));
 
     Ok(OutputRun { project, audit })
+}
+
+fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for module in program.model().modules() {
+        if module.kind == ModuleKind::Package {
+            continue;
+        }
+
+        let definitions = program.model().graph().definitions_for(module.id);
+        if definitions.is_empty() || has_module_source(program.model().input(), module.id) {
+            continue;
+        }
+
+        for definition in definitions {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::MissingDefinition,
+                    "module has symbols but no real source body to emit",
+                )
+                .with_module(module.id.0.to_string())
+                .with_binding(definition.as_str()),
+            );
+        }
+    }
+    audit
+}
+
+fn has_module_source(input: &InputBundle, module_id: ModuleId) -> bool {
+    module_source(input, module_id).is_some()
+}
+
+fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
+    let module = input.modules.iter().find(|module| module.id == module_id)?;
+    let source_file_id = module.source_file_id?;
+    let module_count_for_source = input
+        .modules
+        .iter()
+        .filter(|candidate| candidate.source_file_id == Some(source_file_id))
+        .count();
+    if module_count_for_source != 1 {
+        return None;
+    }
+
+    input
+        .source_files
+        .iter()
+        .find(|source_file| source_file.id == source_file_id)?
+        .source
+        .as_deref()
 }
 
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
@@ -85,9 +144,9 @@ impl Error for PipelineError {}
 mod tests {
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SymbolInput,
+        PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
     };
-    use reverts_ir::ModuleId;
+    use reverts_ir::{ModuleId, ModuleKind};
     use reverts_observe::FindingCode;
 
     use super::generate_project_from_input;
@@ -99,9 +158,21 @@ mod tests {
         rows
     }
 
+    fn rows_with_application_source(source: &str) -> InputRows {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1));
+        rows
+    }
+
     #[test]
     fn complete_fixture_generates_parseable_project_with_package_match_and_semantic_names() {
-        let mut rows = rows_with_application_module();
+        let mut rows = rows_with_application_source("export function activate() { return 42; }");
         rows.modules.push(ModuleInput::package(
             ModuleId(2),
             "lodash_map",
@@ -136,8 +207,8 @@ mod tests {
         assert_eq!(run.project.files.len(), 1);
         let source = run.project.files[0].source.as_str();
         assert!(source.contains("import * as __pkg_lodash_map from 'lodash/map';"));
-        assert!(source.contains("const activate: any = undefined as any;"));
-        assert!(source.contains("export { activate };"));
+        assert!(source.contains("export function activate()"));
+        assert!(!source.contains("undefined as any"));
     }
 
     #[test]
@@ -154,28 +225,26 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.has(FindingCode::UnresolvableBareImport));
-        assert_eq!(run.project.files.len(), 1);
-        assert!(!run.project.files[0].source.contains("lodash/map"));
+        assert!(run.project.files.is_empty());
     }
 
     #[test]
-    fn semantic_naming_sanitizes_reserved_symbol_names_in_output() {
+    fn missing_symbol_source_is_reported_without_emitting_generated_implementation() {
         let mut rows = rows_with_application_module();
         rows.symbols.push(SymbolInput {
             module_id: ModuleId(1),
-            name: "class".to_string(),
+            name: "activate".to_string(),
         });
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
 
-        assert!(run.audit.is_clean());
-        assert!(run.project.files[0].source.contains("const _class: any"));
-        assert!(run.project.files[0].source.contains("export { _class };"));
+        assert!(run.audit.has(FindingCode::MissingDefinition));
+        assert!(run.project.files.is_empty());
     }
 
     #[test]
-    fn duplicate_input_symbols_emit_single_declaration() {
+    fn duplicate_input_symbols_emit_single_missing_source_finding() {
         let mut rows = rows_with_application_module();
         rows.symbols.push(SymbolInput {
             module_id: ModuleId(1),
@@ -190,11 +259,49 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert_eq!(
-            run.project.files[0]
-                .source
-                .matches("const activate: any")
+            run.audit
+                .findings()
+                .iter()
+                .filter(|finding| finding.code == FindingCode::MissingDefinition
+                    && finding.binding.as_deref() == Some("activate"))
                 .count(),
             1
         );
+        assert!(run.project.files.is_empty());
+    }
+
+    #[test]
+    fn shared_bundle_source_is_not_duplicated_as_module_implementation() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("function bundle() {}".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "modules/m1.ts").with_source_file(1));
+        rows.modules.push(ModuleInput {
+            id: ModuleId(2),
+            kind: ModuleKind::Application,
+            original_name: "m2".to_string(),
+            semantic_path: "modules/m2.ts".to_string(),
+            source_file_id: Some(1),
+            package_name: None,
+            package_version: None,
+        });
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "one".to_string(),
+        });
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(2),
+            name: "two".to_string(),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.has(FindingCode::MissingDefinition));
+        assert!(run.project.files.is_empty());
     }
 }
