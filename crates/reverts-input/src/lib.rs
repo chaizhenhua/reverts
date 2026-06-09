@@ -61,6 +61,26 @@ pub struct SourceSpan {
     pub byte_end: u32,
 }
 
+/// Resolved source body for one module.
+///
+/// The slice is the only supported way for downstream pipelines to read module
+/// source. A module with a byte span reads that range from its backing file; a
+/// module without a span can use the whole file only when it is the sole module
+/// attached to that file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleSourceSlice<'a> {
+    /// Module that owns this source slice.
+    pub module_id: ModuleId,
+    /// Source file backing this slice.
+    pub source_file_id: u32,
+    /// Original source file path.
+    pub source_file_path: &'a str,
+    /// Source text that belongs to the module.
+    pub source: &'a str,
+    /// Optional byte span used to extract the slice.
+    pub span: Option<SourceSpan>,
+}
+
 impl SourceSpan {
     /// Creates a byte range for a module source slice.
     #[must_use]
@@ -257,6 +277,11 @@ impl InputBundle {
     }
 
     #[must_use]
+    pub fn module_source_slice(&self, module_id: ModuleId) -> Option<ModuleSourceSlice<'_>> {
+        module_source_slice_from_parts(&self.modules, &self.source_files, module_id)
+    }
+
+    #[must_use]
     pub fn module_ids(&self) -> BTreeSet<ModuleId> {
         self.modules.iter().map(|module| module.id).collect()
     }
@@ -390,6 +415,49 @@ impl InputRows {
             package_attributions,
         })
     }
+
+    #[must_use]
+    pub fn module_source_slice(&self, module_id: ModuleId) -> Option<ModuleSourceSlice<'_>> {
+        module_source_slice_from_parts(&self.modules, &self.source_files, module_id)
+    }
+}
+
+#[must_use]
+pub fn module_source_slice_from_parts<'a>(
+    modules: &'a [ModuleInput],
+    source_files: &'a [SourceFileInput],
+    module_id: ModuleId,
+) -> Option<ModuleSourceSlice<'a>> {
+    let module = modules.iter().find(|module| module.id == module_id)?;
+    let source_file_id = module.source_file_id?;
+    let source_file = source_files
+        .iter()
+        .find(|source_file| source_file.id == source_file_id)?;
+    let source = source_file.source.as_deref()?;
+
+    let (source, span) = if let Some(span) = module.source_span {
+        (
+            source.get(span.byte_start as usize..span.byte_end as usize)?,
+            Some(span),
+        )
+    } else {
+        let module_count_for_source = modules
+            .iter()
+            .filter(|candidate| candidate.source_file_id == Some(source_file_id))
+            .count();
+        if module_count_for_source != 1 {
+            return None;
+        }
+        (source, None)
+    };
+
+    Some(ModuleSourceSlice {
+        module_id,
+        source_file_id,
+        source_file_path: source_file.path.as_str(),
+        source,
+        span,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1147,6 +1215,50 @@ mod tests {
                 byte_end: 200
             })
         ));
+    }
+
+    #[test]
+    fn module_source_slice_uses_shared_bundle_span() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("export const one = 1;\nexport const two = 2;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "m10", "src/one.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(0, 21)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(11), "m11", "src/two.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(22, 43)),
+        );
+
+        let slice = rows
+            .module_source_slice(ModuleId(11))
+            .expect("span should select module source");
+
+        assert_eq!(slice.source_file_path, "bundle.js");
+        assert_eq!(slice.source, "export const two = 2;");
+        assert_eq!(slice.span, Some(SourceSpan::new(22, 43)));
+    }
+
+    #[test]
+    fn shared_source_without_span_has_no_module_slice() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("let x = 1;".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(10), "m10", "src/one.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(11), "m11", "src/two.ts").with_source_file(1));
+
+        assert!(rows.module_source_slice(ModuleId(10)).is_none());
     }
 
     #[test]

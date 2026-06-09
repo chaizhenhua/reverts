@@ -9,7 +9,7 @@ use reverts_ir::{ModuleId, ModuleKind};
 use reverts_js::{JsError, ParseGoal, parse_source};
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-use reverts_planner::ImportExportPlanner;
+use reverts_planner::{ImportExportPlanner, PlanError};
 
 pub use reverts_emitter::{EmittedFile, EmittedProject};
 
@@ -32,7 +32,9 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
     }
 
     let planner = ImportExportPlanner;
-    let plan = planner.plan_enriched_program(&enrichment.program);
+    let plan = planner
+        .plan_enriched_program(&enrichment.program)
+        .map_err(PipelineError::Plan)?;
     let project = emit_project(&plan).map_err(PipelineError::Emit)?;
 
     audit.extend(audit_emitted_project_parse(&project));
@@ -78,33 +80,7 @@ fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
 }
 
 fn has_module_source(input: &InputBundle, module_id: ModuleId) -> bool {
-    module_source(input, module_id).is_some()
-}
-
-fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
-    let module = input.modules.iter().find(|module| module.id == module_id)?;
-    let source_file_id = module.source_file_id?;
-    let source = input
-        .source_files
-        .iter()
-        .find(|source_file| source_file.id == source_file_id)?
-        .source
-        .as_deref()?;
-
-    if let Some(span) = module.source_span {
-        return source.get(span.byte_start as usize..span.byte_end as usize);
-    }
-
-    let module_count_for_source = input
-        .modules
-        .iter()
-        .filter(|candidate| candidate.source_file_id == Some(source_file_id))
-        .count();
-    if module_count_for_source != 1 {
-        return None;
-    }
-
-    Some(source)
+    input.module_source_slice(module_id).is_some()
 }
 
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
@@ -144,18 +120,27 @@ fn parse_error_message(error: &JsError) -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
+    Plan(PlanError),
     Emit(EmitError),
 }
 
 impl fmt::Display for PipelineError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Plan(error) => write!(formatter, "{error}"),
             Self::Emit(error) => write!(formatter, "{error}"),
         }
     }
 }
 
-impl Error for PipelineError {}
+impl Error for PipelineError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Plan(source) => Some(source),
+            Self::Emit(source) => Some(source),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

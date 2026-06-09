@@ -1,6 +1,10 @@
+use std::error::Error;
+use std::fmt;
+use std::path::Path;
+
 use reverts_graph::RevertsGraph;
-use reverts_input::InputBundle;
 use reverts_ir::{BindingName, ModuleId, ModuleKind};
+use reverts_js::{JsError, normalize_source_for_pipeline};
 use reverts_model::EnrichedProgram;
 use reverts_package::PackageResolution;
 
@@ -62,8 +66,7 @@ pub struct PlannedExport {
 pub struct ImportExportPlanner;
 
 impl ImportExportPlanner {
-    #[must_use]
-    pub fn plan_enriched_program(self, program: &EnrichedProgram) -> EmitPlan {
+    pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
 
         for module in program.model().modules() {
@@ -84,14 +87,19 @@ impl ImportExportPlanner {
                 });
             }
 
-            if let Some(source) = module_source(program.model().input(), module.id) {
-                file.push_source(source);
+            if let Some(source) = program.model().input().module_source_slice(module.id) {
+                let normalized = normalize_source_for_emit(
+                    source.module_id,
+                    source.source_file_path,
+                    source.source,
+                )?;
+                file.push_source(normalized);
             }
 
             plan.push_file(file);
         }
 
-        plan
+        Ok(plan)
     }
 
     #[must_use]
@@ -109,31 +117,64 @@ impl ImportExportPlanner {
     }
 }
 
-fn module_source(input: &InputBundle, module_id: ModuleId) -> Option<&str> {
-    let module = input.modules.iter().find(|module| module.id == module_id)?;
-    let source_file_id = module.source_file_id?;
-    let source = input
-        .source_files
-        .iter()
-        .find(|source_file| source_file.id == source_file_id)?
-        .source
-        .as_deref()?;
-
-    if let Some(span) = module.source_span {
-        return source.get(span.byte_start as usize..span.byte_end as usize);
-    }
-
-    let module_count_for_source = input
-        .modules
-        .iter()
-        .filter(|candidate| candidate.source_file_id == Some(source_file_id))
-        .count();
-    if module_count_for_source != 1 {
-        return None;
-    }
-
-    Some(source)
+fn normalize_source_for_emit(
+    module_id: ModuleId,
+    path: &str,
+    source: &str,
+) -> Result<String, PlanError> {
+    normalize_source_for_pipeline(source, Some(Path::new(path))).map_err(|error| {
+        PlanError::UnparseableSource {
+            module_id,
+            path: path.to_string(),
+            message: parse_error_message(&error),
+        }
+    })
 }
+
+fn parse_error_message(error: &JsError) -> String {
+    match error {
+        JsError::ParseFailed(errors) => errors.first().map_or_else(
+            || "source could not be parsed".to_string(),
+            |error| {
+                let diagnostic = error
+                    .diagnostics
+                    .first()
+                    .map_or("no diagnostic", String::as_str);
+                format!(
+                    "source could not be parsed as {}: {diagnostic}",
+                    error.source_type
+                )
+            },
+        ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlanError {
+    UnparseableSource {
+        module_id: ModuleId,
+        path: String,
+        message: String,
+    },
+}
+
+impl fmt::Display for PlanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnparseableSource {
+                module_id,
+                path,
+                message,
+            } => write!(
+                formatter,
+                "module {} source {} failed normalization: {message}",
+                module_id.0, path
+            ),
+        }
+    }
+}
+
+impl Error for PlanError {}
 
 #[cfg(test)]
 mod tests {
@@ -164,9 +205,43 @@ mod tests {
             reverts_ir::BindingShapeSolution::default(),
         );
 
-        let plan = planner.plan_enriched_program(&enriched);
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
 
-        assert_eq!(plan.files[0].body[0], "export const answer = 42;");
+        assert_eq!(
+            plan.files[0].body[0].trim_end(),
+            "export const answer = 42;"
+        );
+    }
+
+    #[test]
+    fn enriched_program_normalizes_source_before_emit_plan() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("export function add(a,b){return a+b}".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        assert!(plan.files[0].body[0].contains("export function add(a, b)"));
+        assert!(plan.files[0].body[0].contains("return a + b;"));
     }
 
     #[test]
@@ -197,9 +272,11 @@ mod tests {
             reverts_ir::BindingShapeSolution::default(),
         );
 
-        let plan = planner.plan_enriched_program(&enriched);
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
 
-        assert_eq!(plan.files[0].body[0], "export const one = 1;");
-        assert_eq!(plan.files[1].body[0], "export const two = 2;");
+        assert_eq!(plan.files[0].body[0].trim_end(), "export const one = 1;");
+        assert_eq!(plan.files[1].body[0].trim_end(), "export const two = 2;");
     }
 }

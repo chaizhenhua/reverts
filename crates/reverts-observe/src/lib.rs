@@ -15,6 +15,9 @@ pub enum FindingCode {
     DuplicateTopLevelBinding,
     SyntheticReferenceWithoutDeclaration,
     UnparseableOutput,
+    UnparseablePackageSource,
+    AmbiguousPackageMatch,
+    MissingPackageSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -12,6 +12,7 @@ members = [
     "crates/reverts-observe",
     "crates/reverts-output-core",
     "crates/reverts-package",
+    "crates/reverts-package-matcher",
     "crates/reverts-pipeline",
     "crates/reverts-planner",
 ]

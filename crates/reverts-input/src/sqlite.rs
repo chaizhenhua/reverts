@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
-    DatabaseRows, InputBundle, InputBundleError, ModuleDependencyRow, ModuleDependencyRowTarget,
-    ModuleRow, PackageAttributionRow, PackageAttributionStatus, PackageEmissionMode, ProjectRow,
-    SourceFileRow, StoredModuleKind, SymbolRow,
+    DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleDependencyRow,
+    ModuleDependencyRowTarget, ModuleRow, PackageAttributionRow, PackageAttributionStatus,
+    PackageEmissionMode, ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
 };
 
 pub fn load_project_bundle_from_sqlite(
@@ -26,17 +26,40 @@ pub fn load_project_bundle_from_sqlite(
     load_project_bundle_from_connection(&connection, project_id)
 }
 
+pub fn load_project_rows_from_sqlite(
+    path: impl AsRef<Path>,
+    project_id: u32,
+) -> Result<InputRows, SqliteInputError> {
+    let path = path.as_ref();
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
+            SqliteInputError::OpenDatabase {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    load_project_rows_from_connection(&connection, project_id)
+}
+
 pub fn load_project_bundle_from_connection(
     connection: &Connection,
     project_id: u32,
 ) -> Result<InputBundle, SqliteInputError> {
+    let rows = load_project_rows_from_connection(connection, project_id)?;
+    InputBundle::from_rows(rows).map_err(SqliteInputError::InputBundle)
+}
+
+pub fn load_project_rows_from_connection(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<InputRows, SqliteInputError> {
     let mut rows = DatabaseRows::new(load_project(connection, project_id)?);
     rows.source_files = load_source_files(connection, project_id)?;
     rows.modules = load_modules(connection, project_id)?;
     rows.symbols = load_module_symbols(connection, project_id)?;
     rows.dependencies = load_module_dependencies(connection, project_id)?;
     rows.package_attributions = load_package_attributions(connection, project_id)?;
-    InputBundle::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
+    InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
 }
 
 fn load_project(connection: &Connection, project_id: u32) -> Result<ProjectRow, SqliteInputError> {
@@ -409,8 +432,8 @@ mod tests {
 
     use reverts_ir::{ModuleId, ModuleKind};
 
-    use crate::sqlite::load_project_bundle_from_connection;
-    use crate::{ModuleDependencyTarget, PackageAttributionStatus};
+    use crate::sqlite::{load_project_bundle_from_connection, load_project_rows_from_connection};
+    use crate::{InputBundleError, ModuleDependencyTarget, PackageAttributionStatus};
 
     #[test]
     fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
@@ -453,6 +476,34 @@ mod tests {
         let error = load_project_bundle_from_connection(&connection, 404);
 
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn sqlite_rows_can_load_before_package_attribution_contract_is_complete() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+        connection
+            .execute("DELETE FROM package_attributions WHERE module_id = 11", [])
+            .expect("fixture attribution should be removed");
+
+        let rows = load_project_rows_from_connection(&connection, 7)
+            .expect("rows should load for matching before bundle validation");
+        let bundle_error = load_project_bundle_from_connection(&connection, 7);
+
+        assert_eq!(rows.modules.len(), 2);
+        assert!(matches!(
+            bundle_error,
+            Err(super::SqliteInputError::InputBundle(
+                InputBundleError::MissingPackageAttribution {
+                    module_id: ModuleId(11)
+                }
+            ))
+        ));
     }
 
     fn create_schema(connection: &Connection) {

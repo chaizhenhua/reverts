@@ -106,6 +106,10 @@ pub fn format_source_pretty(
     Err(JsError::ParseFailed(errors))
 }
 
+pub fn normalize_source_for_pipeline(source: &str, path_hint: Option<&Path>) -> Result<String> {
+    format_source_pretty(source, path_hint, ParseGoal::TypeScript)
+}
+
 #[must_use]
 pub fn sanitize_identifier(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
@@ -195,7 +199,10 @@ fn is_reserved_word(value: &str) -> bool {
 mod tests {
     use std::path::Path;
 
-    use super::{JsError, ParseGoal, format_source_pretty, parse_source, sanitize_identifier};
+    use super::{
+        JsError, ParseGoal, format_source_pretty, normalize_source_for_pipeline, parse_source,
+        sanitize_identifier,
+    };
 
     #[test]
     fn parses_typescript_without_external_tooling() {
@@ -217,6 +224,16 @@ mod tests {
             .expect("fixture should parse");
 
         assert!(formatted.contains("const x: number = 1"));
+    }
+
+    #[test]
+    fn pipeline_normalization_uses_ast_codegen() {
+        let normalized =
+            normalize_source_for_pipeline("export function add(a,b){return a+b}", None)
+                .expect("fixture should normalize");
+
+        assert!(normalized.contains("export function add(a, b)"));
+        assert!(normalized.contains("return a + b;"));
     }
 
     #[test]

@@ -785,6 +785,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverts-package-matcher"
+version = "0.1.0"
+dependencies = [
+ "reverts-input",
+ "reverts-ir",
+ "reverts-js",
+ "reverts-observe",
+]
+
+[[package]]
 name = "reverts-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -805,6 +815,7 @@ dependencies = [
  "reverts-graph",
  "reverts-input",
  "reverts-ir",
+ "reverts-js",
  "reverts-model",
  "reverts-package",
 ]

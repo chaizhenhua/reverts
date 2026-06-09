@@ -1,5 +1,5 @@
 [package]
-name = "reverts-planner"
+name = "reverts-package-matcher"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -9,9 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-reverts-graph = { path = "../reverts-graph" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
-reverts-model = { path = "../reverts-model" }
-reverts-package = { path = "../reverts-package" }
+reverts-observe = { path = "../reverts-observe" }
