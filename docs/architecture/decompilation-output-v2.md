@@ -281,6 +281,14 @@ Documentation-only slices should still validate formatting-sensitive docs where
 possible and run the workspace checks when the Rust code or workspace manifests
 are touched.
 
+Real database or real project validation is a temporary smoke workflow, not a
+required test fixture. Required tests must not read a live database, checked-out
+project, package installation, network resource, or prior output directory. If
+manual validation against a real project exposes a defect, reduce the defect to
+the smallest in-memory `InputRows`, `DatabaseRows`, or in-memory SQLite fixture
+that reproduces the same failure mode, then keep that fixture in the normal
+test suite.
+
 ## Risks and Open Questions
 
 - The exact database-to-`InputBundle` contract must be audited before adding

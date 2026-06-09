@@ -3,12 +3,14 @@ use std::fmt;
 use std::path::Path;
 
 use reverts_analyze::enrich_program;
-use reverts_emitter::{EmitError, EmittedProject, emit_project};
+use reverts_emitter::{EmitError, emit_project};
 use reverts_input::InputBundle;
 use reverts_js::{JsError, ParseGoal, parse_source};
 use reverts_model::ProgramModel;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::ImportExportPlanner;
+
+pub use reverts_emitter::{EmittedFile, EmittedProject};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputRun {
@@ -170,5 +172,29 @@ mod tests {
         assert!(run.audit.is_clean());
         assert!(run.project.files[0].source.contains("const _class: any"));
         assert!(run.project.files[0].source.contains("export { _class };"));
+    }
+
+    #[test]
+    fn duplicate_input_symbols_emit_single_declaration() {
+        let mut rows = rows_with_application_module();
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "activate".to_string(),
+        });
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "activate".to_string(),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert_eq!(
+            run.project.files[0]
+                .source
+                .matches("const activate: any")
+                .count(),
+            1
+        );
     }
 }

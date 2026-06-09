@@ -92,18 +92,13 @@ impl ImportExportPlanner {
                 });
             }
 
-            for symbol in program
-                .model()
-                .symbols()
-                .iter()
-                .filter(|symbol| symbol.module_id == module.id)
-            {
+            for original_binding in program.model().graph().definitions_for(module.id) {
                 let binding = program
                     .semantic_names()
-                    .binding_name(module.id, symbol.name.as_str())
+                    .binding_name(module.id, original_binding.as_str())
                     .cloned()
-                    .unwrap_or_else(|| BindingName::new(symbol.name.clone()));
-                let shape = match program.binding_shape(module.id, symbol.name.as_str()) {
+                    .unwrap_or_else(|| BindingName::new(original_binding.as_str()));
+                let shape = match program.binding_shape(module.id, original_binding.as_str()) {
                     BindingShape::Unknown => BindingShape::Value,
                     shape => shape,
                 };

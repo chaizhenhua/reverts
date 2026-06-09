@@ -10,3 +10,4 @@ workspace = true
 
 [dependencies]
 reverts-ir = { path = "../reverts-ir" }
+rusqlite = { version = "0.33", features = ["bundled"] }

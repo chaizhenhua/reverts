@@ -9,3 +9,6 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+reverts-input = { path = "../reverts-input" }
+reverts-observe = { path = "../reverts-observe" }
+reverts-pipeline = { path = "../reverts-pipeline" }

@@ -4,6 +4,8 @@ use std::fmt;
 
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 
+pub mod sqlite;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectInput {
     pub id: u32,

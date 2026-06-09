@@ -34,12 +34,16 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
 fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
     let mut semantic_names = SemanticNameMap::default();
     let mut used_by_module: BTreeMap<ModuleId, BTreeSet<String>> = BTreeMap::new();
+    let mut mapped_originals = BTreeSet::<(ModuleId, String)>::new();
 
     for module in model.modules() {
         semantic_names.insert_module_path(module.id, module.semantic_path.clone());
     }
 
     for symbol in model.symbols() {
+        if !mapped_originals.insert((symbol.module_id, symbol.name.clone())) {
+            continue;
+        }
         let base = sanitize_identifier(symbol.name.as_str());
         let semantic = reserve_unique_name(&mut used_by_module, symbol.module_id, &base);
         semantic_names.insert_binding(symbol.module_id, symbol.name.clone(), semantic);

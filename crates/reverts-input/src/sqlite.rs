@@ -1,0 +1,499 @@
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::fmt;
+use std::path::{Path, PathBuf};
+
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+
+use crate::{
+    DatabaseRows, InputBundle, InputBundleError, ModuleDependencyRow, ModuleDependencyRowTarget,
+    ModuleRow, PackageAttributionRow, PackageAttributionStatus, PackageEmissionMode, ProjectRow,
+    SourceFileRow, StoredModuleKind, SymbolRow,
+};
+
+pub fn load_project_bundle_from_sqlite(
+    path: impl AsRef<Path>,
+    project_id: u32,
+) -> Result<InputBundle, SqliteInputError> {
+    let path = path.as_ref();
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
+            SqliteInputError::OpenDatabase {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    load_project_bundle_from_connection(&connection, project_id)
+}
+
+pub fn load_project_bundle_from_connection(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<InputBundle, SqliteInputError> {
+    let mut rows = DatabaseRows::new(load_project(connection, project_id)?);
+    rows.source_files = load_source_files(connection, project_id)?;
+    rows.modules = load_modules(connection, project_id)?;
+    rows.symbols = load_module_symbols(connection, project_id)?;
+    rows.dependencies = load_module_dependencies(connection, project_id)?;
+    rows.package_attributions = load_package_attributions(connection, project_id)?;
+    synthesize_missing_package_attributions(&mut rows);
+    InputBundle::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
+}
+
+fn load_project(connection: &Connection, project_id: u32) -> Result<ProjectRow, SqliteInputError> {
+    connection
+        .query_row(
+            "SELECT id, name FROM projects WHERE id = ?1",
+            params![i64::from(project_id)],
+            |row| {
+                Ok(ProjectRow {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(SqliteInputError::ProjectNotFound { project_id })
+}
+
+fn load_source_files(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<SourceFileRow>, SqliteInputError> {
+    let mut statement = connection.prepare(
+        r"
+        SELECT sf.id, pf.project_id, sf.file_path
+        FROM source_files sf
+        JOIN project_files pf ON pf.file_id = sf.id
+        WHERE pf.project_id = ?1
+        ORDER BY sf.id
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        Ok(SourceFileRow {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            path: row.get(2)?,
+            source: None,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn load_modules(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<ModuleRow>, SqliteInputError> {
+    let mut statement = connection.prepare(
+        r"
+        SELECT
+            m.id,
+            m.file_id,
+            m.original_name,
+            m.semantic_name,
+            m.module_category,
+            m.package_name,
+            m.package_version
+        FROM modules m
+        JOIN project_files pf ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+        ORDER BY m.id
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        let id = row.get::<_, i64>(0)?;
+        let original_name = row.get::<_, String>(2)?;
+        let semantic_name = row.get::<_, Option<String>>(3)?;
+        let semantic_path = module_semantic_path(id, semantic_name.as_deref(), &original_name);
+        let category = row.get::<_, Option<String>>(4)?;
+
+        Ok(ModuleRow {
+            id,
+            source_file_id: row.get(1)?,
+            original_name,
+            semantic_path: Some(semantic_path),
+            kind: module_kind_from_category(category.as_deref()),
+            package_name: row.get(5)?,
+            package_version: row.get(6)?,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn load_module_symbols(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<SymbolRow>, SqliteInputError> {
+    let mut statement = connection.prepare(
+        r"
+        SELECT DISTINCT
+            s.module_id,
+            COALESCE(NULLIF(TRIM(s.semantic_name), ''), NULLIF(TRIM(s.export_name), ''), s.original_name) AS symbol_name
+        FROM symbols s
+        JOIN modules m ON m.id = s.module_id
+        JOIN project_files pf ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+          AND s.module_id IS NOT NULL
+          AND s.scope_level = 'module'
+          AND TRIM(COALESCE(NULLIF(TRIM(s.semantic_name), ''), NULLIF(TRIM(s.export_name), ''), s.original_name)) != ''
+        ORDER BY s.module_id, symbol_name
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        Ok(SymbolRow {
+            module_id: row.get(0)?,
+            name: row.get(1)?,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn load_module_dependencies(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<ModuleDependencyRow>, SqliteInputError> {
+    let mut statement = connection.prepare(
+        r"
+        SELECT md.module_id, md.dependency_id
+        FROM module_dependencies md
+        JOIN modules source_module ON source_module.id = md.module_id
+        JOIN project_files source_project ON source_project.file_id = source_module.file_id
+        JOIN modules target_module ON target_module.id = md.dependency_id
+        JOIN project_files target_project ON target_project.file_id = target_module.file_id
+        WHERE source_project.project_id = ?1
+          AND target_project.project_id = ?1
+        ORDER BY md.module_id, md.dependency_id
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        Ok(ModuleDependencyRow {
+            from_module_id: row.get(0)?,
+            target: ModuleDependencyRowTarget::Module {
+                module_id: row.get(1)?,
+            },
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn load_package_attributions(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<PackageAttributionRow>, SqliteInputError> {
+    if !table_exists(connection, "package_attributions")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        r"
+        SELECT
+            pa.module_id,
+            pa.package_name,
+            pa.package_version,
+            pa.package_subpath,
+            pa.export_specifier,
+            pa.emission_mode,
+            pa.status,
+            pa.rejection_reason
+        FROM package_attributions pa
+        JOIN modules m ON m.id = pa.module_id
+        JOIN project_files pf ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+        ORDER BY pa.module_id
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        let emission_mode = emission_mode_from_database(row.get::<_, String>(5)?.as_str())?;
+        let status = attribution_status_from_database(row.get::<_, String>(6)?.as_str())?;
+        Ok(PackageAttributionRow {
+            module_id: row.get(0)?,
+            package_name: row.get(1)?,
+            package_version: row.get(2)?,
+            subpath: row.get(3)?,
+            export_specifier: row.get(4)?,
+            emission_mode,
+            status,
+            rejection_reason: row.get(7)?,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn synthesize_missing_package_attributions(rows: &mut DatabaseRows) {
+    let attributed_modules = rows
+        .package_attributions
+        .iter()
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+
+    for module in &rows.modules {
+        if module.kind != StoredModuleKind::Package || attributed_modules.contains(&module.id) {
+            continue;
+        }
+
+        let Some(package_name) = module.package_name.as_ref() else {
+            continue;
+        };
+
+        rows.package_attributions.push(PackageAttributionRow {
+            module_id: module.id,
+            package_name: package_name.clone(),
+            package_version: module.package_version.clone(),
+            subpath: None,
+            export_specifier: None,
+            emission_mode: PackageEmissionMode::ExternalImport,
+            status: PackageAttributionStatus::Proposed,
+            rejection_reason: None,
+        });
+    }
+}
+
+fn table_exists(connection: &Connection, table: &str) -> Result<bool, SqliteInputError> {
+    let exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        params![table],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(exists == 1)
+}
+
+fn collect_sqlite_rows<T>(
+    rows: impl IntoIterator<Item = rusqlite::Result<T>>,
+) -> Result<Vec<T>, SqliteInputError> {
+    let mut output = Vec::new();
+    for row in rows {
+        output.push(row?);
+    }
+    Ok(output)
+}
+
+fn module_kind_from_category(category: Option<&str>) -> StoredModuleKind {
+    match category.map(str::trim) {
+        Some("package") => StoredModuleKind::Package,
+        Some("builtin") => StoredModuleKind::Builtin,
+        Some("application") | Some("unknown") | Some("") | None => StoredModuleKind::Application,
+        Some(_) => StoredModuleKind::Application,
+    }
+}
+
+fn module_semantic_path(id: i64, semantic_name: Option<&str>, original_name: &str) -> String {
+    let seed = semantic_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(original_name);
+    let slug = path_slug(seed);
+    format!("modules/{id}-{slug}.ts")
+}
+
+fn path_slug(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut last_was_separator = false;
+
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/') {
+            ch
+        } else {
+            '-'
+        };
+
+        if mapped == '-' {
+            if last_was_separator {
+                continue;
+            }
+            last_was_separator = true;
+        } else {
+            last_was_separator = false;
+        }
+        output.push(mapped);
+    }
+
+    let trimmed = output.trim_matches(|ch| matches!(ch, '-' | '/' | '.'));
+    if trimmed.is_empty() {
+        "module".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn emission_mode_from_database(value: &str) -> rusqlite::Result<PackageEmissionMode> {
+    match value {
+        "external_import" => Ok(PackageEmissionMode::ExternalImport),
+        "vendored_asset" => Ok(PackageEmissionMode::VendoredAsset),
+        "application_source" => Ok(PackageEmissionMode::ApplicationSource),
+        "runtime_glue" => Ok(PackageEmissionMode::RuntimeGlue),
+        _ => Err(rusqlite::Error::InvalidParameterName(format!(
+            "unknown package emission mode {value}"
+        ))),
+    }
+}
+
+fn attribution_status_from_database(value: &str) -> rusqlite::Result<PackageAttributionStatus> {
+    match value {
+        "proposed" => Ok(PackageAttributionStatus::Proposed),
+        "accepted" => Ok(PackageAttributionStatus::Accepted),
+        "rejected" => Ok(PackageAttributionStatus::Rejected),
+        _ => Err(rusqlite::Error::InvalidParameterName(format!(
+            "unknown package attribution status {value}"
+        ))),
+    }
+}
+
+#[derive(Debug)]
+pub enum SqliteInputError {
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    ProjectNotFound {
+        project_id: u32,
+    },
+    Sqlite(rusqlite::Error),
+    InputBundle(InputBundleError),
+}
+
+impl fmt::Display for SqliteInputError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenDatabase { path, source } => {
+                write!(
+                    formatter,
+                    "failed to open SQLite database {}: {source}",
+                    path.display()
+                )
+            }
+            Self::ProjectNotFound { project_id } => {
+                write!(
+                    formatter,
+                    "project {project_id} was not found in SQLite database"
+                )
+            }
+            Self::Sqlite(source) => write!(formatter, "SQLite query failed: {source}"),
+            Self::InputBundle(source) => {
+                write!(formatter, "SQLite rows are not valid input: {source}")
+            }
+        }
+    }
+}
+
+impl Error for SqliteInputError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenDatabase { source, .. } | Self::Sqlite(source) => Some(source),
+            Self::InputBundle(source) => Some(source),
+            Self::ProjectNotFound { .. } => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for SqliteInputError {
+    fn from(source: rusqlite::Error) -> Self {
+        Self::Sqlite(source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use reverts_ir::{ModuleId, ModuleKind};
+
+    use crate::sqlite::load_project_bundle_from_connection;
+    use crate::{ModuleDependencyTarget, PackageAttributionStatus};
+
+    #[test]
+    fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        insert_fixture_project(&connection);
+
+        let bundle = load_project_bundle_from_connection(&connection, 7)
+            .expect("fixture database should load");
+
+        assert_eq!(bundle.project.name, "fixture-project");
+        assert_eq!(bundle.source_files.len(), 1);
+        assert_eq!(bundle.modules.len(), 2);
+        assert_eq!(bundle.modules[0].kind, ModuleKind::Application);
+        assert_eq!(bundle.modules[1].kind, ModuleKind::Package);
+        assert_eq!(bundle.symbols.len(), 1);
+        assert!(matches!(
+            bundle.dependencies[0].target,
+            ModuleDependencyTarget::Module(ModuleId(11))
+        ));
+        assert_eq!(
+            bundle.package_attributions[0].status,
+            PackageAttributionStatus::Proposed
+        );
+    }
+
+    #[test]
+    fn sqlite_project_loader_reports_missing_project() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+
+        let error = load_project_bundle_from_connection(&connection, 404);
+
+        assert!(error.is_err());
+    }
+
+    fn create_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE source_files (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL);
+                CREATE TABLE project_files (project_id INTEGER NOT NULL, file_id INTEGER NOT NULL);
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT,
+                    module_category TEXT,
+                    package_name TEXT,
+                    package_version TEXT
+                );
+                CREATE TABLE symbols (
+                    id INTEGER PRIMARY KEY,
+                    module_id INTEGER,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT,
+                    export_name TEXT,
+                    scope_level TEXT NOT NULL
+                );
+                CREATE TABLE module_dependencies (
+                    module_id INTEGER NOT NULL,
+                    dependency_id INTEGER NOT NULL
+                );
+                ",
+            )
+            .expect("fixture schema should be created");
+    }
+
+    fn insert_fixture_project(connection: &Connection) {
+        connection
+            .execute_batch(
+                r"
+                INSERT INTO projects (id, name) VALUES (7, 'fixture-project');
+                INSERT INTO source_files (id, file_path) VALUES (101, 'bundle.js');
+                INSERT INTO project_files (project_id, file_id) VALUES (7, 101);
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category, package_name, package_version)
+                    VALUES
+                    (10, 101, 'app', 'entry/main', 'application', NULL, NULL),
+                    (11, 101, 'lodash_map', 'lodash/map', 'package', 'lodash', '4.17.21');
+                INSERT INTO symbols
+                    (id, module_id, original_name, semantic_name, export_name, scope_level)
+                    VALUES
+                    (1001, 10, 'activate', 'activate', NULL, 'module'),
+                    (1002, 10, 'activate', 'activate', NULL, 'module'),
+                    (1003, 10, 'inner', 'inner', NULL, 'local');
+                INSERT INTO module_dependencies (module_id, dependency_id) VALUES (10, 11);
+                ",
+            )
+            .expect("fixture rows should be inserted");
+    }
+}
