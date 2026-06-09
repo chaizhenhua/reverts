@@ -521,6 +521,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
+name = "reverts-analyze"
+version = "0.1.0"
+dependencies = [
+ "reverts-input",
+ "reverts-ir",
+ "reverts-js",
+ "reverts-model",
+ "reverts-observe",
+ "reverts-package",
+]
+
+[[package]]
 name = "reverts-cli"
 version = "0.1.0"
 
@@ -572,6 +584,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverts-model"
+version = "0.1.0"
+dependencies = [
+ "reverts-graph",
+ "reverts-input",
+ "reverts-ir",
+ "reverts-package",
+]
+
+[[package]]
 name = "reverts-observe"
 version = "0.1.0"
 
@@ -592,11 +614,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverts-pipeline"
+version = "0.1.0"
+dependencies = [
+ "reverts-analyze",
+ "reverts-emitter",
+ "reverts-input",
+ "reverts-ir",
+ "reverts-js",
+ "reverts-model",
+ "reverts-observe",
+ "reverts-planner",
+]
+
+[[package]]
 name = "reverts-planner"
 version = "0.1.0"
 dependencies = [
  "reverts-graph",
  "reverts-ir",
+ "reverts-model",
  "reverts-package",
 ]
 

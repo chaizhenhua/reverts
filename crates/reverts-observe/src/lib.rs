@@ -61,6 +61,10 @@ impl AuditReport {
         self.findings.push(finding);
     }
 
+    pub fn extend(&mut self, other: Self) {
+        self.findings.extend(other.findings);
+    }
+
     #[must_use]
     pub fn findings(&self) -> &[AuditFinding] {
         &self.findings

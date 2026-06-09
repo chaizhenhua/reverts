@@ -1,5 +1,6 @@
 use reverts_graph::RevertsGraph;
-use reverts_ir::{BindingName, BindingShape, ModuleId};
+use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+use reverts_model::EnrichedProgram;
 use reverts_package::PackageResolution;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -69,6 +70,53 @@ pub struct PlannedExport {
 pub struct ImportExportPlanner;
 
 impl ImportExportPlanner {
+    #[must_use]
+    pub fn plan_enriched_program(self, program: &EnrichedProgram) -> EmitPlan {
+        let mut plan = EmitPlan::default();
+
+        for module in program.model().modules() {
+            if module.kind == ModuleKind::Package {
+                continue;
+            }
+
+            let path = program
+                .semantic_names()
+                .module_path(module.id)
+                .unwrap_or(module.semantic_path.as_str());
+            let mut file = PlannedFile::new(path);
+
+            for decision in program.package_imports_for(module.id) {
+                file.add_import(PlannedImport {
+                    namespace: decision.namespace_binding.clone(),
+                    resolution: decision.resolution.clone(),
+                });
+            }
+
+            for symbol in program
+                .model()
+                .symbols()
+                .iter()
+                .filter(|symbol| symbol.module_id == module.id)
+            {
+                let binding = program
+                    .semantic_names()
+                    .binding_name(module.id, symbol.name.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| BindingName::new(symbol.name.clone()));
+                let shape = match program.binding_shape(module.id, symbol.name.as_str()) {
+                    BindingShape::Unknown => BindingShape::Value,
+                    shape => shape,
+                };
+                file.declare(binding.clone(), shape);
+                file.add_export(binding);
+            }
+
+            plan.push_file(file);
+        }
+
+        plan
+    }
+
     #[must_use]
     pub fn plan_module_file(
         self,

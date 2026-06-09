@@ -73,8 +73,10 @@ InputBundle
   -> AstFactExtractor
   -> RevertsGraph
   -> DefUseGraph
+  -> ProgramModel
   -> BindingShapeSolver
   -> PackageSurfaceResolver
+  -> EnrichedProgram
   -> ImportExportPlanner
   -> AstEmitter
   -> ParseAudit / SynthesisAudit
@@ -106,6 +108,13 @@ The def-use graph records binding definitions, imports, reads, writes, and usage
 constraints. Missing definitions, duplicate definitions, and unresolved reads
 are graph-level findings.
 
+### ProgramModel
+
+The model is the immutable handoff from raw input and graph construction into
+analysis. It owns the `InputBundle` plus `RevertsGraph`, so downstream crates
+can query modules, symbols, dependencies, definitions, and package attribution
+without reading from a database or reparsing external state.
+
 ### BindingShapeSolver
 
 The solver maps usage constraints to `BindingShape` decisions. A call site must
@@ -118,6 +127,13 @@ The resolver converts package attribution into `ImportDecision` records. A bare
 import is allowed only when the package name is valid and the requested subpath
 is present in the package surface. Otherwise the planner must choose a local
 module, local shim, or rejected decision with an audit finding.
+
+### EnrichedProgram
+
+`EnrichedProgram` is the complete analysis output consumed by planning. It
+contains semantic module paths, semantic binding names, package import
+decisions, and binding-shape decisions. A planner should not reach back into the
+input source to rediscover these facts.
 
 ### ImportExportPlanner
 
@@ -158,6 +174,9 @@ missing declarations, patch imports, or run repair passes.
 | `SymbolInput` | Symbol identity, module ownership, and source range metadata | Symbol ownership is explicit, not inferred during emission |
 | `ModuleDependencyInput` | Module-to-module and module-to-package edges | Dependency target kind is explicit |
 | `PackageAttributionInput` | Package name, version, and subpath evidence | Package name and subpath can be validated before bare import emission |
+| `ProgramModel` | Input plus constructed graphs for one output run | Downstream analysis never depends on live database reads |
+| `SemanticNameMap` | Module-path and binding-name recovery results | Sanitized names are deterministic and valid identifiers |
+| `EnrichedProgram` | Analysis handoff to planning | Package decisions, semantic names, and shapes are available before emission |
 | `DefUseGraph` | Definitions, imports, reads, and constraints | Unresolved reads are observable findings |
 | `BindingConstraint` | Usage-derived shape evidence | Call/member/construct/class/enum usage is not lost |
 | `BindingShapeSolution` | Solved shape per binding | Materialization follows the strongest required shape |
