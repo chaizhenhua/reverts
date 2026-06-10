@@ -20,7 +20,7 @@ pub struct EnrichmentOutput {
 #[must_use]
 pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let semantic_names = assign_semantic_names(&model);
-    let binding_shapes = solve_binding_shapes(&model);
+    let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
     let compiler_profile = detect_compiler_profile(&model);
     let package_index = PackageSurfaceIndex::from_attributions(
         model.input().package_attributions.as_slice(),
@@ -295,14 +295,6 @@ fn reserve_unique_name(
         }
         suffix += 1;
     }
-}
-
-fn solve_binding_shapes(model: &ProgramModel) -> BindingShapeSolution {
-    let mut solution = BindingShapeSolution::default();
-    for constraint in model.graph().def_use().constraints() {
-        solution.add_constraint(constraint);
-    }
-    solution
 }
 
 fn detect_compiler_profile(model: &ProgramModel) -> CompilerProfile {

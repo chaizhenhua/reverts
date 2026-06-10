@@ -3661,10 +3661,7 @@ mod tests {
         );
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
         let model = ProgramModel::from_input(input);
-        let mut binding_shapes = BindingShapeSolution::default();
-        for constraint in model.graph().def_use().constraints() {
-            binding_shapes.add_constraint(constraint);
-        }
+        let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
         let enriched = reverts_model::EnrichedProgram::new(
             model,
             reverts_model::SemanticNameMap::default(),

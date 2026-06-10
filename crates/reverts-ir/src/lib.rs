@@ -401,6 +401,15 @@ pub struct BindingShapeConflict {
 }
 
 impl BindingShapeSolution {
+    #[must_use]
+    pub fn from_def_use_graph(graph: &DefUseGraph) -> Self {
+        let mut solution = Self::default();
+        for constraint in graph.constraints() {
+            solution.add_constraint(constraint);
+        }
+        solution
+    }
+
     pub fn add_constraint(&mut self, constraint: &BindingConstraint) {
         let key = (constraint.module_id, constraint.binding.clone());
         let required = constraint.kind.required_shape();
@@ -616,6 +625,33 @@ mod tests {
             BindingShape::PlainObject.merge(BindingShape::Callable),
             BindingShape::Callable
         );
+    }
+
+    #[test]
+    fn binding_shape_solution_collects_constraints_from_def_use_graph() {
+        let mut graph = DefUseGraph::default();
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "factory",
+            BindingConstraintKind::Call,
+        ));
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "Service",
+            BindingConstraintKind::ClassDeclaration,
+        ));
+
+        let solution = BindingShapeSolution::from_def_use_graph(&graph);
+
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "factory"),
+            BindingShape::Callable
+        );
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "Service"),
+            BindingShape::ClassLike
+        );
+        assert!(solution.conflicts().is_empty());
     }
 
     #[test]
