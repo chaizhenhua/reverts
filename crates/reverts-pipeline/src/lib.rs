@@ -190,13 +190,21 @@ impl Error for PipelineError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use reverts_analyze::enrich_program;
+    use reverts_emitter::emit_project;
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
     };
-    use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+    use reverts_ir::{
+        BindingName, BindingShape, BindingSourceKind, BindingUseKind, ModuleId, ModuleKind,
+    };
+    use reverts_js::{ParseGoal, parse_source};
+    use reverts_model::ProgramModel;
     use reverts_observe::FindingCode;
-    use reverts_planner::{EmitPlan, PlannedBinding, PlannedFile};
+    use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
     use super::{audit_emit_plan_synthesis, generate_project_from_input};
 
@@ -332,6 +340,166 @@ mod tests {
                 .source
                 .contains("export default () => 42")
         );
+    }
+
+    #[test]
+    fn paper_aligned_pipeline_wires_graph_shape_package_plan_emit_and_parse() {
+        let mut rows = rows_with_application_source(
+            r#"
+                import { factory } from 'pkg/factory';
+                const bag = { value: 1 };
+                function local() {
+                    return factory(bag.value);
+                }
+                local();
+                export { local };
+            "#,
+        );
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "pkg_factory",
+            "node_modules/pkg/factory.js",
+            "pkg",
+            Some("1.2.3".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(2), "pkg", "1.2.3", "pkg/factory")
+                .with_subpath("factory"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let model = ProgramModel::from_input(input);
+        let graph = model.graph();
+        assert!(graph.ast_errors().is_empty());
+        assert!(
+            graph
+                .import_export()
+                .package_imports_for(ModuleId(1))
+                .contains(&"pkg/factory")
+        );
+        assert!(
+            graph
+                .import_export()
+                .exports_for(ModuleId(1))
+                .iter()
+                .any(|binding| binding.as_str() == "local")
+        );
+        assert!(graph.def_use().unresolved_reads().is_empty());
+        assert!(graph.def_use().unresolved_writes().is_empty());
+        let dependence_edges = graph.def_use().data_dependence_edges();
+        assert!(dependence_edges.iter().any(|edge| {
+            edge.binding.as_str() == "factory"
+                && edge.source == BindingSourceKind::Import
+                && edge.target == BindingUseKind::Read
+        }));
+        assert!(dependence_edges.iter().any(|edge| {
+            edge.binding.as_str() == "bag"
+                && edge.source == BindingSourceKind::Definition
+                && edge.target == BindingUseKind::Read
+        }));
+
+        let enrichment = enrich_program(model);
+        assert!(enrichment.audit.is_clean());
+        let program = enrichment.program;
+        assert_eq!(
+            program.binding_shape(ModuleId(1), "factory"),
+            BindingShape::Callable
+        );
+        assert_eq!(
+            program.binding_shape(ModuleId(1), "local"),
+            BindingShape::Callable
+        );
+        assert_eq!(
+            program.binding_shape(ModuleId(1), "bag"),
+            BindingShape::NamespaceObject
+        );
+        assert_eq!(program.package_imports().len(), 1);
+        assert!(program.package_imports()[0].source_backed);
+        assert_eq!(
+            program.package_imports()[0].resolution.specifier(),
+            Some("pkg/factory")
+        );
+
+        let plan = ImportExportPlanner
+            .plan_enriched_program(&program)
+            .expect("paper-aligned fixture should plan");
+        let file = &plan.files[0];
+        assert!(
+            file.imports.iter().any(|import| import.source_backed
+                && import.resolution.specifier() == Some("pkg/factory"))
+        );
+        assert!(
+            file.bindings
+                .iter()
+                .any(|binding| binding.original.as_str() == "factory" && binding.source_backed)
+        );
+        assert!(
+            file.exports
+                .iter()
+                .any(|export| export.binding.as_str() == "local" && export.source_backed)
+        );
+
+        let project = emit_project(&plan).expect("paper-aligned fixture should emit");
+        let source = project.files[0].source.as_str();
+        assert!(source.contains("import { factory } from 'pkg/factory';"));
+        assert!(source.contains("function local()"));
+        assert!(source.contains("export { local };"));
+        assert!(!source.contains("__pkg_pkg_factory"));
+        parse_source(
+            source,
+            Some(Path::new(project.files[0].path.as_str())),
+            ParseGoal::TypeScript,
+        )
+        .expect("emitted fixture should parse");
+    }
+
+    #[test]
+    fn source_backed_reexports_stay_on_package_surface_without_synthetic_namespace() {
+        let mut rows = rows_with_application_source(
+            "export { map as lodashMap } from 'lodash/map';\nexport * as fp from 'lodash/fp';",
+        );
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "lodash_map",
+            "node_modules/lodash/map.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(3),
+            "lodash_fp",
+            "node_modules/lodash/fp.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(3),
+                "lodash",
+                "4.17.21",
+                "lodash/fp",
+            )
+            .with_subpath("fp"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("export { map as lodashMap } from 'lodash/map';"));
+        assert!(source.contains("export * as fp from 'lodash/fp';"));
+        assert!(!source.contains("__pkg_lodash"));
+        assert_eq!(source.matches("from 'lodash/").count(), 2);
     }
 
     #[test]
