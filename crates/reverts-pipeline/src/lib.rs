@@ -436,6 +436,17 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_ast_read_is_rejected_by_first_audit_gate() {
+        let rows = rows_with_application_source("missing();");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should return audit");
+
+        assert!(run.audit.has(FindingCode::MissingDefinition));
+        assert!(run.project.files.is_empty());
+    }
+
+    #[test]
     fn synthesis_audit_accepts_declared_export_and_rejects_missing_export_binding() {
         let mut file = PlannedFile::new("src/index.ts");
         file.add_binding(PlannedBinding::new(

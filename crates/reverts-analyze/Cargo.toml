@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+reverts-graph = { path = "../reverts-graph" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }

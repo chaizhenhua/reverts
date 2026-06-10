@@ -4,14 +4,18 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     Visit,
     ast::{
-        Argument, ArrowFunctionExpression, AssignmentTarget, BindingPattern, BindingPatternKind,
-        CallExpression, Class, ComputedMemberExpression, Expression, Function, FunctionType,
-        NewExpression, StaticMemberExpression, VariableDeclarator,
+        Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
+        BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
+        ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
+        ImportDeclarationSpecifier, ModuleExportName, NewExpression, SimpleAssignmentTarget,
+        StaticMemberExpression, UpdateExpression, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
-        walk_computed_member_expression, walk_function, walk_new_expression,
-        walk_static_member_expression, walk_variable_declarator,
+        walk_computed_member_expression, walk_export_all_declaration,
+        walk_export_default_declaration, walk_export_named_declaration, walk_function,
+        walk_new_expression, walk_static_member_expression, walk_variable_declarator,
     },
 };
 use oxc_parser::{ParseOptions, Parser};
@@ -60,6 +64,33 @@ impl AstFact {
     }
 
     #[must_use]
+    pub fn write(module_id: ModuleId, binding: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(binding)),
+            kind: AstFactKind::Write,
+        }
+    }
+
+    #[must_use]
+    pub fn import(module_id: ModuleId, binding: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(binding)),
+            kind: AstFactKind::Import,
+        }
+    }
+
+    #[must_use]
+    pub fn export(module_id: ModuleId, binding: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(binding)),
+            kind: AstFactKind::Export,
+        }
+    }
+
+    #[must_use]
     pub fn constraint(
         module_id: ModuleId,
         binding: impl Into<String>,
@@ -86,6 +117,9 @@ impl AstFact {
 pub enum AstFactKind {
     Definition,
     Read,
+    Write,
+    Import,
+    Export,
     BindingConstraint(BindingConstraintKind),
     WrapperRegion(AstWrapperKind),
 }
@@ -148,7 +182,7 @@ impl RevertsGraph {
             match AstFactExtractor.extract(module, source.source_file_path, source.source) {
                 Ok(facts) => {
                     for fact in facts {
-                        apply_ast_fact(&mut definitions, &mut def_use, &fact);
+                        apply_ast_fact(&mut definitions, &mut def_use, &mut import_export, &fact);
                         ast_facts.push(fact);
                     }
                 }
@@ -172,6 +206,10 @@ impl RevertsGraph {
 
     pub fn record_read(&mut self, module_id: ModuleId, binding: impl Into<String>) {
         self.def_use.read(module_id, binding);
+    }
+
+    pub fn record_write(&mut self, module_id: ModuleId, binding: impl Into<String>) {
+        self.def_use.write(module_id, binding);
     }
 
     pub fn record_constraint(
@@ -221,6 +259,7 @@ impl RevertsGraph {
 fn apply_ast_fact(
     definitions: &mut BTreeMap<ModuleId, BTreeSet<BindingName>>,
     def_use: &mut DefUseGraph,
+    import_export: &mut ImportExportGraph,
     fact: &AstFact,
 ) {
     match &fact.kind {
@@ -236,6 +275,21 @@ fn apply_ast_fact(
         AstFactKind::Read => {
             if let Some(binding) = &fact.binding {
                 def_use.read(fact.module_id, binding.as_str());
+            }
+        }
+        AstFactKind::Write => {
+            if let Some(binding) = &fact.binding {
+                def_use.write(fact.module_id, binding.as_str());
+            }
+        }
+        AstFactKind::Import => {
+            if let Some(binding) = &fact.binding {
+                def_use.import(fact.module_id, binding.as_str());
+            }
+        }
+        AstFactKind::Export => {
+            if let Some(binding) = &fact.binding {
+                import_export.record_export(fact.module_id, binding.as_str());
             }
         }
         AstFactKind::BindingConstraint(kind) => {
@@ -323,6 +377,79 @@ impl<'a> Visit<'a> for AstFactVisitor {
         self.read(it.name.as_str());
     }
 
+    fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+        if let Some(specifiers) = &it.specifiers {
+            for specifier in specifiers {
+                match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                        self.import(specifier.local.name.as_str());
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        self.import(specifier.local.name.as_str());
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        self.import(specifier.local.name.as_str());
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+        if let Some(declaration) = &it.declaration {
+            for binding in declaration_binding_names(declaration) {
+                self.export(binding);
+            }
+        }
+
+        if it.source.is_none() {
+            for specifier in &it.specifiers {
+                if let Some(local) = module_export_name(&specifier.local) {
+                    self.export(local);
+                }
+            }
+        }
+
+        walk_export_named_declaration(self, it);
+    }
+
+    fn visit_export_default_declaration(&mut self, it: &ExportDefaultDeclaration<'a>) {
+        match &it.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    self.export(id.name.as_str());
+                } else {
+                    self.export("default");
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    self.export(id.name.as_str());
+                } else {
+                    self.export("default");
+                }
+            }
+            declaration => {
+                if let Some(binding) = export_default_expression_identifier(declaration) {
+                    self.export(binding);
+                } else {
+                    self.export("default");
+                }
+            }
+        }
+
+        walk_export_default_declaration(self, it);
+    }
+
+    fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
+        if let Some(exported) = &it.exported
+            && let Some(binding) = module_export_name(exported)
+        {
+            self.export(binding);
+        }
+        walk_export_all_declaration(self, it);
+    }
+
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
         if self.function_depth == 0
             && let Some(binding) = binding_pattern_name(&it.id)
@@ -365,6 +492,30 @@ impl<'a> Visit<'a> for AstFactVisitor {
         self.function_depth += 1;
         walk_arrow_function_expression(self, it);
         self.function_depth -= 1;
+    }
+
+    fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+        if let Some(binding) = assignment_target_identifier(&it.left) {
+            self.write(binding);
+            if !it.operator.is_assign() {
+                self.read(binding);
+            }
+            if assignment_target_is_member(&it.left) {
+                self.constraint(binding, BindingConstraintKind::MemberWrite);
+            }
+        }
+
+        self.visit_expression(&it.right);
+    }
+
+    fn visit_update_expression(&mut self, it: &UpdateExpression<'a>) {
+        if let Some(binding) = simple_assignment_target_identifier(&it.argument) {
+            self.read(binding);
+            self.write(binding);
+            if simple_assignment_target_is_member(&it.argument) {
+                self.constraint(binding, BindingConstraintKind::MemberWrite);
+            }
+        }
     }
 
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
@@ -433,6 +584,18 @@ impl AstFactVisitor {
         self.facts.push(AstFact::read(self.module_id, binding));
     }
 
+    fn write(&mut self, binding: &str) {
+        self.facts.push(AstFact::write(self.module_id, binding));
+    }
+
+    fn import(&mut self, binding: &str) {
+        self.facts.push(AstFact::import(self.module_id, binding));
+    }
+
+    fn export(&mut self, binding: &str) {
+        self.facts.push(AstFact::export(self.module_id, binding));
+    }
+
     fn constraint(&mut self, binding: &str, kind: BindingConstraintKind) {
         self.facts
             .push(AstFact::constraint(self.module_id, binding, kind));
@@ -447,6 +610,57 @@ fn binding_pattern_name<'a>(pattern: &'a BindingPattern<'a>) -> Option<&'a str> 
     }
 }
 
+fn declaration_binding_names<'a>(declaration: &'a Declaration<'a>) -> Vec<&'a str> {
+    match declaration {
+        Declaration::VariableDeclaration(variable) => variable
+            .declarations
+            .iter()
+            .filter_map(|declarator| binding_pattern_name(&declarator.id))
+            .collect(),
+        Declaration::FunctionDeclaration(function) => function
+            .id
+            .as_ref()
+            .map(|id| vec![id.name.as_str()])
+            .unwrap_or_default(),
+        Declaration::ClassDeclaration(class) => class
+            .id
+            .as_ref()
+            .map(|id| vec![id.name.as_str()])
+            .unwrap_or_default(),
+        Declaration::TSTypeAliasDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSInterfaceDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSEnumDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSModuleDeclaration(declaration) => vec![declaration.id.name().as_str()],
+        Declaration::TSImportEqualsDeclaration(declaration) => vec![declaration.id.name.as_str()],
+    }
+}
+
+fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::StringLiteral(literal) => Some(literal.value.as_str()),
+    }
+}
+
+fn export_default_expression_identifier<'a>(
+    declaration: &'a ExportDefaultDeclarationKind<'a>,
+) -> Option<&'a str> {
+    match declaration {
+        ExportDefaultDeclarationKind::Identifier(identifier) => Some(identifier.name.as_str()),
+        ExportDefaultDeclarationKind::StaticMemberExpression(member) => {
+            expression_identifier(&member.object)
+        }
+        ExportDefaultDeclarationKind::ComputedMemberExpression(member) => {
+            expression_identifier(&member.object)
+        }
+        ExportDefaultDeclarationKind::ParenthesizedExpression(parenthesized) => {
+            expression_identifier(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
 fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.as_str()),
@@ -454,6 +668,17 @@ fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> 
         Expression::ComputedMemberExpression(member) => expression_identifier(&member.object),
         Expression::ParenthesizedExpression(parenthesized) => {
             expression_identifier(&parenthesized.expression)
+        }
+        Expression::TSAsExpression(expression) => expression_identifier(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        Expression::TSTypeAssertion(expression) => expression_identifier(&expression.expression),
+        Expression::TSInstantiationExpression(expression) => {
+            expression_identifier(&expression.expression)
         }
         _ => None,
     }
@@ -528,15 +753,75 @@ fn assignment_target_identifier<'a>(target: &'a AssignmentTarget<'a>) -> Option<
         AssignmentTarget::AssignmentTargetIdentifier(identifier) => Some(identifier.name.as_str()),
         AssignmentTarget::StaticMemberExpression(member) => expression_identifier(&member.object),
         AssignmentTarget::ComputedMemberExpression(member) => expression_identifier(&member.object),
-        AssignmentTarget::TSAsExpression(_)
-        | AssignmentTarget::TSSatisfiesExpression(_)
-        | AssignmentTarget::TSNonNullExpression(_)
-        | AssignmentTarget::TSTypeAssertion(_)
-        | AssignmentTarget::TSInstantiationExpression(_)
-        | AssignmentTarget::PrivateFieldExpression(_)
+        AssignmentTarget::TSAsExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        AssignmentTarget::TSSatisfiesExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        AssignmentTarget::TSNonNullExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        AssignmentTarget::TSTypeAssertion(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        AssignmentTarget::TSInstantiationExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        AssignmentTarget::PrivateFieldExpression(_)
         | AssignmentTarget::ArrayAssignmentTarget(_)
         | AssignmentTarget::ObjectAssignmentTarget(_) => None,
     }
+}
+
+fn assignment_target_is_member(target: &AssignmentTarget<'_>) -> bool {
+    matches!(
+        target,
+        AssignmentTarget::StaticMemberExpression(_)
+            | AssignmentTarget::ComputedMemberExpression(_)
+            | AssignmentTarget::PrivateFieldExpression(_)
+    )
+}
+
+fn simple_assignment_target_identifier<'a>(
+    target: &'a SimpleAssignmentTarget<'a>,
+) -> Option<&'a str> {
+    match target {
+        SimpleAssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            Some(identifier.name.as_str())
+        }
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            expression_identifier(&member.object)
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            expression_identifier(&member.object)
+        }
+        SimpleAssignmentTarget::TSAsExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        SimpleAssignmentTarget::TSSatisfiesExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        SimpleAssignmentTarget::TSNonNullExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        SimpleAssignmentTarget::TSTypeAssertion(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        SimpleAssignmentTarget::TSInstantiationExpression(expression) => {
+            expression_identifier(&expression.expression)
+        }
+        SimpleAssignmentTarget::PrivateFieldExpression(_) => None,
+    }
+}
+
+fn simple_assignment_target_is_member(target: &SimpleAssignmentTarget<'_>) -> bool {
+    matches!(
+        target,
+        SimpleAssignmentTarget::StaticMemberExpression(_)
+            | SimpleAssignmentTarget::ComputedMemberExpression(_)
+            | SimpleAssignmentTarget::PrivateFieldExpression(_)
+    )
 }
 
 fn iife_kind(expression: &Expression<'_>) -> Option<AstWrapperKind> {
@@ -579,6 +864,14 @@ impl ImportExportGraph {
             .entry(module_id)
             .or_default()
             .insert(BindingName::new(binding));
+    }
+
+    #[must_use]
+    pub fn exports_for(&self, module_id: ModuleId) -> Vec<BindingName> {
+        self.exports
+            .get(&module_id)
+            .map(|exports| exports.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -704,6 +997,78 @@ mod tests {
         assert!(graph.def_use().constraints().iter().any(|constraint| {
             constraint.binding.as_str() == "ns"
                 && constraint.kind == BindingConstraintKind::MemberRead
+        }));
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_imports_exports_and_writes() {
+        let source = r#"
+            import value, { named as alias } from "pkg";
+            let local = alias;
+            local = value;
+            local += 1;
+            export { local };
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.mjs",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(graph.def_use().unresolved_reads().is_empty());
+        assert!(graph.def_use().unresolved_writes().is_empty());
+        assert!(graph.ast_facts().iter().any(|fact| {
+            fact.kind == AstFactKind::Import
+                && fact
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.as_str() == "alias")
+        }));
+        assert!(graph.ast_facts().iter().any(|fact| {
+            fact.kind == AstFactKind::Write
+                && fact
+                    .binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.as_str() == "local")
+        }));
+        assert!(
+            graph
+                .import_export()
+                .exports_for(ModuleId(1))
+                .iter()
+                .any(|binding| binding.as_str() == "local")
+        );
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_member_writes_into_shape_constraints() {
+        let source = r#"
+            const namespace = {};
+            namespace.value = 1;
+            namespace.count++;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.def_use().constraints().iter().any(|constraint| {
+            constraint.binding.as_str() == "namespace"
+                && constraint.kind == BindingConstraintKind::MemberWrite
         }));
     }
 

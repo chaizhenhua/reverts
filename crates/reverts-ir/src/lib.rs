@@ -165,6 +165,7 @@ pub struct DefUseGraph {
     definitions: BTreeSet<(ModuleId, BindingName)>,
     imports: BTreeSet<(ModuleId, BindingName)>,
     reads: BTreeSet<(ModuleId, BindingName)>,
+    writes: BTreeSet<(ModuleId, BindingName)>,
     constraints: Vec<BindingConstraint>,
 }
 
@@ -182,6 +183,10 @@ impl DefUseGraph {
         self.reads.insert((module_id, BindingName::new(binding)));
     }
 
+    pub fn write(&mut self, module_id: ModuleId, binding: impl Into<String>) {
+        self.writes.insert((module_id, BindingName::new(binding)));
+    }
+
     pub fn constrain(&mut self, constraint: BindingConstraint) {
         self.reads
             .insert((constraint.module_id, constraint.binding.clone()));
@@ -197,6 +202,15 @@ impl DefUseGraph {
     #[must_use]
     pub fn unresolved_reads(&self) -> Vec<(ModuleId, BindingName)> {
         self.reads
+            .iter()
+            .filter(|(module_id, binding)| !self.has_definition_or_import(*module_id, binding))
+            .cloned()
+            .collect()
+    }
+
+    #[must_use]
+    pub fn unresolved_writes(&self) -> Vec<(ModuleId, BindingName)> {
+        self.writes
             .iter()
             .filter(|(module_id, binding)| !self.has_definition_or_import(*module_id, binding))
             .cloned()
@@ -355,8 +369,8 @@ fn normalize_subpath(subpath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution, ModuleId,
-        PackageSurface, is_valid_package_name,
+        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution, DefUseGraph,
+        ModuleId, PackageSurface, is_valid_package_name,
     };
 
     #[test]
@@ -365,6 +379,23 @@ mod tests {
 
         assert!(surface.accepts("lodash"));
         assert!(!surface.accepts("lodash/_mapCacheProto.js"));
+    }
+
+    #[test]
+    fn write_without_definition_or_import_remains_unresolved() {
+        let mut graph = DefUseGraph::default();
+        graph.write(ModuleId(1), "missing");
+
+        assert_eq!(graph.unresolved_writes()[0].1.as_str(), "missing");
+    }
+
+    #[test]
+    fn imported_write_is_resolved() {
+        let mut graph = DefUseGraph::default();
+        graph.import(ModuleId(1), "namespace");
+        graph.write(ModuleId(1), "namespace");
+
+        assert!(graph.unresolved_writes().is_empty());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use reverts_graph::AstFactKind;
 use reverts_input::{
     ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
 };
@@ -29,6 +30,8 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let package_index = build_package_surface_index(model.input().package_attributions.as_slice());
     let mut audit = AuditReport::default();
     audit.extend(audit_ast_fact_extraction(&model));
+    audit.extend(audit_def_use_graph(&model));
+    audit.extend(audit_duplicate_top_level_bindings(&model));
     audit.extend(audit_binding_shape_conflicts(&binding_shapes));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
@@ -49,6 +52,133 @@ fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
         );
     }
     audit
+}
+
+fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for (module_id, binding) in model.graph().def_use().unresolved_reads() {
+        if is_ambient_binding(binding.as_str()) {
+            continue;
+        }
+        audit.push(
+            AuditFinding::error(
+                FindingCode::MissingDefinition,
+                format!("binding '{binding}' is read without a local definition or import"),
+            )
+            .with_module(module_id.0.to_string())
+            .with_binding(binding.as_str()),
+        );
+    }
+    for (module_id, binding) in model.graph().def_use().unresolved_writes() {
+        if is_ambient_binding(binding.as_str()) {
+            continue;
+        }
+        audit.push(
+            AuditFinding::error(
+                FindingCode::MissingDefinition,
+                format!("binding '{binding}' is written without a local definition or import"),
+            )
+            .with_module(module_id.0.to_string())
+            .with_binding(binding.as_str()),
+        );
+    }
+    audit
+}
+
+fn audit_duplicate_top_level_bindings(model: &ProgramModel) -> AuditReport {
+    let mut counts = BTreeMap::<(ModuleId, BindingName), usize>::new();
+    for fact in model
+        .graph()
+        .ast_facts()
+        .iter()
+        .filter(|fact| fact.kind == AstFactKind::Definition)
+    {
+        let Some(binding) = &fact.binding else {
+            continue;
+        };
+        *counts.entry((fact.module_id, binding.clone())).or_default() += 1;
+    }
+
+    let mut audit = AuditReport::default();
+    for ((module_id, binding), count) in counts {
+        if count <= 1 {
+            continue;
+        }
+        audit.push(
+            AuditFinding::error(
+                FindingCode::DuplicateTopLevelBinding,
+                format!("top-level binding '{binding}' is declared {count} times"),
+            )
+            .with_module(module_id.0.to_string())
+            .with_binding(binding.as_str()),
+        );
+    }
+    audit
+}
+
+fn is_ambient_binding(binding: &str) -> bool {
+    matches!(
+        binding,
+        "Array"
+            | "ArrayBuffer"
+            | "Atomics"
+            | "BigInt"
+            | "BigInt64Array"
+            | "BigUint64Array"
+            | "Boolean"
+            | "Buffer"
+            | "DataView"
+            | "Date"
+            | "Error"
+            | "EvalError"
+            | "Float32Array"
+            | "Float64Array"
+            | "Function"
+            | "Infinity"
+            | "Intl"
+            | "JSON"
+            | "Map"
+            | "Math"
+            | "NaN"
+            | "Number"
+            | "Object"
+            | "Promise"
+            | "Proxy"
+            | "RangeError"
+            | "ReferenceError"
+            | "Reflect"
+            | "RegExp"
+            | "Set"
+            | "String"
+            | "Symbol"
+            | "SyntaxError"
+            | "TypeError"
+            | "URIError"
+            | "URL"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "Uint16Array"
+            | "Uint32Array"
+            | "WeakMap"
+            | "WeakSet"
+            | "__dirname"
+            | "__filename"
+            | "clearImmediate"
+            | "clearInterval"
+            | "clearTimeout"
+            | "console"
+            | "exports"
+            | "global"
+            | "globalThis"
+            | "module"
+            | "process"
+            | "queueMicrotask"
+            | "require"
+            | "setImmediate"
+            | "setInterval"
+            | "setTimeout"
+            | "undefined"
+    )
 }
 
 fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> AuditReport {
@@ -614,6 +744,86 @@ NativeModuleType();
         let output = enrich_program(ProgramModel::from_input(input));
 
         assert!(output.audit.has(FindingCode::CallableEmittedAsNonCallable));
+    }
+
+    #[test]
+    fn unresolved_ast_read_is_reported_as_missing_definition() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "missing-read.js",
+            Some("missing();".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::MissingDefinition));
+        assert!(output.audit.findings().iter().any(|finding| {
+            finding.code == FindingCode::MissingDefinition
+                && finding.binding.as_deref() == Some("missing")
+        }));
+    }
+
+    #[test]
+    fn unresolved_ast_write_is_reported_as_missing_definition() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "missing-write.js",
+            Some("missing = 1;".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.findings().iter().any(|finding| {
+            finding.code == FindingCode::MissingDefinition
+                && finding.binding.as_deref() == Some("missing")
+                && finding.message.contains("written")
+        }));
+    }
+
+    #[test]
+    fn duplicate_top_level_ast_definition_is_reported() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "duplicate.js",
+            Some("var value = 1; var value = 2;".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::DuplicateTopLevelBinding));
+        assert!(output.audit.findings().iter().any(|finding| {
+            finding.code == FindingCode::DuplicateTopLevelBinding
+                && finding.binding.as_deref() == Some("value")
+        }));
+    }
+
+    #[test]
+    fn ambient_runtime_globals_do_not_fail_def_use_audit() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "runtime.js",
+            Some("console.log(process.cwd());".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(!output.audit.has(FindingCode::MissingDefinition));
     }
 
     fn identifiers<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
