@@ -707,6 +707,45 @@ mod tests {
     }
 
     #[test]
+    fn ast_bare_reexport_uses_package_surface_resolution() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("export { map as lodashMap } from 'lodash/map';".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "lodash_map",
+            "node_modules/lodash/map.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.is_clean());
+        assert_eq!(output.program.package_imports().len(), 1);
+        assert!(output.program.package_imports()[0].source_backed);
+        assert!(matches!(
+            output.program.package_imports()[0].resolution,
+            PackageResolution::External { .. }
+        ));
+    }
+
+    #[test]
     fn ast_fact_extraction_failure_is_reported_as_audit_finding() {
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(

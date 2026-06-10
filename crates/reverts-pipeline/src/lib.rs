@@ -117,6 +117,9 @@ fn audit_file_synthesis(file: &PlannedFile) -> AuditReport {
     }
 
     for export in &file.exports {
+        if export.source_backed {
+            continue;
+        }
         if !declarations.contains(&export.binding) {
             audit.push(
                 AuditFinding::error(
@@ -287,6 +290,48 @@ mod tests {
         assert!(source.contains("import { map } from 'lodash/map';"));
         assert!(!source.contains("__pkg_lodash_map"));
         assert_eq!(source.matches("from 'lodash/map'").count(), 1);
+    }
+
+    #[test]
+    fn commonjs_require_package_import_uses_surface_attribution_without_synthetic_import() {
+        let mut rows = rows_with_application_source(
+            "const add = require('pkg/add'); export const total = add(1, 2);",
+        );
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "pkg_add",
+            "node_modules/pkg/add.js",
+            "pkg",
+            Some("1.2.3".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(2), "pkg", "1.2.3", "pkg/add")
+                .with_subpath("add"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("require('pkg/add')"));
+        assert!(!source.contains("__pkg_pkg_add"));
+    }
+
+    #[test]
+    fn source_backed_default_export_does_not_require_synthetic_default_binding() {
+        let rows = rows_with_application_source("export default () => 42;");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.project.files.len(), 1);
+        assert!(
+            run.project.files[0]
+                .source
+                .contains("export default () => 42")
+        );
     }
 
     #[test]

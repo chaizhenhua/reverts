@@ -6,11 +6,10 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
-        ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
-        ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
-        ImportDeclarationSpecifier, ModuleExportName, NewExpression, Program,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
-        VariableDeclarator,
+        ExportAllDeclaration, ExportDefaultDeclaration, ExportNamedDeclaration, Expression,
+        Function, FunctionType, ImportDeclaration, ImportDeclarationSpecifier, ModuleExportName,
+        NewExpression, Program, SimpleAssignmentTarget, Statement, StaticMemberExpression,
+        UpdateExpression, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -554,17 +553,26 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+        if let Some(source) = &it.source {
+            let specifier = source.value.as_str();
+            if split_bare_specifier(specifier).is_some() {
+                self.package_import(specifier);
+            }
+        }
+
         if let Some(declaration) = &it.declaration {
             for binding in declaration_binding_names(declaration) {
                 self.export(binding);
             }
         }
 
-        if it.source.is_none() {
-            for specifier in &it.specifiers {
+        for specifier in &it.specifiers {
+            if it.source.is_none() {
                 if let Some(local) = module_export_name(&specifier.local) {
                     self.export(local);
                 }
+            } else if let Some(exported) = module_export_name(&specifier.exported) {
+                self.export(exported);
             }
         }
 
@@ -572,40 +580,34 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_export_default_declaration(&mut self, it: &ExportDefaultDeclaration<'a>) {
-        match &it.declaration {
-            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
-                if let Some(id) = &function.id {
-                    self.export(id.name.as_str());
-                }
-            }
-            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
-                if let Some(id) = &class.id {
-                    self.export(id.name.as_str());
-                }
-            }
-            declaration => {
-                if let Some(binding) = export_default_expression_identifier(declaration) {
-                    self.export(binding);
-                }
-            }
-        }
-
+        self.export("default");
         walk_export_default_declaration(self, it);
     }
 
     fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
+        let specifier = it.source.value.as_str();
+        if split_bare_specifier(specifier).is_some() {
+            self.package_import(specifier);
+        }
+        if let Some(exported) = &it.exported
+            && let Some(binding) = module_export_name(exported)
+        {
+            self.export(binding);
+        }
         walk_export_all_declaration(self, it);
     }
 
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
-        if self.function_depth == 0
-            && let Some(binding) = binding_pattern_name(&it.id)
-        {
-            self.definition(binding);
+        if self.function_depth == 0 {
+            let bindings = binding_pattern_names(&it.id);
+            for binding in &bindings {
+                self.definition(binding);
+            }
             if let Some(init) = &it.init
+                && bindings.len() == 1
                 && let Some(kind) = initializer_constraint_kind(init)
             {
-                self.constraint(binding, kind);
+                self.constraint(bindings[0], kind);
             }
         }
         walk_variable_declarator(self, it);
@@ -642,6 +644,9 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+        if let Some(binding) = commonjs_export_binding(&it.left, &it.right) {
+            self.export(binding);
+        }
         if let Some(binding) = assignment_target_identifier(&it.left) {
             self.write(binding);
             if !it.operator.is_assign() {
@@ -668,6 +673,12 @@ impl<'a> Visit<'a> for AstFactVisitor {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Expression::Identifier(identifier) = &it.callee {
             self.constraint(identifier.name.as_str(), BindingConstraintKind::Call);
+            if identifier.name.as_str() == "require"
+                && let Some(specifier) = it.arguments.first().and_then(argument_string_literal)
+                && split_bare_specifier(specifier).is_some()
+            {
+                self.package_import(specifier);
+            }
         }
         if let Some(kind) = iife_kind(&it.callee) {
             self.facts
@@ -754,11 +765,34 @@ impl AstFactVisitor {
     }
 }
 
-fn binding_pattern_name<'a>(pattern: &'a BindingPattern<'a>) -> Option<&'a str> {
+fn binding_pattern_names<'a>(pattern: &'a BindingPattern<'a>) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    collect_binding_pattern_names(pattern, &mut names);
+    names
+}
+
+fn collect_binding_pattern_names<'a>(pattern: &'a BindingPattern<'a>, names: &mut Vec<&'a str>) {
     match &pattern.kind {
-        BindingPatternKind::BindingIdentifier(identifier) => Some(identifier.name.as_str()),
-        BindingPatternKind::AssignmentPattern(pattern) => binding_pattern_name(&pattern.left),
-        BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => None,
+        BindingPatternKind::BindingIdentifier(identifier) => names.push(identifier.name.as_str()),
+        BindingPatternKind::AssignmentPattern(pattern) => {
+            collect_binding_pattern_names(&pattern.left, names);
+        }
+        BindingPatternKind::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_binding_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPatternKind::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_binding_pattern_names(element, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
     }
 }
 
@@ -767,7 +801,7 @@ fn declaration_binding_names<'a>(declaration: &'a Declaration<'a>) -> Vec<&'a st
         Declaration::VariableDeclaration(variable) => variable
             .declarations
             .iter()
-            .filter_map(|declarator| binding_pattern_name(&declarator.id))
+            .flat_map(|declarator| binding_pattern_names(&declarator.id))
             .collect(),
         Declaration::FunctionDeclaration(function) => function
             .id
@@ -795,24 +829,6 @@ fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
     }
 }
 
-fn export_default_expression_identifier<'a>(
-    declaration: &'a ExportDefaultDeclarationKind<'a>,
-) -> Option<&'a str> {
-    match declaration {
-        ExportDefaultDeclarationKind::Identifier(identifier) => Some(identifier.name.as_str()),
-        ExportDefaultDeclarationKind::StaticMemberExpression(member) => {
-            expression_identifier(&member.object)
-        }
-        ExportDefaultDeclarationKind::ComputedMemberExpression(member) => {
-            expression_identifier(&member.object)
-        }
-        ExportDefaultDeclarationKind::ParenthesizedExpression(parenthesized) => {
-            expression_identifier(&parenthesized.expression)
-        }
-        _ => None,
-    }
-}
-
 fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.as_str()),
@@ -831,6 +847,26 @@ fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> 
         Expression::TSTypeAssertion(expression) => expression_identifier(&expression.expression),
         Expression::TSInstantiationExpression(expression) => {
             expression_identifier(&expression.expression)
+        }
+        _ => None,
+    }
+}
+
+fn argument_string_literal<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
+    match argument {
+        Argument::StringLiteral(literal) => Some(literal.value.as_str()),
+        Argument::ParenthesizedExpression(parenthesized) => {
+            expression_string_literal(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
+fn expression_string_literal<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expression_string_literal(&parenthesized.expression)
         }
         _ => None,
     }
@@ -924,6 +960,48 @@ fn assignment_target_identifier<'a>(target: &'a AssignmentTarget<'a>) -> Option<
         | AssignmentTarget::ArrayAssignmentTarget(_)
         | AssignmentTarget::ObjectAssignmentTarget(_) => None,
     }
+}
+
+fn commonjs_export_binding<'a>(
+    target: &'a AssignmentTarget<'a>,
+    right: &'a Expression<'a>,
+) -> Option<&'a str> {
+    let AssignmentTarget::StaticMemberExpression(member) = target else {
+        return None;
+    };
+
+    if expression_is_identifier(&member.object, "exports") {
+        return Some(member.property.name.as_str());
+    }
+
+    if expression_is_static_member(&member.object, "module", "exports") {
+        return Some(member.property.name.as_str());
+    }
+
+    if expression_is_identifier(&member.object, "module")
+        && member.property.name.as_str() == "exports"
+    {
+        return expression_identifier(right);
+    }
+
+    None
+}
+
+fn expression_is_identifier(expression: &Expression<'_>, expected: &str) -> bool {
+    matches!(expression, Expression::Identifier(identifier) if identifier.name.as_str() == expected)
+}
+
+fn expression_is_static_member(
+    expression: &Expression<'_>,
+    object_name: &str,
+    property_name: &str,
+) -> bool {
+    matches!(
+        expression,
+        Expression::StaticMemberExpression(member)
+            if expression_is_identifier(&member.object, object_name)
+                && member.property.name.as_str() == property_name
+    )
 }
 
 fn assignment_target_is_member(target: &AssignmentTarget<'_>) -> bool {
@@ -1323,5 +1401,109 @@ mod tests {
             constraint.binding.as_str() == "bag"
                 && constraint.kind == BindingConstraintKind::ObjectLiteralDeclaration
         }));
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_commonjs_require_and_exports() {
+        let source = r#"
+            const answer = require("pkg").answer;
+            exports.answer = answer;
+            module.exports.defaultAnswer = answer;
+            module.exports = answer;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.cjs",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let exports = graph.import_export().exports_for(ModuleId(1));
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(
+            graph
+                .import_export()
+                .package_imports_for(ModuleId(1))
+                .contains(&"pkg")
+        );
+        assert!(exports.iter().any(|binding| binding.as_str() == "answer"));
+        assert!(
+            exports
+                .iter()
+                .any(|binding| binding.as_str() == "defaultAnswer")
+        );
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_destructured_top_level_bindings() {
+        let source = r#"
+            const source = { value: 1, other: 2 };
+            const list = [1, 2, 3];
+            const { value: alias, other, ...rest } = source;
+            const [first, , third = 3, ...tail] = list;
+            alias; other; rest; first; third; tail;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let definitions = graph
+            .definitions_for(ModuleId(1))
+            .into_iter()
+            .map(|binding| binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(graph.ast_errors().is_empty());
+        for binding in ["alias", "other", "rest", "first", "third", "tail"] {
+            assert!(definitions.contains(&binding.to_string()));
+        }
+        assert!(graph.def_use().unresolved_reads().is_empty());
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_default_exports_and_reexports() {
+        let source = r#"
+            export { value as renamed } from "pkg/sub";
+            export * as everything from "pkg/all";
+            export default function run() { return 1; }
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.mjs",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let package_imports = graph.import_export().package_imports_for(ModuleId(1));
+        let exports = graph.import_export().exports_for(ModuleId(1));
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(package_imports.contains(&"pkg/sub"));
+        assert!(package_imports.contains(&"pkg/all"));
+        for binding in ["default", "everything", "renamed"] {
+            assert!(exports.iter().any(|export| export.as_str() == binding));
+        }
+        assert!(
+            graph
+                .definitions_for(ModuleId(1))
+                .iter()
+                .any(|binding| binding.as_str() == "run")
+        );
     }
 }
