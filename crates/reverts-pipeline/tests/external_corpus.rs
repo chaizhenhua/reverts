@@ -34,6 +34,7 @@ fn external_corpus_pipeline_coverage_report() {
     let mut artifact_unreadable = 0usize;
     let mut pipeline_failed = 0usize;
     let mut findings_by_code: BTreeMap<FindingCode, usize> = BTreeMap::new();
+    let mut missing_definitions_by_binding: BTreeMap<String, usize> = BTreeMap::new();
 
     for case in &cases {
         let outcome = outcomes
@@ -79,6 +80,13 @@ fn external_corpus_pipeline_coverage_report() {
         } else {
             for finding in run.audit.findings() {
                 *findings_by_code.entry(finding.code).or_default() += 1;
+                if finding.code == FindingCode::MissingDefinition
+                    && let Some(binding) = finding.binding.as_deref()
+                {
+                    *missing_definitions_by_binding
+                        .entry(binding.to_string())
+                        .or_default() += 1;
+                }
             }
         }
         if !run.project.files.is_empty() {
@@ -109,6 +117,17 @@ fn external_corpus_pipeline_coverage_report() {
         println!("  audit findings on non-clean cases:");
         for (code, count) in &findings_by_code {
             println!("    {code:?}: {count}");
+        }
+    }
+    if !missing_definitions_by_binding.is_empty() {
+        let mut top = missing_definitions_by_binding
+            .iter()
+            .map(|(binding, count)| (*count, binding.clone()))
+            .collect::<Vec<_>>();
+        top.sort_by(|left, right| right.0.cmp(&left.0).then(left.1.cmp(&right.1)));
+        println!("  top missing-definition bindings:");
+        for (count, binding) in top.iter().take(15) {
+            println!("    {binding:>40}: {count}");
         }
     }
     println!("  per-family detection accuracy (analyze stage):");
