@@ -800,7 +800,9 @@ dependencies = [
  "reverts-ir",
  "reverts-js",
  "reverts-observe",
+ "reverts-package",
  "semver",
+ "serde_json",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ use oxc_ast::{
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
         ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
-        ImportDeclarationSpecifier, ModuleExportName, NewExpression, Program,
+        ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression, Program,
         SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
         VariableDeclarator,
     },
@@ -16,7 +16,8 @@ use oxc_ast::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
         walk_computed_member_expression, walk_export_all_declaration,
         walk_export_default_declaration, walk_export_named_declaration, walk_function,
-        walk_new_expression, walk_static_member_expression, walk_variable_declarator,
+        walk_import_expression, walk_new_expression, walk_static_member_expression,
+        walk_variable_declarator,
     },
 };
 use oxc_parser::{ParseOptions, Parser};
@@ -1036,6 +1037,15 @@ impl<'a> Visit<'a> for AstFactVisitor {
         walk_call_expression(self, it);
     }
 
+    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+        if let Some(specifier) = expression_string_literal(&it.source)
+            && split_bare_specifier(specifier).is_some()
+        {
+            self.package_import(specifier);
+        }
+        walk_import_expression(self, it);
+    }
+
     fn visit_new_expression(&mut self, it: &NewExpression<'a>) {
         if let Some(binding) = expression_identifier(&it.callee) {
             self.constraint(binding, BindingConstraintKind::Construct);
@@ -1846,6 +1856,7 @@ mod tests {
     fn ast_fact_extractor_projects_commonjs_require_and_exports() {
         let source = r#"
             const answer = require("pkg").answer;
+            const later = import("other-pkg");
             exports.answer = answer;
             module.exports.defaultAnswer = answer;
             module.exports = answer;
@@ -1869,6 +1880,12 @@ mod tests {
                 .import_export()
                 .package_imports_for(ModuleId(1))
                 .contains(&"pkg")
+        );
+        assert!(
+            graph
+                .import_export()
+                .package_imports_for(ModuleId(1))
+                .contains(&"other-pkg")
         );
         assert!(exports.iter().any(|binding| binding.as_str() == "answer"));
         assert!(

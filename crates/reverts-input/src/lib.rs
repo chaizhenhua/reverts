@@ -273,6 +273,38 @@ impl PackageAttributionInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSurfaceInput {
+    pub package_name: String,
+    pub package_version: Option<String>,
+    pub export_specifier: String,
+    pub status: PackageAttributionStatus,
+    pub evidence: Option<String>,
+}
+
+impl PackageSurfaceInput {
+    #[must_use]
+    pub fn accepted_external(
+        package_name: impl Into<String>,
+        package_version: impl Into<String>,
+        export_specifier: impl Into<String>,
+    ) -> Self {
+        Self {
+            package_name: package_name.into(),
+            package_version: Some(package_version.into()),
+            export_specifier: export_specifier.into(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_evidence(mut self, evidence: impl Into<String>) -> Self {
+        self.evidence = normalize_optional(Some(evidence.into()));
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputBundle {
     pub project: ProjectInput,
     pub source_files: Vec<SourceFileInput>,
@@ -280,6 +312,7 @@ pub struct InputBundle {
     pub symbols: Vec<SymbolInput>,
     pub dependencies: Vec<ModuleDependencyInput>,
     pub package_attributions: Vec<PackageAttributionInput>,
+    pub package_surfaces: Vec<PackageSurfaceInput>,
 }
 
 impl InputBundle {
@@ -291,6 +324,7 @@ impl InputBundle {
         validate_symbols(&rows.symbols, &module_ids)?;
         validate_dependencies(&rows.dependencies, &module_ids)?;
         validate_package_attributions(&rows.modules, &rows.package_attributions, &module_ids)?;
+        validate_package_surfaces(&rows.package_surfaces)?;
 
         Ok(Self {
             project: rows.project,
@@ -299,6 +333,7 @@ impl InputBundle {
             symbols: rows.symbols,
             dependencies: rows.dependencies,
             package_attributions: rows.package_attributions,
+            package_surfaces: rows.package_surfaces,
         })
     }
 
@@ -325,6 +360,7 @@ pub struct InputRows {
     pub symbols: Vec<SymbolInput>,
     pub dependencies: Vec<ModuleDependencyInput>,
     pub package_attributions: Vec<PackageAttributionInput>,
+    pub package_surfaces: Vec<PackageSurfaceInput>,
 }
 
 impl InputRows {
@@ -337,6 +373,7 @@ impl InputRows {
             symbols: Vec::new(),
             dependencies: Vec::new(),
             package_attributions: Vec::new(),
+            package_surfaces: Vec::new(),
         }
     }
 
@@ -438,6 +475,28 @@ impl InputRows {
             });
         }
 
+        let mut package_surfaces = Vec::with_capacity(rows.package_surfaces.len());
+        for row in rows.package_surfaces {
+            let row_project_id = checked_u32_id(row.project_id, "package_surface.project_id")?;
+            if row_project_id != project_id {
+                return Err(InputBundleError::PackageSurfaceProjectMismatch {
+                    project_id: row_project_id,
+                    expected_project_id: project_id,
+                    export_specifier: row.export_specifier,
+                });
+            }
+            package_surfaces.push(PackageSurfaceInput {
+                package_name: non_empty(row.package_name, "package_surface.package_name")?,
+                package_version: normalize_optional(row.package_version),
+                export_specifier: non_empty(
+                    row.export_specifier,
+                    "package_surface.export_specifier",
+                )?,
+                status: row.status,
+                evidence: normalize_optional(row.evidence),
+            });
+        }
+
         Ok(Self {
             project,
             source_files,
@@ -445,6 +504,7 @@ impl InputRows {
             symbols,
             dependencies,
             package_attributions,
+            package_surfaces,
         })
     }
 
@@ -500,6 +560,7 @@ pub struct DatabaseRows {
     pub symbols: Vec<SymbolRow>,
     pub dependencies: Vec<ModuleDependencyRow>,
     pub package_attributions: Vec<PackageAttributionRow>,
+    pub package_surfaces: Vec<PackageSurfaceRow>,
 }
 
 impl DatabaseRows {
@@ -512,6 +573,7 @@ impl DatabaseRows {
             symbols: Vec::new(),
             dependencies: Vec::new(),
             package_attributions: Vec::new(),
+            package_surfaces: Vec::new(),
         }
     }
 }
@@ -595,6 +657,16 @@ pub struct PackageAttributionRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSurfaceRow {
+    pub project_id: i64,
+    pub package_name: String,
+    pub package_version: Option<String>,
+    pub export_specifier: String,
+    pub status: PackageAttributionStatus,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputBundleError {
     EmptyField(&'static str),
     InvalidId {
@@ -640,6 +712,19 @@ pub enum InputBundleError {
     MissingRejectionReason {
         module_id: ModuleId,
         package_name: String,
+    },
+    PackageSurfaceProjectMismatch {
+        project_id: u32,
+        expected_project_id: u32,
+        export_specifier: String,
+    },
+    InvalidPackageSurfaceSpecifier {
+        package_name: String,
+        export_specifier: String,
+    },
+    MissingPackageSurfaceVersion {
+        package_name: String,
+        export_specifier: String,
     },
 }
 
@@ -731,6 +816,28 @@ impl fmt::Display for InputBundleError {
                 formatter,
                 "rejected package attribution for module {} package {package_name} has no rejection reason",
                 module_id.0
+            ),
+            Self::PackageSurfaceProjectMismatch {
+                project_id,
+                expected_project_id,
+                export_specifier,
+            } => write!(
+                formatter,
+                "package surface {export_specifier} belongs to project {project_id}, expected {expected_project_id}"
+            ),
+            Self::InvalidPackageSurfaceSpecifier {
+                package_name,
+                export_specifier,
+            } => write!(
+                formatter,
+                "package surface {export_specifier} does not belong to package {package_name}"
+            ),
+            Self::MissingPackageSurfaceVersion {
+                package_name,
+                export_specifier,
+            } => write!(
+                formatter,
+                "accepted package surface {export_specifier} for package {package_name} has no version"
             ),
         }
     }
@@ -921,6 +1028,44 @@ fn validate_package_attribution(
     Ok(())
 }
 
+fn validate_package_surfaces(surfaces: &[PackageSurfaceInput]) -> Result<(), InputBundleError> {
+    for surface in surfaces {
+        validate_package_surface(surface)?;
+    }
+    Ok(())
+}
+
+fn validate_package_surface(surface: &PackageSurfaceInput) -> Result<(), InputBundleError> {
+    if !is_valid_package_name(&surface.package_name) {
+        return Err(InputBundleError::InvalidPackageName(
+            surface.package_name.clone(),
+        ));
+    }
+
+    let Some((resolved_package, _subpath)) = split_bare_specifier(&surface.export_specifier) else {
+        return Err(InputBundleError::InvalidPackageSpecifier(
+            surface.export_specifier.clone(),
+        ));
+    };
+    if resolved_package != surface.package_name {
+        return Err(InputBundleError::InvalidPackageSurfaceSpecifier {
+            package_name: surface.package_name.clone(),
+            export_specifier: surface.export_specifier.clone(),
+        });
+    }
+
+    if surface.status == PackageAttributionStatus::Accepted
+        && surface.package_version.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(InputBundleError::MissingPackageSurfaceVersion {
+            package_name: surface.package_name.clone(),
+            export_specifier: surface.export_specifier.clone(),
+        });
+    }
+
+    Ok(())
+}
+
 fn validate_package_specifier(specifier: &str) -> Result<(), InputBundleError> {
     let Some((package_name, _subpath)) = split_bare_specifier(specifier) else {
         return Err(InputBundleError::InvalidPackageSpecifier(
@@ -1045,8 +1190,8 @@ mod tests {
     use super::{
         DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleInput, ModuleRow,
         PackageAttributionInput, PackageAttributionRow, PackageAttributionStatus,
-        PackageEmissionMode, ProjectInput, ProjectRow, SourceFileInput, SourceFileRow, SourceSpan,
-        StoredModuleKind, SymbolInput, SymbolRow,
+        PackageEmissionMode, PackageSurfaceInput, PackageSurfaceRow, ProjectInput, ProjectRow,
+        SourceFileInput, SourceFileRow, SourceSpan, StoredModuleKind, SymbolInput, SymbolRow,
     };
 
     #[test]
@@ -1193,6 +1338,118 @@ mod tests {
                 module_id: ModuleId(10),
                 package_name
             }) if package_name == "axios"
+        ));
+    }
+
+    #[test]
+    fn accepted_package_surface_resolves_without_package_module_attribution() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.package_surfaces
+            .push(PackageSurfaceInput::accepted_external(
+                "undici", "2.2.1", "undici",
+            ));
+
+        let bundle = InputBundle::from_rows(rows).expect("surface should be valid input");
+
+        assert_eq!(bundle.package_surfaces.len(), 1);
+        assert_eq!(bundle.package_surfaces[0].package_name, "undici");
+        assert_eq!(
+            bundle.package_surfaces[0].package_version.as_deref(),
+            Some("2.2.1")
+        );
+    }
+
+    #[test]
+    fn accepted_package_surface_requires_version_and_matching_specifier() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.package_surfaces.push(PackageSurfaceInput {
+            package_name: "undici".to_string(),
+            package_version: None,
+            export_specifier: "undici".to_string(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        });
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::MissingPackageSurfaceVersion {
+                package_name,
+                export_specifier,
+            }) if package_name == "undici" && export_specifier == "undici"
+        ));
+
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.package_surfaces.push(PackageSurfaceInput {
+            package_name: "undici".to_string(),
+            package_version: Some("2.2.1".to_string()),
+            export_specifier: "ws".to_string(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        });
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::InvalidPackageSurfaceSpecifier {
+                package_name,
+                export_specifier,
+            }) if package_name == "undici" && export_specifier == "ws"
+        ));
+    }
+
+    #[test]
+    fn package_surface_database_project_must_match() {
+        let mut rows = DatabaseRows::new(ProjectRow {
+            id: 1,
+            name: "fixture".to_string(),
+        });
+        rows.modules.push(ModuleRow {
+            id: 10,
+            source_file_id: None,
+            original_name: "m10".to_string(),
+            semantic_path: Some("src/index.ts".to_string()),
+            kind: StoredModuleKind::Application,
+            package_name: None,
+            package_version: None,
+            byte_start: None,
+            byte_end: None,
+        });
+        rows.package_surfaces.push(PackageSurfaceRow {
+            project_id: 2,
+            package_name: "undici".to_string(),
+            package_version: Some("2.2.1".to_string()),
+            export_specifier: "undici".to_string(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        });
+
+        let error = InputBundle::from_database_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::PackageSurfaceProjectMismatch {
+                project_id: 2,
+                expected_project_id: 1,
+                export_specifier,
+            }) if export_specifier == "undici"
         ));
     }
 

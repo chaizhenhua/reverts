@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
-use reverts_input::InputBundle;
+use reverts_input::{InputBundle, PackageAttributionStatus};
 use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_js::{ParseGoal, parse_error_message, parse_source};
 use reverts_model::{EnrichedProgram, ProgramModel};
@@ -17,17 +18,26 @@ pub use reverts_emitter::{EmittedFile, EmittedProject};
 pub struct OutputRun {
     pub project: EmittedProject,
     pub audit: AuditReport,
+    pub runtime_dependencies: Vec<RuntimeDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeDependency {
+    pub package_name: String,
+    pub package_version: String,
 }
 
 pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, PipelineError> {
     let model = ProgramModel::from_input(input);
     let enrichment = enrich_program(model);
     let mut audit = enrichment.audit;
+    let runtime_dependencies = collect_runtime_dependencies(enrichment.program.model().input());
     audit.extend(audit_required_sources(&enrichment.program));
     if !audit.is_clean() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
             audit,
+            runtime_dependencies,
         });
     }
 
@@ -40,6 +50,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
         return Ok(OutputRun {
             project: EmittedProject::default(),
             audit,
+            runtime_dependencies,
         });
     }
 
@@ -47,7 +58,49 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
 
     audit.extend(audit_emitted_project_parse(&project));
 
-    Ok(OutputRun { project, audit })
+    Ok(OutputRun {
+        project,
+        audit,
+        runtime_dependencies,
+    })
+}
+
+fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
+    let mut dependencies = BTreeMap::<String, String>::new();
+
+    for attribution in &input.package_attributions {
+        if attribution.status != PackageAttributionStatus::Accepted
+            || !attribution.emission_mode.requires_runtime_dependency()
+        {
+            continue;
+        }
+        let Some(package_version) = attribution.package_version.as_deref() else {
+            continue;
+        };
+        dependencies
+            .entry(attribution.package_name.clone())
+            .or_insert_with(|| package_version.to_string());
+    }
+
+    for package_surface in &input.package_surfaces {
+        if package_surface.status != PackageAttributionStatus::Accepted {
+            continue;
+        }
+        let Some(package_version) = package_surface.package_version.as_deref() else {
+            continue;
+        };
+        dependencies
+            .entry(package_surface.package_name.clone())
+            .or_insert_with(|| package_version.to_string());
+    }
+
+    dependencies
+        .into_iter()
+        .map(|(package_name, package_version)| RuntimeDependency {
+            package_name,
+            package_version,
+        })
+        .collect()
 }
 
 fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
@@ -196,7 +249,8 @@ mod tests {
     use reverts_emitter::emit_project;
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
+        PackageAttributionInput, PackageSurfaceInput, ProjectInput, SourceFileInput, SourceSpan,
+        SymbolInput,
     };
     use reverts_ir::{
         BindingName, BindingShape, BindingSourceKind, BindingUseKind, ModuleId, ModuleKind,
@@ -259,10 +313,32 @@ mod tests {
 
         assert!(run.audit.is_clean());
         assert_eq!(run.project.files.len(), 1);
+        assert_eq!(run.runtime_dependencies.len(), 1);
+        assert_eq!(run.runtime_dependencies[0].package_name, "lodash");
+        assert_eq!(run.runtime_dependencies[0].package_version, "4.17.21");
         let source = run.project.files[0].source.as_str();
         assert!(source.contains("import * as __pkg_lodash_map from 'lodash/map';"));
         assert!(source.contains("export function activate()"));
         assert!(!source.contains("undefined as any"));
+    }
+
+    #[test]
+    fn package_surface_contributes_runtime_dependency_without_package_module() {
+        let mut rows =
+            rows_with_application_source("const undici = require('undici'); export { undici };");
+        rows.package_surfaces
+            .push(PackageSurfaceInput::accepted_external(
+                "undici", "2.2.1", "undici",
+            ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.runtime_dependencies.len(), 1);
+        assert_eq!(run.runtime_dependencies[0].package_name, "undici");
+        assert_eq!(run.runtime_dependencies[0].package_version, "2.2.1");
+        assert!(run.project.files[0].source.contains("require('undici')"));
     }
 
     #[test]

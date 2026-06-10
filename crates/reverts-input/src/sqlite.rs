@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use crate::{
     DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleDependencyRow,
     ModuleDependencyRowTarget, ModuleRow, PackageAttributionRow, PackageAttributionStatus,
-    PackageEmissionMode, ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
+    PackageEmissionMode, PackageSurfaceRow, ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
 };
 
 pub fn load_project_bundle_from_sqlite(
@@ -59,6 +59,7 @@ pub fn load_project_rows_from_connection(
     rows.symbols = load_module_symbols(connection, project_id)?;
     rows.dependencies = load_module_dependencies(connection, project_id)?;
     rows.package_attributions = load_package_attributions(connection, project_id)?;
+    rows.package_surfaces = load_package_surfaces(connection, project_id)?;
     InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
 }
 
@@ -255,6 +256,43 @@ fn load_package_attributions(
             emission_mode,
             status,
             rejection_reason: row.get(7)?,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
+fn load_package_surfaces(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<PackageSurfaceRow>, SqliteInputError> {
+    if !table_exists(connection, "package_surfaces")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        r"
+        SELECT
+            project_id,
+            package_name,
+            package_version,
+            export_specifier,
+            status,
+            evidence_json
+        FROM package_surfaces
+        WHERE project_id = ?1
+        ORDER BY package_name, export_specifier
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        let status = attribution_status_from_database(row.get::<_, String>(4)?.as_str())?;
+        Ok(PackageSurfaceRow {
+            project_id: row.get(0)?,
+            package_name: row.get(1)?,
+            package_version: row.get(2)?,
+            export_specifier: row.get(3)?,
+            status,
+            evidence: row.get(5)?,
         })
     })?;
 
@@ -472,6 +510,13 @@ mod tests {
             bundle.package_attributions[0].status,
             PackageAttributionStatus::Accepted
         );
+        assert_eq!(bundle.package_surfaces.len(), 1);
+        assert_eq!(bundle.package_surfaces[0].package_name, "undici");
+        assert_eq!(
+            bundle.package_surfaces[0].package_version.as_deref(),
+            Some("2.2.1")
+        );
+        assert_eq!(bundle.package_surfaces[0].export_specifier, "undici");
         assert_eq!(
             bundle.source_files[0].source.as_deref(),
             Some("export const activate = 42;")
@@ -556,6 +601,14 @@ mod tests {
                     status TEXT NOT NULL,
                     rejection_reason TEXT
                 );
+                CREATE TABLE package_surfaces (
+                    project_id INTEGER NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT,
+                    export_specifier TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT
+                );
                 ",
             )
             .expect("fixture schema should be created");
@@ -583,6 +636,10 @@ mod tests {
                     (module_id, package_name, package_version, package_subpath, export_specifier, emission_mode, status, rejection_reason)
                     VALUES
                     (11, 'lodash', '4.17.21', 'map', 'lodash/map', 'external_import', 'accepted', NULL);
+                INSERT INTO package_surfaces
+                    (project_id, package_name, package_version, export_specifier, status, evidence_json)
+                    VALUES
+                    (7, 'undici', '2.2.1', 'undici', 'accepted', NULL);
                 ",
             source_path.replace('\'', "''")
         );

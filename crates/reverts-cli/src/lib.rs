@@ -16,8 +16,11 @@ use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     ExactPackageMatcher, PackageMatch, PackageMatchReport, PackageSource,
+    package_import_names_from_sources,
 };
-use reverts_pipeline::{EmittedFile, PipelineError, generate_project_from_input};
+use reverts_pipeline::{
+    EmittedFile, PipelineError, RuntimeDependency, generate_project_from_input,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,7 +206,8 @@ fn run_generate_project(args: GenerateProjectV2Args) -> Result<(), CliRunError> 
         )));
     }
 
-    let written = write_emitted_project(&run.project.files, &args.output)?;
+    let written =
+        write_emitted_project(&run.project.files, &args.output, &run.runtime_dependencies)?;
     println!(
         "generated project {} into {} with {written} files",
         args.project_id,
@@ -215,11 +219,13 @@ fn run_generate_project(args: GenerateProjectV2Args) -> Result<(), CliRunError> 
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} cached source(s): {} accepted, {} written, {} audit finding(s)",
+        "matched packages for project {} from {} cached source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
+        outcome.matched_package_surfaces,
         outcome.written_attributions,
+        outcome.written_surfaces,
         outcome.audit.findings().len()
     );
     if !outcome.audit.is_clean() {
@@ -234,7 +240,9 @@ pub struct MatchPackagesOutcome {
     pub loaded_package_modules: usize,
     pub loaded_package_sources: usize,
     pub matched_modules: usize,
+    pub matched_package_surfaces: usize,
     pub written_attributions: usize,
+    pub written_surfaces: usize,
     pub audit: AuditReport,
 }
 
@@ -271,10 +279,13 @@ pub fn match_packages_from_connection(
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources = load_package_sources(connection, &package_names)?;
     let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
-    let written_attributions = if args.apply {
-        persist_package_attributions(connection, &rows, &report)?
+    let (written_attributions, written_surfaces) = if args.apply {
+        (
+            persist_package_attributions(connection, &rows, &report)?,
+            persist_package_surfaces(connection, &rows, &report)?,
+        )
     } else {
-        0
+        (0, 0)
     };
 
     Ok(MatchPackagesOutcome {
@@ -286,7 +297,9 @@ pub fn match_packages_from_connection(
             .count(),
         loaded_package_sources: package_sources.len(),
         matched_modules: report.matches.len(),
+        matched_package_surfaces: report.surfaces.len(),
         written_attributions,
+        written_surfaces,
         audit: report.audit,
     })
 }
@@ -296,12 +309,15 @@ fn package_source_filter(rows: &InputRows, requested_package_names: &[String]) -
         return requested_package_names.iter().cloned().collect();
     }
 
-    rows.modules
+    let mut package_names = rows
+        .modules
         .iter()
         .filter(|module| module.kind == ModuleKind::Package)
         .filter(|module| !has_accepted_external_attribution(rows, module.id))
         .filter_map(|module| module.package_name.clone())
-        .collect()
+        .collect::<BTreeSet<_>>();
+    package_names.extend(package_import_names_from_sources(rows));
+    package_names
 }
 
 fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
@@ -400,6 +416,10 @@ fn persist_package_attributions(
     rows: &InputRows,
     report: &PackageMatchReport,
 ) -> Result<usize, MatchPackagesError> {
+    if report.attributions.is_empty() {
+        return Ok(0);
+    }
+
     if !sqlite_table_exists(connection, "package_attributions")
         .map_err(MatchPackagesError::WriteAttribution)?
     {
@@ -520,6 +540,99 @@ fn persist_package_attribution(
     Ok(())
 }
 
+fn persist_package_surfaces(
+    connection: &mut Connection,
+    rows: &InputRows,
+    report: &PackageMatchReport,
+) -> Result<usize, MatchPackagesError> {
+    if report.surfaces.is_empty() {
+        return Ok(0);
+    }
+
+    ensure_package_surfaces_table(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WritePackageSurface)?;
+    let mut written = 0;
+    for surface in &report.surfaces {
+        persist_package_surface(&transaction, rows.project.id, surface)?;
+        written += 1;
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WritePackageSurface)?;
+    Ok(written)
+}
+
+fn ensure_package_surfaces_table(connection: &Connection) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS package_surfaces (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                package_name TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                export_specifier TEXT NOT NULL,
+                status TEXT NOT NULL,
+                evidence_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (project_id, export_specifier)
+            );
+            ",
+        )
+        .map_err(MatchPackagesError::WritePackageSurface)
+}
+
+fn persist_package_surface(
+    connection: &Connection,
+    project_id: u32,
+    surface: &reverts_input::PackageSurfaceInput,
+) -> Result<(), MatchPackagesError> {
+    let package_version =
+        surface
+            .package_version
+            .as_deref()
+            .ok_or(MatchPackagesError::InvalidPackageSurface {
+                export_specifier: surface.export_specifier.clone(),
+                message: "accepted package surface has no package version".to_string(),
+            })?;
+    let evidence = surface.evidence.clone().unwrap_or_else(|| {
+        serde_json::json!({
+            "matcher": "source_package_import_surface",
+            "package_name": surface.package_name.as_str(),
+            "package_version": package_version,
+            "export_specifier": surface.export_specifier.as_str(),
+        })
+        .to_string()
+    });
+    connection
+        .execute(
+            r"
+            INSERT INTO package_surfaces
+                (project_id, package_name, package_version, export_specifier,
+                 status, evidence_json, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, datetime('now'), datetime('now'))
+            ON CONFLICT(project_id, export_specifier) DO UPDATE SET
+                package_name = excluded.package_name,
+                package_version = excluded.package_version,
+                status = excluded.status,
+                evidence_json = excluded.evidence_json,
+                updated_at = datetime('now')
+            ",
+            params![
+                i64::from(project_id),
+                surface.package_name.as_str(),
+                package_version,
+                surface.export_specifier.as_str(),
+                evidence,
+            ],
+        )
+        .map_err(MatchPackagesError::WritePackageSurface)?;
+    Ok(())
+}
+
 fn sqlite_table_exists(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
     connection
         .query_row(
@@ -541,12 +654,16 @@ fn sqlite_placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
 }
 
-fn write_emitted_project(files: &[EmittedFile], output: &Path) -> Result<usize, CliRunError> {
+fn write_emitted_project(
+    files: &[EmittedFile],
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+) -> Result<usize, CliRunError> {
     fs::create_dir_all(output).map_err(|source| CliRunError::WriteOutput {
         path: output.to_path_buf(),
         source,
     })?;
-    write_typescript_project_scaffold(output)?;
+    write_typescript_project_scaffold(output, runtime_dependencies)?;
 
     for file in files {
         let path = checked_output_path(output, file.path.as_str())?;
@@ -563,8 +680,12 @@ fn write_emitted_project(files: &[EmittedFile], output: &Path) -> Result<usize, 
     Ok(files.len())
 }
 
-fn write_typescript_project_scaffold(output: &Path) -> Result<(), CliRunError> {
-    write_project_file(output, "package.json", TYPESCRIPT_PACKAGE_JSON)?;
+fn write_typescript_project_scaffold(
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+) -> Result<(), CliRunError> {
+    let package_json = typescript_package_json(runtime_dependencies);
+    write_project_file(output, "package.json", package_json.as_str())?;
     write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
     write_project_file(
         output,
@@ -574,28 +695,40 @@ fn write_typescript_project_scaffold(output: &Path) -> Result<(), CliRunError> {
     Ok(())
 }
 
+fn typescript_package_json(runtime_dependencies: &[RuntimeDependency]) -> String {
+    let mut dependencies = serde_json::Map::new();
+    for dependency in runtime_dependencies {
+        dependencies.insert(
+            dependency.package_name.clone(),
+            serde_json::Value::String(dependency.package_version.clone()),
+        );
+    }
+
+    let package = serde_json::json!({
+        "name": "reverts-output",
+        "version": "0.0.0",
+        "private": true,
+        "type": "module",
+        "description": "Decompiled TypeScript source generated by Reverts",
+        "scripts": {
+            "check": "tsc --noEmit -p tsconfig.json",
+            "build": "tsc -p tsconfig.runtime.json",
+        },
+        "dependencies": dependencies,
+        "devDependencies": {
+            "@types/node": "*",
+            "typescript": "^5",
+            "tsx": "^4",
+        },
+    });
+    serde_json::to_string_pretty(&package).expect("package.json scaffold is serializable") + "\n"
+}
+
 fn write_project_file(output: &Path, relative: &str, source: &str) -> Result<(), CliRunError> {
     let path = checked_output_path(output, relative)?;
     fs::write(path.as_path(), source.as_bytes())
         .map_err(|source| CliRunError::WriteOutput { path, source })
 }
-
-const TYPESCRIPT_PACKAGE_JSON: &str = r#"{
-  "name": "reverts-output",
-  "version": "0.0.0",
-  "private": true,
-  "type": "module",
-  "description": "Decompiled TypeScript source generated by Reverts",
-  "scripts": {
-    "check": "tsc --noEmit -p tsconfig.json",
-    "build": "tsc -p tsconfig.runtime.json"
-  },
-  "devDependencies": {
-    "typescript": "^5",
-    "tsx": "^4"
-  }
-}
-"#;
 
 const TYPESCRIPT_TSCONFIG_JSON: &str = r#"{
   "compilerOptions": {
@@ -695,6 +828,7 @@ pub enum MatchPackagesError {
     LoadInput(SqliteInputError),
     QueryPackageSources(rusqlite::Error),
     WriteAttribution(rusqlite::Error),
+    WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
     MissingMatchEvidence {
         module_id: ModuleId,
@@ -704,6 +838,10 @@ pub enum MatchPackagesError {
     },
     InvalidAttribution {
         module_id: ModuleId,
+        message: String,
+    },
+    InvalidPackageSurface {
+        export_specifier: String,
         message: String,
     },
 }
@@ -723,6 +861,9 @@ impl fmt::Display for MatchPackagesError {
             }
             Self::WriteAttribution(source) => {
                 write!(formatter, "failed to write package attribution: {source}")
+            }
+            Self::WritePackageSurface(source) => {
+                write!(formatter, "failed to write package surface: {source}")
             }
             Self::MissingTable(table) => {
                 write!(formatter, "required SQLite table is missing: {table}")
@@ -748,6 +889,15 @@ impl fmt::Display for MatchPackagesError {
                     module_id.0
                 )
             }
+            Self::InvalidPackageSurface {
+                export_specifier,
+                message,
+            } => {
+                write!(
+                    formatter,
+                    "invalid package surface {export_specifier}: {message}"
+                )
+            }
         }
     }
 }
@@ -758,12 +908,14 @@ impl Error for MatchPackagesError {
             Self::OpenDatabase { source, .. }
             | Self::ConfigureDatabase(source)
             | Self::QueryPackageSources(source)
-            | Self::WriteAttribution(source) => Some(source),
+            | Self::WriteAttribution(source)
+            | Self::WritePackageSurface(source) => Some(source),
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)
             | Self::MissingMatchEvidence { .. }
             | Self::MissingModuleForAttribution { .. }
-            | Self::InvalidAttribution { .. } => None,
+            | Self::InvalidAttribution { .. }
+            | Self::InvalidPackageSurface { .. } => None,
         }
     }
 }
@@ -825,7 +977,7 @@ mod tests {
     use std::path::PathBuf;
 
     use reverts_observe::FindingCode;
-    use reverts_pipeline::EmittedFile;
+    use reverts_pipeline::{EmittedFile, RuntimeDependency};
     use rusqlite::{Connection, params};
 
     use super::{
@@ -905,8 +1057,15 @@ mod tests {
             source: "// @ts-nocheck\nconsole.log('ok');".to_string(),
         }];
 
-        let written =
-            write_emitted_project(&files, tempdir.path()).expect("project should be written");
+        let written = write_emitted_project(
+            &files,
+            tempdir.path(),
+            &[RuntimeDependency {
+                package_name: "undici".to_string(),
+                package_version: "2.2.1".to_string(),
+            }],
+        )
+        .expect("project should be written");
 
         assert_eq!(written, 1);
         assert!(tempdir.path().join("modules/1-entry.ts").exists());
@@ -914,6 +1073,16 @@ mod tests {
             fs::read_to_string(tempdir.path().join("package.json"))
                 .expect("package json")
                 .contains("\"check\": \"tsc --noEmit -p tsconfig.json\"")
+        );
+        assert!(
+            fs::read_to_string(tempdir.path().join("package.json"))
+                .expect("package json")
+                .contains("\"undici\": \"2.2.1\"")
+        );
+        assert!(
+            fs::read_to_string(tempdir.path().join("package.json"))
+                .expect("package json")
+                .contains("\"@types/node\": \"*\"")
         );
         assert!(
             fs::read_to_string(tempdir.path().join("tsconfig.json"))
@@ -950,7 +1119,9 @@ mod tests {
         assert_eq!(outcome.loaded_package_modules, 1);
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 0);
+        assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 0);
     }
 
@@ -994,7 +1165,9 @@ mod tests {
 
         assert!(outcome.audit.is_clean());
         assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 1);
+        assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_version, "1.2.3");
         assert!(evidence.contains("exact_normalized_source_binary_search"));
     }
@@ -1032,8 +1205,48 @@ mod tests {
 
         assert!(outcome.audit.has(FindingCode::AmbiguousPackageMatch));
         assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 0);
+        assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_apply_writes_source_import_package_surface() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(
+            source_path.as_path(),
+            "const client = require('undici'); export { client };",
+        )
+        .expect("write source fixture");
+        let mut connection = Connection::open_in_memory().expect("open in-memory database");
+        create_source_surface_schema(&connection);
+        insert_source_surface_rows(&connection, source_path.to_string_lossy().as_ref());
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+        let (package_version, evidence): (String, String) = connection
+            .query_row(
+                "SELECT package_version, evidence_json FROM package_surfaces WHERE export_specifier = 'undici'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("package surface should be written");
+
+        assert!(outcome.audit.is_clean());
+        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.matched_package_surfaces, 1);
+        assert_eq!(outcome.written_attributions, 0);
+        assert_eq!(outcome.written_surfaces, 1);
+        assert_eq!(package_version, "2.2.1");
+        assert!(evidence.contains("source_package_import_surface"));
     }
 
     #[test]
@@ -1085,6 +1298,7 @@ mod tests {
         assert!(!generated_source.contains("__pkg_pkg_add"));
         let connection = Connection::open(database_path).expect("reopen fixture database");
         assert_eq!(package_attribution_count(&connection), 1);
+        assert_eq!(package_surface_count(&connection), 1);
     }
 
     fn package_match_connection(
@@ -1209,6 +1423,127 @@ mod tests {
                 row.get(0)
             })
             .expect("count package attributions")
+    }
+
+    fn package_surface_count(connection: &Connection) -> i64 {
+        connection
+            .query_row("SELECT COUNT(*) FROM package_surfaces", [], |row| {
+                row.get(0)
+            })
+            .expect("count package surfaces")
+    }
+
+    fn create_source_surface_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                );
+                CREATE TABLE source_files (
+                    id INTEGER PRIMARY KEY,
+                    file_path TEXT NOT NULL
+                );
+                CREATE TABLE project_files (
+                    project_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL
+                );
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT,
+                    module_category TEXT,
+                    package_name TEXT,
+                    package_version TEXT,
+                    byte_start INTEGER,
+                    byte_end INTEGER
+                );
+                CREATE TABLE symbols (
+                    module_id INTEGER,
+                    semantic_name TEXT,
+                    export_name TEXT,
+                    original_name TEXT,
+                    scope_level TEXT
+                );
+                CREATE TABLE module_dependencies (
+                    module_id INTEGER,
+                    dependency_id INTEGER
+                );
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                CREATE TABLE package_attributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_id INTEGER NOT NULL,
+                    module_original_name TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    package_subpath TEXT,
+                    resolved_file TEXT,
+                    export_specifier TEXT,
+                    emission_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT,
+                    rejection_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (module_id)
+                );
+                ",
+            )
+            .expect("create source surface schema");
+    }
+
+    fn insert_source_surface_rows(connection: &Connection, source_path: &str) {
+        let app_source = fs::read_to_string(source_path).expect("source fixture should exist");
+        connection
+            .execute("INSERT INTO projects (id, name) VALUES (1, 'fixture')", [])
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (1, ?1)",
+                [source_path],
+            )
+            .expect("insert source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 1)",
+                [],
+            )
+            .expect("insert project file");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (1, 1, 'entry', 'entry', 'application', NULL, NULL, 0, ?1)
+                ",
+                [app_source.len() as i64],
+            )
+            .expect("insert app module");
+        connection
+            .execute(
+                r"
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, fetched_at, expires_at)
+                VALUES
+                    ('undici', '2.2.1', 'wrapper.mjs', 'export default {};',
+                     'hash', 'now', 'later')
+                ",
+                [],
+            )
+            .expect("insert package source");
     }
 
     fn create_match_generate_schema(connection: &Connection) {

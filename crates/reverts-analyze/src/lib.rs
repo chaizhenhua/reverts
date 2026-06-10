@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_graph::AstFactKind;
 use reverts_input::{
     ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+    PackageSurfaceInput,
 };
 use reverts_ir::{
     BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId, PackageSurface,
@@ -27,7 +28,10 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let semantic_names = assign_semantic_names(&model);
     let binding_shapes = solve_binding_shapes(&model);
     let compiler_profile = detect_compiler_profile(&model);
-    let package_index = build_package_surface_index(model.input().package_attributions.as_slice());
+    let package_index = build_package_surface_index(
+        model.input().package_attributions.as_slice(),
+        model.input().package_surfaces.as_slice(),
+    );
     let mut audit = AuditReport::default();
     audit.extend(audit_ast_fact_extraction(&model));
     audit.extend(audit_def_use_graph(&model));
@@ -474,7 +478,10 @@ const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "regeneratorRuntime",
 ];
 
-fn build_package_surface_index(attributions: &[PackageAttributionInput]) -> PackageSurfaceIndex {
+fn build_package_surface_index(
+    attributions: &[PackageAttributionInput],
+    package_surfaces: &[PackageSurfaceInput],
+) -> PackageSurfaceIndex {
     let mut surfaces = BTreeMap::<String, PackageSurface>::new();
 
     for attribution in attributions {
@@ -491,6 +498,17 @@ fn build_package_surface_index(attributions: &[PackageAttributionInput]) -> Pack
         if let Some(subpath) = attribution.subpath.as_deref() {
             insert_surface_subpath(&mut surfaces, attribution.package_name.as_str(), subpath);
         }
+    }
+
+    for package_surface in package_surfaces {
+        if package_surface.status != PackageAttributionStatus::Accepted {
+            continue;
+        }
+        insert_surface_specifier(
+            &mut surfaces,
+            package_surface.package_name.as_str(),
+            package_surface.export_specifier.as_str(),
+        );
     }
 
     let mut index = PackageSurfaceIndex::default();
@@ -597,7 +615,7 @@ mod tests {
 
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
+        PackageAttributionInput, PackageSurfaceInput, ProjectInput, SourceFileInput, SymbolInput,
     };
     use reverts_ir::ModuleId;
     use reverts_model::CompilerKind;
@@ -643,6 +661,33 @@ mod tests {
         let output = enrich_program(ProgramModel::from_input(input));
 
         assert!(output.audit.is_clean());
+        assert!(matches!(
+            output.program.package_imports()[0].resolution,
+            PackageResolution::External { .. }
+        ));
+    }
+
+    #[test]
+    fn accepted_project_package_surface_resolves_source_backed_external_import() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("const client = require('undici'); export { client };".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        rows.package_surfaces
+            .push(PackageSurfaceInput::accepted_external(
+                "undici", "2.2.1", "undici",
+            ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.is_clean());
+        assert_eq!(output.program.package_imports().len(), 1);
+        assert!(output.program.package_imports()[0].source_backed);
         assert!(matches!(
             output.program.package_imports()[0].resolution,
             PackageResolution::External { .. }

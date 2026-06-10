@@ -5,19 +5,27 @@ use std::path::Path;
 use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind, Visit,
-    ast::{ArrowFunctionExpression, TemplateElement},
-    visit::walk::walk_template_element,
+    ast::{
+        Argument, ArrowFunctionExpression, CallExpression, ExportAllDeclaration,
+        ExportNamedDeclaration, Expression, ImportDeclaration, ImportExpression, TemplateElement,
+    },
+    visit::walk::{
+        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
+        walk_import_expression, walk_template_element,
+    },
 };
 use oxc_parser::{ParseOptions, Parser};
 use reverts_input::{
     InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+    PackageSurfaceInput,
 };
-use reverts_ir::{ModuleId, ModuleKind, split_bare_specifier};
+use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 use reverts_js::{
     JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
     source_type_candidates,
 };
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::is_node_builtin;
 use semver::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +61,19 @@ impl PackageSource {
             source: source.into(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Source-backed bare package import/require site discovered in the original bundle source.
+pub struct PackageImportSite {
+    /// Source file id that contains the import expression.
+    pub source_file_id: u32,
+    /// Original source path.
+    pub source_file_path: String,
+    /// npm package name parsed from the bare specifier.
+    pub package_name: String,
+    /// Concrete bare specifier used by source, e.g. `undici` or `lodash/map`.
+    pub specifier: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -276,9 +297,11 @@ impl VersionedPackageMatcher {
             }
             decisions.push(decision);
         }
+        let surfaces = resolve_source_package_surfaces(rows, &attributions, package_sources);
 
         VersionedPackageMatchReport {
             attributions,
+            surfaces,
             matches,
             version_matches: decisions,
             audit,
@@ -291,6 +314,8 @@ impl VersionedPackageMatcher {
 pub struct VersionedPackageMatchReport {
     /// Accepted attributions that can be persisted by the caller.
     pub attributions: Vec<PackageAttributionInput>,
+    /// Accepted project-level package surfaces discovered from source-backed bare imports.
+    pub surfaces: Vec<PackageSurfaceInput>,
     /// Match evidence for accepted attributions.
     pub matches: Vec<PackageMatch>,
     /// Per-package best-version decisions.
@@ -303,6 +328,7 @@ impl From<VersionedPackageMatchReport> for PackageMatchReport {
     fn from(report: VersionedPackageMatchReport) -> Self {
         Self {
             attributions: report.attributions,
+            surfaces: report.surfaces,
             matches: report.matches,
             audit: report.audit,
         }
@@ -335,6 +361,8 @@ impl ExactPackageMatcher {
 pub struct PackageMatchReport {
     /// Accepted attributions that can be persisted by the caller.
     pub attributions: Vec<PackageAttributionInput>,
+    /// Accepted project-level package surfaces discovered from source-backed bare imports.
+    pub surfaces: Vec<PackageSurfaceInput>,
     /// Match evidence for accepted attributions.
     pub matches: Vec<PackageMatch>,
     /// Ambiguity, missing source, and parse findings.
@@ -388,6 +416,13 @@ fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     })
 }
 
+fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
+    rows.package_surfaces.iter().any(|surface| {
+        surface.status == PackageAttributionStatus::Accepted
+            && surface.export_specifier.as_str() == specifier
+    })
+}
+
 fn package_names_for_matching(rows: &InputRows) -> BTreeSet<String> {
     rows.modules
         .iter()
@@ -395,6 +430,269 @@ fn package_names_for_matching(rows: &InputRows) -> BTreeSet<String> {
         .filter(|module| !has_accepted_attribution(rows, module.id))
         .filter_map(|module| module.package_name.clone())
         .collect()
+}
+
+/// Returns npm package names referenced by source-backed `import`, `export from`,
+/// `require()`, or dynamic `import()` sites in the original source files.
+#[must_use]
+pub fn package_import_names_from_sources(rows: &InputRows) -> BTreeSet<String> {
+    package_import_sites_from_sources(rows)
+        .into_iter()
+        .map(|site| site.package_name)
+        .collect()
+}
+
+/// Extracts source-backed bare package import/require sites from whole source
+/// files rather than from package-module rows. This is the path used for
+/// packages such as `ws`/`undici` that appear as runtime dependencies but whose
+/// implementation is not bundled as a module.
+#[must_use]
+pub fn package_import_sites_from_sources(rows: &InputRows) -> BTreeSet<PackageImportSite> {
+    let mut sites = BTreeSet::new();
+    for source_file in &rows.source_files {
+        let Some(source) = source_file.source.as_deref() else {
+            continue;
+        };
+        sites.extend(package_import_sites_from_source_file(
+            source_file.id,
+            source_file.path.as_str(),
+            source,
+        ));
+    }
+    sites
+}
+
+fn resolve_source_package_surfaces(
+    rows: &InputRows,
+    current_attributions: &[PackageAttributionInput],
+    package_sources: &[PackageSource],
+) -> Vec<PackageSurfaceInput> {
+    let mut sites_by_specifier = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for site in package_import_sites_from_sources(rows) {
+        if has_accepted_surface(rows, site.specifier.as_str()) {
+            continue;
+        }
+        sites_by_specifier
+            .entry((site.package_name, site.specifier))
+            .or_default()
+            .insert(site.source_file_path);
+    }
+
+    let mut surfaces = Vec::new();
+    for ((package_name, specifier), source_paths) in sites_by_specifier {
+        let (package_version, evidence_kind) = external_package_version(
+            rows,
+            current_attributions,
+            package_sources,
+            package_name.as_str(),
+        );
+        let evidence = source_surface_evidence(
+            package_name.as_str(),
+            package_version.as_str(),
+            specifier.as_str(),
+            evidence_kind,
+            &source_paths,
+        );
+        surfaces.push(
+            PackageSurfaceInput::accepted_external(package_name, package_version, specifier)
+                .with_evidence(evidence),
+        );
+    }
+    surfaces
+}
+
+fn package_import_sites_from_source_file(
+    source_file_id: u32,
+    source_file_path: &str,
+    source: &str,
+) -> BTreeSet<PackageImportSite> {
+    let allocator = Allocator::default();
+    for source_type in
+        source_type_candidates(Some(Path::new(source_file_path)), ParseGoal::TypeScript)
+    {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            let mut visitor = SourcePackageImportVisitor::default();
+            visitor.visit_program(&parsed.program);
+            return visitor
+                .specifiers
+                .into_iter()
+                .map(|(package_name, specifier)| PackageImportSite {
+                    source_file_id,
+                    source_file_path: source_file_path.to_string(),
+                    package_name,
+                    specifier,
+                })
+                .collect();
+        }
+    }
+    BTreeSet::new()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SurfaceVersionEvidenceKind {
+    PackageModule,
+    AcceptedAttribution,
+    CachedPackageSource,
+    SourceImportWildcard,
+}
+
+impl SurfaceVersionEvidenceKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PackageModule => "package_module_version",
+            Self::AcceptedAttribution => "accepted_attribution_version",
+            Self::CachedPackageSource => "cached_package_source_version",
+            Self::SourceImportWildcard => "source_import_without_unique_version",
+        }
+    }
+}
+
+fn external_package_version(
+    rows: &InputRows,
+    current_attributions: &[PackageAttributionInput],
+    package_sources: &[PackageSource],
+    package_name: &str,
+) -> (String, SurfaceVersionEvidenceKind) {
+    let module_versions = rows
+        .modules
+        .iter()
+        .filter(|module| {
+            module.kind == ModuleKind::Package
+                && module.package_name.as_deref() == Some(package_name)
+        })
+        .filter_map(|module| module.package_version.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(version) = unique_version(module_versions) {
+        return (version, SurfaceVersionEvidenceKind::PackageModule);
+    }
+
+    let attribution_versions = rows
+        .package_attributions
+        .iter()
+        .chain(current_attributions.iter())
+        .filter(|attribution| {
+            attribution.package_name == package_name
+                && attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .filter_map(|attribution| attribution.package_version.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(version) = unique_version(attribution_versions) {
+        return (version, SurfaceVersionEvidenceKind::AcceptedAttribution);
+    }
+
+    let cached_versions = package_sources
+        .iter()
+        .filter(|source| source.package_name == package_name)
+        .map(|source| source.package_version.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(version) = unique_version(cached_versions) {
+        return (version, SurfaceVersionEvidenceKind::CachedPackageSource);
+    }
+
+    (
+        "*".to_string(),
+        SurfaceVersionEvidenceKind::SourceImportWildcard,
+    )
+}
+
+fn unique_version(versions: BTreeSet<String>) -> Option<String> {
+    if versions.len() == 1 {
+        versions.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn source_surface_evidence(
+    package_name: &str,
+    package_version: &str,
+    export_specifier: &str,
+    evidence_kind: SurfaceVersionEvidenceKind,
+    source_paths: &BTreeSet<String>,
+) -> String {
+    serde_json::json!({
+        "matcher": "source_package_import_surface",
+        "package_name": package_name,
+        "package_version": package_version,
+        "export_specifier": export_specifier,
+        "version_evidence": evidence_kind.as_str(),
+        "source_paths": source_paths.iter().collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+#[derive(Debug, Default)]
+struct SourcePackageImportVisitor {
+    specifiers: BTreeSet<(String, String)>,
+}
+
+impl<'a> Visit<'a> for SourcePackageImportVisitor {
+    fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+        self.record_specifier(it.source.value.as_str());
+    }
+
+    fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
+        if let Some(source) = &it.source {
+            self.record_specifier(source.value.as_str());
+        }
+        walk_export_named_declaration(self, it);
+    }
+
+    fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
+        self.record_specifier(it.source.value.as_str());
+        walk_export_all_declaration(self, it);
+    }
+
+    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
+        if let Expression::Identifier(identifier) = &it.callee
+            && identifier.name.as_str() == "require"
+            && let Some(specifier) = it.arguments.first().and_then(argument_string_literal)
+        {
+            self.record_specifier(specifier);
+        }
+        walk_call_expression(self, it);
+    }
+
+    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
+        if let Some(specifier) = expression_string_literal(&it.source) {
+            self.record_specifier(specifier);
+        }
+        walk_import_expression(self, it);
+    }
+}
+
+impl SourcePackageImportVisitor {
+    fn record_specifier(&mut self, specifier: &str) {
+        if is_node_builtin(specifier) {
+            return;
+        }
+        let Some((package_name, _subpath)) = split_bare_specifier(specifier) else {
+            return;
+        };
+        if !is_valid_package_name(package_name.as_str()) {
+            return;
+        }
+        self.specifiers
+            .insert((package_name, specifier.to_string()));
+    }
+}
+
+fn argument_string_literal<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
+    match argument {
+        Argument::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
+    }
+}
+
+fn expression_string_literal<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
+    }
 }
 
 #[derive(Debug)]
@@ -1079,7 +1377,7 @@ mod tests {
 
     use super::{
         BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageSource,
-        VersionedPackageMatcher,
+        VersionedPackageMatcher, package_import_names_from_sources,
     };
 
     fn rows_with_package_source(source: &str) -> InputRows {
@@ -1337,5 +1635,96 @@ mod tests {
         );
         assert!(report.matches[0].function_signature_matches >= 2);
         assert!(report.matches[0].string_anchor_matches >= 1);
+    }
+
+    #[test]
+    fn source_package_imports_are_extracted_from_whole_source_file() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                "import { x } from 'pkg/sub';\nconst y = require('undici');\nasync function f(){ return import('ws'); }\nimport fs from 'node:fs';"
+                    .to_string(),
+            ),
+        ));
+
+        let names = package_import_names_from_sources(&rows);
+
+        assert!(names.contains("pkg"));
+        assert!(names.contains("undici"));
+        assert!(names.contains("ws"));
+        assert!(!names.contains("node:fs"));
+        assert!(!names.contains("fs"));
+    }
+
+    #[test]
+    fn source_backed_import_surface_uses_unique_project_package_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("const client = require('undici');".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "undici_wrapper",
+            "pkg/undici.ts",
+            "undici",
+            Some("2.2.1".to_string()),
+        ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "undici",
+                "2.2.1",
+                "undici",
+            ));
+
+        let report = ExactPackageMatcher.match_rows(&rows, &[]);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.surfaces.len(), 1);
+        assert_eq!(report.surfaces[0].package_name, "undici");
+        assert_eq!(report.surfaces[0].package_version.as_deref(), Some("2.2.1"));
+        assert_eq!(report.surfaces[0].export_specifier, "undici");
+        assert!(
+            report.surfaces[0]
+                .evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains("source_package_import_surface"))
+        );
+    }
+
+    #[test]
+    fn source_backed_import_surface_uses_wildcard_for_ambiguous_cached_versions() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("const ws = require('ws');".to_string()),
+        ));
+        let package_sources = [
+            PackageSource::external("ws", "8.0.0", "ws", "wrapper.mjs", "export default {};"),
+            PackageSource::external(
+                "ws",
+                "8.18.2",
+                "ws",
+                "lib/websocket-server.js",
+                "export class WebSocketServer {}",
+            ),
+        ];
+
+        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+
+        assert_eq!(report.surfaces.len(), 1);
+        assert_eq!(report.surfaces[0].package_name, "ws");
+        assert_eq!(report.surfaces[0].package_version.as_deref(), Some("*"));
+        assert!(
+            report.surfaces[0]
+                .evidence
+                .as_deref()
+                .is_some_and(|evidence| evidence.contains("source_import_without_unique_version"))
+        );
     }
 }
