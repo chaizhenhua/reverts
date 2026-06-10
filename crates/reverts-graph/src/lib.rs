@@ -1447,6 +1447,7 @@ impl<'a> Visit<'a> for AstFactVisitor {
 
         if self.function_depth == 0
             && let Some(binding) = it.arguments.first().and_then(enum_initializer_binding)
+            && iife_body_has_enum_init_pattern(&it.callee, binding)
         {
             self.constraint(binding, BindingConstraintKind::EnumInitializer);
             self.facts.push(AstFact {
@@ -1731,6 +1732,56 @@ fn initializer_constraint_kind(expression: &Expression<'_>) -> Option<BindingCon
         }
         _ => None,
     }
+}
+
+fn iife_body_has_enum_init_pattern(callee: &Expression<'_>, binding: &str) -> bool {
+    let statements = match callee {
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_ref()
+            .map(|body| body.statements.as_slice()),
+        Expression::ArrowFunctionExpression(arrow) => Some(arrow.body.statements.as_slice()),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            return iife_body_has_enum_init_pattern(&parenthesized.expression, binding);
+        }
+        _ => None,
+    };
+    let Some(statements) = statements else {
+        return false;
+    };
+    statements
+        .iter()
+        .any(|statement| statement_is_enum_reverse_mapping(statement, binding))
+}
+
+fn statement_is_enum_reverse_mapping(statement: &Statement<'_>, binding: &str) -> bool {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return false;
+    };
+    let Expression::AssignmentExpression(outer) = &statement.expression else {
+        return false;
+    };
+    if outer.operator != AssignmentOperator::Assign {
+        return false;
+    }
+    let AssignmentTarget::ComputedMemberExpression(computed) = &outer.left else {
+        return false;
+    };
+    if expression_identifier(&computed.object) != Some(binding) {
+        return false;
+    }
+    let Expression::AssignmentExpression(inner) = &computed.expression else {
+        return false;
+    };
+    if inner.operator != AssignmentOperator::Assign {
+        return false;
+    }
+    let inner_object = match &inner.left {
+        AssignmentTarget::StaticMemberExpression(member) => &member.object,
+        AssignmentTarget::ComputedMemberExpression(member) => &member.object,
+        _ => return false,
+    };
+    expression_identifier(inner_object) == Some(binding)
 }
 
 fn enum_initializer_binding<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
@@ -2059,6 +2110,50 @@ mod tests {
             constraint.binding.as_str() == "Child"
                 && constraint.kind == BindingConstraintKind::EnumInitializer
         }));
+    }
+
+    #[test]
+    fn ast_fact_extractor_does_not_misclassify_namespace_iife_as_enum() {
+        // Classic TypeScript "namespace augmentation": the IIFE has the
+        // (X || (X = {})) argument shape, but the body attaches properties
+        // and functions instead of the X[X.K=N]="K" enum reverse-mapping.
+        let source = r#"
+            var Logger;
+            (function (Logger) {
+                Logger.level = "info";
+                function log(message) { console.log(message); }
+                Logger.log = log;
+            })(Logger || (Logger = {}));
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(
+            !graph.def_use().constraints().iter().any(|constraint| {
+                constraint.binding.as_str() == "Logger"
+                    && constraint.kind == BindingConstraintKind::EnumInitializer
+            }),
+            "namespace augmentation IIFE must not be classified as an enum-initializer",
+        );
+        assert!(
+            !graph.ast_facts().iter().any(|fact| {
+                fact.binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.as_str() == "Logger")
+                    && fact.kind == AstFactKind::WrapperRegion(AstWrapperKind::EnumIife)
+            }),
+            "namespace augmentation IIFE must not produce an EnumIife wrapper region",
+        );
     }
 
     #[test]

@@ -787,4 +787,49 @@ mod tests {
         );
         assert_eq!(audit.findings()[0].binding.as_deref(), Some("missing"));
     }
+
+    #[test]
+    fn enum_iife_source_solves_to_enum_object_shape_and_preserves_body_in_output() {
+        let enum_source = "var Color;\n\
+            (function (Color) {\n\
+                Color[Color[\"Red\"] = 0] = \"Red\";\n\
+                Color[Color[\"Green\"] = 1] = \"Green\";\n\
+            })(Color || (Color = {}));\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/colors.ts",
+            Some(enum_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "colors", "src/colors.ts").with_source_file(1),
+        );
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "Color"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let model = ProgramModel::from_input(input.clone());
+        let enrichment = enrich_program(model);
+        assert_eq!(
+            enrichment.program.binding_shape(ModuleId(1), "Color"),
+            BindingShape::EnumObject,
+            "enum-IIFE source must solve to EnumObject shape",
+        );
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+        assert!(
+            run.audit.is_clean(),
+            "expected clean audit, got: {:?}",
+            run.audit.findings(),
+        );
+        assert_eq!(run.project.files.len(), 1);
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("Color[Color['Red'] = 0]"),
+            "emitted source must preserve enum reverse-mapping body, got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("Color[Color['Green'] = 1]"),
+            "emitted source must preserve all enum members, got:\n{emitted}",
+        );
+    }
 }
