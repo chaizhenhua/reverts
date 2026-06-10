@@ -751,7 +751,7 @@ mod tests {
 
     use super::{
         CliCommand, CliError, GenerateProjectV2Args, MatchPackagesArgs, checked_output_path,
-        match_packages_from_connection,
+        match_packages_from_connection, run,
     };
 
     #[test]
@@ -931,6 +931,57 @@ mod tests {
         assert_eq!(package_attribution_count(&connection), 0);
     }
 
+    #[test]
+    fn cli_match_packages_then_generate_project_uses_written_attribution() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("input.db");
+        let app_source_path = tempdir.path().join("app.ts");
+        let package_slice_path = tempdir.path().join("pkg-add.js");
+        let output_dir = tempdir.path().join("out");
+        let app_source = "import { add } from 'pkg/add';\nexport const total = add(1, 2);";
+        let package_slice = "export function add(a,b){return a+b}";
+        fs::write(app_source_path.as_path(), app_source).expect("write app source");
+        fs::write(package_slice_path.as_path(), package_slice).expect("write package slice");
+        let connection = Connection::open(database_path.as_path()).expect("open fixture database");
+        create_match_generate_schema(&connection);
+        insert_match_generate_rows(
+            &connection,
+            app_source_path.to_string_lossy().as_ref(),
+            package_slice_path.to_string_lossy().as_ref(),
+            app_source.len() as i64,
+            package_slice.len() as i64,
+        );
+        drop(connection);
+
+        run([
+            "match-packages".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--apply".to_string(),
+        ])
+        .expect("package matching should persist attribution");
+        run([
+            "generate-project-v2".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--output".to_string(),
+            output_dir.to_string_lossy().into_owned(),
+        ])
+        .expect("generation should consume persisted attribution");
+
+        let generated_source = fs::read_to_string(output_dir.join("modules/1-entry.ts"))
+            .expect("generated entry should be written");
+        assert!(generated_source.contains("import { add } from 'pkg/add';"));
+        assert!(generated_source.contains("export const total = add(1, 2);"));
+        assert!(!generated_source.contains("__pkg_pkg_add"));
+        let connection = Connection::open(database_path).expect("reopen fixture database");
+        assert_eq!(package_attribution_count(&connection), 1);
+    }
+
     fn package_match_connection(
         source_path: PathBuf,
         bundled_source: &str,
@@ -1053,5 +1104,125 @@ mod tests {
                 row.get(0)
             })
             .expect("count package attributions")
+    }
+
+    fn create_match_generate_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL
+                );
+                CREATE TABLE source_files (
+                    id INTEGER PRIMARY KEY,
+                    file_path TEXT NOT NULL
+                );
+                CREATE TABLE project_files (
+                    project_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL
+                );
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT,
+                    module_category TEXT,
+                    package_name TEXT,
+                    package_version TEXT,
+                    byte_start INTEGER,
+                    byte_end INTEGER
+                );
+                CREATE TABLE symbols (
+                    module_id INTEGER,
+                    semantic_name TEXT,
+                    export_name TEXT,
+                    original_name TEXT,
+                    scope_level TEXT
+                );
+                CREATE TABLE module_dependencies (
+                    module_id INTEGER,
+                    dependency_id INTEGER
+                );
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                CREATE TABLE package_attributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_id INTEGER NOT NULL,
+                    module_original_name TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    package_subpath TEXT,
+                    resolved_file TEXT,
+                    export_specifier TEXT,
+                    emission_mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    evidence_json TEXT,
+                    rejection_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (module_id)
+                );
+                ",
+            )
+            .expect("create match/generate schema");
+    }
+
+    fn insert_match_generate_rows(
+        connection: &Connection,
+        app_source_path: &str,
+        package_slice_path: &str,
+        app_len: i64,
+        package_len: i64,
+    ) {
+        connection
+            .execute("INSERT INTO projects (id, name) VALUES (1, 'fixture')", [])
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (1, ?1), (2, ?2)",
+                params![app_source_path, package_slice_path],
+            )
+            .expect("insert source files");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 1), (1, 2)",
+                [],
+            )
+            .expect("insert project files");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES
+                    (1, 1, 'entry', 'entry', 'application', NULL, NULL, 0, ?1),
+                    (10, 2, 'pkg_add', 'pkg/add', 'package', 'pkg', NULL, 0, ?2)
+                ",
+                params![app_len, package_len],
+            )
+            .expect("insert modules");
+        connection
+            .execute(
+                r"
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, fetched_at, expires_at)
+                VALUES
+                    ('pkg', '1.2.3', 'add', 'export function add(a, b) { return a + b; }',
+                     'hash', 'now', 'later')
+                ",
+                [],
+            )
+            .expect("insert package source");
     }
 }

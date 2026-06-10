@@ -27,7 +27,7 @@ use oxc_syntax::{
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput};
 use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
-    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, split_bare_specifier,
+    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, split_bare_specifier,
 };
 use reverts_js::{JsError, ParseError, ParseGoal, parse_error_message, source_type_candidates};
 
@@ -198,6 +198,9 @@ impl RevertsGraph {
         let mut ast_errors = Vec::new();
         let mut control_flow = ControlFlowGraph::default();
         for module in &input.modules {
+            if module.kind == ModuleKind::Package {
+                continue;
+            }
             let Some(source) = input.module_source_slice(module.id) else {
                 continue;
             };
