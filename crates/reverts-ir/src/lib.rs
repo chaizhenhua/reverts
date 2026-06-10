@@ -79,6 +79,7 @@ pub enum BindingConstraintKind {
     Construct,
     MemberRead,
     MemberWrite,
+    ObjectLiteralDeclaration,
     EnumInitializer,
     ClassDeclaration,
 }
@@ -91,6 +92,7 @@ impl BindingConstraintKind {
             Self::Call => BindingShape::Callable,
             Self::Construct => BindingShape::Constructor,
             Self::MemberRead | Self::MemberWrite => BindingShape::NamespaceObject,
+            Self::ObjectLiteralDeclaration => BindingShape::PlainObject,
             Self::EnumInitializer => BindingShape::EnumObject,
             Self::ClassDeclaration => BindingShape::ClassLike,
         }
@@ -99,11 +101,13 @@ impl BindingConstraintKind {
     #[must_use]
     pub fn conflicts_with(self, other: Self) -> bool {
         use BindingConstraintKind::{
-            Call, ClassDeclaration, Construct, EnumInitializer, MemberRead, MemberWrite, Read,
+            Call, ClassDeclaration, Construct, EnumInitializer, MemberRead, MemberWrite,
+            ObjectLiteralDeclaration, Read,
         };
 
         let self_kind = match self {
             Read | MemberRead | MemberWrite => return false,
+            ObjectLiteralDeclaration => ObjectLiteralDeclaration,
             EnumInitializer => EnumInitializer,
             Call => Call,
             Construct => Construct,
@@ -111,6 +115,7 @@ impl BindingConstraintKind {
         };
         let other_kind = match other {
             Read | MemberRead | MemberWrite => return false,
+            ObjectLiteralDeclaration => ObjectLiteralDeclaration,
             EnumInitializer => EnumInitializer,
             Call => Call,
             Construct => Construct,
@@ -119,7 +124,13 @@ impl BindingConstraintKind {
 
         matches!(
             (self_kind, other_kind),
-            (EnumInitializer, Call | Construct | ClassDeclaration)
+            (
+                ObjectLiteralDeclaration,
+                Call | Construct | ClassDeclaration | EnumInitializer
+            ) | (
+                Call | Construct | ClassDeclaration | EnumInitializer,
+                ObjectLiteralDeclaration
+            ) | (EnumInitializer, Call | Construct | ClassDeclaration)
                 | (Call | Construct | ClassDeclaration, EnumInitializer)
                 | (ClassDeclaration, Call)
                 | (Call, ClassDeclaration)
@@ -418,6 +429,31 @@ mod tests {
         assert_eq!(
             solution.shape_of(ModuleId(1), "Service"),
             BindingShape::ClassLike
+        );
+    }
+
+    #[test]
+    fn object_literal_declaration_conflicts_with_callable_usage() {
+        let mut solution = BindingShapeSolution::default();
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "factory",
+            BindingConstraintKind::ObjectLiteralDeclaration,
+        ));
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "factory",
+            BindingConstraintKind::Call,
+        ));
+
+        assert_eq!(solution.conflicts().len(), 1);
+        assert_eq!(
+            solution.conflicts()[0].existing_kind,
+            BindingConstraintKind::ObjectLiteralDeclaration
+        );
+        assert_eq!(
+            solution.conflicts()[0].incoming_kind,
+            BindingConstraintKind::Call
         );
     }
 }

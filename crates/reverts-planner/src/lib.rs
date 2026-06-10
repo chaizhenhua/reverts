@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use reverts_graph::RevertsGraph;
-use reverts_ir::{BindingName, ModuleId, ModuleKind};
+use reverts_graph::{AstFactKind, RevertsGraph};
+use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{JsError, ParseGoal, format_source_pretty};
 use reverts_model::{CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
@@ -23,6 +24,7 @@ impl EmitPlan {
 pub struct PlannedFile {
     pub path: String,
     pub imports: Vec<PlannedImport>,
+    pub bindings: Vec<PlannedBinding>,
     pub exports: Vec<PlannedExport>,
     pub body: Vec<String>,
     pub source_strategy: SourceCompilerStrategy,
@@ -34,6 +36,7 @@ impl PlannedFile {
         Self {
             path: path.into(),
             imports: Vec::new(),
+            bindings: Vec::new(),
             exports: Vec::new(),
             body: Vec::new(),
             source_strategy: SourceCompilerStrategy::DirectSource,
@@ -42,6 +45,10 @@ impl PlannedFile {
 
     pub fn add_import(&mut self, import: PlannedImport) {
         self.imports.push(import);
+    }
+
+    pub fn add_binding(&mut self, binding: PlannedBinding) {
+        self.bindings.push(binding);
     }
 
     pub fn add_export(&mut self, binding: BindingName) {
@@ -61,6 +68,31 @@ impl PlannedFile {
 pub struct PlannedImport {
     pub namespace: BindingName,
     pub resolution: PackageResolution,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedBinding {
+    pub original: BindingName,
+    pub emitted: BindingName,
+    pub shape: BindingShape,
+    pub source_backed: bool,
+}
+
+impl PlannedBinding {
+    #[must_use]
+    pub fn new(
+        original: BindingName,
+        emitted: BindingName,
+        shape: BindingShape,
+        source_backed: bool,
+    ) -> Self {
+        Self {
+            original,
+            emitted,
+            shape,
+            source_backed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +165,18 @@ impl ImportExportPlanner {
                 });
             }
 
+            let source_definitions = ast_definitions_for(program.model().graph(), module.id);
+            for original in program.model().graph().definitions_for(module.id) {
+                let emitted = program
+                    .semantic_names()
+                    .binding_name(module.id, original.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| original.clone());
+                let shape = program.binding_shape(module.id, original.as_str());
+                let source_backed = source_definitions.contains(&original);
+                file.add_binding(PlannedBinding::new(original, emitted, shape, source_backed));
+            }
+
             if let Some(source) = program.model().input().module_source_slice(module.id) {
                 let normalized = normalize_source_for_emit(
                     source.module_id,
@@ -162,6 +206,15 @@ impl ImportExportPlanner {
         }
         file
     }
+}
+
+fn ast_definitions_for(graph: &RevertsGraph, module_id: ModuleId) -> BTreeSet<BindingName> {
+    graph
+        .ast_facts()
+        .iter()
+        .filter(|fact| fact.module_id == module_id && fact.kind == AstFactKind::Definition)
+        .filter_map(|fact| fact.binding.clone())
+        .collect()
 }
 
 fn normalize_source_for_emit(
@@ -240,8 +293,10 @@ impl Error for PlanError {}
 
 #[cfg(test)]
 mod tests {
-    use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput};
-    use reverts_ir::ModuleId;
+    use reverts_input::{
+        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
+    };
+    use reverts_ir::{BindingShape, BindingShapeSolution, ModuleId};
     use reverts_model::{
         CompilerEvidence, CompilerKind, CompilerProfile, ModuleCompilerProfile, ProgramModel,
     };
@@ -386,5 +441,77 @@ mod tests {
             SourceCompilerStrategy::WebpackRuntime
         );
         assert_eq!(plan.files[0].body[0].trim_end(), "__webpack_require__(1);");
+    }
+
+    #[test]
+    fn enriched_program_plans_recovered_bindings_with_shapes() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("function factory() { return 42; }".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let mut binding_shapes = BindingShapeSolution::default();
+        for constraint in model.graph().def_use().constraints() {
+            binding_shapes.add_constraint(constraint);
+        }
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            binding_shapes,
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        assert_eq!(plan.files[0].bindings.len(), 1);
+        assert_eq!(plan.files[0].bindings[0].original.as_str(), "factory");
+        assert_eq!(plan.files[0].bindings[0].shape, BindingShape::Callable);
+        assert!(plan.files[0].bindings[0].source_backed);
+    }
+
+    #[test]
+    fn input_symbol_without_ast_definition_is_planned_as_not_source_backed() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("export const real = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "missing".to_string(),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let missing = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "missing")
+            .expect("input symbol should be planned");
+        assert!(!missing.source_backed);
     }
 }

@@ -5,11 +5,11 @@ use std::path::Path;
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
 use reverts_input::InputBundle;
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_js::{JsError, ParseGoal, parse_source};
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-use reverts_planner::{ImportExportPlanner, PlanError};
+use reverts_planner::{EmitPlan, ImportExportPlanner, PlanError, PlannedFile};
 
 pub use reverts_emitter::{EmittedFile, EmittedProject};
 
@@ -35,6 +35,14 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
     let plan = planner
         .plan_enriched_program(&enrichment.program)
         .map_err(PipelineError::Plan)?;
+    audit.extend(audit_emit_plan_synthesis(&plan));
+    if !audit.is_clean() {
+        return Ok(OutputRun {
+            project: EmittedProject::default(),
+            audit,
+        });
+    }
+
     let project = emit_project(&plan).map_err(PipelineError::Emit)?;
 
     audit.extend(audit_emitted_project_parse(&project));
@@ -81,6 +89,55 @@ fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
 
 fn has_module_source(input: &InputBundle, module_id: ModuleId) -> bool {
     input.module_source_slice(module_id).is_some()
+}
+
+fn audit_emit_plan_synthesis(plan: &EmitPlan) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for file in &plan.files {
+        audit.extend(audit_file_synthesis(file));
+    }
+    audit
+}
+
+fn audit_file_synthesis(file: &PlannedFile) -> AuditReport {
+    let mut audit = AuditReport::default();
+    let declarations = planned_declarations(file);
+
+    for binding in &file.bindings {
+        if !binding.source_backed {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::SyntheticReferenceWithoutDeclaration,
+                    "planned binding has no recovered source declaration",
+                )
+                .with_module(file.path.clone())
+                .with_binding(binding.emitted.as_str()),
+            );
+        }
+    }
+
+    for export in &file.exports {
+        if !declarations.contains(&export.binding) {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::SyntheticReferenceWithoutDeclaration,
+                    "planned export references a binding without declaration or import",
+                )
+                .with_module(file.path.clone())
+                .with_binding(export.binding.as_str()),
+            );
+        }
+    }
+
+    audit
+}
+
+fn planned_declarations(file: &PlannedFile) -> std::collections::BTreeSet<BindingName> {
+    file.imports
+        .iter()
+        .map(|import| import.namespace.clone())
+        .chain(file.bindings.iter().map(|binding| binding.emitted.clone()))
+        .collect()
 }
 
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
@@ -148,10 +205,11 @@ mod tests {
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
     };
-    use reverts_ir::{ModuleId, ModuleKind};
+    use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
     use reverts_observe::FindingCode;
+    use reverts_planner::{EmitPlan, PlannedBinding, PlannedFile};
 
-    use super::generate_project_from_input;
+    use super::{audit_emit_plan_synthesis, generate_project_from_input};
 
     fn rows_with_application_module() -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -357,5 +415,47 @@ mod tests {
         assert_eq!(run.project.files.len(), 2);
         assert!(run.project.files[0].source.contains("export const one = 1"));
         assert!(run.project.files[1].source.contains("export const two = 2"));
+    }
+
+    #[test]
+    fn symbol_not_recovered_from_source_is_rejected_before_emit() {
+        let mut rows = rows_with_application_source("export const real = 1;");
+        rows.symbols.push(SymbolInput {
+            module_id: ModuleId(1),
+            name: "missing".to_string(),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(
+            run.audit
+                .has(FindingCode::SyntheticReferenceWithoutDeclaration)
+        );
+        assert!(run.project.files.is_empty());
+    }
+
+    #[test]
+    fn synthesis_audit_accepts_declared_export_and_rejects_missing_export_binding() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.add_binding(PlannedBinding::new(
+            BindingName::new("real"),
+            BindingName::new("real"),
+            BindingShape::Unknown,
+            true,
+        ));
+        file.add_export(BindingName::new("real"));
+        file.add_export(BindingName::new("missing"));
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let audit = audit_emit_plan_synthesis(&plan);
+
+        assert_eq!(audit.findings().len(), 1);
+        assert_eq!(
+            audit.findings()[0].code,
+            FindingCode::SyntheticReferenceWithoutDeclaration
+        );
+        assert_eq!(audit.findings()[0].binding.as_deref(), Some("missing"));
     }
 }

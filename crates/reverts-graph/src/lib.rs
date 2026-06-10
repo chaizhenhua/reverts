@@ -328,6 +328,11 @@ impl<'a> Visit<'a> for AstFactVisitor {
             && let Some(binding) = binding_pattern_name(&it.id)
         {
             self.definition(binding);
+            if let Some(init) = &it.init
+                && let Some(kind) = initializer_constraint_kind(init)
+            {
+                self.constraint(binding, kind);
+            }
         }
         walk_variable_declarator(self, it);
     }
@@ -449,6 +454,20 @@ fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> 
         Expression::ComputedMemberExpression(member) => expression_identifier(&member.object),
         Expression::ParenthesizedExpression(parenthesized) => {
             expression_identifier(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
+fn initializer_constraint_kind(expression: &Expression<'_>) -> Option<BindingConstraintKind> {
+    match expression {
+        Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_) => {
+            Some(BindingConstraintKind::Call)
+        }
+        Expression::ClassExpression(_) => Some(BindingConstraintKind::ClassDeclaration),
+        Expression::ObjectExpression(_) => Some(BindingConstraintKind::ObjectLiteralDeclaration),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            initializer_constraint_kind(&parenthesized.expression)
         }
         _ => None,
     }
@@ -685,6 +704,43 @@ mod tests {
         assert!(graph.def_use().constraints().iter().any(|constraint| {
             constraint.binding.as_str() == "ns"
                 && constraint.kind == BindingConstraintKind::MemberRead
+        }));
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_top_level_initializer_shapes() {
+        let source = r#"
+            const callable = () => 42;
+            const Constructable = class {};
+            const bag = {};
+            callable();
+            new Constructable();
+            bag.value;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(graph.def_use().constraints().iter().any(|constraint| {
+            constraint.binding.as_str() == "callable"
+                && constraint.kind == BindingConstraintKind::Call
+        }));
+        assert!(graph.def_use().constraints().iter().any(|constraint| {
+            constraint.binding.as_str() == "Constructable"
+                && constraint.kind == BindingConstraintKind::ClassDeclaration
+        }));
+        assert!(graph.def_use().constraints().iter().any(|constraint| {
+            constraint.binding.as_str() == "bag"
+                && constraint.kind == BindingConstraintKind::ObjectLiteralDeclaration
         }));
     }
 }

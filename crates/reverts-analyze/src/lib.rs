@@ -4,7 +4,8 @@ use reverts_input::{
     ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
 };
 use reverts_ir::{
-    BindingName, BindingShapeSolution, ModuleId, PackageSurface, split_bare_specifier,
+    BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId, PackageSurface,
+    split_bare_specifier,
 };
 use reverts_js::sanitize_identifier;
 use reverts_model::{
@@ -55,7 +56,7 @@ fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> Audit
     for conflict in binding_shapes.conflicts() {
         audit.push(
             AuditFinding::error(
-                FindingCode::AmbiguousBindingShape,
+                binding_shape_conflict_code(conflict.existing_kind, conflict.incoming_kind),
                 format!(
                     "binding has incompatible shape constraints: {:?} requires {:?}, {:?} requires {:?}",
                     conflict.existing_kind,
@@ -69,6 +70,26 @@ fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> Audit
         );
     }
     audit
+}
+
+fn binding_shape_conflict_code(
+    existing_kind: BindingConstraintKind,
+    incoming_kind: BindingConstraintKind,
+) -> FindingCode {
+    if matches!(
+        (existing_kind, incoming_kind),
+        (
+            BindingConstraintKind::ObjectLiteralDeclaration,
+            BindingConstraintKind::Call
+        ) | (
+            BindingConstraintKind::Call,
+            BindingConstraintKind::ObjectLiteralDeclaration
+        )
+    ) {
+        FindingCode::CallableEmittedAsNonCallable
+    } else {
+        FindingCode::AmbiguousBindingShape
+    }
 }
 
 fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
@@ -576,6 +597,23 @@ NativeModuleType();
         let output = enrich_program(ProgramModel::from_input(input));
 
         assert!(output.audit.has(FindingCode::AmbiguousBindingShape));
+    }
+
+    #[test]
+    fn object_literal_called_as_function_reports_callable_shape_failure() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "callable-conflict.js",
+            Some("const factory = {}; factory();".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::CallableEmittedAsNonCallable));
     }
 
     fn identifiers<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
