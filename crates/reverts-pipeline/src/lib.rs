@@ -2096,6 +2096,184 @@ mod tests {
     }
 
     #[test]
+    fn babel_interop_require_default_rewrites_every_call_in_the_same_module() {
+        // Real Babel CJS output frequently has several `_interopRequireDefault`
+        // call sites per module. The lowering must rewrite every occurrence,
+        // not just the first one, and the helper must be stripped once all
+        // calls are gone.
+        let source = "var _foo = _interopRequireDefault(require('./foo'));\n\
+                      var _bar = _interopRequireDefault(require('./bar'));\n\
+                      var _baz = _interopRequireDefault(require('./baz'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var entry = [_foo.default, _bar.default, _baz.default];\n";
+        let run = run_with_source(
+            source,
+            &["_foo", "_bar", "_baz", "_interopRequireDefault", "entry"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(emitted.contains("var _foo = { default: require('./foo') }"));
+        assert!(emitted.contains("var _bar = { default: require('./bar') }"));
+        assert!(emitted.contains("var _baz = { default: require('./baz') }"));
+        assert!(
+            !emitted.contains("_interopRequireDefault(require("),
+            "no helper call should survive after multi-call rewrite; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("function _interopRequireDefault"),
+            "helper must be stripped once all three calls are rewritten; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn babel_lowering_handles_default_and_wildcard_helpers_in_one_module() {
+        // A module that mixes default + wildcard interop must:
+        //   - rewrite the default call into `{ default: require(...) }`,
+        //   - rewrite the wildcard call into bare `require(...)`,
+        //   - strip BOTH helper definitions once they become dead.
+        let source = "var _foo = _interopRequireDefault(require('./foo'));\n\
+                      var bar = _interopRequireWildcard(require('./bar'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      function _interopRequireWildcard(e, t) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var entry = [_foo.default, bar.named];\n";
+        let run = run_with_source(
+            source,
+            &[
+                "_foo",
+                "bar",
+                "_interopRequireDefault",
+                "_interopRequireWildcard",
+                "entry",
+            ],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(emitted.contains("var _foo = { default: require('./foo') }"));
+        assert!(emitted.contains("var bar = require('./bar')"));
+        assert!(!emitted.contains("function _interopRequireDefault"));
+        assert!(!emitted.contains("function _interopRequireWildcard"));
+        assert!(emitted.contains("var entry = [_foo.default, bar.named]"));
+    }
+
+    #[test]
+    fn babel_lowering_combines_es_module_marker_strip_and_interop_rewrite() {
+        // The `__esModule` marker strip and the interop call rewrite must
+        // compose: a single emit should drop the marker AND rewrite the
+        // helper call AND strip the helper definition.
+        let source = "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+                      exports.default = void 0;\n\
+                      var _foo = _interopRequireDefault(require('./foo'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      exports.default = _foo.default;\n";
+        let run = run_with_source(source, &["_foo", "_interopRequireDefault"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            !emitted.contains("__esModule"),
+            "marker must be stripped; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var _foo = { default: require('./foo') }"),
+            "interop call must be rewritten; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("function _interopRequireDefault"),
+            "helper must be stripped; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn babel_helper_name_inside_string_literal_does_not_keep_helper_alive() {
+        // A string literal that happens to contain the helper name must not
+        // be counted as a reference — the lowering relies on real
+        // `IdentifierReference` AST nodes, never on textual matching.
+        let source = "var _foo = _interopRequireDefault(require('./foo'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var description = '_interopRequireDefault is a babel helper';\n\
+                      var entry = _foo.default;\n";
+        let run = run_with_source(
+            source,
+            &["_foo", "_interopRequireDefault", "description", "entry"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            !emitted.contains("function _interopRequireDefault"),
+            "helper must be stripped despite the string literal mention; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("'_interopRequireDefault is a babel helper'"),
+            "the unrelated string literal must be preserved verbatim; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn unknown_compiler_does_not_trigger_any_lowering() {
+        // A module with no bundler signatures should be classified as
+        // Unknown, which maps to `CompilerLowering::None`. No banner is
+        // emitted and every top-level declaration must pass through
+        // untouched. (Using bundler-named identifiers here would itself
+        // trigger detection, so the fixture stays signature-free.)
+        let source = "function compute(input) { return input * 2; }\n\
+                      var entry = compute(21);\n\
+                      var label = 'ready';\n";
+        let run = run_with_source(source, &["compute", "entry", "label"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            !emitted.contains("reverts-recovery"),
+            "Unknown compiler must not emit any recovery banner; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function compute"),
+            "function declaration must be preserved; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var entry = compute(21)"),
+            "var declaration must be preserved; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var label = 'ready'"),
+            "string literal initializer must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn esbuild_lowering_does_not_strip_babel_helper_definitions() {
+        // Cross-compiler protection: when the detector picks esbuild, the
+        // esbuild strip rules must only consider esbuild helper names. Any
+        // babel-shaped helper that happens to live alongside esbuild
+        // signatures must remain untouched.
+        let source = "var __commonJS = (cb, mod) => function __require() { return mod; };\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var require_foo = __commonJS({ 'foo'() { return _interopRequireDefault({}); } });\n\
+                      var entry = require_foo();\n";
+        let run = run_with_source(
+            source,
+            &[
+                "__commonJS",
+                "_interopRequireDefault",
+                "require_foo",
+                "entry",
+            ],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: esbuild"),
+            "esbuild must be the active detection; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function _interopRequireDefault"),
+            "babel helper must survive when esbuild lowering is in charge; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var __commonJS"),
+            "referenced esbuild helper must survive; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.
