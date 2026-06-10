@@ -18,6 +18,7 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, split_bare_specifier};
 use reverts_model::{CompilerKind, ProgramModel};
+use reverts_observe::FindingCode;
 use reverts_pipeline::generate_project_from_input;
 
 #[test]
@@ -32,6 +33,7 @@ fn external_corpus_pipeline_coverage_report() {
     let mut input_invalid = 0usize;
     let mut artifact_unreadable = 0usize;
     let mut pipeline_failed = 0usize;
+    let mut findings_by_code: BTreeMap<FindingCode, usize> = BTreeMap::new();
 
     for case in &cases {
         let outcome = outcomes
@@ -74,6 +76,10 @@ fn external_corpus_pipeline_coverage_report() {
 
         if run.audit.is_clean() {
             audit_clean += 1;
+        } else {
+            for finding in run.audit.findings() {
+                *findings_by_code.entry(finding.code).or_default() += 1;
+            }
         }
         if !run.project.files.is_empty() {
             emit_succeeded += 1;
@@ -99,6 +105,12 @@ fn external_corpus_pipeline_coverage_report() {
     println!("  pipeline error:     {pipeline_failed}");
     println!("  emit succeeded:     {emit_succeeded}");
     println!("  audit clean:        {audit_clean}");
+    if !findings_by_code.is_empty() {
+        println!("  audit findings on non-clean cases:");
+        for (code, count) in &findings_by_code {
+            println!("    {code:?}: {count}");
+        }
+    }
     println!("  per-family detection accuracy (analyze stage):");
     for (family, outcome) in &outcomes {
         let percent = if outcome.total == 0 {
