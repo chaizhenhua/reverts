@@ -3347,14 +3347,7 @@ mod tests {
             ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
         );
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
-        let model = ProgramModel::from_input(input);
-        let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
-        let enriched = reverts_model::EnrichedProgram::new(
-            model,
-            reverts_model::SemanticNameMap::default(),
-            Vec::new(),
-            binding_shapes,
-        );
+        let enriched = enriched_with_solved_shapes(input);
 
         let plan = planner
             .plan_enriched_program(&enriched)
