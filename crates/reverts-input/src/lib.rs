@@ -369,6 +369,24 @@ impl PackageAttributionInput {
     }
 
     #[must_use]
+    pub fn rejected_source(
+        module_id: ModuleId,
+        package_name: impl Into<String>,
+        rejection_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_id,
+            package_name: package_name.into(),
+            package_version: None,
+            subpath: None,
+            export_specifier: None,
+            emission_mode: PackageEmissionMode::ApplicationSource,
+            status: PackageAttributionStatus::Rejected,
+            rejection_reason: Some(rejection_reason.into()),
+        }
+    }
+
+    #[must_use]
     pub fn with_subpath(mut self, subpath: impl Into<String>) -> Self {
         self.subpath = normalize_optional(Some(subpath.into()));
         self
@@ -518,12 +536,12 @@ impl InputRows {
                     expected_project_id: project_id,
                 });
             }
-            let kind = AssetKind::from_storage(row.kind.as_str()).ok_or_else(|| {
+            let kind = AssetKind::from_storage(row.kind.as_str()).ok_or(
                 InputBundleError::InvalidAssetKind {
                     asset_id: id,
                     kind: row.kind,
-                }
-            })?;
+                },
+            )?;
             assets.push(AssetInput {
                 id,
                 logical_path: non_empty(row.logical_path, "asset.logical_path")?,
@@ -872,6 +890,10 @@ pub enum InputBundleError {
     MissingPackageAttribution {
         module_id: ModuleId,
     },
+    ProposedPackageAttribution {
+        module_id: ModuleId,
+        package_name: String,
+    },
     MissingPackageVersion {
         module_id: ModuleId,
         package_name: String,
@@ -989,6 +1011,14 @@ impl fmt::Display for InputBundleError {
                     module_id.0
                 )
             }
+            Self::ProposedPackageAttribution {
+                module_id,
+                package_name,
+            } => write!(
+                formatter,
+                "package attribution for module {} package {package_name} is still proposed",
+                module_id.0
+            ),
             Self::MissingPackageVersion {
                 module_id,
                 package_name,
@@ -1274,7 +1304,12 @@ fn validate_package_attribution(
                 });
             }
         }
-        PackageAttributionStatus::Proposed => {}
+        PackageAttributionStatus::Proposed => {
+            return Err(InputBundleError::ProposedPackageAttribution {
+                module_id: attribution.module_id,
+                package_name: attribution.package_name.clone(),
+            });
+        }
     }
 
     Ok(())
@@ -1663,6 +1698,35 @@ mod tests {
             error,
             Err(InputBundleError::InvalidPackageName(package_name))
                 if package_name == "@smithy/XY7"
+        ));
+    }
+
+    #[test]
+    fn proposed_package_attribution_is_not_generation_ready() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "pkg_mod",
+            "node_modules/pkg/add.js",
+            "pkg",
+            None,
+        ));
+        rows.package_attributions
+            .push(PackageAttributionInput::proposed(
+                ModuleId(10),
+                "pkg",
+                Some("1.2.3".to_string()),
+                PackageEmissionMode::ExternalImport,
+            ));
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::ProposedPackageAttribution {
+                module_id: ModuleId(10),
+                package_name
+            }) if package_name == "pkg"
         ));
     }
 

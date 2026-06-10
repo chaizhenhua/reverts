@@ -3107,8 +3107,7 @@ mod tests {
     use reverts_graph::RuntimePreludeBindingKind;
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, PackageEmissionMode, ProjectInput, SourceFileInput, SourceSpan,
-        SymbolInput,
+        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
     use reverts_model::{
@@ -4109,11 +4108,10 @@ mod tests {
             .with_source_file(2),
         );
         rows.package_attributions
-            .push(PackageAttributionInput::proposed(
+            .push(PackageAttributionInput::rejected_source(
                 ModuleId(2),
                 "fixture-helper",
-                Some("1.0.0".to_string()),
-                PackageEmissionMode::ApplicationSource,
+                "fixture helper stays source-backed in planner fixture",
             ));
         rows.dependencies.push(ModuleDependencyInput {
             from_module_id: ModuleId(1),

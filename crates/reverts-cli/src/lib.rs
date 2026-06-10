@@ -16,8 +16,8 @@ use reverts_input::{
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    ExactPackageMatcher, PackageMatch, PackageMatchReport, PackageSource,
-    package_import_names_from_sources,
+    BestVersionMatch, PackageMatch, PackageSource, VersionedPackageMatchReport,
+    VersionedPackageMatcher, package_import_names_from_sources,
 };
 use reverts_pipeline::{
     AssetReference, EmittedAsset, EmittedFile, PipelineError, RuntimeDependency,
@@ -471,10 +471,10 @@ pub fn match_packages_from_connection(
         .map_err(MatchPackagesError::LoadInput)?;
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources = load_package_sources(connection, &package_names)?;
-    let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+    let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
     let (written_attributions, written_surfaces) = if args.apply {
         (
-            persist_package_attributions(connection, &rows, &report)?,
+            persist_package_attributions(connection, &rows, &report, &package_names)?,
             persist_package_surfaces(connection, &rows, &report)?,
         )
     } else {
@@ -1240,17 +1240,16 @@ fn clean_package_entry_path(entry_path: &str) -> String {
 fn persist_package_attributions(
     connection: &mut Connection,
     rows: &InputRows,
-    report: &PackageMatchReport,
+    report: &VersionedPackageMatchReport,
+    matched_package_names: &BTreeSet<String>,
 ) -> Result<usize, MatchPackagesError> {
-    if report.attributions.is_empty() {
+    let rejected_attributions =
+        rejected_package_attributions_for_unaccepted_modules(rows, report, matched_package_names)?;
+    if report.attributions.is_empty() && rejected_attributions.is_empty() {
         return Ok(0);
     }
 
-    if !sqlite_table_exists(connection, "package_attributions")
-        .map_err(MatchPackagesError::WriteAttribution)?
-    {
-        return Err(MatchPackagesError::MissingTable("package_attributions"));
-    }
+    ensure_package_attributions_table(connection)?;
 
     let matches_by_module = report
         .matches
@@ -1286,11 +1285,267 @@ fn persist_package_attributions(
         )?;
         written += 1;
     }
+    for attribution in &rejected_attributions {
+        let module_original_name = modules_by_id.get(&attribution.module_id).copied().ok_or(
+            MatchPackagesError::MissingModuleForAttribution {
+                module_id: attribution.module_id,
+            },
+        )?;
+        persist_rejected_package_attribution(&transaction, module_original_name, attribution)?;
+        written += 1;
+    }
 
     transaction
         .commit()
         .map_err(MatchPackagesError::WriteAttribution)?;
     Ok(written)
+}
+
+fn ensure_package_attributions_table(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(PACKAGE_ATTRIBUTIONS_CREATE_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    if package_attributions_requires_nullable_version_migration(connection)
+        .map_err(MatchPackagesError::WriteAttribution)?
+    {
+        migrate_package_attributions_nullable_version(connection)?;
+    }
+    connection
+        .execute_batch(PACKAGE_ATTRIBUTIONS_INDEX_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
+}
+
+const PACKAGE_ATTRIBUTIONS_CREATE_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS package_attributions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module_id INTEGER NOT NULL,
+    module_original_name TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    package_version TEXT,
+    package_subpath TEXT,
+    resolved_file TEXT,
+    export_specifier TEXT,
+    emission_mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    evidence_json TEXT,
+    rejection_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (module_id),
+    FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE,
+    CHECK (TRIM(module_original_name) != ''),
+    CHECK (TRIM(package_name) != ''),
+    CHECK (emission_mode IN (
+        'external_import',
+        'vendored_asset',
+        'application_source',
+        'runtime_glue'
+    )),
+    CHECK (status IN ('proposed', 'accepted', 'rejected')),
+    CHECK (status != 'accepted' OR TRIM(COALESCE(package_version, '')) != ''),
+    CHECK (
+        status != 'accepted'
+        OR emission_mode != 'external_import'
+        OR TRIM(COALESCE(export_specifier, '')) != ''
+    ),
+    CHECK (status != 'rejected' OR TRIM(COALESCE(rejection_reason, '')) != '')
+);
+";
+
+const PACKAGE_ATTRIBUTIONS_INDEX_SQL: &str = r"
+CREATE INDEX IF NOT EXISTS idx_package_attributions_package
+    ON package_attributions(package_name, package_version);
+CREATE INDEX IF NOT EXISTS idx_package_attributions_status
+    ON package_attributions(status);
+CREATE INDEX IF NOT EXISTS idx_package_attributions_emission
+    ON package_attributions(emission_mode);
+";
+
+fn package_attributions_requires_nullable_version_migration(
+    connection: &Connection,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA table_info(package_attributions)")?;
+    let columns = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+    })?;
+    let mut package_version_not_null = false;
+    for column in columns {
+        let (name, not_null) = column?;
+        if name == "package_version" && not_null != 0 {
+            package_version_not_null = true;
+            break;
+        }
+    }
+
+    let create_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'package_attributions'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let has_legacy_non_empty_version_check = create_sql
+        .as_deref()
+        .is_some_and(|sql| sql.contains("TRIM(package_version) != ''"));
+
+    Ok(package_version_not_null || has_legacy_non_empty_version_check)
+}
+
+fn migrate_package_attributions_nullable_version(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(
+            r"
+            ALTER TABLE package_attributions RENAME TO package_attributions__reverts_old;
+            ",
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(PACKAGE_ATTRIBUTIONS_CREATE_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(
+            r"
+            INSERT INTO package_attributions (
+                id,
+                module_id,
+                module_original_name,
+                package_name,
+                package_version,
+                package_subpath,
+                resolved_file,
+                export_specifier,
+                emission_mode,
+                status,
+                evidence_json,
+                rejection_reason,
+                created_at,
+                updated_at
+            )
+            SELECT
+                id,
+                module_id,
+                module_original_name,
+                package_name,
+                package_version,
+                package_subpath,
+                resolved_file,
+                export_specifier,
+                emission_mode,
+                status,
+                evidence_json,
+                rejection_reason,
+                created_at,
+                updated_at
+              FROM package_attributions__reverts_old;
+            DROP TABLE package_attributions__reverts_old;
+            ",
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
+}
+
+fn rejected_package_attributions_for_unaccepted_modules(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+    matched_package_names: &BTreeSet<String>,
+) -> Result<Vec<PackageAttributionInput>, MatchPackagesError> {
+    let accepted_modules = report
+        .attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| attribution.module_id)
+        .chain(
+            rows.package_attributions
+                .iter()
+                .filter(|attribution| {
+                    attribution.status == PackageAttributionStatus::Accepted
+                        && attribution.emission_mode == PackageEmissionMode::ExternalImport
+                })
+                .map(|attribution| attribution.module_id),
+        )
+        .collect::<BTreeSet<_>>();
+    let decision_reasons = report
+        .version_matches
+        .iter()
+        .map(|decision| {
+            (
+                decision_package_name(decision).to_string(),
+                rejection_reason_from_decision(decision),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut rejected = Vec::new();
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
+            continue;
+        }
+        let package_name =
+            module
+                .package_name
+                .as_deref()
+                .ok_or(MatchPackagesError::InvalidAttribution {
+                    module_id: module.id,
+                    message: "package module has no package_name".to_string(),
+                })?;
+        if !matched_package_names.contains(package_name) {
+            continue;
+        }
+
+        let reason = decision_reasons
+            .get(package_name)
+            .map(String::as_str)
+            .unwrap_or("package matcher did not produce an accepted attribution for this package");
+        rejected.push(PackageAttributionInput::rejected_source(
+            module.id,
+            package_name,
+            reason,
+        ));
+    }
+    Ok(rejected)
+}
+
+fn decision_package_name(decision: &BestVersionMatch) -> &str {
+    match decision {
+        BestVersionMatch::Selected { score, .. }
+        | BestVersionMatch::InsufficientEvidence { score } => score.package_name.as_str(),
+        BestVersionMatch::Ambiguous { package_name, .. }
+        | BestVersionMatch::NoMatch { package_name, .. } => package_name.as_str(),
+    }
+}
+
+fn rejection_reason_from_decision(decision: &BestVersionMatch) -> String {
+    match decision {
+        BestVersionMatch::Selected { .. } => {
+            "selected package version did not match this module source".to_string()
+        }
+        BestVersionMatch::Ambiguous { .. } => {
+            "package version search found more than one best version".to_string()
+        }
+        BestVersionMatch::NoMatch { scores, .. } if scores.is_empty() => {
+            "no cached package source was available for this package".to_string()
+        }
+        BestVersionMatch::NoMatch { .. } => {
+            "package version search found no usable evidence".to_string()
+        }
+        BestVersionMatch::InsufficientEvidence { .. } => {
+            "package version evidence did not satisfy the acceptance threshold".to_string()
+        }
+    }
 }
 
 fn persist_package_attribution(
@@ -1366,10 +1621,72 @@ fn persist_package_attribution(
     Ok(())
 }
 
+fn persist_rejected_package_attribution(
+    connection: &Connection,
+    module_original_name: &str,
+    attribution: &PackageAttributionInput,
+) -> Result<(), MatchPackagesError> {
+    let rejection_reason =
+        attribution
+            .rejection_reason
+            .as_deref()
+            .ok_or(MatchPackagesError::InvalidAttribution {
+                module_id: attribution.module_id,
+                message: "rejected package attribution has no rejection reason".to_string(),
+            })?;
+    if rejection_reason.trim().is_empty() {
+        return Err(MatchPackagesError::InvalidAttribution {
+            module_id: attribution.module_id,
+            message: "rejected package attribution has empty rejection reason".to_string(),
+        });
+    }
+
+    let evidence = serde_json::json!({
+        "matcher": "exact_normalized_source_binary_search",
+        "package_name": attribution.package_name,
+        "status": "rejected",
+        "rejection_reason": rejection_reason,
+        "writes_package_version": false,
+    })
+    .to_string();
+    connection
+        .execute(
+            r"
+            INSERT INTO package_attributions
+                (module_id, module_original_name, package_name, package_version,
+                 package_subpath, resolved_file, export_specifier, emission_mode,
+                 status, evidence_json, rejection_reason, created_at, updated_at)
+            VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, 'application_source',
+                    'rejected', ?4, ?5, datetime('now'), datetime('now'))
+            ON CONFLICT(module_id) DO UPDATE SET
+                module_original_name = excluded.module_original_name,
+                package_name = excluded.package_name,
+                package_version = excluded.package_version,
+                package_subpath = excluded.package_subpath,
+                resolved_file = excluded.resolved_file,
+                export_specifier = excluded.export_specifier,
+                emission_mode = excluded.emission_mode,
+                status = excluded.status,
+                evidence_json = excluded.evidence_json,
+                rejection_reason = excluded.rejection_reason,
+                updated_at = datetime('now')
+            ",
+            params![
+                i64::from(attribution.module_id.0),
+                module_original_name,
+                attribution.package_name.as_str(),
+                evidence,
+                rejection_reason,
+            ],
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
+}
+
 fn persist_package_surfaces(
     connection: &mut Connection,
     rows: &InputRows,
-    report: &PackageMatchReport,
+    report: &VersionedPackageMatchReport,
 ) -> Result<usize, MatchPackagesError> {
     if report.surfaces.is_empty() {
         return Ok(0);
@@ -2373,7 +2690,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_package_versions_are_not_written() {
+    fn ambiguous_package_versions_write_rejected_attribution() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -2402,13 +2719,99 @@ mod tests {
 
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
+        let (status, rejection_reason, package_version, emission_mode): (
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, rejection_reason, package_version, emission_mode
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("rejected attribution should be written");
+        let package_version_not_null: i64 = connection
+            .query_row(
+                r"
+                SELECT [notnull]
+                  FROM pragma_table_info('package_attributions')
+                 WHERE name = 'package_version'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .expect("package_version column should exist");
 
         assert!(outcome.audit.has(FindingCode::AmbiguousPackageMatch));
         assert_eq!(outcome.matched_modules, 0);
         assert_eq!(outcome.matched_package_surfaces, 0);
-        assert_eq!(outcome.written_attributions, 0);
+        assert_eq!(outcome.written_attributions, 1);
         assert_eq!(outcome.written_surfaces, 0);
-        assert_eq!(package_attribution_count(&connection), 0);
+        assert_eq!(package_attribution_count(&connection), 1);
+        assert_eq!(status, "rejected");
+        assert!(rejection_reason.contains("more than one best version"));
+        assert_eq!(package_version, None);
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version_not_null, 0);
+    }
+
+    #[test]
+    fn match_packages_apply_replaces_proposed_rows_with_rejected_decisions() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        connection
+            .execute(
+                r"
+                INSERT INTO package_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     package_subpath, resolved_file, export_specifier, emission_mode,
+                     status, evidence_json, rejection_reason, created_at, updated_at)
+                VALUES
+                    (10, 'm10', 'pkg', '0.0.0', NULL, NULL, NULL,
+                     'external_import', 'proposed', NULL, NULL, 'now', 'now')
+                ",
+                [],
+            )
+            .expect("insert proposed attribution");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+        let (status, package_version, rejection_reason): (String, Option<String>, String) =
+            connection
+                .query_row(
+                    r"
+                    SELECT status, package_version, rejection_reason
+                      FROM package_attributions
+                     WHERE module_id = 10
+                    ",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("proposed row should be replaced");
+
+        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.written_attributions, 1);
+        assert_eq!(package_attribution_count(&connection), 1);
+        assert_eq!(status, "rejected");
+        assert_eq!(package_version, None);
+        assert!(rejection_reason.contains("no cached package source"));
+        reverts_input::sqlite::load_project_bundle_from_connection(&connection, 1)
+            .expect("rejected attribution should satisfy generation input contract");
     }
 
     #[test]
