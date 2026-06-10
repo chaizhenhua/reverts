@@ -377,7 +377,8 @@ fn detect_module_compiler_profile(
         source,
         BABEL_RUNTIME_IDENTIFIERS,
         &mut evidence,
-    ) {
+    ) || collect_source_pattern_evidence(source, BABEL_SOURCE_PATTERNS, &mut evidence)
+    {
         CompilerKind::Babel
     } else if wrappers.contains(&AstWrapperKind::ArrowIife) {
         // Top-level arrow IIFE is the signature shape of esbuild's bundle output
@@ -496,6 +497,19 @@ const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "_inherits",
     "_possibleConstructorReturn",
     "regeneratorRuntime",
+];
+
+/// Source-level fingerprints that mark Babel-emitted CJS/JSX output without
+/// requiring a runtime helper identifier to be present. These patterns are
+/// intentionally checked *after* webpack/esbuild/rollup runtime identifiers
+/// so cases that any of those bundlers also emit get attributed to the
+/// correct producer first.
+const BABEL_SOURCE_PATTERNS: &[&str] = &[
+    "Object.defineProperty(exports, \"__esModule\"",
+    "from \"react/jsx-runtime\"",
+    "from \"react/jsx-dev-runtime\"",
+    "/jsx-runtime\"",
+    "/jsx-dev-runtime\"",
 ];
 
 fn resolve_package_imports(
@@ -933,6 +947,66 @@ mod tests {
                 .module(ModuleId(1))
                 .compiler,
             CompilerKind::Esbuild,
+        );
+    }
+
+    #[test]
+    fn babel_es_module_marker_alone_classifies_as_babel() {
+        // CJS modules emitted by Babel/swc/tsc consistently include the
+        // `Object.defineProperty(exports, "__esModule", ...)` marker even when
+        // no `_interopRequireDefault` helper appears (e.g. re-export forms).
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                "\"use strict\";\nObject.defineProperty(exports, \"__esModule\", { value: true });\nexports.foo = 1;\n"
+                    .to_string(),
+            ),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert_eq!(
+            output
+                .program
+                .compiler_profile()
+                .module(ModuleId(1))
+                .compiler,
+            CompilerKind::Babel,
+        );
+    }
+
+    #[test]
+    fn babel_jsx_runtime_import_alone_classifies_as_babel() {
+        // The `react/jsx-runtime` automatic JSX runtime import is the
+        // signature output of Babel's @babel/plugin-transform-react-jsx
+        // when no transpiler-specific runtime is present.
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                "import { jsx as _jsx } from \"react/jsx-runtime\";\nvar x = _jsx(\"div\", {});\n"
+                    .to_string(),
+            ),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert_eq!(
+            output
+                .program
+                .compiler_profile()
+                .module(ModuleId(1))
+                .compiler,
+            CompilerKind::Babel,
         );
     }
 

@@ -153,14 +153,22 @@ fn banner_compiler(run: &reverts_pipeline::OutputRun) -> Option<CompilerKind> {
     }
 }
 
+/// Map a fixture's declared `bundler_family` to the `CompilerKind` we expect
+/// our detector to produce when given that fixture's artifact. Some bundlers
+/// emit code that is structurally equivalent to another bundler's output and
+/// so reuse that detector branch:
+///
+/// - `bun` and `rolldown` emit esbuild-compatible runtime helpers.
+/// - `swc` and `tsc` emit babel-compatible CJS interop.
+/// - `vite` emits rollup-style output (rollup is its bundler).
+/// - `parcel` ships its own helpers that the detector does not yet recognise.
 fn expected_compiler_for(family: &str) -> Option<CompilerKind> {
     match family {
         "webpack" => Some(CompilerKind::Webpack),
-        "esbuild" | "rolldown" => Some(CompilerKind::Esbuild),
+        "esbuild" | "bun" | "rolldown" => Some(CompilerKind::Esbuild),
         "rollup" | "vite" => Some(CompilerKind::Rollup),
-        "babel" | "swc" => Some(CompilerKind::Babel),
-        "tsc" => None,
-        "bun" | "parcel" => None,
+        "babel" | "swc" | "tsc" => Some(CompilerKind::Babel),
+        "parcel" => None,
         _ => None,
     }
 }

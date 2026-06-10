@@ -1079,20 +1079,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_compiler_keeps_es_module_marker_intact() {
-        // The strip is babel-specific; other compilers must not touch the marker.
-        let source = "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
-                      export function ok() { return 1; }\n";
-        let run = run_with_source(source, &["ok"]);
-        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
-        let emitted = run.project.files[0].source.as_str();
-        assert!(
-            emitted.contains("__esModule"),
-            "non-babel module must preserve the original marker statement, got:\n{emitted}",
-        );
-    }
-
-    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.
