@@ -1832,6 +1832,39 @@ mod tests {
     }
 
     #[test]
+    fn babel_interop_require_default_call_is_rewritten_to_default_wrapped_require() {
+        // Babel's classic CJS interop pattern wraps a require with the
+        // `_interopRequireDefault` helper:
+        //     var _foo = _interopRequireDefault(require("./foo"));
+        // After lowering the helper call is dropped and the original require
+        // is wrapped in a plain `{ default: ... }` literal — that preserves
+        // every existing `_foo.default` access without keeping the helper
+        // around.
+        let source = "var _foo = _interopRequireDefault(require('./foo'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var entry = _foo.default;\n";
+        let run = run_with_source(source, &["_foo", "_interopRequireDefault", "entry"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: babel"),
+            "babel fixture must keep its banner; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var _foo = { default: require('./foo') }"),
+            "babel lowering must rewrite the helper call into a literal default wrapper; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("_interopRequireDefault(require("),
+            "babel lowering must drop the helper *call* (its definition may remain unused); got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var entry = _foo.default"),
+            "babel lowering must preserve subsequent .default accesses; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.

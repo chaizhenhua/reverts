@@ -17,7 +17,7 @@ use oxc_ast::{
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
-use oxc_span::{SPAN, SourceType};
+use oxc_span::{GetSpan, SPAN, SourceType, Span};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -487,6 +487,14 @@ pub fn format_source_with_module_items(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> Result<String> {
+    // Source-level pre-rewrites: applied before the main parse/codegen path so
+    // that subsequent steps (audit, codegen) see the lowered form. The
+    // rewriter parses once, collects span-aware edits, and returns the
+    // unchanged source if it cannot parse — in which case the regular parse
+    // below will surface a faithful diagnostic.
+    let lowered = apply_source_level_lowerings(body_source, path_hint, goal, lowering);
+    let body_source = lowered.as_str();
+
     let mut errors = Vec::new();
 
     for source_type in source_type_candidates(path_hint, goal) {
@@ -537,6 +545,91 @@ pub fn format_source_with_module_items(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// Apply compiler-specific source-level rewrites before the main format pass.
+/// Currently handles Babel's `_interopRequireDefault(require("X"))` pattern,
+/// reducing it to `{ default: require("X") }` so the helper call disappears
+/// while `.default` access on the wrapped binding stays valid.
+fn apply_source_level_lowerings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    lowering: CompilerLowering,
+) -> String {
+    if !matches!(lowering, CompilerLowering::Babel) {
+        return source.to_string();
+    }
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        let mut replacements = Vec::<(u32, u32, String)>::new();
+        for statement in &parsed.program.body {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                continue;
+            };
+            for declarator in &declaration.declarations {
+                let Some(init) = declarator.init.as_ref() else {
+                    continue;
+                };
+                let Some(arg_span) = babel_interop_require_default_arg_span(init) else {
+                    continue;
+                };
+                let init_span = init.span();
+                let arg_text = &source[arg_span.start as usize..arg_span.end as usize];
+                replacements.push((
+                    init_span.start,
+                    init_span.end,
+                    format!("{{ default: require({arg_text}) }}"),
+                ));
+            }
+        }
+        if replacements.is_empty() {
+            return source.to_string();
+        }
+        replacements.sort_by_key(|edit| edit.0);
+        let mut output = source.to_string();
+        for (start, end, new_text) in replacements.iter().rev() {
+            output.replace_range(*start as usize..*end as usize, new_text);
+        }
+        return output;
+    }
+    // No source type parsed cleanly. Defer the parse-failure surface to the
+    // downstream format pass.
+    source.to_string()
+}
+
+/// Recognise the canonical Babel interop wrapper `_interopRequireDefault(require("X"))`.
+/// Returns the span of the inner string-literal specifier so the caller can
+/// re-use the original quoting and escaping when constructing the rewrite.
+fn babel_interop_require_default_arg_span(expression: &Expression<'_>) -> Option<Span> {
+    let Expression::CallExpression(outer) = expression else {
+        return None;
+    };
+    let Expression::Identifier(callee) = &outer.callee else {
+        return None;
+    };
+    if callee.name.as_str() != "_interopRequireDefault" || outer.arguments.len() != 1 {
+        return None;
+    }
+    let Argument::CallExpression(inner) = &outer.arguments[0] else {
+        return None;
+    };
+    let Expression::Identifier(inner_callee) = &inner.callee else {
+        return None;
+    };
+    if inner_callee.name.as_str() != "require" || inner.arguments.len() != 1 {
+        return None;
+    }
+    let Argument::StringLiteral(specifier) = &inner.arguments[0] else {
+        return None;
+    };
+    Some(specifier.span())
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:
