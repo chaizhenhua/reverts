@@ -572,24 +572,23 @@ fn parse_runtime_prelude(
             .with_options(parse_options_for(source_type))
             .parse();
         if parsed.errors.is_empty() && !parsed.panicked {
-            let (bindings, snippets, namespace_exports, source, entrypoint) =
-                collect_runtime_prelude_declarations(
-                    source_file_id,
-                    &parsed.program,
-                    source,
-                    module_spans,
-                );
-            if bindings.is_empty() {
+            let collection = collect_runtime_prelude_declarations(
+                source_file_id,
+                &parsed.program,
+                source,
+                module_spans,
+            );
+            if collection.bindings.is_empty() {
                 return None;
             }
             return Some(RuntimePrelude {
                 source_file_id,
                 source_file_path: source_file_path.to_string(),
-                source,
-                bindings,
-                snippets,
-                namespace_exports,
-                entrypoint,
+                source: collection.source,
+                bindings: collection.bindings,
+                snippets: collection.snippets,
+                namespace_exports: collection.namespace_exports,
+                entrypoint: collection.entrypoint,
             });
         }
     }
@@ -597,18 +596,20 @@ fn parse_runtime_prelude(
     None
 }
 
+struct RuntimePreludeCollection {
+    bindings: BTreeMap<BindingName, RuntimePreludeBindingKind>,
+    snippets: BTreeMap<BindingName, RuntimePreludeSnippet>,
+    namespace_exports: Vec<RuntimeNamespaceExport>,
+    source: String,
+    entrypoint: Option<RuntimeEntrypoint>,
+}
+
 fn collect_runtime_prelude_declarations(
     source_file_id: u32,
     program: &Program<'_>,
     source: &str,
     module_spans: &[(u32, u32)],
-) -> (
-    BTreeMap<BindingName, RuntimePreludeBindingKind>,
-    BTreeMap<BindingName, RuntimePreludeSnippet>,
-    Vec<RuntimeNamespaceExport>,
-    String,
-    Option<RuntimeEntrypoint>,
-) {
+) -> RuntimePreludeCollection {
     let mut bindings = BTreeMap::new();
     let mut snippets_by_binding = BTreeMap::new();
     let mut snippets = Vec::new();
@@ -654,13 +655,13 @@ fn collect_runtime_prelude_declarations(
     }
     let entrypoint =
         entrypoint_candidate.filter(|candidate| bindings.contains_key(&candidate.callee));
-    (
+    RuntimePreludeCollection {
         bindings,
-        snippets_by_binding,
+        snippets: snippets_by_binding,
         namespace_exports,
-        snippets.join("\n"),
+        source: snippets.join("\n"),
         entrypoint,
-    )
+    }
 }
 
 fn runtime_entrypoint_from_statement(
