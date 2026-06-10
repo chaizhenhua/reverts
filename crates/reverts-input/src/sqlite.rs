@@ -125,11 +125,9 @@ fn load_modules(
             m.package_name,
             m.package_version,
             m.byte_start,
-            m.byte_end,
-            sf.file_path
+            m.byte_end
         FROM modules m
         JOIN project_files pf ON pf.file_id = m.file_id
-        JOIN source_files sf ON sf.id = m.file_id
         WHERE pf.project_id = ?1
         ORDER BY m.id
         ",
@@ -138,13 +136,7 @@ fn load_modules(
         let id = row.get::<_, i64>(0)?;
         let original_name = row.get::<_, String>(2)?;
         let semantic_name = row.get::<_, Option<String>>(3)?;
-        let source_file_path = row.get::<_, String>(9)?;
-        let semantic_path = module_semantic_path(
-            id,
-            semantic_name.as_deref(),
-            &original_name,
-            source_file_path.as_str(),
-        );
+        let semantic_path = module_semantic_path(id, semantic_name.as_deref(), &original_name);
         let category = row.get::<_, Option<String>>(4)?;
 
         Ok(ModuleRow {
@@ -293,35 +285,13 @@ fn module_kind_from_category(category: Option<&str>) -> StoredModuleKind {
     }
 }
 
-fn module_semantic_path(
-    id: i64,
-    semantic_name: Option<&str>,
-    original_name: &str,
-    source_file_path: &str,
-) -> String {
+fn module_semantic_path(id: i64, semantic_name: Option<&str>, original_name: &str) -> String {
     let seed = semantic_name
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(original_name);
     let slug = path_slug(seed);
-    let extension = output_extension_for_source(source_file_path);
-    format!("modules/{id}-{slug}.{extension}")
-}
-
-fn output_extension_for_source(source_file_path: &str) -> &'static str {
-    match std::path::Path::new(source_file_path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("cjs") => "cjs",
-        Some("mjs") => "mjs",
-        Some("jsx") => "jsx",
-        Some("ts") => "ts",
-        Some("tsx") => "tsx",
-        _ => "js",
-    }
+    format!("modules/{id}-{slug}.ts")
 }
 
 fn path_slug(value: &str) -> String {
@@ -482,7 +452,7 @@ mod tests {
         assert_eq!(bundle.source_files.len(), 1);
         assert_eq!(bundle.modules.len(), 2);
         assert_eq!(bundle.modules[0].kind, ModuleKind::Application);
-        assert_eq!(bundle.modules[0].semantic_path, "modules/10-entry/main.js");
+        assert_eq!(bundle.modules[0].semantic_path, "modules/10-entry/main.ts");
         assert_eq!(bundle.modules[1].kind, ModuleKind::Package);
         assert_eq!(bundle.symbols.len(), 1);
         assert!(matches!(

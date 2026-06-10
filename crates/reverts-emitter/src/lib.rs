@@ -66,12 +66,30 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
 
     Ok(EmittedFile {
         path: file.path.clone(),
-        source: formatted,
+        source: add_typescript_compat_header(formatted),
     })
 }
 
 fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
+}
+
+fn add_typescript_compat_header(source: String) -> String {
+    if source
+        .lines()
+        .take(3)
+        .any(|line| line.contains("@ts-nocheck"))
+    {
+        return source;
+    }
+
+    if let Some(rest) = source.strip_prefix("#!")
+        && let Some((hashbang, body)) = rest.split_once('\n')
+    {
+        return format!("#!{hashbang}\n// @ts-nocheck\n{body}");
+    }
+
+    format!("// @ts-nocheck\n{source}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +125,7 @@ mod tests {
         let project = emit_project(&plan).expect("planned file should emit");
 
         assert_eq!(project.files[0].path, "src/index.ts");
+        assert!(project.files[0].source.starts_with("// @ts-nocheck"));
         assert!(project.files[0].source.contains("export const answer = 42"));
         assert!(!project.files[0].source.contains("undefined as any"));
     }
@@ -180,5 +199,21 @@ mod tests {
         let source = project.files[0].source.as_str();
         assert!(source.contains("import * as pkg_name_value from 'pkg-name/value';"));
         assert!(source.contains("export { _class };"));
+    }
+
+    #[test]
+    fn typescript_compat_header_preserves_hashbang_first() {
+        let mut file = PlannedFile::new("src/bin.ts");
+        file.push_source("#!/usr/bin/env node\nconsole.log('ok');");
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        assert!(
+            project.files[0]
+                .source
+                .starts_with("#!/usr/bin/env node\n// @ts-nocheck")
+        );
     }
 }
