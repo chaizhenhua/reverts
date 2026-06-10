@@ -191,6 +191,7 @@ fn is_ambient_binding(binding: &str) -> bool {
             | "console"
             | "crypto"
             | "document"
+            | "eval"
             | "exports"
             | "fetch"
             | "global"
