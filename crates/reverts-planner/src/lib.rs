@@ -217,7 +217,6 @@ pub struct ImportExportPlanner;
 impl ImportExportPlanner {
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
-        let mut used_runtime_preludes = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let accepted_externalized_packages = externalized_package_modules(program);
@@ -227,8 +226,6 @@ impl ImportExportPlanner {
             .difference(&source_required_packages)
             .copied()
             .collect::<BTreeSet<_>>();
-        let runtime_module_wiring =
-            runtime_entrypoint_module_wiring(program, &externalized_packages);
         let source_module_wiring = source_module_wiring(program, &externalized_packages);
 
         for module in program.model().modules() {
@@ -275,11 +272,6 @@ impl ImportExportPlanner {
 
             let runtime_imports = program.model().graph().runtime_imports_for(module.id);
             let source = program.model().input().module_source_slice(module.id);
-            let forced_runtime_helpers = runtime_module_wiring
-                .exports_by_module
-                .get(&module.id)
-                .cloned()
-                .unwrap_or_default();
             let (lowered_source, lowered_helpers, remaining_runtime_helpers) = source.map_or_else(
                 || (None, BTreeSet::new(), BTreeSet::new()),
                 |source| {
@@ -291,19 +283,6 @@ impl ImportExportPlanner {
                         source.source,
                     ));
                     let lowering = lower_runtime_helpers(source.source, &helper_kinds);
-                    let mut remaining_helpers = lowering.remaining_helpers;
-                    if let Some(prelude) = program
-                        .model()
-                        .graph()
-                        .runtime_prelude(source.source_file_id)
-                    {
-                        remaining_helpers.extend(
-                            forced_runtime_helpers
-                                .iter()
-                                .filter(|binding| prelude.defines(binding))
-                                .cloned(),
-                        );
-                    }
                     (
                         Some((
                             source.source_file_id,
@@ -311,7 +290,7 @@ impl ImportExportPlanner {
                             lowering.source,
                         )),
                         lowering.lowered_helpers,
-                        remaining_helpers,
+                        lowering.remaining_helpers,
                     )
                 },
             );
@@ -380,13 +359,17 @@ impl ImportExportPlanner {
                 if bindings.is_empty() {
                     continue;
                 }
-                used_runtime_preludes
+                used_runtime_helper_files
                     .entry(source_file_id)
                     .or_default()
                     .extend(bindings.iter().cloned());
                 let specifier =
-                    relative_import_specifier(path, runtime_prelude_path(source_file_id).as_str());
-                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+                    relative_import_specifier(path, runtime_helpers_path(source_file_id).as_str());
+                file.push_source(runtime_helper_import_statement(
+                    &bindings,
+                    &BTreeSet::new(),
+                    specifier.as_str(),
+                ));
                 for binding in bindings {
                     if planned_bindings.contains(&binding) {
                         continue;
@@ -471,10 +454,7 @@ impl ImportExportPlanner {
             let extra_exports = extra_exports_for_module(
                 program,
                 module.id,
-                [
-                    runtime_module_wiring.exports_by_module.get(&module.id),
-                    source_module_wiring.exports_by_module.get(&module.id),
-                ],
+                [source_module_wiring.exports_by_module.get(&module.id)],
             );
             if !extra_exports.is_empty() {
                 let existing_exports = program
@@ -499,52 +479,11 @@ impl ImportExportPlanner {
             plan.push_file(file);
         }
 
-        for (source_file_id, exported_bindings) in &used_runtime_preludes {
-            let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
-                continue;
-            };
-            let mut file = PlannedFile::new(runtime_prelude_path(*source_file_id));
-            let mut source_bindings = prelude.required_bindings_for(exported_bindings.iter());
-            let namespace_exports =
-                runtime_namespace_exports_for_helpers(prelude, &source_bindings);
-            for namespace_export in &namespace_exports {
-                source_bindings.extend(namespace_export.exports.values().cloned());
-            }
-            source_bindings = prelude.required_bindings_for(source_bindings.iter());
-            let prelude_source = prelude.source_for_bindings(source_bindings.iter());
-            let prelude_imports = runtime_source_module_imports(
-                program,
-                prelude,
-                prelude_source.as_str(),
-                &externalized_packages,
-            );
-            let prelude_path = runtime_prelude_path(*source_file_id);
-            for (module_id, bindings) in &prelude_imports {
-                ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
-                let Some(module_path) = module_output_path(program, *module_id) else {
-                    continue;
-                };
-                let specifier =
-                    relative_import_specifier(prelude_path.as_str(), module_path.as_str());
-                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-            }
-            file.push_source(prelude_source);
-            for namespace_export in &namespace_exports {
-                file.push_source(runtime_namespace_export_statement(namespace_export));
-            }
-            for binding in exported_bindings {
-                file.add_binding(PlannedBinding::new(
-                    binding.clone(),
-                    binding.clone(),
-                    BindingShape::Unknown,
-                    true,
-                ));
-            }
-            file.push_source(named_export_statement(exported_bindings.iter()));
-            for binding in exported_bindings.iter().cloned() {
-                file.add_export_with_source_backed(binding, true);
-            }
-            plan.push_file(file);
+        if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
+            used_runtime_helper_files
+                .entry(entrypoint.source_file_id)
+                .or_default()
+                .insert(entrypoint.callee.clone());
         }
 
         for (source_file_id, helper_bindings) in &used_runtime_helper_files {
@@ -552,14 +491,25 @@ impl ImportExportPlanner {
                 continue;
             };
             let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
-            let mut source_bindings = prelude.required_bindings_for(helper_bindings.iter());
+            let entrypoint = prelude
+                .entrypoint
+                .as_ref()
+                .filter(|entrypoint| helper_bindings.contains(&entrypoint.callee));
+            let mut root_bindings = helper_bindings.clone();
+            if let Some(entrypoint) = entrypoint {
+                root_bindings.extend(runtime_entrypoint_root_bindings(prelude, entrypoint));
+            }
+            let mut source_bindings = prelude.required_bindings_for(root_bindings.iter());
             let namespace_exports =
                 runtime_namespace_exports_for_helpers(prelude, &source_bindings);
             for namespace_export in &namespace_exports {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
             source_bindings = prelude.required_bindings_for(source_bindings.iter());
-            let helper_source = prelude.source_for_bindings(source_bindings.iter());
+            let mut helper_source = prelude.source_for_bindings(source_bindings.iter());
+            if let Some(entrypoint) = entrypoint {
+                append_runtime_entrypoint_side_effects(&mut helper_source, prelude, entrypoint);
+            }
             let helper_imports = runtime_source_module_imports(
                 program,
                 prelude,
@@ -618,31 +568,16 @@ impl ImportExportPlanner {
             plan.push_file(file);
         }
 
-        if let Some((prelude, entrypoint)) = runtime_entrypoint(program) {
+        if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
             let mut file = PlannedFile::new("cli.ts");
             file.push_source("#!/usr/bin/env node");
-            if let Some(module_imports) = runtime_module_wiring
-                .imports_by_prelude
-                .get(&entrypoint.source_file_id)
-            {
-                for (module_id, bindings) in module_imports {
-                    ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
-                    let Some(module_path) = module_output_path(program, *module_id) else {
-                        continue;
-                    };
-                    let specifier = relative_import_specifier("cli.ts", module_path.as_str());
-                    file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-                }
-            }
-            file.push_source(runtime_entrypoint_source(prelude, entrypoint));
-            if let Some(namespace_exports) = runtime_module_wiring
-                .namespace_exports_by_prelude
-                .get(&entrypoint.source_file_id)
-            {
-                for namespace_export in namespace_exports {
-                    file.push_source(runtime_namespace_export_statement(namespace_export));
-                }
-            }
+            let helper_path = runtime_helpers_path(entrypoint.source_file_id);
+            let specifier = relative_import_specifier("cli.ts", helper_path.as_str());
+            let entrypoint_imports = BTreeSet::from([entrypoint.callee.clone()]);
+            file.push_source(named_import_statement(
+                entrypoint_imports.iter(),
+                specifier.as_str(),
+            ));
             file.push_source(format!("await {}();", entrypoint.callee.as_str()));
             plan.push_file(file);
         }
@@ -697,87 +632,9 @@ fn group_runtime_imports(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeModuleWiring {
-    imports_by_prelude: BTreeMap<u32, BTreeMap<ModuleId, BTreeSet<BindingName>>>,
-    exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    namespace_exports_by_prelude: BTreeMap<u32, Vec<RuntimeNamespaceExport>>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct SourceModuleWiring {
     imports_by_module: BTreeMap<ModuleId, BTreeMap<ModuleId, BTreeSet<BindingName>>>,
     exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-}
-
-fn runtime_entrypoint_module_wiring(
-    program: &EnrichedProgram,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> RuntimeModuleWiring {
-    let mut wiring = RuntimeModuleWiring::default();
-    let definition_modules = unique_source_definition_modules(program, externalized_packages);
-
-    for prelude in program.model().graph().runtime_preludes().values() {
-        let Some(entrypoint) = &prelude.entrypoint else {
-            continue;
-        };
-        let prelude_source = runtime_entrypoint_source(prelude, entrypoint);
-        for identifier in runtime_import_identifiers_in_source(prelude_source.as_str()) {
-            let binding = BindingName::new(identifier);
-            if prelude.defines(&binding) {
-                continue;
-            }
-            let Some(Some(module_id)) = definition_modules.get(&binding) else {
-                continue;
-            };
-            wiring
-                .imports_by_prelude
-                .entry(prelude.source_file_id)
-                .or_default()
-                .entry(*module_id)
-                .or_default()
-                .insert(binding.clone());
-            wiring
-                .exports_by_module
-                .entry(*module_id)
-                .or_default()
-                .insert(binding);
-        }
-        for namespace_export in &prelude.namespace_exports {
-            if !contains_identifier_reference(
-                prelude_source.as_str(),
-                namespace_export.namespace.as_str(),
-            ) {
-                continue;
-            }
-            for target in namespace_export.exports.values() {
-                if prelude.defines(target) {
-                    continue;
-                }
-                let Some(Some(module_id)) = definition_modules.get(target) else {
-                    continue;
-                };
-                wiring
-                    .imports_by_prelude
-                    .entry(prelude.source_file_id)
-                    .or_default()
-                    .entry(*module_id)
-                    .or_default()
-                    .insert(target.clone());
-                wiring
-                    .exports_by_module
-                    .entry(*module_id)
-                    .or_default()
-                    .insert(target.clone());
-            }
-            wiring
-                .namespace_exports_by_prelude
-                .entry(prelude.source_file_id)
-                .or_default()
-                .push(namespace_export.clone());
-        }
-    }
-
-    wiring
 }
 
 fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &RuntimeEntrypoint)> {
@@ -794,8 +651,10 @@ fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &Ru
         })
 }
 
-fn runtime_entrypoint_source(prelude: &RuntimePrelude, entrypoint: &RuntimeEntrypoint) -> String {
-    let mut parts = Vec::new();
+fn runtime_entrypoint_root_bindings(
+    prelude: &RuntimePrelude,
+    entrypoint: &RuntimeEntrypoint,
+) -> BTreeSet<BindingName> {
     let side_effects = runtime_entrypoint_side_effects(prelude, entrypoint);
     let mut source_bindings = BTreeSet::from([entrypoint.callee.clone()]);
     for side_effect in &side_effects {
@@ -806,16 +665,20 @@ fn runtime_entrypoint_source(prelude: &RuntimePrelude, entrypoint: &RuntimeEntry
             }
         }
     }
-    let callee_source = prelude.source_for_bindings(source_bindings.iter());
-    if !callee_source.trim().is_empty() {
-        parts.push(callee_source);
+    source_bindings
+}
+
+fn append_runtime_entrypoint_side_effects(
+    source: &mut String,
+    prelude: &RuntimePrelude,
+    entrypoint: &RuntimeEntrypoint,
+) {
+    for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
+        if !source.trim().is_empty() {
+            source.push('\n');
+        }
+        source.push_str(side_effect.source.as_str());
     }
-    parts.extend(
-        side_effects
-            .into_iter()
-            .map(|side_effect| side_effect.source),
-    );
-    parts.join("\n")
 }
 
 fn runtime_entrypoint_side_effects(
@@ -2846,7 +2709,7 @@ fn is_identifier_continue(byte: u8) -> bool {
 fn is_js_keyword(value: &str) -> bool {
     matches!(
         value,
-        "as" | "async"
+        "async"
             | "await"
             | "break"
             | "case"
@@ -3038,10 +2901,6 @@ fn skip_regex_literal(bytes: &[u8], start: usize) -> usize {
         }
     }
     bytes.len()
-}
-
-fn runtime_prelude_path(source_file_id: u32) -> String {
-    format!("modules/runtime/source-{source_file_id}-prelude.ts")
 }
 
 fn runtime_helpers_path(source_file_id: u32) -> String {
@@ -3668,7 +3527,7 @@ mod tests {
     }
 
     #[test]
-    fn entrypoint_runtime_is_inlined_into_cli_with_tail_side_effects() {
+    fn entrypoint_runtime_uses_shared_helper_module_with_tail_side_effects() {
         let planner = ImportExportPlanner;
         let prelude = "function main() { return cliEntry(); }\n";
         let body = "var cliEntry = () => 'ok';\nvar cliInit = () => {};\n";
@@ -3707,6 +3566,11 @@ mod tests {
             .iter()
             .find(|file| file.path == "cli.ts")
             .expect("cli entrypoint should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
 
         assert!(
             plan.files
@@ -3715,15 +3579,137 @@ mod tests {
         );
         let module_source = module_file.body.join("\n");
         let cli_source = cli_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
 
         assert!(module_source.contains("export { cliEntry, cliInit };"));
         assert!(cli_source.contains("#!/usr/bin/env node"));
-        assert!(cli_source.contains("import { cliEntry, cliInit } from './modules/entry.js';"));
-        assert!(cli_source.contains("function main()"));
-        assert!(cli_source.contains("cliInit();"));
-        assert!(cli_source.contains("process.env.FLAG = 'ok';"));
+        assert!(
+            cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';")
+        );
         assert!(cli_source.contains("await main();"));
+        assert!(!cli_source.contains("function main()"));
+        assert!(!cli_source.contains("cliInit();"));
+        assert!(!cli_source.contains("process.env.FLAG = 'ok';"));
         assert!(!cli_source.contains("source-1-prelude"));
+        assert!(helper_source.contains("import { cliEntry, cliInit } from '../entry.js';"));
+        assert!(helper_source.contains("function main()"));
+        assert!(helper_source.contains("return cliEntry();"));
+        assert!(helper_source.contains("cliInit();"));
+        assert!(helper_source.contains("process.env.FLAG = 'ok';"));
+        assert!(helper_source.contains("export { main };"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
+        let planner = ImportExportPlanner;
+        let prelude = "var yA;\nfunction main() { initModule(); return yA(); }\n";
+        let body = "yA = () => 'linux';\nfunction initModule() {}\nexport { initModule };\n";
+        let tail = "main();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let cli_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "cli.ts")
+            .expect("cli entrypoint should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry_file.body.join("\n");
+        let cli_source = cli_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(
+            entry_source
+                .contains("import { yA, __reverts_set_yA } from './runtime/source-1-helpers.js';")
+        );
+        assert!(entry_source.contains("__reverts_set_yA(() => 'linux');"));
+        assert!(
+            cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';")
+        );
+        assert!(cli_source.contains("await main();"));
+        assert!(!cli_source.contains("var yA"));
+        assert!(helper_source.contains("import { initModule } from '../entry.js';"));
+        assert!(helper_source.contains("var yA;"));
+        assert!(helper_source.contains("function main()"));
+        assert!(helper_source.contains("return yA();"));
+        assert!(
+            helper_source
+                .contains("function __reverts_set_yA(value) { yA = value; return value; }")
+        );
+        assert!(helper_source.contains("export { __reverts_set_yA, main, yA };"));
+    }
+
+    #[test]
+    fn contextual_identifier_as_is_kept_as_runtime_dependency() {
+        let planner = ImportExportPlanner;
+        let prelude = "var as = { command() { return this; } };\nfunction main() { return as.command('run'); }\n";
+        let body = "export const value = 1;\n";
+        let tail = "main();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(helper_source.contains("var as = { command() { return this; } };"));
+        assert!(helper_source.contains("function main()"));
+        assert!(helper_source.contains("as.command('run')"));
+        assert!(helper_source.contains("export { main };"));
     }
 
     #[test]
@@ -3787,15 +3773,24 @@ mod tests {
             .iter()
             .find(|file| file.path == "cli.ts")
             .expect("cli entrypoint should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
         let package_file = plan
             .files
             .iter()
             .find(|file| file.path == "modules/package.ts")
             .expect("source-required package file should be emitted");
         let cli_source = cli_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
 
-        assert!(cli_source.contains("import { packageInit } from './modules/package.js';"));
-        assert!(cli_source.contains("packageInit();"));
+        assert!(
+            cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';")
+        );
+        assert!(helper_source.contains("import { packageInit } from '../package.js';"));
+        assert!(helper_source.contains("packageInit();"));
         assert!(
             package_file
                 .body
@@ -3839,11 +3834,20 @@ mod tests {
             .iter()
             .find(|file| file.path == "cli.ts")
             .expect("cli entrypoint should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
         let cli_source = cli_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
 
         assert!(!cli_source.contains("noop();"));
         assert!(!cli_source.contains("var noop"));
-        assert!(cli_source.contains("function main()"));
+        assert!(!cli_source.contains("function main()"));
+        assert!(!helper_source.contains("noop();"));
+        assert!(!helper_source.contains("var noop"));
+        assert!(helper_source.contains("function main()"));
     }
 
     #[test]
@@ -3882,11 +3886,19 @@ mod tests {
             .iter()
             .find(|file| file.path == "cli.ts")
             .expect("cli entrypoint should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
         let cli_source = cli_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
 
-        assert!(cli_source.contains("var setup"));
-        assert!(cli_source.contains("setup();"));
-        assert!(cli_source.contains("globalThis.ready = true"));
+        assert!(!cli_source.contains("var setup"));
+        assert!(!cli_source.contains("setup();"));
+        assert!(helper_source.contains("var setup"));
+        assert!(helper_source.contains("setup();"));
+        assert!(helper_source.contains("globalThis.ready = true"));
     }
 
     #[test]
@@ -3895,9 +3907,11 @@ mod tests {
             "function local() { function nested() {} }\n\
              let { isReady: localAlias } = source;\n\
              class Transport { buffer = Buffer.alloc(0); async start() {} stop() {} }\n\
+             as.command('servers');\n\
              console.log(request.method); Promise.resolve().then(() => (packageInit(), ns));",
         );
 
+        assert!(identifiers.contains("as"));
         assert!(identifiers.contains("packageInit"));
         assert!(identifiers.contains("request"));
         assert!(identifiers.contains("ns"));

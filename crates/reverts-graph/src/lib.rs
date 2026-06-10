@@ -1130,7 +1130,7 @@ fn is_identifier_continue(byte: u8) -> bool {
 fn is_js_keyword(value: &str) -> bool {
     matches!(
         value,
-        "as" | "async"
+        "async"
             | "await"
             | "break"
             | "case"
@@ -2831,6 +2831,38 @@ mod tests {
 
         assert!(source.contains("function main()"));
         assert!(source.contains("var dependency = 'value';"));
+    }
+
+    #[test]
+    fn runtime_snippet_dependencies_include_contextual_identifier_as() {
+        let prelude = concat!(
+            "var as = { command() { return this; } };\n",
+            "function main() { return as.command('run'); }\n",
+        );
+        let body = "export const moduleValue = 1;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let main = BindingName::new("main");
+        let source = prelude.source_for_bindings(std::iter::once(&main));
+
+        assert!(source.contains("function main()"));
+        assert!(source.contains("var as = { command() { return this; } };"));
     }
 
     #[test]
