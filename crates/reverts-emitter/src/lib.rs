@@ -65,7 +65,7 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
     let formatted = format_source_pretty(
         &source,
         emit_path_hint(file),
-        file.source_strategy.parse_goal(),
+        file.source_strategy().parse_goal(),
     )
     .map_err(|source_error| EmitError::UnparseableOutput {
         path: file.path.clone(),
@@ -79,7 +79,7 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
 }
 
 fn emit_path_hint(file: &PlannedFile) -> Option<&Path> {
-    match file.source_strategy {
+    match file.source_strategy() {
         reverts_planner::SourceCompilerStrategy::DirectSource => {
             Some(Path::new(file.path.as_str()))
         }

@@ -6,7 +6,7 @@ use std::path::Path;
 use reverts_graph::{AstFactKind, RevertsGraph};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{JsError, ParseGoal, format_source_pretty};
-use reverts_model::{CompilerKind, EnrichedProgram, ModuleCompilerProfile};
+use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub struct PlannedFile {
     pub bindings: Vec<PlannedBinding>,
     pub exports: Vec<PlannedExport>,
     pub body: Vec<String>,
-    pub source_strategy: SourceCompilerStrategy,
+    pub compiler_recovery: CompilerRecoveryDecision,
 }
 
 impl PlannedFile {
@@ -39,7 +39,7 @@ impl PlannedFile {
             bindings: Vec::new(),
             exports: Vec::new(),
             body: Vec::new(),
-            source_strategy: SourceCompilerStrategy::DirectSource,
+            compiler_recovery: CompilerRecoveryDecision::default(),
         }
     }
 
@@ -66,8 +66,13 @@ impl PlannedFile {
         self.body.push(source.into());
     }
 
-    pub fn set_source_strategy(&mut self, source_strategy: SourceCompilerStrategy) {
-        self.source_strategy = source_strategy;
+    pub fn set_compiler_recovery(&mut self, compiler_recovery: CompilerRecoveryDecision) {
+        self.compiler_recovery = compiler_recovery;
+    }
+
+    #[must_use]
+    pub const fn source_strategy(&self) -> SourceCompilerStrategy {
+        self.compiler_recovery.strategy
     }
 }
 
@@ -120,6 +125,51 @@ pub enum SourceCompilerStrategy {
     TerserMinified,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerRecoveryAction {
+    #[default]
+    DirectModuleSource,
+    PreserveWebpackRuntime,
+    PreserveEsbuildHelpers,
+    PreserveRollupFacade,
+    PreserveBabelTranspiledOutput,
+    PreserveTerserMinifiedOutput,
+}
+
+impl CompilerRecoveryAction {
+    #[must_use]
+    pub const fn from_compiler(compiler: CompilerKind) -> Self {
+        match compiler {
+            CompilerKind::Unknown => Self::DirectModuleSource,
+            CompilerKind::Webpack => Self::PreserveWebpackRuntime,
+            CompilerKind::Esbuild => Self::PreserveEsbuildHelpers,
+            CompilerKind::Rollup => Self::PreserveRollupFacade,
+            CompilerKind::Babel => Self::PreserveBabelTranspiledOutput,
+            CompilerKind::Terser => Self::PreserveTerserMinifiedOutput,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CompilerRecoveryDecision {
+    pub strategy: SourceCompilerStrategy,
+    pub action: CompilerRecoveryAction,
+    pub minified: bool,
+    pub evidence: Vec<CompilerEvidence>,
+}
+
+impl CompilerRecoveryDecision {
+    #[must_use]
+    pub fn from_profile(profile: &ModuleCompilerProfile) -> Self {
+        Self {
+            strategy: SourceCompilerStrategy::from_profile(profile),
+            action: CompilerRecoveryAction::from_compiler(profile.compiler),
+            minified: profile.minified,
+            evidence: profile.evidence.clone(),
+        }
+    }
+}
+
 impl SourceCompilerStrategy {
     #[must_use]
     pub fn from_profile(profile: &ModuleCompilerProfile) -> Self {
@@ -164,8 +214,8 @@ impl ImportExportPlanner {
                 .unwrap_or(module.semantic_path.as_str());
             let mut file = PlannedFile::new(path);
             let compiler_profile = program.compiler_profile().module(module.id);
-            let source_strategy = SourceCompilerStrategy::from_profile(&compiler_profile);
-            file.set_source_strategy(source_strategy);
+            let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
+            file.set_compiler_recovery(compiler_recovery);
 
             for decision in program.package_imports_for(module.id) {
                 file.add_import(PlannedImport {
@@ -207,7 +257,7 @@ impl ImportExportPlanner {
                     source.module_id,
                     source.source_file_path,
                     source.source,
-                    source_strategy,
+                    file.source_strategy(),
                 )?;
                 file.push_source(normalized);
             }
@@ -349,7 +399,7 @@ mod tests {
         CompilerEvidence, CompilerKind, CompilerProfile, ModuleCompilerProfile, ProgramModel,
     };
 
-    use super::{ImportExportPlanner, SourceCompilerStrategy};
+    use super::{CompilerRecoveryAction, ImportExportPlanner, SourceCompilerStrategy};
 
     #[test]
     fn enriched_program_plans_real_source_without_synthetic_declarations() {
@@ -448,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_profile_selects_webpack_source_strategy() {
+    fn compiler_profile_selects_webpack_recovery_decision() {
         let planner = ImportExportPlanner;
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
@@ -485,10 +535,48 @@ mod tests {
             .expect("fixture should normalize");
 
         assert_eq!(
-            plan.files[0].source_strategy,
+            plan.files[0].compiler_recovery.strategy,
             SourceCompilerStrategy::WebpackRuntime
         );
+        assert_eq!(
+            plan.files[0].compiler_recovery.action,
+            CompilerRecoveryAction::PreserveWebpackRuntime
+        );
+        assert_eq!(
+            plan.files[0].compiler_recovery.evidence,
+            vec![CompilerEvidence::Identifier(
+                "__webpack_require__".to_string()
+            )]
+        );
         assert_eq!(plan.files[0].body[0].trim_end(), "__webpack_require__(1);");
+    }
+
+    #[test]
+    fn compiler_recovery_actions_cover_known_compilers() {
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Webpack),
+            CompilerRecoveryAction::PreserveWebpackRuntime
+        );
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Esbuild),
+            CompilerRecoveryAction::PreserveEsbuildHelpers
+        );
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Rollup),
+            CompilerRecoveryAction::PreserveRollupFacade
+        );
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Babel),
+            CompilerRecoveryAction::PreserveBabelTranspiledOutput
+        );
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Terser),
+            CompilerRecoveryAction::PreserveTerserMinifiedOutput
+        );
+        assert_eq!(
+            CompilerRecoveryAction::from_compiler(CompilerKind::Unknown),
+            CompilerRecoveryAction::DirectModuleSource
+        );
     }
 
     #[test]
