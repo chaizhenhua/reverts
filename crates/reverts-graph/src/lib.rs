@@ -20,6 +20,7 @@ use oxc_ast::{
     },
 };
 use oxc_parser::{ParseOptions, Parser};
+use oxc_span::GetSpan;
 use oxc_syntax::{
     operator::{AssignmentOperator, LogicalOperator},
     scope::ScopeFlags,
@@ -38,8 +39,43 @@ pub struct RevertsGraph {
     def_use: DefUseGraph,
     control_flow: ControlFlowGraph,
     import_export: ImportExportGraph,
+    runtime_preludes: BTreeMap<u32, RuntimePrelude>,
+    runtime_imports: BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>>,
     ast_facts: Vec<AstFact>,
     ast_errors: Vec<AstFactError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePrelude {
+    pub source_file_id: u32,
+    pub source_file_path: String,
+    pub source: String,
+    pub bindings: BTreeMap<BindingName, RuntimePreludeBindingKind>,
+}
+
+impl RuntimePrelude {
+    #[must_use]
+    pub fn defines(&self, binding: &BindingName) -> bool {
+        self.bindings.contains_key(binding)
+    }
+
+    #[must_use]
+    pub fn binding_kind(&self, binding: &BindingName) -> Option<RuntimePreludeBindingKind> {
+        self.bindings.get(binding).copied()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimePreludeBindingKind {
+    CommonJsWrapper,
+    LazyInitializer,
+    SourceBacked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimePreludeImport {
+    pub source_file_id: u32,
+    pub binding: BindingName,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,6 +233,7 @@ impl RevertsGraph {
         let mut ast_facts = Vec::new();
         let mut ast_errors = Vec::new();
         let mut control_flow = ControlFlowGraph::default();
+        let runtime_preludes = extract_runtime_preludes(input);
         for module in &input.modules {
             if module.kind == ModuleKind::Package {
                 continue;
@@ -219,6 +256,8 @@ impl RevertsGraph {
                 }),
             }
         }
+        let runtime_imports =
+            resolve_runtime_prelude_imports(&modules, &runtime_preludes, &mut def_use);
 
         Self {
             modules,
@@ -226,6 +265,8 @@ impl RevertsGraph {
             def_use,
             control_flow,
             import_export,
+            runtime_preludes,
+            runtime_imports,
             ast_facts,
             ast_errors,
         }
@@ -275,6 +316,24 @@ impl RevertsGraph {
     #[must_use]
     pub fn import_export(&self) -> &ImportExportGraph {
         &self.import_export
+    }
+
+    #[must_use]
+    pub fn runtime_prelude(&self, source_file_id: u32) -> Option<&RuntimePrelude> {
+        self.runtime_preludes.get(&source_file_id)
+    }
+
+    #[must_use]
+    pub fn runtime_preludes(&self) -> &BTreeMap<u32, RuntimePrelude> {
+        &self.runtime_preludes
+    }
+
+    #[must_use]
+    pub fn runtime_imports_for(&self, module_id: ModuleId) -> Vec<RuntimePreludeImport> {
+        self.runtime_imports
+            .get(&module_id)
+            .map(|imports| imports.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -362,6 +421,236 @@ fn apply_ast_fact(
         }
         AstFactKind::WrapperRegion(_) => {}
     }
+}
+
+fn extract_runtime_preludes(input: &InputBundle) -> BTreeMap<u32, RuntimePrelude> {
+    let mut preludes = BTreeMap::new();
+    for source_file in &input.source_files {
+        let Some(source) = source_file.source.as_deref() else {
+            continue;
+        };
+        let Some(prefix_end) = runtime_prelude_prefix_end(input, source_file.id) else {
+            continue;
+        };
+        if prefix_end == 0 {
+            continue;
+        }
+        let Some(prefix_source) = source.get(..prefix_end) else {
+            continue;
+        };
+        if prefix_source.trim().is_empty() {
+            continue;
+        }
+        if let Some(prelude) =
+            parse_runtime_prelude(source_file.id, source_file.path.as_str(), prefix_source)
+        {
+            preludes.insert(source_file.id, prelude);
+        }
+    }
+    preludes
+}
+
+fn runtime_prelude_prefix_end(input: &InputBundle, source_file_id: u32) -> Option<usize> {
+    input
+        .modules
+        .iter()
+        .filter(|module| module.source_file_id == Some(source_file_id))
+        .filter_map(|module| module.source_span)
+        .map(|span| span.byte_start as usize)
+        .min()
+}
+
+fn parse_runtime_prelude(
+    source_file_id: u32,
+    source_file_path: &str,
+    source: &str,
+) -> Option<RuntimePrelude> {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(
+        Some(std::path::Path::new(source_file_path)),
+        ParseGoal::TypeScript,
+    ) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            let bindings = collect_runtime_prelude_bindings(&parsed.program, source);
+            if bindings.is_empty() {
+                return None;
+            }
+            return Some(RuntimePrelude {
+                source_file_id,
+                source_file_path: source_file_path.to_string(),
+                source: source.to_string(),
+                bindings,
+            });
+        }
+    }
+
+    None
+}
+
+fn collect_runtime_prelude_bindings(
+    program: &Program<'_>,
+    source: &str,
+) -> BTreeMap<BindingName, RuntimePreludeBindingKind> {
+    let mut bindings = BTreeMap::new();
+    for statement in &program.body {
+        collect_statement_runtime_prelude_bindings(statement, source, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_statement_runtime_prelude_bindings(
+    statement: &Statement<'_>,
+    source: &str,
+    bindings: &mut BTreeMap<BindingName, RuntimePreludeBindingKind>,
+) {
+    match statement {
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                let kind = declarator
+                    .init
+                    .as_ref()
+                    .map_or(RuntimePreludeBindingKind::SourceBacked, |init| {
+                        runtime_binding_kind_from_initializer(init, source)
+                    });
+                for binding in binding_pattern_names(&declarator.id) {
+                    bindings.insert(BindingName::new(binding), kind);
+                }
+            }
+        }
+        Statement::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                bindings.insert(
+                    BindingName::new(id.name.as_str()),
+                    RuntimePreludeBindingKind::SourceBacked,
+                );
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                bindings.insert(
+                    BindingName::new(id.name.as_str()),
+                    RuntimePreludeBindingKind::SourceBacked,
+                );
+            }
+        }
+        Statement::ImportDeclaration(declaration) => {
+            let mut imported = BTreeSet::new();
+            collect_import_module_bindings(declaration, &mut imported);
+            for binding in imported {
+                bindings.insert(
+                    BindingName::new(binding),
+                    RuntimePreludeBindingKind::SourceBacked,
+                );
+            }
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                for binding in declaration_binding_names(declaration) {
+                    bindings.insert(
+                        BindingName::new(binding),
+                        RuntimePreludeBindingKind::SourceBacked,
+                    );
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(declaration) => match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    bindings.insert(
+                        BindingName::new(id.name.as_str()),
+                        RuntimePreludeBindingKind::SourceBacked,
+                    );
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    bindings.insert(
+                        BindingName::new(id.name.as_str()),
+                        RuntimePreludeBindingKind::SourceBacked,
+                    );
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn runtime_binding_kind_from_initializer(
+    init: &Expression<'_>,
+    source: &str,
+) -> RuntimePreludeBindingKind {
+    let span = init.span();
+    let Some(snippet) = source.get(span.start as usize..span.end as usize) else {
+        return RuntimePreludeBindingKind::SourceBacked;
+    };
+    let compact = compact_source(snippet);
+    if looks_like_commonjs_wrapper(&compact) {
+        RuntimePreludeBindingKind::CommonJsWrapper
+    } else if looks_like_lazy_initializer(&compact) {
+        RuntimePreludeBindingKind::LazyInitializer
+    } else {
+        RuntimePreludeBindingKind::SourceBacked
+    }
+}
+
+fn compact_source(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn looks_like_commonjs_wrapper(compact: &str) -> bool {
+    compact.contains("=>()=>") && compact.contains("{exports:{}}") && compact.contains(".exports")
+}
+
+fn looks_like_lazy_initializer(compact: &str) -> bool {
+    compact.contains("=>()=>") && compact.contains("&&") && compact.contains("=0")
+}
+
+fn resolve_runtime_prelude_imports(
+    modules: &BTreeMap<ModuleId, ModuleInput>,
+    runtime_preludes: &BTreeMap<u32, RuntimePrelude>,
+    def_use: &mut DefUseGraph,
+) -> BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>> {
+    let unresolved_writes = def_use
+        .unresolved_writes()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut runtime_imports = BTreeMap::<ModuleId, BTreeSet<RuntimePreludeImport>>::new();
+
+    for (module_id, binding) in def_use.unresolved_reads() {
+        if unresolved_writes.contains(&(module_id, binding.clone())) {
+            continue;
+        }
+        let Some(module) = modules.get(&module_id) else {
+            continue;
+        };
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        let Some(prelude) = runtime_preludes.get(&source_file_id) else {
+            continue;
+        };
+        if !prelude.defines(&binding) {
+            continue;
+        }
+
+        def_use.import(module_id, binding.as_str());
+        runtime_imports
+            .entry(module_id)
+            .or_default()
+            .insert(RuntimePreludeImport {
+                source_file_id,
+                binding,
+            });
+    }
+
+    runtime_imports
 }
 
 impl AstFactExtractor {
@@ -1213,11 +1502,13 @@ impl ImportExportGraph {
 #[cfg(test)]
 mod tests {
     use reverts_input::{
-        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
+        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
-    use reverts_ir::{BindingConstraintKind, ControlFlowEdgeKind, ControlFlowNodeKind, ModuleId};
+    use reverts_ir::{
+        BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowNodeKind, ModuleId,
+    };
 
-    use super::{AstFactKind, AstWrapperKind, RevertsGraph};
+    use super::{AstFactKind, AstWrapperKind, RevertsGraph, RuntimePreludeBindingKind};
 
     #[test]
     fn input_symbols_become_graph_definitions() {
@@ -1696,6 +1987,79 @@ mod tests {
                 .definitions_for(ModuleId(1))
                 .iter()
                 .any(|binding| binding.as_str() == "run")
+        );
+    }
+
+    #[test]
+    fn graph_resolves_arbitrary_bundle_prelude_helpers_without_fixed_names() {
+        let prelude = concat!(
+            "var $wrap7 = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var _lazy9 = (init, cache) => () => (init && (cache = init(init = 0)), cache);\n",
+        );
+        let body = concat!(
+            "var entry = $wrap7((exports, module) => { module.exports = 1; });\n",
+            "_lazy9();\n",
+            "export { entry };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let runtime_imports = graph.runtime_imports_for(ModuleId(1));
+        let runtime_binding_names = runtime_imports
+            .iter()
+            .map(|import| import.binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            prelude.binding_kind(&BindingName::new("$wrap7")),
+            Some(RuntimePreludeBindingKind::CommonJsWrapper)
+        );
+        assert_eq!(
+            prelude.binding_kind(&BindingName::new("_lazy9")),
+            Some(RuntimePreludeBindingKind::LazyInitializer)
+        );
+        assert_eq!(runtime_binding_names, vec!["$wrap7", "_lazy9"]);
+        assert!(graph.def_use().unresolved_reads().is_empty());
+    }
+
+    #[test]
+    fn graph_does_not_resolve_bundle_prelude_writes_as_imports() {
+        let prelude = "var shared = 0;\n";
+        let body = "shared = 1;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.runtime_imports_for(ModuleId(1)).is_empty());
+        assert!(
+            graph
+                .def_use()
+                .unresolved_writes()
+                .iter()
+                .any(|(module_id, binding)| *module_id == ModuleId(1)
+                    && binding.as_str() == "shared")
         );
     }
 }

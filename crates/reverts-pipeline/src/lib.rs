@@ -196,7 +196,7 @@ mod tests {
     use reverts_emitter::emit_project;
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
+        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{
         BindingName, BindingShape, BindingSourceKind, BindingUseKind, ModuleId, ModuleKind,
@@ -451,6 +451,55 @@ mod tests {
             ParseGoal::TypeScript,
         )
         .expect("emitted fixture should parse");
+    }
+
+    #[test]
+    fn pipeline_wires_arbitrary_bundle_prelude_runtime_helpers_end_to_end() {
+        let prelude = concat!(
+            "var $wrap7 = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var _lazy9 = (init, cache) => () => (init && (cache = init(init = 0)), cache);\n",
+        );
+        let body = concat!(
+            "var entry = $wrap7((exports, module) => { module.exports = 1; });\n",
+            "_lazy9();\n",
+            "export { entry };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.project.files.len(), 2);
+        let entry = run
+            .project
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be emitted");
+        let runtime = run
+            .project
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-prelude.ts")
+            .expect("runtime prelude should be emitted");
+        assert!(entry.source.contains("import { $wrap7, _lazy9 }"));
+        assert!(
+            entry
+                .source
+                .contains("from './runtime/source-1-prelude.js';")
+        );
+        assert!(runtime.source.contains("var $wrap7"));
+        assert!(runtime.source.contains("export { $wrap7, _lazy9 };"));
     }
 
     #[test]

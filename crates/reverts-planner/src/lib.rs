@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use reverts_graph::RevertsGraph;
+use reverts_graph::{RevertsGraph, RuntimePreludeImport};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{ParseGoal, format_source_pretty, parse_error_message};
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
@@ -213,6 +213,7 @@ pub struct ImportExportPlanner;
 impl ImportExportPlanner {
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
+        let mut used_runtime_preludes = BTreeMap::<u32, BTreeSet<BindingName>>::new();
 
         for module in program.model().modules() {
             if module.kind == ModuleKind::Package {
@@ -227,6 +228,7 @@ impl ImportExportPlanner {
             let compiler_profile = program.compiler_profile().module(module.id);
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
             file.set_compiler_recovery(compiler_recovery);
+            let mut planned_bindings = BTreeSet::<BindingName>::new();
 
             for decision in program.package_imports_for(module.id) {
                 file.add_import(PlannedImport {
@@ -236,9 +238,31 @@ impl ImportExportPlanner {
                 });
             }
 
+            let runtime_imports = program.model().graph().runtime_imports_for(module.id);
+            for (source_file_id, bindings) in group_runtime_imports(runtime_imports) {
+                used_runtime_preludes
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(bindings.iter().cloned());
+                let specifier =
+                    relative_import_specifier(path, runtime_prelude_path(source_file_id).as_str());
+                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+                for binding in bindings {
+                    if planned_bindings.contains(&binding) {
+                        continue;
+                    }
+                    planned_bindings.insert(binding.clone());
+                    file.add_binding(PlannedBinding::new(
+                        binding.clone(),
+                        binding,
+                        BindingShape::Unknown,
+                        true,
+                    ));
+                }
+            }
+
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
             let source_imports = program.model().graph().ast_imports_for(module.id);
-            let mut planned_bindings = BTreeSet::<BindingName>::new();
             for original in program.model().graph().definitions_for(module.id) {
                 let emitted = program
                     .semantic_names()
@@ -290,6 +314,27 @@ impl ImportExportPlanner {
             plan.push_file(file);
         }
 
+        for (source_file_id, exported_bindings) in used_runtime_preludes {
+            let Some(prelude) = program.model().graph().runtime_prelude(source_file_id) else {
+                continue;
+            };
+            let mut file = PlannedFile::new(runtime_prelude_path(source_file_id));
+            file.push_source(prelude.source.clone());
+            for binding in prelude.bindings.keys() {
+                file.add_binding(PlannedBinding::new(
+                    binding.clone(),
+                    binding.clone(),
+                    BindingShape::Unknown,
+                    true,
+                ));
+            }
+            file.push_source(named_export_statement(exported_bindings.iter()));
+            for binding in exported_bindings {
+                file.add_export_with_source_backed(binding, true);
+            }
+            plan.push_file(file);
+        }
+
         Ok(plan)
     }
 
@@ -326,6 +371,91 @@ fn normalize_source_for_emit(
     })
 }
 
+fn group_runtime_imports(
+    imports: Vec<RuntimePreludeImport>,
+) -> BTreeMap<u32, BTreeSet<BindingName>> {
+    let mut grouped = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+    for import in imports {
+        grouped
+            .entry(import.source_file_id)
+            .or_default()
+            .insert(import.binding);
+    }
+    grouped
+}
+
+fn runtime_prelude_path(source_file_id: u32) -> String {
+    format!("modules/runtime/source-{source_file_id}-prelude.ts")
+}
+
+fn named_import_statement<'a>(
+    bindings: impl Iterator<Item = &'a BindingName>,
+    specifier: &str,
+) -> String {
+    let names = bindings
+        .map(BindingName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("import {{ {names} }} from '{specifier}';")
+}
+
+fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
+    let names = bindings
+        .map(BindingName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("export {{ {names} }};")
+}
+
+fn relative_import_specifier(from_file: &str, to_file: &str) -> String {
+    let from_dir = path_dir_segments(from_file);
+    let to_segments = path_file_segments_with_js_extension(to_file);
+    let common = common_prefix_len(&from_dir, &to_segments);
+    let mut relative = Vec::new();
+    relative.extend(std::iter::repeat_n(
+        "..".to_string(),
+        from_dir.len().saturating_sub(common),
+    ));
+    relative.extend(to_segments[common..].iter().cloned());
+    let joined = relative.join("/");
+    if joined.starts_with("..") {
+        joined
+    } else {
+        format!("./{joined}")
+    }
+}
+
+fn path_dir_segments(path: &str) -> Vec<String> {
+    let mut segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    segments.pop();
+    segments
+}
+
+fn path_file_segments_with_js_extension(path: &str) -> Vec<String> {
+    let mut segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if let Some(last) = segments.last_mut()
+        && let Some(stripped) = last.strip_suffix(".ts")
+    {
+        *last = format!("{stripped}.js");
+    }
+    segments
+}
+
+fn common_prefix_len(left: &[String], right: &[String]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
     UnparseableSource {
@@ -356,7 +486,7 @@ impl Error for PlanError {}
 #[cfg(test)]
 mod tests {
     use reverts_input::{
-        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
+        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{BindingShape, BindingShapeSolution, ModuleId};
     use reverts_model::{
@@ -677,5 +807,60 @@ mod tests {
                 .any(|binding| { binding.original.as_str() == "answer" && binding.source_backed })
         );
         assert_eq!(plan.files[0].exports[0].binding.as_str(), "answer");
+    }
+
+    #[test]
+    fn enriched_program_plans_runtime_prelude_imports_from_arbitrary_binding_names() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var $wrap7 = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var _lazy9 = (init, cache) => () => (init && (cache = init(init = 0)), cache);\n",
+        );
+        let body = concat!(
+            "var entry = $wrap7((exports, module) => { module.exports = 1; });\n",
+            "_lazy9();\n",
+            "export { entry };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let module_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("module file should be planned");
+        let runtime_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-prelude.ts")
+            .expect("runtime prelude should be planned");
+
+        assert!(module_file.body[0].contains("import { $wrap7, _lazy9 }"));
+        assert!(module_file.body[0].contains("from './runtime/source-1-prelude.js'"));
+        assert!(
+            runtime_file
+                .body
+                .iter()
+                .any(|source| source.contains("export { $wrap7, _lazy9 };"))
+        );
     }
 }
