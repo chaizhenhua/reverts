@@ -4,8 +4,8 @@ use std::path::Path;
 
 use reverts_graph::RevertsGraph;
 use reverts_ir::{BindingName, ModuleId, ModuleKind};
-use reverts_js::{JsError, normalize_source_for_pipeline};
-use reverts_model::EnrichedProgram;
+use reverts_js::{JsError, ParseGoal, format_source_pretty};
+use reverts_model::{CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub struct PlannedFile {
     pub imports: Vec<PlannedImport>,
     pub exports: Vec<PlannedExport>,
     pub body: Vec<String>,
+    pub source_strategy: SourceCompilerStrategy,
 }
 
 impl PlannedFile {
@@ -35,6 +36,7 @@ impl PlannedFile {
             imports: Vec::new(),
             exports: Vec::new(),
             body: Vec::new(),
+            source_strategy: SourceCompilerStrategy::DirectSource,
         }
     }
 
@@ -49,6 +51,10 @@ impl PlannedFile {
     pub fn push_source(&mut self, source: impl Into<String>) {
         self.body.push(source.into());
     }
+
+    pub fn set_source_strategy(&mut self, source_strategy: SourceCompilerStrategy) {
+        self.source_strategy = source_strategy;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +66,43 @@ pub struct PlannedImport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedExport {
     pub binding: BindingName,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCompilerStrategy {
+    #[default]
+    DirectSource,
+    WebpackRuntime,
+    EsbuildHelpers,
+    RollupFacade,
+    BabelTranspiled,
+    TerserMinified,
+}
+
+impl SourceCompilerStrategy {
+    #[must_use]
+    pub fn from_profile(profile: &ModuleCompilerProfile) -> Self {
+        match profile.compiler {
+            CompilerKind::Unknown => Self::DirectSource,
+            CompilerKind::Webpack => Self::WebpackRuntime,
+            CompilerKind::Esbuild => Self::EsbuildHelpers,
+            CompilerKind::Rollup => Self::RollupFacade,
+            CompilerKind::Babel => Self::BabelTranspiled,
+            CompilerKind::Terser => Self::TerserMinified,
+        }
+    }
+
+    #[must_use]
+    pub const fn parse_goal(self) -> ParseGoal {
+        match self {
+            Self::DirectSource => ParseGoal::TypeScript,
+            Self::WebpackRuntime
+            | Self::EsbuildHelpers
+            | Self::RollupFacade
+            | Self::BabelTranspiled
+            | Self::TerserMinified => ParseGoal::JavaScript,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +122,9 @@ impl ImportExportPlanner {
                 .module_path(module.id)
                 .unwrap_or(module.semantic_path.as_str());
             let mut file = PlannedFile::new(path);
+            let compiler_profile = program.compiler_profile().module(module.id);
+            let source_strategy = SourceCompilerStrategy::from_profile(&compiler_profile);
+            file.set_source_strategy(source_strategy);
 
             for decision in program.package_imports_for(module.id) {
                 file.add_import(PlannedImport {
@@ -92,6 +138,7 @@ impl ImportExportPlanner {
                     source.module_id,
                     source.source_file_path,
                     source.source,
+                    source_strategy,
                 )?;
                 file.push_source(normalized);
             }
@@ -121,14 +168,29 @@ fn normalize_source_for_emit(
     module_id: ModuleId,
     path: &str,
     source: &str,
+    source_strategy: SourceCompilerStrategy,
 ) -> Result<String, PlanError> {
-    normalize_source_for_pipeline(source, Some(Path::new(path))).map_err(|error| {
-        PlanError::UnparseableSource {
-            module_id,
-            path: path.to_string(),
-            message: parse_error_message(&error),
-        }
+    format_source_pretty(
+        source,
+        source_path_hint(path, source_strategy),
+        source_strategy.parse_goal(),
+    )
+    .map_err(|error| PlanError::UnparseableSource {
+        module_id,
+        path: path.to_string(),
+        message: parse_error_message(&error),
     })
+}
+
+fn source_path_hint(path: &str, source_strategy: SourceCompilerStrategy) -> Option<&Path> {
+    match source_strategy {
+        SourceCompilerStrategy::DirectSource => Some(Path::new(path)),
+        SourceCompilerStrategy::WebpackRuntime
+        | SourceCompilerStrategy::EsbuildHelpers
+        | SourceCompilerStrategy::RollupFacade
+        | SourceCompilerStrategy::BabelTranspiled
+        | SourceCompilerStrategy::TerserMinified => None,
+    }
 }
 
 fn parse_error_message(error: &JsError) -> String {
@@ -180,9 +242,11 @@ impl Error for PlanError {}
 mod tests {
     use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput};
     use reverts_ir::ModuleId;
-    use reverts_model::ProgramModel;
+    use reverts_model::{
+        CompilerEvidence, CompilerKind, CompilerProfile, ModuleCompilerProfile, ProgramModel,
+    };
 
-    use super::ImportExportPlanner;
+    use super::{ImportExportPlanner, SourceCompilerStrategy};
 
     #[test]
     fn enriched_program_plans_real_source_without_synthetic_declarations() {
@@ -278,5 +342,49 @@ mod tests {
 
         assert_eq!(plan.files[0].body[0].trim_end(), "export const one = 1;");
         assert_eq!(plan.files[1].body[0].trim_end(), "export const two = 2;");
+    }
+
+    #[test]
+    fn compiler_profile_selects_webpack_source_strategy() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("__webpack_require__(1);".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let mut compiler_profile = CompilerProfile::default();
+        compiler_profile.insert_module(
+            ModuleId(1),
+            ModuleCompilerProfile::new(
+                CompilerKind::Webpack,
+                false,
+                vec![CompilerEvidence::Identifier(
+                    "__webpack_require__".to_string(),
+                )],
+            ),
+        );
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        )
+        .with_compiler_profile(compiler_profile);
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        assert_eq!(
+            plan.files[0].source_strategy,
+            SourceCompilerStrategy::WebpackRuntime
+        );
+        assert_eq!(plan.files[0].body[0].trim_end(), "__webpack_require__(1);");
     }
 }

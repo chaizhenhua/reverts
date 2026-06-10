@@ -102,6 +102,7 @@ pub struct EnrichedProgram {
     semantic_names: SemanticNameMap,
     package_imports: Vec<PackageImportDecision>,
     binding_shapes: BindingShapeSolution,
+    compiler_profile: CompilerProfile,
 }
 
 impl EnrichedProgram {
@@ -117,7 +118,14 @@ impl EnrichedProgram {
             semantic_names,
             package_imports,
             binding_shapes,
+            compiler_profile: CompilerProfile::default(),
         }
+    }
+
+    #[must_use]
+    pub fn with_compiler_profile(mut self, compiler_profile: CompilerProfile) -> Self {
+        self.compiler_profile = compiler_profile;
+        self
     }
 
     #[must_use]
@@ -147,6 +155,73 @@ impl EnrichedProgram {
     pub fn binding_shape(&self, module_id: ModuleId, original_name: &str) -> BindingShape {
         self.binding_shapes.shape_of(module_id, original_name)
     }
+
+    #[must_use]
+    pub fn compiler_profile(&self) -> &CompilerProfile {
+        &self.compiler_profile
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CompilerProfile {
+    modules: BTreeMap<ModuleId, ModuleCompilerProfile>,
+}
+
+impl CompilerProfile {
+    pub fn insert_module(&mut self, module_id: ModuleId, profile: ModuleCompilerProfile) {
+        self.modules.insert(module_id, profile);
+    }
+
+    #[must_use]
+    pub fn module(&self, module_id: ModuleId) -> ModuleCompilerProfile {
+        self.modules.get(&module_id).cloned().unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleCompilerProfile {
+    pub compiler: CompilerKind,
+    pub minified: bool,
+    pub evidence: Vec<CompilerEvidence>,
+}
+
+impl Default for ModuleCompilerProfile {
+    fn default() -> Self {
+        Self {
+            compiler: CompilerKind::Unknown,
+            minified: false,
+            evidence: Vec::new(),
+        }
+    }
+}
+
+impl ModuleCompilerProfile {
+    #[must_use]
+    pub fn new(compiler: CompilerKind, minified: bool, evidence: Vec<CompilerEvidence>) -> Self {
+        Self {
+            compiler,
+            minified,
+            evidence,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CompilerKind {
+    #[default]
+    Unknown,
+    Webpack,
+    Esbuild,
+    Rollup,
+    Babel,
+    Terser,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompilerEvidence {
+    Identifier(String),
+    SourcePattern(&'static str),
+    MinifiedLayout,
 }
 
 #[cfg(test)]

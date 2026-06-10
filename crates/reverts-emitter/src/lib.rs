@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::Path;
 
 use reverts_ir::BindingName;
-use reverts_js::{JsError, ParseGoal, format_source_pretty, sanitize_identifier};
+use reverts_js::{JsError, format_source_pretty, sanitize_identifier};
 use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
 
@@ -58,8 +58,8 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
 
     let formatted = format_source_pretty(
         &source,
-        Some(Path::new(file.path.as_str())),
-        ParseGoal::TypeScript,
+        emit_path_hint(file),
+        file.source_strategy.parse_goal(),
     )
     .map_err(|source_error| EmitError::UnparseableOutput {
         path: file.path.clone(),
@@ -70,6 +70,19 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         path: file.path.clone(),
         source: formatted,
     })
+}
+
+fn emit_path_hint(file: &PlannedFile) -> Option<&Path> {
+    match file.source_strategy {
+        reverts_planner::SourceCompilerStrategy::DirectSource => {
+            Some(Path::new(file.path.as_str()))
+        }
+        reverts_planner::SourceCompilerStrategy::WebpackRuntime
+        | reverts_planner::SourceCompilerStrategy::EsbuildHelpers
+        | reverts_planner::SourceCompilerStrategy::RollupFacade
+        | reverts_planner::SourceCompilerStrategy::BabelTranspiled
+        | reverts_planner::SourceCompilerStrategy::TerserMinified => None,
+    }
 }
 
 fn accepted_specifier(resolution: &PackageResolution) -> Option<&str> {

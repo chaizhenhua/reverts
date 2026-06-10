@@ -7,7 +7,10 @@ use reverts_ir::{
     BindingName, BindingShapeSolution, ModuleId, PackageSurface, split_bare_specifier,
 };
 use reverts_js::sanitize_identifier;
-use reverts_model::{EnrichedProgram, PackageImportDecision, ProgramModel, SemanticNameMap};
+use reverts_model::{
+    CompilerEvidence, CompilerKind, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
+    PackageImportDecision, ProgramModel, SemanticNameMap,
+};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::{PackageResolution, PackageSurfaceIndex};
 
@@ -21,6 +24,7 @@ pub struct EnrichmentOutput {
 pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let semantic_names = assign_semantic_names(&model);
     let binding_shapes = solve_binding_shapes(&model);
+    let compiler_profile = detect_compiler_profile(&model);
     let package_index = build_package_surface_index(model.input().package_attributions.as_slice());
     let mut audit = AuditReport::default();
     audit.extend(audit_ast_fact_extraction(&model));
@@ -28,7 +32,8 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     EnrichmentOutput {
-        program: EnrichedProgram::new(model, semantic_names, package_imports, binding_shapes),
+        program: EnrichedProgram::new(model, semantic_names, package_imports, binding_shapes)
+            .with_compiler_profile(compiler_profile),
         audit,
     }
 }
@@ -114,6 +119,173 @@ fn solve_binding_shapes(model: &ProgramModel) -> BindingShapeSolution {
     }
     solution
 }
+
+fn detect_compiler_profile(model: &ProgramModel) -> CompilerProfile {
+    let mut identifiers_by_module = BTreeMap::<ModuleId, BTreeSet<String>>::new();
+    for fact in model.graph().ast_facts() {
+        if let Some(binding) = &fact.binding {
+            identifiers_by_module
+                .entry(fact.module_id)
+                .or_default()
+                .insert(binding.as_str().to_string());
+        }
+    }
+
+    let mut profile = CompilerProfile::default();
+    for module in model.modules() {
+        let Some(source) = model.input().module_source_slice(module.id) else {
+            continue;
+        };
+        let identifiers = identifiers_by_module
+            .get(&module.id)
+            .cloned()
+            .unwrap_or_default();
+        profile.insert_module(
+            module.id,
+            detect_module_compiler_profile(source.source, &identifiers),
+        );
+    }
+    profile
+}
+
+fn detect_module_compiler_profile(
+    source: &str,
+    identifiers: &BTreeSet<String>,
+) -> ModuleCompilerProfile {
+    let mut evidence = Vec::new();
+    let minified = looks_minified(source);
+    if minified {
+        evidence.push(CompilerEvidence::MinifiedLayout);
+    }
+
+    let compiler =
+        if collect_identifier_evidence(identifiers, WEBPACK_RUNTIME_IDENTIFIERS, &mut evidence) {
+            CompilerKind::Webpack
+        } else if collect_identifier_evidence(
+            identifiers,
+            ESBUILD_RUNTIME_IDENTIFIERS,
+            &mut evidence,
+        ) {
+            CompilerKind::Esbuild
+        } else if collect_identifier_evidence(
+            identifiers,
+            ROLLUP_RUNTIME_IDENTIFIERS,
+            &mut evidence,
+        ) || collect_source_pattern_evidence(
+            source,
+            ROLLUP_SOURCE_PATTERNS,
+            &mut evidence,
+        ) {
+            CompilerKind::Rollup
+        } else if collect_identifier_evidence(identifiers, BABEL_RUNTIME_IDENTIFIERS, &mut evidence)
+        {
+            CompilerKind::Babel
+        } else if minified {
+            CompilerKind::Terser
+        } else {
+            CompilerKind::Unknown
+        };
+
+    ModuleCompilerProfile::new(compiler, minified, evidence)
+}
+
+fn collect_identifier_evidence(
+    identifiers: &BTreeSet<String>,
+    candidates: &[&'static str],
+    evidence: &mut Vec<CompilerEvidence>,
+) -> bool {
+    let mut matched = false;
+    for candidate in candidates {
+        if identifiers.contains(*candidate) {
+            evidence.push(CompilerEvidence::Identifier((*candidate).to_string()));
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn collect_source_pattern_evidence(
+    source: &str,
+    candidates: &[&'static str],
+    evidence: &mut Vec<CompilerEvidence>,
+) -> bool {
+    let mut matched = false;
+    for candidate in candidates {
+        if source.contains(*candidate) {
+            evidence.push(CompilerEvidence::SourcePattern(candidate));
+            matched = true;
+        }
+    }
+    matched
+}
+
+fn looks_minified(source: &str) -> bool {
+    let byte_len = source.len();
+    if byte_len < 120 {
+        return false;
+    }
+
+    let non_empty_lines = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    if non_empty_lines.is_empty() {
+        return false;
+    }
+
+    let max_line_len = non_empty_lines
+        .iter()
+        .map(|line| line.len())
+        .max()
+        .unwrap_or(0);
+    let whitespace_count = source.bytes().filter(u8::is_ascii_whitespace).count();
+    let whitespace_ratio = whitespace_count as f64 / byte_len as f64;
+    let average_line_len = byte_len / non_empty_lines.len();
+
+    (non_empty_lines.len() == 1 && max_line_len >= 120)
+        || (average_line_len >= 160 && whitespace_ratio <= 0.12)
+}
+
+const WEBPACK_RUNTIME_IDENTIFIERS: &[&str] = &[
+    "__webpack_require__",
+    "__webpack_exports__",
+    "__webpack_modules__",
+    "__webpack_module_cache__",
+    "webpackChunk",
+    "webpackJsonp",
+];
+
+const ESBUILD_RUNTIME_IDENTIFIERS: &[&str] = &[
+    "__defProp",
+    "__export",
+    "__copyProps",
+    "__toESM",
+    "__toCommonJS",
+    "__commonJS",
+    "__require",
+];
+
+const ROLLUP_RUNTIME_IDENTIFIERS: &[&str] = &[
+    "commonjsGlobal",
+    "getDefaultExportFromCjs",
+    "getAugmentedNamespace",
+    "_mergeNamespaces",
+    "_interopNamespaceDefault",
+    "_interopDefaultLegacy",
+];
+
+const ROLLUP_SOURCE_PATTERNS: &[&str] = &["Object.freeze"];
+
+const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
+    "_interopRequireDefault",
+    "_interopRequireWildcard",
+    "_classCallCheck",
+    "_createClass",
+    "_defineProperty",
+    "_inherits",
+    "_possibleConstructorReturn",
+    "regeneratorRuntime",
+];
 
 fn build_package_surface_index(attributions: &[PackageAttributionInput]) -> PackageSurfaceIndex {
     let mut surfaces = BTreeMap::<String, PackageSurface>::new();
@@ -215,15 +387,18 @@ fn package_namespace_binding(specifier: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
     };
     use reverts_ir::ModuleId;
+    use reverts_model::CompilerKind;
     use reverts_observe::FindingCode;
     use reverts_package::PackageResolution;
 
-    use super::{ProgramModel, enrich_program};
+    use super::{ProgramModel, detect_module_compiler_profile, enrich_program};
 
     fn valid_rows() -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -325,6 +500,59 @@ mod tests {
     }
 
     #[test]
+    fn compiler_profile_detector_classifies_runtime_fingerprints() {
+        assert_eq!(
+            detect_module_compiler_profile("", &identifiers(["__webpack_require__"])).compiler,
+            CompilerKind::Webpack
+        );
+        assert_eq!(
+            detect_module_compiler_profile("", &identifiers(["__toCommonJS"])).compiler,
+            CompilerKind::Esbuild
+        );
+        assert_eq!(
+            detect_module_compiler_profile("Object.freeze({ answer: 42 })", &BTreeSet::new())
+                .compiler,
+            CompilerKind::Rollup
+        );
+        assert_eq!(
+            detect_module_compiler_profile("", &identifiers(["_interopRequireDefault"])).compiler,
+            CompilerKind::Babel
+        );
+        assert_eq!(
+            detect_module_compiler_profile(
+                "function a(b){return b?b.c?b.c.d:b.c:b}var c={};for(var d=0;d<200;d++)c[d]=a({c:{d:d}});module.exports=c;function e(f){return f&&f.g?f.g.h:0}exports.e=e;",
+                &BTreeSet::new()
+            )
+            .compiler,
+            CompilerKind::Terser
+        );
+    }
+
+    #[test]
+    fn enrich_program_records_compiler_profile_from_ast_facts() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("__webpack_require__(1);".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert_eq!(
+            output
+                .program
+                .compiler_profile()
+                .module(ModuleId(1))
+                .compiler,
+            CompilerKind::Webpack
+        );
+    }
+
+    #[test]
     fn incompatible_ast_shape_facts_are_reported_as_audit_finding() {
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(
@@ -348,5 +576,9 @@ NativeModuleType();
         let output = enrich_program(ProgramModel::from_input(input));
 
         assert!(output.audit.has(FindingCode::AmbiguousBindingShape));
+    }
+
+    fn identifiers<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
+        values.into_iter().map(str::to_string).collect()
     }
 }
