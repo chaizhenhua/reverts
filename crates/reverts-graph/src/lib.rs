@@ -6,10 +6,11 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
-        ExportAllDeclaration, ExportDefaultDeclaration, ExportNamedDeclaration, Expression,
-        Function, FunctionType, ImportDeclaration, ImportDeclarationSpecifier, ModuleExportName,
-        NewExpression, Program, SimpleAssignmentTarget, Statement, StaticMemberExpression,
-        UpdateExpression, VariableDeclarator,
+        ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
+        ImportDeclarationSpecifier, ModuleExportName, NewExpression, Program,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
+        VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -385,6 +386,7 @@ impl AstFactExtractor {
                     module_id: module.id,
                     facts: Vec::new(),
                     function_depth: 0,
+                    module_scope_bindings: collect_module_scope_bindings(&parsed.program),
                 };
                 visitor.visit_program(&parsed.program);
                 return Ok(AstExtraction {
@@ -522,6 +524,7 @@ struct AstFactVisitor {
     module_id: ModuleId,
     facts: Vec<AstFact>,
     function_depth: usize,
+    module_scope_bindings: BTreeSet<String>,
 }
 
 impl<'a> Visit<'a> for AstFactVisitor {
@@ -673,14 +676,19 @@ impl<'a> Visit<'a> for AstFactVisitor {
     fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
         if let Expression::Identifier(identifier) = &it.callee {
             self.constraint(identifier.name.as_str(), BindingConstraintKind::Call);
-            if identifier.name.as_str() == "require"
-                && let Some(specifier) = it.arguments.first().and_then(argument_string_literal)
-                && split_bare_specifier(specifier).is_some()
-            {
-                self.package_import(specifier);
-            }
         }
-        if let Some(kind) = iife_kind(&it.callee) {
+
+        if let Expression::Identifier(identifier) = &it.callee
+            && identifier.name.as_str() == "require"
+            && let Some(specifier) = it.arguments.first().and_then(argument_string_literal)
+            && split_bare_specifier(specifier).is_some()
+        {
+            self.package_import(specifier);
+        }
+
+        if self.function_depth == 0
+            && let Some(kind) = iife_kind(&it.callee)
+        {
             self.facts
                 .push(AstFact::wrapper_region(self.module_id, kind));
         }
@@ -698,7 +706,9 @@ impl<'a> Visit<'a> for AstFactVisitor {
             _ => {}
         }
 
-        if let Some(binding) = it.arguments.first().and_then(enum_initializer_binding) {
+        if self.function_depth == 0
+            && let Some(binding) = it.arguments.first().and_then(enum_initializer_binding)
+        {
             self.constraint(binding, BindingConstraintKind::EnumInitializer);
             self.facts.push(AstFact {
                 module_id: self.module_id,
@@ -734,19 +744,27 @@ impl<'a> Visit<'a> for AstFactVisitor {
 
 impl AstFactVisitor {
     fn definition(&mut self, binding: &str) {
+        if self.function_depth == 0 {
+            self.module_scope_bindings.insert(binding.to_string());
+        }
         self.facts
             .push(AstFact::definition(self.module_id, binding));
     }
 
     fn read(&mut self, binding: &str) {
-        self.facts.push(AstFact::read(self.module_id, binding));
+        if self.should_emit_binding_fact(binding) {
+            self.facts.push(AstFact::read(self.module_id, binding));
+        }
     }
 
     fn write(&mut self, binding: &str) {
-        self.facts.push(AstFact::write(self.module_id, binding));
+        if self.should_emit_binding_fact(binding) {
+            self.facts.push(AstFact::write(self.module_id, binding));
+        }
     }
 
     fn import(&mut self, binding: &str) {
+        self.module_scope_bindings.insert(binding.to_string());
         self.facts.push(AstFact::import(self.module_id, binding));
     }
 
@@ -760,8 +778,89 @@ impl AstFactVisitor {
     }
 
     fn constraint(&mut self, binding: &str, kind: BindingConstraintKind) {
-        self.facts
-            .push(AstFact::constraint(self.module_id, binding, kind));
+        if self.should_emit_binding_fact(binding) {
+            self.facts
+                .push(AstFact::constraint(self.module_id, binding, kind));
+        }
+    }
+
+    fn should_emit_binding_fact(&self, binding: &str) -> bool {
+        self.function_depth == 0 || self.module_scope_bindings.contains(binding)
+    }
+}
+
+fn collect_module_scope_bindings(program: &Program<'_>) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    for statement in &program.body {
+        collect_statement_module_bindings(statement, &mut bindings);
+    }
+    bindings
+}
+
+fn collect_statement_module_bindings(statement: &Statement<'_>, bindings: &mut BTreeSet<String>) {
+    match statement {
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                for binding in binding_pattern_names(&declarator.id) {
+                    bindings.insert(binding.to_string());
+                }
+            }
+        }
+        Statement::FunctionDeclaration(function) => {
+            if let Some(id) = &function.id {
+                bindings.insert(id.name.as_str().to_string());
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(id) = &class.id {
+                bindings.insert(id.name.as_str().to_string());
+            }
+        }
+        Statement::ImportDeclaration(declaration) => {
+            collect_import_module_bindings(declaration, bindings);
+        }
+        Statement::ExportNamedDeclaration(declaration) => {
+            if let Some(declaration) = &declaration.declaration {
+                for binding in declaration_binding_names(declaration) {
+                    bindings.insert(binding.to_string());
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(declaration) => match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    bindings.insert(id.name.as_str().to_string());
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    bindings.insert(id.name.as_str().to_string());
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn collect_import_module_bindings(
+    declaration: &ImportDeclaration<'_>,
+    bindings: &mut BTreeSet<String>,
+) {
+    if let Some(specifiers) = &declaration.specifiers {
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    bindings.insert(specifier.local.name.as_str().to_string());
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    bindings.insert(specifier.local.name.as_str().to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    bindings.insert(specifier.local.name.as_str().to_string());
+                }
+            }
+        }
     }
 }
 
@@ -888,7 +987,6 @@ fn initializer_constraint_kind(expression: &Expression<'_>) -> Option<BindingCon
 
 fn enum_initializer_binding<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
     match argument {
-        Argument::Identifier(identifier) => Some(identifier.name.as_str()),
         Argument::LogicalExpression(logical) if logical.operator == LogicalOperator::Or => {
             let left = expression_identifier(&logical.left)?;
             let right = assignment_expression_target(&logical.right)?;
@@ -906,7 +1004,6 @@ fn enum_initializer_binding<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
 
 fn expression_enum_initializer_binding<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
     match expression {
-        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
         Expression::LogicalExpression(logical) if logical.operator == LogicalOperator::Or => {
             let left = expression_identifier(&logical.left)?;
             let right = assignment_expression_target(&logical.right)?;
@@ -1191,6 +1288,33 @@ mod tests {
     }
 
     #[test]
+    fn ast_fact_extractor_does_not_treat_plain_call_arguments_as_enum_iifes() {
+        let source = r#"
+            function inherits(child, parent) {}
+            function Child() {}
+            function Parent() {}
+            inherits(Child, Parent);
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(!graph.def_use().constraints().iter().any(|constraint| {
+            constraint.binding.as_str() == "Child"
+                && constraint.kind == BindingConstraintKind::EnumInitializer
+        }));
+    }
+
+    #[test]
     fn ast_fact_extractor_projects_calls_constructs_members_and_classes() {
         let source = r#"
             class Service {}
@@ -1437,6 +1561,74 @@ mod tests {
                 .iter()
                 .any(|binding| binding.as_str() == "defaultAnswer")
         );
+    }
+
+    #[test]
+    fn ast_fact_extractor_ignores_function_locals_but_keeps_wrapped_module_edges() {
+        let source = r#"
+            (function () {
+                const pkg = require("pkg");
+                function inner(param) {
+                    let local = param.value;
+                    local++;
+                    return pkg.make(local);
+                }
+                exports.answer = inner({ value: 1 });
+            })();
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.cjs",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let exports = graph.import_export().exports_for(ModuleId(1));
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(
+            graph
+                .import_export()
+                .package_imports_for(ModuleId(1))
+                .contains(&"pkg")
+        );
+        assert!(exports.iter().any(|binding| binding.as_str() == "answer"));
+        assert!(graph.def_use().unresolved_reads().is_empty());
+        assert!(graph.def_use().unresolved_writes().is_empty());
+    }
+
+    #[test]
+    fn ast_fact_extractor_keeps_top_level_missing_reads_visible() {
+        let source = r#"
+            function handle(message) {
+                const data = message.data;
+                return fetch(data.url);
+            }
+            topLevelMissing();
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let unresolved = graph
+            .def_use()
+            .unresolved_reads()
+            .into_iter()
+            .map(|(_, binding)| binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(unresolved, vec!["topLevelMissing".to_string()]);
     }
 
     #[test]

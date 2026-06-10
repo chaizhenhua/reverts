@@ -122,39 +122,55 @@ fn is_ambient_binding(binding: &str) -> bool {
         "Array"
             | "ArrayBuffer"
             | "Atomics"
+            | "AbortController"
+            | "AsyncContext"
             | "BigInt"
             | "BigInt64Array"
             | "BigUint64Array"
+            | "Blob"
             | "Boolean"
             | "Buffer"
+            | "DOMParser"
             | "DataView"
             | "Date"
             | "Error"
             | "EvalError"
+            | "File"
+            | "FileReader"
             | "Float32Array"
             | "Float64Array"
+            | "FormData"
             | "Function"
+            | "Headers"
             | "Infinity"
             | "Intl"
             | "JSON"
             | "Map"
             | "Math"
+            | "MessageChannel"
             | "NaN"
             | "Number"
             | "Object"
+            | "OffscreenCanvas"
             | "Promise"
             | "Proxy"
             | "RangeError"
             | "ReferenceError"
             | "Reflect"
             | "RegExp"
+            | "Request"
+            | "Response"
+            | "Screen"
             | "Set"
             | "String"
             | "Symbol"
             | "SyntaxError"
+            | "TextDecoder"
+            | "TextEncoder"
             | "TypeError"
             | "URIError"
             | "URL"
+            | "URLSearchParams"
             | "Uint8Array"
             | "Uint8ClampedArray"
             | "Uint16Array"
@@ -163,21 +179,36 @@ fn is_ambient_binding(binding: &str) -> bool {
             | "WeakSet"
             | "__dirname"
             | "__filename"
+            | "atob"
+            | "browser"
+            | "btoa"
+            | "chrome"
             | "clearImmediate"
             | "clearInterval"
             | "clearTimeout"
             | "console"
+            | "crypto"
+            | "document"
             | "exports"
+            | "fetch"
             | "global"
             | "globalThis"
+            | "localStorage"
+            | "location"
             | "module"
+            | "navigator"
+            | "performance"
             | "process"
             | "queueMicrotask"
             | "require"
+            | "self"
             | "setImmediate"
             | "setInterval"
             | "setTimeout"
+            | "structuredClone"
             | "undefined"
+            | "window"
+            | "XMLHttpRequest"
     )
 }
 
@@ -928,6 +959,32 @@ NativeModuleType();
             1,
             "runtime.js",
             Some("console.log(process.cwd());".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(!output.audit.has(FindingCode::MissingDefinition));
+    }
+
+    #[test]
+    fn ambient_browser_and_extension_globals_do_not_fail_def_use_audit() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "browser-runtime.js",
+            Some(
+                r#"
+                chrome.runtime.sendMessage({ ok: true });
+                fetch(new Request("/api"), { headers: new Headers() });
+                const blob = new Blob(["ok"]);
+                new DOMParser().parseFromString("<p>ok</p>", "text/html");
+                localStorage.setItem("blob", URL.createObjectURL(blob));
+                "#
+                .to_string(),
+            ),
         ));
         rows.modules[0] =
             ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
