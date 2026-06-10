@@ -5,7 +5,7 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, NONE,
     ast::{
-        BindingPatternKind, Declaration, ExportDefaultDeclarationKind, Expression,
+        Argument, BindingPatternKind, Declaration, ExportDefaultDeclarationKind, Expression,
         ImportOrExportKind, Statement, VariableDeclarator,
     },
 };
@@ -149,12 +149,23 @@ pub fn format_source_pretty(
     Err(JsError::ParseFailed(errors))
 }
 
+/// Compiler-specific lowering applied when re-emitting a parsed module body.
+/// Each variant names a recognised bundler/transpiler whose semantically
+/// no-op artefacts can be stripped from the emitted output.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerLowering {
+    #[default]
+    None,
+    Babel,
+}
+
 pub fn format_source_with_module_items(
     body_source: &str,
     generated_imports: &[GeneratedImport],
     generated_exports: &[GeneratedExport],
     path_hint: Option<&Path>,
     goal: ParseGoal,
+    lowering: CompilerLowering,
 ) -> Result<String> {
     let mut errors = Vec::new();
 
@@ -169,6 +180,13 @@ pub fn format_source_with_module_items(
                 diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
             });
             continue;
+        }
+
+        if matches!(lowering, CompilerLowering::Babel) {
+            parsed
+                .program
+                .body
+                .retain(|statement| !is_babel_es_module_marker(statement));
         }
 
         let builder = AstBuilder::new(&allocator);
@@ -199,6 +217,42 @@ pub fn format_source_with_module_items(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+/// Recognise the canonical Babel CJS-to-ESM marker statement:
+/// `Object.defineProperty(exports, "__esModule", { value: true });`. Stripping
+/// it from emitted output is safe in an ES module context, where `exports` is
+/// not bound and the assignment would otherwise be a runtime error.
+fn is_babel_es_module_marker(statement: &Statement<'_>) -> bool {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return false;
+    };
+    let Expression::CallExpression(call) = &statement.expression else {
+        return false;
+    };
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return false;
+    };
+    let Expression::Identifier(callee_object) = &callee.object else {
+        return false;
+    };
+    if callee_object.name.as_str() != "Object" || callee.property.name.as_str() != "defineProperty"
+    {
+        return false;
+    }
+    if call.arguments.len() != 3 {
+        return false;
+    }
+    let Argument::Identifier(target) = &call.arguments[0] else {
+        return false;
+    };
+    if target.name.as_str() != "exports" {
+        return false;
+    }
+    let Argument::StringLiteral(key) = &call.arguments[1] else {
+        return false;
+    };
+    key.value.as_str() == "__esModule"
 }
 
 #[must_use]
@@ -480,9 +534,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        GeneratedExport, GeneratedImport, JsError, ParseGoal, format_source_pretty,
-        format_source_with_module_items, normalize_source_for_pipeline, parse_error_message,
-        parse_source, sanitize_identifier,
+        CompilerLowering, GeneratedExport, GeneratedImport, JsError, ParseGoal,
+        format_source_pretty, format_source_with_module_items, normalize_source_for_pipeline,
+        parse_error_message, parse_source, sanitize_identifier,
     };
 
     #[test]
@@ -535,6 +589,7 @@ mod tests {
             &[GeneratedExport::new("answer")],
             Some(Path::new("src/index.ts")),
             ParseGoal::TypeScript,
+            CompilerLowering::None,
         )
         .expect("fixture should format");
 
@@ -551,6 +606,7 @@ mod tests {
             &[],
             Some(Path::new("src/empty.ts")),
             ParseGoal::TypeScript,
+            CompilerLowering::None,
         )
         .expect("empty module should format");
 

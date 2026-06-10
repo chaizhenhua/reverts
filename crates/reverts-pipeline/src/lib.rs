@@ -1055,6 +1055,44 @@ mod tests {
     }
 
     #[test]
+    fn babel_es_module_marker_is_stripped_from_emitted_output() {
+        // The `Object.defineProperty(exports, "__esModule", { value: true })`
+        // statement is a no-op in ESM output. When the module is classified
+        // as Babel, the lowering pipeline must strip it from the emit.
+        let source = "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+                      function load(mod) {\n  return _interopRequireDefault(mod);\n}\n";
+        let run = run_with_source(source, &["load"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: babel"),
+            "babel fixture must keep its banner, got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("__esModule"),
+            "babel lowering must strip the __esModule marker, got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function load"),
+            "babel lowering must keep unrelated declarations, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn unknown_compiler_keeps_es_module_marker_intact() {
+        // The strip is babel-specific; other compilers must not touch the marker.
+        let source = "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+                      export function ok() { return 1; }\n";
+        let run = run_with_source(source, &["ok"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("__esModule"),
+            "non-babel module must preserve the original marker statement, got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.

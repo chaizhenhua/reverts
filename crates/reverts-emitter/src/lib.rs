@@ -3,10 +3,10 @@ use std::fmt;
 
 use reverts_ir::BindingName;
 use reverts_js::{
-    GeneratedExport, GeneratedImport, format_source_with_module_items, parse_error_message,
-    sanitize_identifier,
+    CompilerLowering, GeneratedExport, GeneratedImport, format_source_with_module_items,
+    parse_error_message, sanitize_identifier,
 };
-use reverts_planner::{EmitPlan, PlannedFile};
+use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmittedProject {
@@ -58,6 +58,7 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         &generated_exports,
         file.source_strategy().path_hint(file.path.as_str()),
         file.source_strategy().parse_goal(),
+        compiler_lowering(file.compiler_recovery.action),
     )
     .map_err(|source_error| EmitError::UnparseableOutput {
         path: file.path.clone(),
@@ -75,6 +76,17 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
 
 fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
+}
+
+const fn compiler_lowering(action: CompilerRecoveryAction) -> CompilerLowering {
+    match action {
+        CompilerRecoveryAction::PreserveBabelTranspiledOutput => CompilerLowering::Babel,
+        CompilerRecoveryAction::DirectModuleSource
+        | CompilerRecoveryAction::PreserveWebpackRuntime
+        | CompilerRecoveryAction::PreserveEsbuildHelpers
+        | CompilerRecoveryAction::PreserveRollupFacade
+        | CompilerRecoveryAction::PreserveTerserMinifiedOutput => CompilerLowering::None,
+    }
 }
 
 fn add_typescript_compat_header(source: String, recovery_banner: Option<&str>) -> String {
