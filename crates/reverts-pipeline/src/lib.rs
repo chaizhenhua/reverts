@@ -1,15 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
-use reverts_input::{InputBundle, PackageAttributionStatus};
+use reverts_input::{
+    InputBundle, InputRows, ModuleInput, PackageAttributionStatus, SourceFileInput,
+};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    DeclarationCallability, ParseGoal, classify_top_level_bindings, parse_error_message,
-    parse_source,
+    DeclarationCallability, ParseGoal, classify_top_level_bindings, collect_string_literals,
+    parse_error_message, parse_source,
 };
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -22,6 +24,7 @@ pub struct OutputRun {
     pub project: EmittedProject,
     pub audit: AuditReport,
     pub runtime_dependencies: Vec<RuntimeDependency>,
+    pub assets: Vec<EmittedAsset>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,17 +33,35 @@ pub struct RuntimeDependency {
     pub package_version: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmittedAsset {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AssetReference {
+    pub module_id: ModuleId,
+    pub logical_path: String,
+}
+
 pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, PipelineError> {
     let model = ProgramModel::from_input(input);
     let enrichment = enrich_program(model);
     let mut audit = enrichment.audit;
-    let runtime_dependencies = collect_runtime_dependencies(enrichment.program.model().input());
+    let input = enrichment.program.model().input();
+    let runtime_dependencies = collect_runtime_dependencies(input);
+    let asset_references = collect_required_asset_references(input);
+    let assets = collect_emitted_assets(input, &asset_references);
     audit.extend(audit_required_sources(&enrichment.program));
+    audit.extend(audit_required_assets(input, &asset_references));
     if !audit.is_clean() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
             audit,
             runtime_dependencies,
+            assets,
         });
     }
 
@@ -54,10 +75,13 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
             project: EmittedProject::default(),
             audit,
             runtime_dependencies,
+            assets,
         });
     }
 
-    let project = emit_project(&plan).map_err(PipelineError::Emit)?;
+    let module_output_paths = module_output_paths(&enrichment.program);
+    let mut project = emit_project(&plan).map_err(PipelineError::Emit)?;
+    rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
 
     audit.extend(audit_emitted_project_parse(&project));
     audit.extend(audit_binding_shape_consistency(&plan, &project));
@@ -66,6 +90,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
         project,
         audit,
         runtime_dependencies,
+        assets,
     })
 }
 
@@ -103,6 +128,279 @@ fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
         .map(|(package_name, package_version)| RuntimeDependency {
             package_name,
             package_version,
+        })
+        .collect()
+}
+
+fn collect_emitted_assets(input: &InputBundle, references: &[AssetReference]) -> Vec<EmittedAsset> {
+    let required_logical_paths = references
+        .iter()
+        .map(|reference| reference.logical_path.as_str())
+        .collect::<BTreeSet<_>>();
+    input
+        .assets
+        .iter()
+        .filter(|asset| required_logical_paths.contains(asset.logical_path.as_str()))
+        .map(|asset| EmittedAsset {
+            path: asset.output_path.clone(),
+            bytes: asset.bytes.clone(),
+            executable: asset.executable,
+        })
+        .collect()
+}
+
+#[must_use]
+pub fn collect_required_asset_references(input: &InputBundle) -> Vec<AssetReference> {
+    collect_required_asset_references_from_parts(&input.modules, &input.source_files, |module_id| {
+        input
+            .module_source_slice(module_id)
+            .map(|slice| (slice.source_file_path.to_string(), slice.source.to_string()))
+    })
+}
+
+#[must_use]
+pub fn collect_required_asset_references_from_rows(rows: &InputRows) -> Vec<AssetReference> {
+    collect_required_asset_references_from_parts(&rows.modules, &rows.source_files, |module_id| {
+        rows.module_source_slice(module_id)
+            .map(|slice| (slice.source_file_path.to_string(), slice.source.to_string()))
+    })
+}
+
+fn collect_required_asset_references_from_parts(
+    modules: &[ModuleInput],
+    _source_files: &[SourceFileInput],
+    source_for_module: impl Fn(ModuleId) -> Option<(String, String)>,
+) -> Vec<AssetReference> {
+    let mut references = BTreeSet::new();
+    for module in modules {
+        if module.kind == ModuleKind::Package {
+            continue;
+        }
+        let Some((source_file_path, source)) = source_for_module(module.id) else {
+            continue;
+        };
+        let Ok(literals) = collect_string_literals(
+            source.as_str(),
+            Some(Path::new(source_file_path.as_str())),
+            ParseGoal::TypeScript,
+        ) else {
+            // No heuristic fallback: parse failures are already surfaced by
+            // AstFactExtractionFailed during enrichment.
+            continue;
+        };
+        for literal in literals {
+            if is_asset_reference_literal(literal.value.as_str()) {
+                references.insert(AssetReference {
+                    module_id: module.id,
+                    logical_path: literal.value,
+                });
+            }
+        }
+    }
+    references.into_iter().collect()
+}
+
+fn audit_required_assets(input: &InputBundle, references: &[AssetReference]) -> AuditReport {
+    let available = input
+        .assets
+        .iter()
+        .map(|asset| asset.logical_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut audit = AuditReport::default();
+    for reference in references {
+        if available.contains(reference.logical_path.as_str()) {
+            continue;
+        }
+        audit.push(
+            AuditFinding::error(
+                FindingCode::MissingRequiredAsset,
+                "source references an asset that is absent from project_assets",
+            )
+            .with_module(reference.module_id.0.to_string())
+            .with_binding(reference.logical_path.clone()),
+        );
+    }
+    audit
+}
+
+fn is_asset_reference_literal(value: &str) -> bool {
+    let path = strip_query_and_fragment(value);
+    if path.starts_with("/$bunfs/root/") || path.starts_with("bun:/") {
+        return true;
+    }
+    if path == "rg"
+        || path == "rg.exe"
+        || path == "ripgrep"
+        || path == "ripgrep.exe"
+        || path.starts_with("vendor/")
+        || path.contains("/vendor/")
+    {
+        return true;
+    }
+
+    let lower = path.to_ascii_lowercase();
+    matches!(
+        Path::new(lower.as_str())
+            .extension()
+            .and_then(std::ffi::OsStr::to_str),
+        Some(
+            "wasm"
+                | "node"
+                | "so"
+                | "dylib"
+                | "dll"
+                | "exe"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "svg"
+                | "webp"
+                | "avif"
+                | "ico"
+                | "ttf"
+                | "otf"
+                | "woff"
+                | "woff2"
+                | "css"
+                | "html"
+        )
+    )
+}
+
+fn strip_query_and_fragment(value: &str) -> &str {
+    let query_index = value.find('?').unwrap_or(value.len());
+    let fragment_index = value.find('#').unwrap_or(value.len());
+    &value[..query_index.min(fragment_index)]
+}
+
+fn rewrite_emitted_asset_references(
+    project: &mut EmittedProject,
+    input: &InputBundle,
+    references: &[AssetReference],
+    module_output_paths: &BTreeMap<ModuleId, String>,
+) {
+    let assets_by_logical_path = input
+        .assets
+        .iter()
+        .map(|asset| (asset.logical_path.as_str(), asset.output_path.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut rewrites_by_file = BTreeMap::<String, BTreeMap<String, String>>::new();
+    for reference in references {
+        let Some(file_path) = module_output_paths.get(&reference.module_id) else {
+            continue;
+        };
+        let Some(asset_output_path) = assets_by_logical_path.get(reference.logical_path.as_str())
+        else {
+            continue;
+        };
+        rewrites_by_file
+            .entry(file_path.clone())
+            .or_default()
+            .insert(
+                reference.logical_path.clone(),
+                relative_asset_specifier(file_path.as_str(), asset_output_path),
+            );
+    }
+
+    for file in &mut project.files {
+        let Some(rewrites) = rewrites_by_file.get(file.path.as_str()) else {
+            continue;
+        };
+        file.source =
+            rewrite_string_literal_values(file.source.as_str(), file.path.as_str(), rewrites);
+    }
+}
+
+fn rewrite_string_literal_values(
+    source: &str,
+    path_hint: &str,
+    rewrites: &BTreeMap<String, String>,
+) -> String {
+    let Ok(literals) =
+        collect_string_literals(source, Some(Path::new(path_hint)), ParseGoal::TypeScript)
+    else {
+        return source.to_string();
+    };
+    let mut output = source.to_string();
+    for literal in literals.iter().rev() {
+        let Some(replacement) = rewrites.get(literal.value.as_str()) else {
+            continue;
+        };
+        output.replace_range(
+            literal.byte_start as usize..literal.byte_end as usize,
+            single_quoted_js_string(replacement).as_str(),
+        );
+    }
+    output
+}
+
+fn single_quoted_js_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\'' => output.push_str("\\'"),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            _ => output.push(ch),
+        }
+    }
+    output.push('\'');
+    output
+}
+
+fn module_output_paths(program: &EnrichedProgram) -> BTreeMap<ModuleId, String> {
+    program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| {
+            let path = program
+                .semantic_names()
+                .module_path(module.id)
+                .unwrap_or(module.semantic_path.as_str())
+                .to_string();
+            (module.id, path)
+        })
+        .collect()
+}
+
+fn relative_asset_specifier(from_file: &str, to_asset: &str) -> String {
+    let from_dir = Path::new(from_file)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let from_components = normal_path_components(from_dir);
+    let to_components = normal_path_components(Path::new(to_asset));
+    let common = from_components
+        .iter()
+        .zip(to_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+
+    let mut parts = Vec::new();
+    parts.extend(std::iter::repeat_n(
+        "..".to_string(),
+        from_components.len() - common,
+    ));
+    parts.extend(to_components[common..].iter().cloned());
+    let relative = parts.join("/");
+    if relative.starts_with('.') {
+        relative
+    } else {
+        format!("./{relative}")
+    }
+}
+
+fn normal_path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            Component::ParentDir => Some("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => None,
         })
         .collect()
 }
@@ -288,9 +586,9 @@ mod tests {
     use reverts_analyze::enrich_program;
     use reverts_emitter::emit_project;
     use reverts_input::{
-        InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, PackageSurfaceInput, ProjectInput, SourceFileInput, SourceSpan,
-        SymbolInput,
+        AssetInput, AssetKind, InputBundle, InputRows, ModuleDependencyInput,
+        ModuleDependencyTarget, ModuleInput, PackageAttributionInput, PackageSurfaceInput,
+        ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{
         BindingName, BindingShape, BindingSourceKind, BindingUseKind, ModuleId, ModuleKind,
@@ -379,6 +677,103 @@ mod tests {
         assert_eq!(run.runtime_dependencies[0].package_name, "undici");
         assert_eq!(run.runtime_dependencies[0].package_version, "2.2.1");
         assert!(run.project.files[0].source.contains("require('undici')"));
+    }
+
+    #[test]
+    fn pipeline_carries_input_assets_to_output_run() {
+        let mut rows =
+            rows_with_application_source("export const rgPath = '/$bunfs/root/vendor/rg';");
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/vendor/rg",
+            "modules/1-app/vendor/rg",
+            b"rg-binary".to_vec(),
+            AssetKind::Executable,
+            true,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.assets.len(), 1);
+        assert_eq!(run.assets[0].path, "modules/1-app/vendor/rg");
+        assert_eq!(run.assets[0].bytes, b"rg-binary");
+        assert!(run.assets[0].executable);
+    }
+
+    #[test]
+    fn pipeline_rejects_asset_reference_missing_from_project_assets_without_fallback() {
+        let rows = rows_with_application_source(
+            "const native = '/$bunfs/root/addon.node'; export { native };",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should return audit");
+
+        assert!(run.audit.has(FindingCode::MissingRequiredAsset));
+        assert!(run.project.files.is_empty());
+        assert!(run.assets.is_empty());
+        assert!(run.audit.findings().iter().any(|finding| {
+            finding.code == FindingCode::MissingRequiredAsset
+                && finding.module.as_deref() == Some("1")
+                && finding.binding.as_deref() == Some("/$bunfs/root/addon.node")
+        }));
+    }
+
+    #[test]
+    fn pipeline_emits_only_assets_referenced_by_source_literals() {
+        let mut rows = rows_with_application_source(
+            "const native = '/$bunfs/root/addon.node'; export { native };",
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/addon.node",
+            "modules/1-app/addon.node",
+            b"native".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        rows.assets.push(AssetInput::new(
+            101,
+            "/$bunfs/root/unused.node",
+            "modules/1-app/unused.node",
+            b"unused".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.assets.len(), 1);
+        assert_eq!(run.assets[0].path, "modules/1-app/addon.node");
+        assert_eq!(run.assets[0].bytes, b"native");
+    }
+
+    #[test]
+    fn pipeline_rewrites_matched_asset_literals_to_relative_emitted_paths() {
+        let mut rows = rows_with_application_source(
+            "const native = require('/$bunfs/root/addon.node'); export { native };",
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/addon.node",
+            "src/addon.node",
+            b"native".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("require('./addon.node')"));
+        assert!(!source.contains("/$bunfs/root/addon.node"));
+        assert_eq!(run.assets[0].path, "src/addon.node");
     }
 
     #[test]

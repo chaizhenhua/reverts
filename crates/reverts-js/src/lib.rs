@@ -3,11 +3,12 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    AstBuilder, NONE,
+    AstBuilder, NONE, Visit,
     ast::{
         Argument, BindingPatternKind, Declaration, ExportDefaultDeclarationKind, Expression,
-        ImportOrExportKind, Statement, VariableDeclarator,
+        ImportOrExportKind, Statement, StringLiteral, VariableDeclarator,
     },
+    visit::walk::walk_string_literal,
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
@@ -62,6 +63,13 @@ impl GeneratedExport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringLiteralFact {
+    pub value: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
 #[must_use]
 pub fn source_type_candidates(path_hint: Option<&Path>, goal: ParseGoal) -> Vec<SourceType> {
     let mut candidates = Vec::new();
@@ -114,6 +122,50 @@ pub fn parse_source(source: &str, path_hint: Option<&Path>, goal: ParseGoal) -> 
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_string_literals(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<StringLiteralFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = StringLiteralCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.literals);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+#[derive(Debug, Default)]
+struct StringLiteralCollector {
+    literals: Vec<StringLiteralFact>,
+}
+
+impl<'a> Visit<'a> for StringLiteralCollector {
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        self.literals.push(StringLiteralFact {
+            value: literal.value.as_str().to_string(),
+            byte_start: literal.span.start,
+            byte_end: literal.span.end,
+        });
+        walk_string_literal(self, literal);
+    }
 }
 
 pub fn format_source_pretty(
@@ -535,8 +587,8 @@ mod tests {
 
     use super::{
         CompilerLowering, GeneratedExport, GeneratedImport, JsError, ParseGoal,
-        format_source_pretty, format_source_with_module_items, normalize_source_for_pipeline,
-        parse_error_message, parse_source, sanitize_identifier,
+        collect_string_literals, format_source_pretty, format_source_with_module_items,
+        normalize_source_for_pipeline, parse_error_message, parse_source, sanitize_identifier,
     };
 
     #[test]
@@ -544,6 +596,28 @@ mod tests {
         let source = "const answer: number = 42;";
 
         assert!(parse_source(source, Some(Path::new("fixture.ts")), ParseGoal::TypeScript).is_ok());
+    }
+
+    #[test]
+    fn collects_string_literal_facts_from_ast_without_source_scanning_fallback() {
+        let source =
+            "import './tree-sitter.wasm';\nconst native = require('/$bunfs/root/addon.node');";
+
+        let literals =
+            collect_string_literals(source, Some(Path::new("fixture.ts")), ParseGoal::TypeScript)
+                .expect("string literals should be collected from parseable source");
+
+        let values = literals
+            .iter()
+            .map(|literal| literal.value.as_str())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"./tree-sitter.wasm"));
+        assert!(values.contains(&"/$bunfs/root/addon.node"));
+        assert!(
+            literals
+                .iter()
+                .all(|literal| literal.byte_end > literal.byte_start)
+        );
     }
 
     #[test]

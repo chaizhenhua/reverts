@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
-    DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleDependencyRow,
+    AssetRow, DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleDependencyRow,
     ModuleDependencyRowTarget, ModuleRow, PackageAttributionRow, PackageAttributionStatus,
     PackageEmissionMode, PackageSurfaceRow, ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
 };
@@ -60,6 +60,7 @@ pub fn load_project_rows_from_connection(
     rows.dependencies = load_module_dependencies(connection, project_id)?;
     rows.package_attributions = load_package_attributions(connection, project_id)?;
     rows.package_surfaces = load_package_surfaces(connection, project_id)?;
+    rows.assets = load_project_assets(connection, project_id)?;
     InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
 }
 
@@ -299,6 +300,56 @@ fn load_package_surfaces(
     collect_sqlite_rows(rows)
 }
 
+fn load_project_assets(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<AssetRow>, SqliteInputError> {
+    if !table_exists(connection, "project_assets")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        r"
+        SELECT
+            id,
+            project_id,
+            logical_path,
+            output_path,
+            source_path,
+            kind,
+            executable,
+            platform,
+            arch
+        FROM project_assets
+        WHERE project_id = ?1
+        ORDER BY id
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        let source_path = row.get::<_, String>(4)?;
+        let bytes = fs::read(source_path.as_str()).map_err(|source| {
+            rusqlite::Error::ToSqlConversionFailure(Box::new(ReadSourceError {
+                path: PathBuf::from(source_path.clone()),
+                source,
+            }))
+        })?;
+        Ok(AssetRow {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            logical_path: row.get(2)?,
+            output_path: row.get(3)?,
+            source_path: Some(source_path),
+            bytes,
+            kind: row.get(5)?,
+            executable: row.get::<_, i64>(6)? != 0,
+            platform: row.get(7)?,
+            arch: row.get(8)?,
+        })
+    })?;
+
+    collect_sqlite_rows(rows)
+}
+
 fn table_exists(connection: &Connection, table: &str) -> Result<bool, SqliteInputError> {
     let exists = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
@@ -475,7 +526,7 @@ mod tests {
     use reverts_ir::{ModuleId, ModuleKind};
 
     use crate::sqlite::{load_project_bundle_from_connection, load_project_rows_from_connection};
-    use crate::{InputBundleError, ModuleDependencyTarget, PackageAttributionStatus};
+    use crate::{AssetKind, InputBundleError, ModuleDependencyTarget, PackageAttributionStatus};
 
     #[test]
     fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
@@ -486,6 +537,20 @@ mod tests {
         fs::write(&source_path, "export const activate = 42;")
             .expect("fixture source should be written");
         insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+        let asset_path = tempdir.path().join("vendor").join("rg");
+        fs::create_dir_all(asset_path.parent().expect("asset parent"))
+            .expect("fixture asset parent should be created");
+        fs::write(asset_path.as_path(), b"rg-binary").expect("fixture asset should be written");
+        connection
+            .execute(
+                r"
+                INSERT INTO project_assets
+                    (id, project_id, logical_path, output_path, source_path, kind, executable, platform, arch)
+                VALUES (501, 7, '/$bunfs/root/vendor/rg', 'modules/10-entry/vendor/rg', ?1, 'executable', 1, 'linux', 'x64')
+                ",
+                [asset_path.to_string_lossy().as_ref()],
+            )
+            .expect("fixture asset row should be inserted");
 
         let bundle = load_project_bundle_from_connection(&connection, 7)
             .expect("fixture database should load");
@@ -521,6 +586,19 @@ mod tests {
             bundle.source_files[0].source.as_deref(),
             Some("export const activate = 42;")
         );
+        assert_eq!(bundle.assets.len(), 1);
+        assert_eq!(bundle.assets[0].id, 501);
+        assert_eq!(
+            bundle.assets[0].logical_path.as_str(),
+            "/$bunfs/root/vendor/rg"
+        );
+        assert_eq!(
+            bundle.assets[0].output_path.as_str(),
+            "modules/10-entry/vendor/rg"
+        );
+        assert_eq!(bundle.assets[0].bytes, b"rg-binary");
+        assert_eq!(bundle.assets[0].kind, AssetKind::Executable);
+        assert!(bundle.assets[0].executable);
     }
 
     #[test]
@@ -531,6 +609,22 @@ mod tests {
         let error = load_project_bundle_from_connection(&connection, 404);
 
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn sqlite_project_loader_treats_missing_project_assets_table_as_empty() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema_without_project_assets(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+
+        let bundle = load_project_bundle_from_connection(&connection, 7)
+            .expect("fixture database should load without project_assets");
+
+        assert!(bundle.assets.is_empty());
     }
 
     #[test]
@@ -562,6 +656,27 @@ mod tests {
     }
 
     fn create_schema(connection: &Connection) {
+        create_schema_without_project_assets(connection);
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE project_assets (
+                    id INTEGER PRIMARY KEY,
+                    project_id INTEGER NOT NULL,
+                    logical_path TEXT NOT NULL,
+                    output_path TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    executable INTEGER NOT NULL DEFAULT 0,
+                    platform TEXT,
+                    arch TEXT
+                );
+                ",
+            )
+            .expect("fixture asset schema should be created");
+    }
+
+    fn create_schema_without_project_assets(connection: &Connection) {
         connection
             .execute_batch(
                 r"

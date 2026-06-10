@@ -10,7 +10,8 @@ use reverts_input::sqlite::{
     SqliteInputError, load_project_bundle_from_sqlite, load_project_rows_from_connection,
 };
 use reverts_input::{
-    InputRows, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+    AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
+    PackageEmissionMode, SourceFileInput,
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
@@ -19,7 +20,8 @@ use reverts_package_matcher::{
     package_import_names_from_sources,
 };
 use reverts_pipeline::{
-    EmittedFile, PipelineError, RuntimeDependency, generate_project_from_input,
+    AssetReference, EmittedAsset, EmittedFile, PipelineError, RuntimeDependency,
+    collect_required_asset_references_from_rows, generate_project_from_input,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
@@ -114,26 +116,146 @@ impl MatchPackagesArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractAssetsArgs {
+    pub input: PathBuf,
+    pub project_id: u32,
+    pub apply: bool,
+    pub asset_root: Option<PathBuf>,
+}
+
+impl ExtractAssetsArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut project_id = None;
+        let mut apply = false;
+        let mut asset_root = None;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|argument| argument == "extract-assets")
+        {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--project-id" => {
+                    project_id = Some(parse_project_id(next_value(&mut args, "--project-id")?)?);
+                }
+                "--asset-root" => asset_root = Some(next_path(&mut args, "--asset-root")?),
+                "--apply" => apply = true,
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        Ok(Self {
+            input: input.ok_or(CliError::MissingArgument("--input"))?,
+            project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
+            apply,
+            asset_root,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
+    Help(HelpTopic),
+    Version,
     GenerateProjectV2(GenerateProjectV2Args),
     MatchPackages(MatchPackagesArgs),
+    ExtractAssets(ExtractAssetsArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTopic {
+    TopLevel,
+    GenerateProjectV2,
+    MatchPackages,
+    ExtractAssets,
 }
 
 impl CliCommand {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         let args = args.into_iter().collect::<Vec<_>>();
         match args.first().map(String::as_str) {
+            Some(argument) if is_help_flag(argument) => parse_top_level_help(args.as_slice()),
+            Some(argument) if is_version_flag(argument) => parse_version(args.as_slice()),
+            Some("help") => parse_help_command(args.as_slice()),
+            Some("version") => parse_version(args.as_slice()),
             Some("generate-project-v2") => {
+                if is_command_help(args.as_slice()) {
+                    return Ok(Self::Help(HelpTopic::GenerateProjectV2));
+                }
                 Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
             }
-            Some("match-packages") => Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?)),
+            Some("match-packages") => {
+                if is_command_help(args.as_slice()) {
+                    return Ok(Self::Help(HelpTopic::MatchPackages));
+                }
+                Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?))
+            }
+            Some("extract-assets") => {
+                if is_command_help(args.as_slice()) {
+                    return Ok(Self::Help(HelpTopic::ExtractAssets));
+                }
+                Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
+            }
             Some(argument) if argument.starts_with("--") => {
                 Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
             }
             Some(command) => Err(CliError::UnknownCommand(command.to_string())),
-            None => Err(CliError::MissingCommand),
+            None => Ok(Self::Help(HelpTopic::TopLevel)),
         }
     }
+}
+
+fn parse_top_level_help(args: &[String]) -> Result<CliCommand, CliError> {
+    match args {
+        [_] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
+        [_, command] => parse_named_help_topic(command.as_str()).map(CliCommand::Help),
+        [_, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
+        [] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
+    }
+}
+
+fn parse_help_command(args: &[String]) -> Result<CliCommand, CliError> {
+    match args {
+        [_] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
+        [_, command] => parse_named_help_topic(command.as_str()).map(CliCommand::Help),
+        [_, _, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
+        [] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
+    }
+}
+
+fn parse_version(args: &[String]) -> Result<CliCommand, CliError> {
+    match args {
+        [_] => Ok(CliCommand::Version),
+        [_, extra, ..] => Err(CliError::UnknownArgument(extra.clone())),
+        [] => Ok(CliCommand::Version),
+    }
+}
+
+fn parse_named_help_topic(command: &str) -> Result<HelpTopic, CliError> {
+    match command {
+        "generate-project-v2" => Ok(HelpTopic::GenerateProjectV2),
+        "match-packages" => Ok(HelpTopic::MatchPackages),
+        "extract-assets" => Ok(HelpTopic::ExtractAssets),
+        other => Err(CliError::UnknownCommand(other.to_string())),
+    }
+}
+
+fn is_command_help(args: &[String]) -> bool {
+    matches!(args, [_, argument] if is_help_flag(argument) || argument == "help")
+}
+
+fn is_help_flag(argument: &str) -> bool {
+    matches!(argument, "--help" | "-h")
+}
+
+fn is_version_flag(argument: &str) -> bool {
+    matches!(argument, "--version" | "-V")
 }
 
 fn next_path(
@@ -190,8 +312,38 @@ impl Error for CliError {}
 
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
     match CliCommand::parse(args).map_err(CliRunError::Args)? {
+        CliCommand::Help(topic) => {
+            println!("{}", help_text(topic));
+            Ok(())
+        }
+        CliCommand::Version => {
+            println!("{}", version_text());
+            Ok(())
+        }
         CliCommand::GenerateProjectV2(args) => run_generate_project(args),
         CliCommand::MatchPackages(args) => run_match_packages(args),
+        CliCommand::ExtractAssets(args) => run_extract_assets(args),
+    }
+}
+
+pub fn version_text() -> String {
+    format!("reverts-cli {}", env!("CARGO_PKG_VERSION"))
+}
+
+pub fn help_text(topic: HelpTopic) -> &'static str {
+    match topic {
+        HelpTopic::TopLevel => {
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages        Populate package_attributions/package_surfaces in SQLite\n    extract-assets        Populate project_assets from asset references in source slices\n    generate-project-v2   Generate a TypeScript project from SQLite input\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+        }
+        HelpTopic::GenerateProjectV2 => {
+            "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
+        }
+        HelpTopic::MatchPackages => {
+            "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--apply]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --package-name <NAME>     Restrict matching to one package name; repeatable\n    --apply                   Persist accepted package attributions and surfaces"
+        }
+        HelpTopic::ExtractAssets => {
+            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR>] [--apply]\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --asset-root <DIR>    Root directory for absolute bundle asset references\n    --apply               Persist discovered project_assets rows"
+        }
     }
 }
 
@@ -206,8 +358,12 @@ fn run_generate_project(args: GenerateProjectV2Args) -> Result<(), CliRunError> 
         )));
     }
 
-    let written =
-        write_emitted_project(&run.project.files, &args.output, &run.runtime_dependencies)?;
+    let written = write_emitted_project(
+        &run.project.files,
+        &run.assets,
+        &args.output,
+        &run.runtime_dependencies,
+    )?;
     println!(
         "generated project {} into {} with {written} files",
         args.project_id,
@@ -234,6 +390,19 @@ fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     Ok(())
 }
 
+fn run_extract_assets(args: ExtractAssetsArgs) -> Result<(), CliRunError> {
+    let outcome = extract_assets_from_sqlite(&args).map_err(CliRunError::ExtractAssets)?;
+    println!(
+        "extracted assets for project {}: {} reference(s), {} matched, {} missing, {} written",
+        outcome.project_id,
+        outcome.referenced_assets,
+        outcome.matched_assets,
+        outcome.missing_assets,
+        outcome.written_assets
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchPackagesOutcome {
     pub project_id: u32,
@@ -244,6 +413,24 @@ pub struct MatchPackagesOutcome {
     pub written_attributions: usize,
     pub written_surfaces: usize,
     pub audit: AuditReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractAssetsOutcome {
+    pub project_id: u32,
+    pub referenced_assets: usize,
+    pub matched_assets: usize,
+    pub missing_assets: usize,
+    pub written_assets: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscoveredProjectAsset {
+    reference: AssetReference,
+    source_path: PathBuf,
+    output_path: String,
+    kind: AssetKind,
+    executable: bool,
 }
 
 pub fn match_packages_from_sqlite(
@@ -302,6 +489,304 @@ pub fn match_packages_from_connection(
         written_surfaces,
         audit: report.audit,
     })
+}
+
+pub fn extract_assets_from_sqlite(
+    args: &ExtractAssetsArgs,
+) -> Result<ExtractAssetsOutcome, ExtractAssetsError> {
+    let flags = if args.apply {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let mut connection =
+        Connection::open_with_flags(args.input.as_path(), flags).map_err(|source| {
+            ExtractAssetsError::OpenDatabase {
+                path: args.input.clone(),
+                source,
+            }
+        })?;
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .map_err(ExtractAssetsError::ConfigureDatabase)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON")
+        .map_err(ExtractAssetsError::ConfigureDatabase)?;
+    extract_assets_from_connection(&mut connection, args)
+}
+
+pub fn extract_assets_from_connection(
+    connection: &mut Connection,
+    args: &ExtractAssetsArgs,
+) -> Result<ExtractAssetsOutcome, ExtractAssetsError> {
+    let rows = load_project_rows_from_connection(connection, args.project_id)
+        .map_err(ExtractAssetsError::LoadInput)?;
+    let references = collect_required_asset_references_from_rows(&rows);
+    let referenced_logical_paths = references
+        .iter()
+        .map(|reference| reference.logical_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let discovered = discover_project_assets(&rows, &references, args.asset_root.as_deref())?;
+    let written_assets = if args.apply {
+        persist_project_assets(connection, rows.project.id, &discovered)?
+    } else {
+        0
+    };
+
+    Ok(ExtractAssetsOutcome {
+        project_id: rows.project.id,
+        referenced_assets: referenced_logical_paths.len(),
+        matched_assets: discovered.len(),
+        missing_assets: referenced_logical_paths
+            .len()
+            .saturating_sub(discovered.len()),
+        written_assets,
+    })
+}
+
+fn discover_project_assets(
+    rows: &InputRows,
+    references: &[AssetReference],
+    asset_root: Option<&Path>,
+) -> Result<Vec<DiscoveredProjectAsset>, ExtractAssetsError> {
+    let default_asset_root =
+        common_source_root(&rows.source_files).ok_or(ExtractAssetsError::CannotInferAssetRoot {
+            project_id: rows.project.id,
+        })?;
+    let asset_root = asset_root.unwrap_or(default_asset_root.as_path());
+    let modules = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let source_files = rows
+        .source_files
+        .iter()
+        .map(|source_file| (source_file.id, source_file))
+        .collect::<BTreeMap<_, _>>();
+    let mut discovered = Vec::new();
+    let mut seen_logical_paths = BTreeSet::new();
+
+    for reference in references {
+        if !seen_logical_paths.insert(reference.logical_path.as_str()) {
+            continue;
+        }
+        let Some(module) = modules.get(&reference.module_id).copied() else {
+            continue;
+        };
+        let Some(source_file) = module
+            .source_file_id
+            .and_then(|source_file_id| source_files.get(&source_file_id).copied())
+        else {
+            continue;
+        };
+        let source_path = asset_source_path(
+            reference.logical_path.as_str(),
+            source_file.path.as_str(),
+            asset_root,
+        );
+        if !source_path.is_file() {
+            continue;
+        }
+        let Some(output_path) = asset_output_path(module, reference.logical_path.as_str()) else {
+            continue;
+        };
+        discovered.push(DiscoveredProjectAsset {
+            reference: reference.clone(),
+            source_path,
+            output_path,
+            kind: infer_asset_kind(reference.logical_path.as_str()),
+            executable: infer_asset_executable(reference.logical_path.as_str()),
+        });
+    }
+
+    Ok(discovered)
+}
+
+fn asset_source_path(logical_path: &str, source_file_path: &str, asset_root: &Path) -> PathBuf {
+    if let Some(root_relative) = bun_root_relative_path(logical_path) {
+        return asset_root.join(root_relative);
+    }
+    let logical = Path::new(logical_path);
+    if logical_path.starts_with("./") || logical_path.starts_with("../") {
+        return Path::new(source_file_path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(logical);
+    }
+    asset_root.join(logical)
+}
+
+fn asset_output_path(module: &ModuleInput, logical_path: &str) -> Option<String> {
+    let module_dir = Path::new(module.semantic_path.as_str())
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let relative = output_relative_asset_path(logical_path)?;
+    let mut output = module_dir.to_path_buf();
+    output.push(relative);
+    Some(path_to_forward_slashes(output.as_path()))
+}
+
+fn output_relative_asset_path(logical_path: &str) -> Option<PathBuf> {
+    let logical = bun_root_relative_path(logical_path).unwrap_or(logical_path);
+    let mut output = PathBuf::new();
+    for component in Path::new(logical).components() {
+        match component {
+            Component::Normal(part) => output.push(part),
+            Component::CurDir | Component::ParentDir => {}
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!output.as_os_str().is_empty()).then_some(output)
+}
+
+fn bun_root_relative_path(logical_path: &str) -> Option<&str> {
+    logical_path
+        .strip_prefix("/$bunfs/root/")
+        .or_else(|| logical_path.strip_prefix("bun:/root/"))
+}
+
+fn common_source_root(source_files: &[SourceFileInput]) -> Option<PathBuf> {
+    let mut parents = source_files
+        .iter()
+        .map(|source_file| Path::new(source_file.path.as_str()))
+        .filter_map(Path::parent);
+    let first = parents.next()?.to_path_buf();
+    Some(parents.fold(first, common_path_prefix))
+}
+
+fn common_path_prefix(left: PathBuf, right: &Path) -> PathBuf {
+    let left_components = left.components().collect::<Vec<_>>();
+    let right_components = right.components().collect::<Vec<_>>();
+    let mut output = PathBuf::new();
+    for (left, right) in left_components.iter().zip(right_components.iter()) {
+        if left != right {
+            break;
+        }
+        output.push(left.as_os_str());
+    }
+    output
+}
+
+fn path_to_forward_slashes(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            Component::CurDir => None,
+            Component::ParentDir => Some("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn infer_asset_kind(logical_path: &str) -> AssetKind {
+    let extension = Path::new(logical_path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
+        Some("wasm") => AssetKind::Wasm,
+        Some("node") => AssetKind::NativeNode,
+        Some("exe") => AssetKind::Executable,
+        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "avif" | "ico") => AssetKind::Image,
+        Some("ttf" | "otf" | "woff" | "woff2") => AssetKind::Font,
+        Some("css") => AssetKind::Css,
+        Some("html" | "htm") => AssetKind::Html,
+        _ if infer_asset_executable(logical_path) => AssetKind::Executable,
+        _ => AssetKind::Data,
+    }
+}
+
+fn infer_asset_executable(logical_path: &str) -> bool {
+    Path::new(logical_path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|name| matches!(name, "rg" | "rg.exe" | "ripgrep" | "ripgrep.exe"))
+        .unwrap_or(false)
+        || Path::new(logical_path)
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+}
+
+fn persist_project_assets(
+    connection: &mut Connection,
+    project_id: u32,
+    assets: &[DiscoveredProjectAsset],
+) -> Result<usize, ExtractAssetsError> {
+    if assets.is_empty() {
+        return Ok(0);
+    }
+    ensure_project_assets_table(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(ExtractAssetsError::WriteAsset)?;
+    let mut written = 0;
+    for asset in assets {
+        persist_project_asset(&transaction, project_id, asset)?;
+        written += 1;
+    }
+    transaction
+        .commit()
+        .map_err(ExtractAssetsError::WriteAsset)?;
+    Ok(written)
+}
+
+fn ensure_project_assets_table(connection: &Connection) -> Result<(), ExtractAssetsError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS project_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                logical_path TEXT NOT NULL,
+                output_path TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                executable INTEGER NOT NULL DEFAULT 0,
+                platform TEXT,
+                arch TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE (project_id, logical_path),
+                UNIQUE (project_id, output_path)
+            );
+            ",
+        )
+        .map_err(ExtractAssetsError::WriteAsset)
+}
+
+fn persist_project_asset(
+    connection: &Connection,
+    project_id: u32,
+    asset: &DiscoveredProjectAsset,
+) -> Result<(), ExtractAssetsError> {
+    connection
+        .execute(
+            "DELETE FROM project_assets WHERE project_id = ?1 AND logical_path = ?2",
+            params![i64::from(project_id), asset.reference.logical_path.as_str()],
+        )
+        .map_err(ExtractAssetsError::WriteAsset)?;
+    connection
+        .execute(
+            r"
+            INSERT INTO project_assets
+                (project_id, logical_path, output_path, source_path, kind, executable,
+                 platform, arch, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, datetime('now'), datetime('now'))
+            ",
+            params![
+                i64::from(project_id),
+                asset.reference.logical_path.as_str(),
+                asset.output_path.as_str(),
+                asset.source_path.to_string_lossy().as_ref(),
+                asset.kind.as_str(),
+                if asset.executable { 1_i64 } else { 0_i64 },
+            ],
+        )
+        .map_err(ExtractAssetsError::WriteAsset)?;
+    Ok(())
 }
 
 fn package_source_filter(rows: &InputRows, requested_package_names: &[String]) -> BTreeSet<String> {
@@ -656,6 +1141,7 @@ fn sqlite_placeholders(count: usize) -> String {
 
 fn write_emitted_project(
     files: &[EmittedFile],
+    assets: &[EmittedAsset],
     output: &Path,
     runtime_dependencies: &[RuntimeDependency],
 ) -> Result<usize, CliRunError> {
@@ -664,7 +1150,7 @@ fn write_emitted_project(
         source,
     })?;
     let has_cli_entrypoint = files.iter().any(|file| file.path == "cli.ts");
-    write_typescript_project_scaffold(output, runtime_dependencies, has_cli_entrypoint)?;
+    write_typescript_project_scaffold(output, runtime_dependencies, has_cli_entrypoint, assets)?;
 
     for file in files {
         let path = checked_output_path(output, file.path.as_str())?;
@@ -678,15 +1164,34 @@ fn write_emitted_project(
             .map_err(|source| CliRunError::WriteOutput { path, source })?;
     }
 
-    Ok(files.len())
+    for asset in assets {
+        let path = checked_output_path(output, asset.path.as_str())?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        fs::write(path.as_path(), asset.bytes.as_slice()).map_err(|source| {
+            CliRunError::WriteOutput {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        set_executable_bit(path.as_path(), asset.executable)?;
+    }
+
+    Ok(files.len() + assets.len())
 }
 
 fn write_typescript_project_scaffold(
     output: &Path,
     runtime_dependencies: &[RuntimeDependency],
     has_cli_entrypoint: bool,
+    assets: &[EmittedAsset],
 ) -> Result<(), CliRunError> {
-    let package_json = typescript_package_json(runtime_dependencies, has_cli_entrypoint);
+    let package_json =
+        typescript_package_json(runtime_dependencies, has_cli_entrypoint, !assets.is_empty());
     write_project_file(output, "package.json", package_json.as_str())?;
     write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
     write_project_file(
@@ -694,12 +1199,17 @@ fn write_typescript_project_scaffold(
         "tsconfig.runtime.json",
         TYPESCRIPT_RUNTIME_TSCONFIG_JSON,
     )?;
+    if !assets.is_empty() {
+        let copy_assets = typescript_copy_assets_script(assets);
+        write_project_file(output, "scripts/copy-assets.mjs", copy_assets.as_str())?;
+    }
     Ok(())
 }
 
 fn typescript_package_json(
     runtime_dependencies: &[RuntimeDependency],
     has_cli_entrypoint: bool,
+    has_assets: bool,
 ) -> String {
     let mut dependencies = serde_json::Map::new();
     for dependency in runtime_dependencies {
@@ -716,7 +1226,11 @@ fn typescript_package_json(
     );
     scripts.insert(
         "build".to_string(),
-        serde_json::Value::String("tsc -p tsconfig.runtime.json".to_string()),
+        serde_json::Value::String(if has_assets {
+            "tsc -p tsconfig.runtime.json && node ./scripts/copy-assets.mjs".to_string()
+        } else {
+            "tsc -p tsconfig.runtime.json".to_string()
+        }),
     );
     if has_cli_entrypoint {
         scripts.insert(
@@ -747,10 +1261,74 @@ fn typescript_package_json(
     serde_json::to_string_pretty(&package).expect("package.json scaffold is serializable") + "\n"
 }
 
+fn typescript_copy_assets_script(assets: &[EmittedAsset]) -> String {
+    let manifest = assets
+        .iter()
+        .map(|asset| {
+            serde_json::json!({
+                "from": asset.path.as_str(),
+                "to": format!("dist/{}", asset.path),
+                "executable": asset.executable,
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).expect("asset manifest is serializable");
+    format!(
+        r#"import {{ chmodSync, copyFileSync, mkdirSync }} from 'node:fs';
+import {{ dirname, join }} from 'node:path';
+import {{ fileURLToPath }} from 'node:url';
+
+const assets = {manifest_json};
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+
+for (const asset of assets) {{
+  const from = join(projectRoot, asset.from);
+  const to = join(projectRoot, asset.to);
+  mkdirSync(dirname(to), {{ recursive: true }});
+  copyFileSync(from, to);
+  if (asset.executable) {{
+    chmodSync(to, 0o755);
+  }}
+}}
+"#
+    )
+}
+
 fn write_project_file(output: &Path, relative: &str, source: &str) -> Result<(), CliRunError> {
     let path = checked_output_path(output, relative)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CliRunError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
     fs::write(path.as_path(), source.as_bytes())
         .map_err(|source| CliRunError::WriteOutput { path, source })
+}
+
+#[cfg(unix)]
+fn set_executable_bit(path: &Path, executable: bool) -> Result<(), CliRunError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !executable {
+        return Ok(());
+    }
+    let metadata = fs::metadata(path).map_err(|source| CliRunError::WriteOutput {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    fs::set_permissions(path, permissions).map_err(|source| CliRunError::WriteOutput {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+#[cfg(not(unix))]
+fn set_executable_bit(_path: &Path, _executable: bool) -> Result<(), CliRunError> {
+    Ok(())
 }
 
 const TYPESCRIPT_TSCONFIG_JSON: &str = r#"{
@@ -945,11 +1523,61 @@ impl Error for MatchPackagesError {
 }
 
 #[derive(Debug)]
+pub enum ExtractAssetsError {
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    ConfigureDatabase(rusqlite::Error),
+    LoadInput(SqliteInputError),
+    CannotInferAssetRoot {
+        project_id: u32,
+    },
+    WriteAsset(rusqlite::Error),
+}
+
+impl fmt::Display for ExtractAssetsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenDatabase { path, source } => {
+                write!(formatter, "failed to open {}: {source}", path.display())
+            }
+            Self::ConfigureDatabase(source) => {
+                write!(formatter, "failed to configure SQLite: {source}")
+            }
+            Self::LoadInput(source) => write!(formatter, "{source}"),
+            Self::CannotInferAssetRoot { project_id } => {
+                write!(
+                    formatter,
+                    "cannot infer asset root for project {project_id} without source files"
+                )
+            }
+            Self::WriteAsset(source) => {
+                write!(formatter, "failed to write project asset: {source}")
+            }
+        }
+    }
+}
+
+impl Error for ExtractAssetsError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenDatabase { source, .. }
+            | Self::ConfigureDatabase(source)
+            | Self::WriteAsset(source) => Some(source),
+            Self::LoadInput(source) => Some(source),
+            Self::CannotInferAssetRoot { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum CliRunError {
     Args(CliError),
     LoadInput(SqliteInputError),
     Pipeline(PipelineError),
     MatchPackages(MatchPackagesError),
+    ExtractAssets(ExtractAssetsError),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -962,6 +1590,7 @@ impl fmt::Display for CliRunError {
             Self::LoadInput(source) => write!(formatter, "{source}"),
             Self::Pipeline(source) => write!(formatter, "{source}"),
             Self::MatchPackages(source) => write!(formatter, "{source}"),
+            Self::ExtractAssets(source) => write!(formatter, "{source}"),
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -989,6 +1618,7 @@ impl Error for CliRunError {
             Self::LoadInput(source) => Some(source),
             Self::Pipeline(source) => Some(source),
             Self::MatchPackages(source) => Some(source),
+            Self::ExtractAssets(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
             Self::AuditRejected(_) | Self::UnsafeOutputPath(_) => None,
         }
@@ -1001,12 +1631,13 @@ mod tests {
     use std::path::PathBuf;
 
     use reverts_observe::FindingCode;
-    use reverts_pipeline::{EmittedFile, RuntimeDependency};
+    use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency};
     use rusqlite::{Connection, params};
 
     use super::{
-        CliCommand, CliError, GenerateProjectV2Args, MatchPackagesArgs, checked_output_path,
-        match_packages_from_connection, run, write_emitted_project,
+        CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
+        MatchPackagesArgs, checked_output_path, help_text, match_packages_from_connection, run,
+        version_text, write_emitted_project,
     };
 
     #[test]
@@ -1067,6 +1698,94 @@ mod tests {
     }
 
     #[test]
+    fn parses_extract_assets_command() {
+        let args = ExtractAssetsArgs::parse([
+            "extract-assets".to_string(),
+            "--input".to_string(),
+            "input.db".to_string(),
+            "--project-id".to_string(),
+            "13495".to_string(),
+            "--asset-root".to_string(),
+            "dist".to_string(),
+            "--apply".to_string(),
+        ])
+        .expect("args should parse");
+
+        assert_eq!(args.input, PathBuf::from("input.db"));
+        assert_eq!(args.project_id, 13495);
+        assert_eq!(args.asset_root, Some(PathBuf::from("dist")));
+        assert!(args.apply);
+    }
+
+    #[test]
+    fn parses_top_level_help_and_version_without_required_command_args() {
+        assert_eq!(
+            CliCommand::parse(Vec::<String>::new()).expect("empty args should show help"),
+            CliCommand::Help(HelpTopic::TopLevel)
+        );
+        assert_eq!(
+            CliCommand::parse(["--help".to_string()]).expect("top-level help should parse"),
+            CliCommand::Help(HelpTopic::TopLevel)
+        );
+        assert_eq!(
+            CliCommand::parse(["-h".to_string()]).expect("short help should parse"),
+            CliCommand::Help(HelpTopic::TopLevel)
+        );
+        assert_eq!(
+            CliCommand::parse(["help".to_string()]).expect("help command should parse"),
+            CliCommand::Help(HelpTopic::TopLevel)
+        );
+        assert_eq!(
+            CliCommand::parse(["--version".to_string()]).expect("version should parse"),
+            CliCommand::Version
+        );
+        assert_eq!(
+            CliCommand::parse(["-V".to_string()]).expect("short version should parse"),
+            CliCommand::Version
+        );
+        assert_eq!(
+            CliCommand::parse(["version".to_string()]).expect("version command should parse"),
+            CliCommand::Version
+        );
+    }
+
+    #[test]
+    fn parses_command_specific_help_without_running_command() {
+        assert_eq!(
+            CliCommand::parse(["generate-project-v2".to_string(), "--help".to_string()])
+                .expect("generate help should parse"),
+            CliCommand::Help(HelpTopic::GenerateProjectV2)
+        );
+        assert_eq!(
+            CliCommand::parse(["match-packages".to_string(), "help".to_string()])
+                .expect("match help should parse"),
+            CliCommand::Help(HelpTopic::MatchPackages)
+        );
+        assert_eq!(
+            CliCommand::parse(["help".to_string(), "extract-assets".to_string()])
+                .expect("extract help should parse"),
+            CliCommand::Help(HelpTopic::ExtractAssets)
+        );
+    }
+
+    #[test]
+    fn help_and_version_commands_return_ok() {
+        run(["--help".to_string()]).expect("top-level help should not require a database");
+        run(["help".to_string(), "extract-assets".to_string()])
+            .expect("command help should not require a database");
+        run(["--version".to_string()]).expect("version should not require a database");
+    }
+
+    #[test]
+    fn help_text_documents_commands_and_options() {
+        assert!(help_text(HelpTopic::TopLevel).contains("extract-assets"));
+        assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
+        assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
+        assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR>"));
+        assert!(version_text().starts_with("reverts-cli "));
+    }
+
+    #[test]
     fn output_paths_cannot_escape_output_directory() {
         let error = checked_output_path(PathBuf::from("out").as_path(), "../escape.ts");
 
@@ -1083,6 +1802,7 @@ mod tests {
 
         let written = write_emitted_project(
             &files,
+            &[],
             tempdir.path(),
             &[RuntimeDependency {
                 package_name: "undici".to_string(),
@@ -1124,8 +1844,8 @@ mod tests {
             source: "#!/usr/bin/env node\n// @ts-nocheck\nconsole.log('ok');".to_string(),
         }];
 
-        let written =
-            write_emitted_project(&files, tempdir.path(), &[]).expect("project should be written");
+        let written = write_emitted_project(&files, &[], tempdir.path(), &[])
+            .expect("project should be written");
         let package_json = fs::read_to_string(tempdir.path().join("package.json"))
             .expect("package json should be written");
         let tsconfig = fs::read_to_string(tempdir.path().join("tsconfig.json")).expect("tsconfig");
@@ -1135,6 +1855,48 @@ mod tests {
         assert!(package_json.contains("\"start\": \"node ./dist/cli.js\""));
         assert!(package_json.contains("\"reverts-output\": \"./dist/cli.js\""));
         assert!(tsconfig.contains("\"cli.ts\""));
+    }
+
+    #[test]
+    fn project_writer_materializes_assets_and_build_copy_script() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let files = vec![EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nexport const ok = true;".to_string(),
+        }];
+        let assets = vec![EmittedAsset {
+            path: "modules/1-entry/vendor/rg".to_string(),
+            bytes: b"rg-binary".to_vec(),
+            executable: true,
+        }];
+
+        let written = write_emitted_project(&files, &assets, tempdir.path(), &[])
+            .expect("project should be written");
+        let asset_path = tempdir.path().join("modules/1-entry/vendor/rg");
+        let package_json = fs::read_to_string(tempdir.path().join("package.json"))
+            .expect("package json should be written");
+        let copy_assets = fs::read_to_string(tempdir.path().join("scripts/copy-assets.mjs"))
+            .expect("copy-assets script should be written");
+
+        assert_eq!(written, 2);
+        assert_eq!(
+            fs::read(asset_path.as_path()).expect("asset bytes should be written"),
+            b"rg-binary"
+        );
+        assert!(package_json.contains("node ./scripts/copy-assets.mjs"));
+        assert!(copy_assets.contains("modules/1-entry/vendor/rg"));
+        assert!(copy_assets.contains("dist/modules/1-entry/vendor/rg"));
+        assert!(copy_assets.contains("\"executable\": true"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = fs::metadata(asset_path.as_path())
+                .expect("asset metadata")
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o111, 0);
+        }
     }
 
     #[test]
@@ -1344,6 +2106,86 @@ mod tests {
         let connection = Connection::open(database_path).expect("reopen fixture database");
         assert_eq!(package_attribution_count(&connection), 1);
         assert_eq!(package_surface_count(&connection), 1);
+    }
+
+    #[test]
+    fn cli_extract_assets_then_generate_project_materializes_assets() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("input.db");
+        let app_source_path = tempdir.path().join("app.ts");
+        let asset_path = tempdir.path().join("addon.node");
+        let output_dir = tempdir.path().join("out");
+        let app_source = "const native = require('/$bunfs/root/addon.node'); export { native };";
+        fs::write(app_source_path.as_path(), app_source).expect("write app source");
+        fs::write(asset_path.as_path(), b"native").expect("write native asset");
+        let connection = Connection::open(database_path.as_path()).expect("open fixture database");
+        create_match_generate_schema(&connection);
+        connection
+            .execute("INSERT INTO projects (id, name) VALUES (1, 'fixture')", [])
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (1, ?1)",
+                [app_source_path.to_string_lossy().as_ref()],
+            )
+            .expect("insert source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 1)",
+                [],
+            )
+            .expect("insert project file");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (1, 1, 'entry', 'src/index', 'application', NULL, NULL, 0, ?1)
+                ",
+                [app_source.len() as i64],
+            )
+            .expect("insert app module");
+        drop(connection);
+
+        run([
+            "extract-assets".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--apply".to_string(),
+        ])
+        .expect("asset extraction should persist project_assets");
+        run([
+            "generate-project-v2".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--output".to_string(),
+            output_dir.to_string_lossy().into_owned(),
+        ])
+        .expect("generation should consume persisted asset");
+
+        let generated_source = fs::read_to_string(output_dir.join("modules/1-src/index.ts"))
+            .expect("generated entry should be written");
+        assert!(generated_source.contains("require('./addon.node')"));
+        assert!(!generated_source.contains("/$bunfs/root/addon.node"));
+        assert_eq!(
+            fs::read(output_dir.join("modules/1-src/addon.node")).expect("asset should be written"),
+            b"native"
+        );
+        assert!(
+            fs::read_to_string(output_dir.join("package.json"))
+                .expect("package json")
+                .contains("node ./scripts/copy-assets.mjs")
+        );
+        let connection = Connection::open(database_path).expect("reopen fixture database");
+        let stored_asset_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM project_assets", [], |row| row.get(0))
+            .expect("count project assets");
+        assert_eq!(stored_asset_count, 1);
     }
 
     fn package_match_connection(

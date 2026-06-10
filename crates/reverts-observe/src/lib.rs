@@ -21,6 +21,7 @@ pub enum FindingCode {
     AmbiguousPackageMatch,
     MissingPackageSource,
     UnreachableTopLevelCode,
+    MissingRequiredAsset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

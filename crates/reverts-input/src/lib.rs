@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::path::{Component, Path};
 
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 
@@ -37,6 +38,108 @@ impl SourceFileInput {
             path: path.into(),
             source,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetKind {
+    Wasm,
+    NativeNode,
+    Executable,
+    Data,
+    Image,
+    Font,
+    Css,
+    Html,
+    Unknown,
+}
+
+impl AssetKind {
+    #[must_use]
+    pub fn from_storage(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase().replace('-', "_");
+        match normalized.as_str() {
+            "wasm" | "webassembly" => Some(Self::Wasm),
+            "native_node" | "node" | "node_native" => Some(Self::NativeNode),
+            "executable" | "bin" | "binary" => Some(Self::Executable),
+            "data" => Some(Self::Data),
+            "image" => Some(Self::Image),
+            "font" => Some(Self::Font),
+            "css" | "stylesheet" => Some(Self::Css),
+            "html" => Some(Self::Html),
+            "unknown" => Some(Self::Unknown),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm => "wasm",
+            Self::NativeNode => "native_node",
+            Self::Executable => "executable",
+            Self::Data => "data",
+            Self::Image => "image",
+            Self::Font => "font",
+            Self::Css => "css",
+            Self::Html => "html",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetInput {
+    pub id: u32,
+    pub logical_path: String,
+    pub output_path: String,
+    pub source_path: Option<String>,
+    pub bytes: Vec<u8>,
+    pub kind: AssetKind,
+    pub executable: bool,
+    pub platform: Option<String>,
+    pub arch: Option<String>,
+}
+
+impl AssetInput {
+    #[must_use]
+    pub fn new(
+        id: u32,
+        logical_path: impl Into<String>,
+        output_path: impl Into<String>,
+        bytes: Vec<u8>,
+        kind: AssetKind,
+        executable: bool,
+    ) -> Self {
+        Self {
+            id,
+            logical_path: logical_path.into(),
+            output_path: output_path.into(),
+            source_path: None,
+            bytes,
+            kind,
+            executable,
+            platform: None,
+            arch: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_source_path(mut self, source_path: impl Into<String>) -> Self {
+        self.source_path = Some(source_path.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
+        self.platform = Some(platform.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_arch(mut self, arch: impl Into<String>) -> Self {
+        self.arch = Some(arch.into());
+        self
     }
 }
 
@@ -308,6 +411,7 @@ impl PackageSurfaceInput {
 pub struct InputBundle {
     pub project: ProjectInput,
     pub source_files: Vec<SourceFileInput>,
+    pub assets: Vec<AssetInput>,
     pub modules: Vec<ModuleInput>,
     pub symbols: Vec<SymbolInput>,
     pub dependencies: Vec<ModuleDependencyInput>,
@@ -320,6 +424,7 @@ impl InputBundle {
         validate_project(&rows.project)?;
         let source_file_ids = collect_source_file_ids(&rows.source_files)?;
         let module_ids = collect_module_ids(&rows.modules)?;
+        validate_assets(&rows.assets)?;
         validate_modules(&rows.modules, &rows.source_files, &source_file_ids)?;
         validate_symbols(&rows.symbols, &module_ids)?;
         validate_dependencies(&rows.dependencies, &module_ids)?;
@@ -329,6 +434,7 @@ impl InputBundle {
         Ok(Self {
             project: rows.project,
             source_files: rows.source_files,
+            assets: rows.assets,
             modules: rows.modules,
             symbols: rows.symbols,
             dependencies: rows.dependencies,
@@ -356,6 +462,7 @@ impl InputBundle {
 pub struct InputRows {
     pub project: ProjectInput,
     pub source_files: Vec<SourceFileInput>,
+    pub assets: Vec<AssetInput>,
     pub modules: Vec<ModuleInput>,
     pub symbols: Vec<SymbolInput>,
     pub dependencies: Vec<ModuleDependencyInput>,
@@ -369,6 +476,7 @@ impl InputRows {
         Self {
             project,
             source_files: Vec::new(),
+            assets: Vec::new(),
             modules: Vec::new(),
             symbols: Vec::new(),
             dependencies: Vec::new(),
@@ -397,6 +505,36 @@ impl InputRows {
                 non_empty(row.path, "source_file.path")?,
                 row.source,
             ));
+        }
+
+        let mut assets = Vec::with_capacity(rows.assets.len());
+        for row in rows.assets {
+            let id = checked_u32_id(row.id, "asset.id")?;
+            let row_project_id = checked_u32_id(row.project_id, "asset.project_id")?;
+            if row_project_id != project_id {
+                return Err(InputBundleError::AssetProjectMismatch {
+                    asset_id: id,
+                    project_id: row_project_id,
+                    expected_project_id: project_id,
+                });
+            }
+            let kind = AssetKind::from_storage(row.kind.as_str()).ok_or_else(|| {
+                InputBundleError::InvalidAssetKind {
+                    asset_id: id,
+                    kind: row.kind,
+                }
+            })?;
+            assets.push(AssetInput {
+                id,
+                logical_path: non_empty(row.logical_path, "asset.logical_path")?,
+                output_path: non_empty(row.output_path, "asset.output_path")?,
+                source_path: normalize_optional(row.source_path),
+                bytes: row.bytes,
+                kind,
+                executable: row.executable,
+                platform: normalize_optional(row.platform),
+                arch: normalize_optional(row.arch),
+            });
         }
 
         let mut modules = Vec::with_capacity(rows.modules.len());
@@ -500,6 +638,7 @@ impl InputRows {
         Ok(Self {
             project,
             source_files,
+            assets,
             modules,
             symbols,
             dependencies,
@@ -556,6 +695,7 @@ pub fn module_source_slice_from_parts<'a>(
 pub struct DatabaseRows {
     pub project: ProjectRow,
     pub source_files: Vec<SourceFileRow>,
+    pub assets: Vec<AssetRow>,
     pub modules: Vec<ModuleRow>,
     pub symbols: Vec<SymbolRow>,
     pub dependencies: Vec<ModuleDependencyRow>,
@@ -569,6 +709,7 @@ impl DatabaseRows {
         Self {
             project,
             source_files: Vec::new(),
+            assets: Vec::new(),
             modules: Vec::new(),
             symbols: Vec::new(),
             dependencies: Vec::new(),
@@ -590,6 +731,20 @@ pub struct SourceFileRow {
     pub project_id: i64,
     pub path: String,
     pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetRow {
+    pub id: i64,
+    pub project_id: i64,
+    pub logical_path: String,
+    pub output_path: String,
+    pub source_path: Option<String>,
+    pub bytes: Vec<u8>,
+    pub kind: String,
+    pub executable: bool,
+    pub platform: Option<String>,
+    pub arch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,6 +834,22 @@ pub enum InputBundleError {
         expected_project_id: u32,
     },
     DuplicateSourceFileId(u32),
+    AssetProjectMismatch {
+        asset_id: u32,
+        project_id: u32,
+        expected_project_id: u32,
+    },
+    DuplicateAssetId(u32),
+    DuplicateAssetLogicalPath(String),
+    DuplicateAssetOutputPath(String),
+    InvalidAssetKind {
+        asset_id: u32,
+        kind: String,
+    },
+    UnsafeAssetOutputPath {
+        asset_id: u32,
+        output_path: String,
+    },
     DuplicateModuleId(ModuleId),
     UnknownSourceFile {
         source_file_id: u32,
@@ -747,6 +918,31 @@ impl fmt::Display for InputBundleError {
                 "source file {source_file_id} belongs to project {project_id}, expected {expected_project_id}"
             ),
             Self::DuplicateSourceFileId(id) => write!(formatter, "duplicate source file id {id}"),
+            Self::AssetProjectMismatch {
+                asset_id,
+                project_id,
+                expected_project_id,
+            } => write!(
+                formatter,
+                "asset {asset_id} belongs to project {project_id}, expected {expected_project_id}"
+            ),
+            Self::DuplicateAssetId(id) => write!(formatter, "duplicate asset id {id}"),
+            Self::DuplicateAssetLogicalPath(path) => {
+                write!(formatter, "duplicate asset logical path {path}")
+            }
+            Self::DuplicateAssetOutputPath(path) => {
+                write!(formatter, "duplicate asset output path {path}")
+            }
+            Self::InvalidAssetKind { asset_id, kind } => {
+                write!(formatter, "asset {asset_id} has invalid kind {kind}")
+            }
+            Self::UnsafeAssetOutputPath {
+                asset_id,
+                output_path,
+            } => write!(
+                formatter,
+                "asset {asset_id} output path is not safe: {output_path}"
+            ),
             Self::DuplicateModuleId(module_id) => {
                 write!(formatter, "duplicate module id {}", module_id.0)
             }
@@ -860,6 +1056,62 @@ fn collect_source_file_ids(
         }
     }
     Ok(ids)
+}
+
+fn validate_assets(assets: &[AssetInput]) -> Result<(), InputBundleError> {
+    let mut ids = BTreeSet::new();
+    let mut logical_paths = BTreeSet::new();
+    let mut output_paths = BTreeSet::new();
+    for asset in assets {
+        ensure_non_empty(asset.logical_path.as_str(), "asset.logical_path")?;
+        ensure_non_empty(asset.output_path.as_str(), "asset.output_path")?;
+        if let Some(source_path) = &asset.source_path {
+            ensure_non_empty(source_path.as_str(), "asset.source_path")?;
+        }
+        if let Some(platform) = &asset.platform {
+            ensure_non_empty(platform.as_str(), "asset.platform")?;
+        }
+        if let Some(arch) = &asset.arch {
+            ensure_non_empty(arch.as_str(), "asset.arch")?;
+        }
+        if !ids.insert(asset.id) {
+            return Err(InputBundleError::DuplicateAssetId(asset.id));
+        }
+        if !logical_paths.insert(asset.logical_path.clone()) {
+            return Err(InputBundleError::DuplicateAssetLogicalPath(
+                asset.logical_path.clone(),
+            ));
+        }
+        if !output_paths.insert(asset.output_path.clone()) {
+            return Err(InputBundleError::DuplicateAssetOutputPath(
+                asset.output_path.clone(),
+            ));
+        }
+        if !is_safe_relative_path(asset.output_path.as_str()) {
+            return Err(InputBundleError::UnsafeAssetOutputPath {
+                asset_id: asset.id,
+                output_path: asset.output_path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_safe_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return false;
+    }
+
+    let mut has_normal_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    has_normal_component
 }
 
 fn collect_module_ids(modules: &[ModuleInput]) -> Result<BTreeSet<ModuleId>, InputBundleError> {
@@ -1188,10 +1440,11 @@ mod tests {
     use reverts_ir::{ModuleId, ModuleKind};
 
     use super::{
-        DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleInput, ModuleRow,
-        PackageAttributionInput, PackageAttributionRow, PackageAttributionStatus,
-        PackageEmissionMode, PackageSurfaceInput, PackageSurfaceRow, ProjectInput, ProjectRow,
-        SourceFileInput, SourceFileRow, SourceSpan, StoredModuleKind, SymbolInput, SymbolRow,
+        AssetInput, AssetKind, AssetRow, DatabaseRows, InputBundle, InputBundleError, InputRows,
+        ModuleInput, ModuleRow, PackageAttributionInput, PackageAttributionRow,
+        PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput, PackageSurfaceRow,
+        ProjectInput, ProjectRow, SourceFileInput, SourceFileRow, SourceSpan, StoredModuleKind,
+        SymbolInput, SymbolRow,
     };
 
     #[test]
@@ -1208,6 +1461,102 @@ mod tests {
 
         assert_eq!(bundle.project.name, "fixture");
         assert!(bundle.module_ids().contains(&ModuleId(10)));
+    }
+
+    #[test]
+    fn rows_preserve_binary_assets_in_input_bundle() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.assets.push(
+            AssetInput::new(
+                100,
+                "/$bunfs/root/vendor/rg",
+                "modules/entry/vendor/rg",
+                b"rg-binary".to_vec(),
+                AssetKind::Executable,
+                true,
+            )
+            .with_source_path("/tmp/rg")
+            .with_platform("linux")
+            .with_arch("x64"),
+        );
+
+        let bundle = InputBundle::from_rows(rows).expect("asset rows should be valid");
+
+        assert_eq!(bundle.assets.len(), 1);
+        assert_eq!(bundle.assets[0].logical_path, "/$bunfs/root/vendor/rg");
+        assert_eq!(bundle.assets[0].output_path, "modules/entry/vendor/rg");
+        assert_eq!(bundle.assets[0].bytes, b"rg-binary");
+        assert_eq!(bundle.assets[0].kind, AssetKind::Executable);
+        assert!(bundle.assets[0].executable);
+        assert_eq!(bundle.assets[0].platform.as_deref(), Some("linux"));
+        assert_eq!(bundle.assets[0].arch.as_deref(), Some("x64"));
+    }
+
+    #[test]
+    fn unsafe_asset_output_path_is_rejected_before_writing() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.assets.push(AssetInput::new(
+            100,
+            "vendor/rg",
+            "../escape/rg",
+            Vec::new(),
+            AssetKind::Executable,
+            true,
+        ));
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::UnsafeAssetOutputPath {
+                asset_id: 100,
+                output_path,
+            }) if output_path == "../escape/rg"
+        ));
+    }
+
+    #[test]
+    fn duplicate_asset_logical_path_is_rejected_as_ambiguous() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/addon.node",
+            "assets/addon-linux.node",
+            b"native-a".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        rows.assets.push(AssetInput::new(
+            101,
+            "/$bunfs/root/addon.node",
+            "assets/addon-darwin.node",
+            b"native-b".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(matches!(
+            error,
+            Err(InputBundleError::DuplicateAssetLogicalPath(path))
+                if path == "/$bunfs/root/addon.node"
+        ));
     }
 
     #[test]
@@ -1239,6 +1588,18 @@ mod tests {
             semantic_name: Some("readableAnswer".to_string()),
             export_name: None,
         });
+        rows.assets.push(AssetRow {
+            id: 31,
+            project_id: 7,
+            logical_path: "vendor/addon.node".to_string(),
+            output_path: "assets/addon.node".to_string(),
+            source_path: Some("/tmp/addon.node".to_string()),
+            bytes: b"native".to_vec(),
+            kind: "native_node".to_string(),
+            executable: false,
+            platform: Some("linux".to_string()),
+            arch: Some("x64".to_string()),
+        });
 
         let bundle = InputBundle::from_database_rows(rows).expect("database rows should convert");
 
@@ -1252,6 +1613,9 @@ mod tests {
             bundle.symbols[0].semantic_name.as_deref(),
             Some("readableAnswer")
         );
+        assert_eq!(bundle.assets[0].id, 31);
+        assert_eq!(bundle.assets[0].kind, AssetKind::NativeNode);
+        assert_eq!(bundle.assets[0].bytes, b"native");
     }
 
     #[test]
