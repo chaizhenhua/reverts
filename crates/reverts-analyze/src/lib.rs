@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstFactKind, AstWrapperKind};
 use reverts_input::ModuleDependencyTarget;
-use reverts_ir::{BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId};
+use reverts_ir::{
+    BindingConstraintKind, BindingName, BindingShapeSolution, ControlFlowEdgeKind,
+    ControlFlowNodeKind, ModuleId,
+};
 use reverts_js::sanitize_identifier;
 use reverts_model::{
     CompilerEvidence, CompilerKind, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
@@ -31,6 +34,7 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     audit.extend(audit_def_use_graph(&model));
     audit.extend(audit_duplicate_top_level_bindings(&model));
     audit.extend(audit_binding_shape_conflicts(&binding_shapes));
+    audit.extend(audit_unreachable_top_level_code(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     EnrichmentOutput {
@@ -208,6 +212,48 @@ fn is_ambient_binding(binding: &str) -> bool {
             | "window"
             | "XMLHttpRequest"
     )
+}
+
+/// Walk the lightweight CFG and flag statements that follow a top-level
+/// `return` or `throw` via a Sequential edge — those are unreachable. Skips
+/// the implicit Exit node so the final terminator does not falsely fire.
+fn audit_unreachable_top_level_code(model: &ProgramModel) -> AuditReport {
+    let mut audit = AuditReport::default();
+    let cfg = model.graph().control_flow();
+    for module in model.modules() {
+        let nodes = cfg.nodes_for(module.id);
+        if nodes.is_empty() {
+            continue;
+        }
+        for edge in cfg.edges_for(module.id) {
+            if edge.kind != ControlFlowEdgeKind::Sequential {
+                continue;
+            }
+            let Some(from_node) = nodes.iter().find(|node| node.id == edge.from) else {
+                continue;
+            };
+            if !matches!(
+                from_node.kind,
+                ControlFlowNodeKind::Return | ControlFlowNodeKind::Throw
+            ) {
+                continue;
+            }
+            let Some(to_node) = nodes.iter().find(|node| node.id == edge.to) else {
+                continue;
+            };
+            if to_node.kind == ControlFlowNodeKind::Exit {
+                continue;
+            }
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::UnreachableTopLevelCode,
+                    "module body contains a statement that follows a top-level return or throw",
+                )
+                .with_module(module.id.0.to_string()),
+            );
+        }
+    }
+    audit
 }
 
 fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> AuditReport {
@@ -1007,6 +1053,55 @@ mod tests {
                 .module(ModuleId(1))
                 .compiler,
             CompilerKind::Babel,
+        );
+    }
+
+    #[test]
+    fn top_level_throw_followed_by_statement_is_reported_as_unreachable() {
+        // CommonJS scripts may have a top-level `return` and ESM modules may
+        // have a top-level `throw`; either way, code that follows them
+        // unconditionally cannot run and the CFG-based audit must surface that.
+        let source = "throw new Error(\"boom\");\nvar leftover = 1;\n";
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            output.audit.has(FindingCode::UnreachableTopLevelCode),
+            "expected UnreachableTopLevelCode finding, got: {:?}",
+            output.audit.findings(),
+        );
+    }
+
+    #[test]
+    fn final_top_level_throw_alone_is_not_reported_as_unreachable() {
+        // A single `throw` at the end of a module is reachable; the audit must
+        // not fire on it.
+        let source = "var x = 1;\nthrow new Error(\"boom\");\n";
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            !output.audit.has(FindingCode::UnreachableTopLevelCode),
+            "audit must not fire on a final throw, got: {:?}",
+            output.audit.findings(),
         );
     }
 
