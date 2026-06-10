@@ -15,9 +15,10 @@ The workspace currently contains these output-v2 crates:
 | `reverts-observe` | existing | Audit reports, finding codes, severity, and telemetry event types |
 | `reverts-input` | existing | In-memory input bundle and row conversion contract |
 | `reverts-graph` | existing | Graph, def-use, import/export, and lightweight control-flow construction from input bundles |
-| `reverts-package` | existing | Package surface and import specifier resolution |
+| `reverts-package` | existing | Package surface index construction from input attributions and import specifier resolution |
+| `reverts-package-matcher` | existing | AST-fingerprint matching of bundle modules against cached npm package sources, persisting accepted attributions |
 | `reverts-model` | existing | Program and enriched-program handoff records |
-| `reverts-analyze` | existing | Semantic naming, package-decision enrichment, and shape-solution wiring |
+| `reverts-analyze` | existing | Semantic naming, package-decision enrichment, shape-solution wiring, and compiler-profile detection |
 | `reverts-planner` | existing | Emit planning for imports, declarations, and exports |
 | `reverts-emitter` | existing | Parseable emitted project generation from plans |
 | `reverts-pipeline` | existing | Pure in-memory minimal decompilation loop |
@@ -38,7 +39,8 @@ planning, emission, and command orchestration.
 | `reverts-graph` | analysis | Build `RevertsGraph`, `DefUseGraph`, `ImportExportGraph`, and lightweight `ControlFlowGraph` from input and AST facts |
 | `reverts-model` | analysis | Hold `ProgramModel`, `SemanticNameMap`, and `EnrichedProgram` as the typed handoff from analysis to planning |
 | `reverts-analyze` | analysis | Enrich the program model with semantic names, binding-shape solutions, and package-import decisions |
-| `reverts-package` | analysis | Resolve package names, builtins, exports, subpaths, and package surfaces without emitting source |
+| `reverts-package` | analysis | Resolve package names, builtins, exports, subpaths, and build the package-surface index from input attributions without emitting source |
+| `reverts-package-matcher` | analysis | Match bundle modules to cached npm package sources via AST fingerprints; produce accepted attribution rows the pipeline can later read |
 | `reverts-planner` | planning | Produce file-level import, export, local binding, and synthetic binding plans |
 | `reverts-emitter` | emission | Convert accepted plans into AST-backed emitted files and `EmittedProject` |
 | `reverts-pipeline` | orchestration | Connect input, model enrichment, planning, emission, and parse audit for the core library loop |
@@ -58,11 +60,16 @@ reverts-cli
               -> reverts-graph
                   -> reverts-input
           -> reverts-package
+              -> reverts-input
       -> reverts-planner
           -> reverts-model
           -> reverts-package
       -> reverts-emitter
           -> reverts-planner
+      -> reverts-observe
+  -> reverts-package-matcher
+      -> reverts-input
+      -> reverts-js
       -> reverts-observe
 ```
 
@@ -108,8 +115,12 @@ crate tests / integration tests
   It must not inspect databases, fetch packages, or emit source.
 - `reverts-analyze` owns pure enrichment from `ProgramModel` to
   `EnrichedProgram`: semantic names, package decisions, and shape solutions.
-- `reverts-package` owns package-surface decisions. It may accept, reject, or
+- `reverts-package` owns package-surface decisions and constructs the
+  `PackageSurfaceIndex` from input attributions. It may accept, reject, or
   classify package imports, but it must not generate import statements.
+- `reverts-package-matcher` owns AST-fingerprint matching between bundle modules
+  and cached package sources. Its results land in `package_attributions` rows
+  that the pipeline reads as input — it must not call the planner or emitter.
 - `reverts-planner` owns output plans. It decides which imports, exports, local
   declarations, and synthetic bindings are needed before emission.
 - `reverts-emitter` owns AST-backed source generation and emitted project
@@ -152,6 +163,7 @@ Filesystem and external access are intentionally narrow:
 | `reverts-model` | no | no | no |
 | `reverts-analyze` | no | no | no |
 | `reverts-package` | optional offline cache adapter only | no required access | no |
+| `reverts-package-matcher` | no required access; reads package source rows from input | no | no |
 | `reverts-planner` | no | no | no |
 | `reverts-emitter` | no required access; returns `EmittedProject` | no | no |
 | `reverts-pipeline` | no required access; returns `EmittedProject` | no | no |
@@ -173,6 +185,7 @@ now live only in their final owner crates:
 | Program snapshots and enrichment records | `reverts-model` |
 | Semantic naming, package-decision enrichment, and shape-solution wiring | `reverts-analyze` |
 | Package name, builtin, exports, and subpath resolution | `reverts-package` |
+| Bundle-to-package AST-fingerprint matching | `reverts-package-matcher` |
 | Import/export/local/synthetic binding planning | `reverts-planner` |
 | AST emission and `EmittedProject` assembly | `reverts-emitter` |
 | In-memory core pipeline orchestration | `reverts-pipeline` |
