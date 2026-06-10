@@ -946,6 +946,38 @@ mod tests {
     }
 
     #[test]
+    fn webpack_runtime_identifier_inside_function_still_classifies_as_webpack() {
+        // Real webpack bundles wrap their runtime in an IIFE; identifiers like
+        // __webpack_require__ live inside function bodies and are filtered out
+        // of AST facts by the module-scope rule. The compiler detector must
+        // fall back to raw-source scanning so these bundles still get classified.
+        let source = "function activate() {\n  __webpack_require__(1);\n  return 42;\n}\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/runtime.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "runtime", "src/runtime.ts").with_source_file(1),
+        );
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "activate"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+        assert!(
+            run.audit.is_clean(),
+            "expected clean audit, got: {:?}",
+            run.audit.findings(),
+        );
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "in-function webpack runtime identifier must still trigger webpack banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn unknown_compiler_does_not_emit_recovery_banner() {
         // Plain TypeScript source with no bundler signals must NOT carry a
         // recovery banner; the banner is reserved for non-Unknown compilers.
