@@ -66,7 +66,10 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
 
     Ok(EmittedFile {
         path: file.path.clone(),
-        source: add_typescript_compat_header(formatted),
+        source: add_typescript_compat_header(
+            formatted,
+            file.compiler_recovery.action.recovery_banner(),
+        ),
     })
 }
 
@@ -74,22 +77,30 @@ fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
 }
 
-fn add_typescript_compat_header(source: String) -> String {
+fn add_typescript_compat_header(source: String, recovery_banner: Option<&str>) -> String {
+    let banner_line = recovery_banner
+        .map(|banner| format!("// {banner}\n"))
+        .unwrap_or_default();
+
     if source
         .lines()
         .take(3)
         .any(|line| line.contains("@ts-nocheck"))
     {
-        return source;
+        return if banner_line.is_empty() {
+            source
+        } else {
+            format!("{banner_line}{source}")
+        };
     }
 
     if let Some(rest) = source.strip_prefix("#!")
         && let Some((hashbang, body)) = rest.split_once('\n')
     {
-        return format!("#!{hashbang}\n// @ts-nocheck\n{body}");
+        return format!("#!{hashbang}\n{banner_line}// @ts-nocheck\n{body}");
     }
 
-    format!("// @ts-nocheck\n{source}")
+    format!("{banner_line}// @ts-nocheck\n{source}")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -151,6 +151,21 @@ impl CompilerRecoveryAction {
             CompilerKind::Terser => Self::PreserveTerserMinifiedOutput,
         }
     }
+
+    /// Short banner text that surfaces the recovery decision in the emitted
+    /// source. Returns `None` for `DirectModuleSource` so untransformed user
+    /// code stays banner-free.
+    #[must_use]
+    pub const fn recovery_banner(self) -> Option<&'static str> {
+        match self {
+            Self::DirectModuleSource => None,
+            Self::PreserveWebpackRuntime => Some("reverts-recovery: webpack"),
+            Self::PreserveEsbuildHelpers => Some("reverts-recovery: esbuild"),
+            Self::PreserveRollupFacade => Some("reverts-recovery: rollup"),
+            Self::PreserveBabelTranspiledOutput => Some("reverts-recovery: babel"),
+            Self::PreserveTerserMinifiedOutput => Some("reverts-recovery: terser"),
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

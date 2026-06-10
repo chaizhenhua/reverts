@@ -910,4 +910,62 @@ mod tests {
             "emitted source must preserve all enum members, got:\n{emitted}",
         );
     }
+
+    #[test]
+    fn webpack_bundle_emits_compiler_specific_recovery_banner() {
+        // The fixture has the canonical __webpack_require__ identifier at module
+        // scope, so compiler detection classifies the module as Webpack and the
+        // pipeline must surface that decision via a recovery banner.
+        let source = "var __webpack_require__ = function (id) { return id; };\n\
+                      var entry = __webpack_require__(1);\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/runtime.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "runtime", "src/runtime.ts").with_source_file(1),
+        );
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "__webpack_require__"));
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "entry"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+        assert!(
+            run.audit.is_clean(),
+            "expected clean audit, got: {:?}",
+            run.audit.findings(),
+        );
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "emitted source must carry a webpack recovery banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn unknown_compiler_does_not_emit_recovery_banner() {
+        // Plain TypeScript source with no bundler signals must NOT carry a
+        // recovery banner; the banner is reserved for non-Unknown compilers.
+        let source = "export function add(a: number, b: number) {\n  return a + b;\n}\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/add.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "add", "src/add.ts").with_source_file(1));
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "add"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            !emitted.contains("reverts-recovery"),
+            "unknown-compiler module must not include a recovery banner, got:\n{emitted}",
+        );
+    }
 }
