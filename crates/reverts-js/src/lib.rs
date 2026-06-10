@@ -6,9 +6,9 @@ use oxc_ast::{
     AstBuilder, NONE, Visit,
     ast::{
         Argument, BindingPatternKind, CallExpression, Declaration, ExportAllDeclaration,
-        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, ImportDeclaration,
-        ImportExpression, ImportOrExportKind, NewExpression, Statement, StringLiteral,
-        VariableDeclarator,
+        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, IdentifierReference,
+        ImportDeclaration, ImportExpression, ImportOrExportKind, NewExpression, Program, Statement,
+        StringLiteral, VariableDeclarator,
     },
     visit::walk::{
         walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
@@ -515,6 +515,12 @@ pub fn format_source_with_module_items(
                 .program
                 .body
                 .retain(|statement| !is_babel_es_module_marker(statement));
+            if !program_references_interop_require_default(&parsed.program) {
+                parsed
+                    .program
+                    .body
+                    .retain(|statement| !is_babel_interop_require_default_helper(statement));
+            }
         }
 
         let builder = AstBuilder::new(&allocator);
@@ -630,6 +636,54 @@ fn babel_interop_require_default_arg_span(expression: &Expression<'_>) -> Option
         return None;
     };
     Some(specifier.span())
+}
+
+/// Returns true if any expression in the program refers to
+/// `_interopRequireDefault` as an identifier (i.e. uses it as a value).
+/// The function's own `BindingIdentifier` does NOT show up as an
+/// `IdentifierReference`, so when the count is zero the helper declaration
+/// is genuinely dead and can be safely stripped.
+fn program_references_interop_require_default(program: &Program<'_>) -> bool {
+    let mut counter = InteropRequireDefaultReferenceCounter::default();
+    counter.visit_program(program);
+    counter.count > 0
+}
+
+#[derive(Debug, Default)]
+struct InteropRequireDefaultReferenceCounter {
+    count: usize,
+}
+
+impl<'a> Visit<'a> for InteropRequireDefaultReferenceCounter {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if identifier.name.as_str() == "_interopRequireDefault" {
+            self.count += 1;
+        }
+    }
+}
+
+/// Recognise the canonical Babel CJS interop helper declaration:
+/// `function _interopRequireDefault(<param>) { return <param> && <param>.__esModule ? <param> : { default: <param> }; }`.
+/// The strict-name + single-param + single-return-statement check stays
+/// narrow enough that a user-written function with the same name but a
+/// different signature is left alone.
+fn is_babel_interop_require_default_helper(statement: &Statement<'_>) -> bool {
+    let Statement::FunctionDeclaration(function) = statement else {
+        return false;
+    };
+    let Some(name) = function.id.as_ref() else {
+        return false;
+    };
+    if name.name.as_str() != "_interopRequireDefault" {
+        return false;
+    }
+    if function.params.items.len() != 1 {
+        return false;
+    }
+    let Some(body) = function.body.as_ref() else {
+        return false;
+    };
+    body.statements.len() == 1 && matches!(body.statements[0], Statement::ReturnStatement(_))
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:

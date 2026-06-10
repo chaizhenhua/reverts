@@ -1862,6 +1862,37 @@ mod tests {
             emitted.contains("var entry = _foo.default"),
             "babel lowering must preserve subsequent .default accesses; got:\n{emitted}",
         );
+        assert!(
+            !emitted.contains("function _interopRequireDefault"),
+            "babel lowering must strip the helper definition once all calls are rewritten; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn babel_interop_require_default_helper_is_kept_when_a_call_remains_unrewritten() {
+        // The helper definition may only be stripped when nothing in the
+        // emitted output still references it. A non-rewritable use (e.g.
+        // a top-level call without the var-init pattern) must keep the
+        // helper alive so the runtime stays valid.
+        let source = "var _foo = _interopRequireDefault(require('./foo'));\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var _bar = _interopRequireDefault({});\n\
+                      var entry = _foo.default;\n\
+                      var bar = _bar.default;\n";
+        let run = run_with_source(
+            source,
+            &["_foo", "_interopRequireDefault", "_bar", "entry", "bar"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("function _interopRequireDefault"),
+            "helper definition must remain because at least one call site survives; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("_interopRequireDefault({})"),
+            "untouched call must still be present; got:\n{emitted}",
+        );
     }
 
     #[test]
