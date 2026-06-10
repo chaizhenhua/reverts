@@ -8,8 +8,9 @@ use oxc_ast::{
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
         ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
-        ImportDeclarationSpecifier, ModuleExportName, NewExpression, SimpleAssignmentTarget,
-        StaticMemberExpression, UpdateExpression, VariableDeclarator,
+        ImportDeclarationSpecifier, ModuleExportName, NewExpression, Program,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
+        VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -25,8 +26,8 @@ use oxc_syntax::{
 };
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput};
 use reverts_ir::{
-    BindingConstraint, BindingConstraintKind, BindingName, DefUseGraph, ModuleId,
-    split_bare_specifier,
+    BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
+    ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, split_bare_specifier,
 };
 use reverts_js::{JsError, ParseError, ParseGoal, source_type_candidates};
 
@@ -35,6 +36,7 @@ pub struct RevertsGraph {
     modules: BTreeMap<ModuleId, ModuleInput>,
     definitions: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     def_use: DefUseGraph,
+    control_flow: ControlFlowGraph,
     import_export: ImportExportGraph,
     ast_facts: Vec<AstFact>,
     ast_errors: Vec<AstFactError>,
@@ -154,6 +156,12 @@ pub struct AstFactError {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AstFactExtractor;
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AstExtraction {
+    pub facts: Vec<AstFact>,
+    pub control_flow: ControlFlowGraph,
+}
+
 impl RevertsGraph {
     #[must_use]
     pub fn from_input(input: &InputBundle) -> Self {
@@ -188,13 +196,15 @@ impl RevertsGraph {
 
         let mut ast_facts = Vec::new();
         let mut ast_errors = Vec::new();
+        let mut control_flow = ControlFlowGraph::default();
         for module in &input.modules {
             let Some(source) = input.module_source_slice(module.id) else {
                 continue;
             };
             match AstFactExtractor.extract(module, source.source_file_path, source.source) {
-                Ok(facts) => {
-                    for fact in facts {
+                Ok(extraction) => {
+                    control_flow.extend(extraction.control_flow);
+                    for fact in extraction.facts {
                         apply_ast_fact(&mut definitions, &mut def_use, &mut import_export, &fact);
                         ast_facts.push(fact);
                     }
@@ -211,6 +221,7 @@ impl RevertsGraph {
             modules,
             definitions,
             def_use,
+            control_flow,
             import_export,
             ast_facts,
             ast_errors,
@@ -251,6 +262,11 @@ impl RevertsGraph {
     #[must_use]
     pub fn def_use(&self) -> &DefUseGraph {
         &self.def_use
+    }
+
+    #[must_use]
+    pub fn control_flow(&self) -> &ControlFlowGraph {
+        &self.control_flow
     }
 
     #[must_use]
@@ -329,7 +345,7 @@ impl AstFactExtractor {
         module: &ModuleInput,
         source_path: &str,
         source: &str,
-    ) -> Result<Vec<AstFact>, String> {
+    ) -> Result<AstExtraction, String> {
         let allocator = Allocator::default();
         let mut errors = Vec::new();
 
@@ -347,7 +363,10 @@ impl AstFactExtractor {
                     function_depth: 0,
                 };
                 visitor.visit_program(&parsed.program);
-                return Ok(visitor.facts);
+                return Ok(AstExtraction {
+                    facts: visitor.facts,
+                    control_flow: extract_control_flow(module.id, &parsed.program),
+                });
             }
             errors.push(ParseError {
                 source_type: format!("{source_type:?}"),
@@ -356,6 +375,112 @@ impl AstFactExtractor {
         }
 
         Err(parse_error_message(&JsError::ParseFailed(errors)))
+    }
+}
+
+fn extract_control_flow(module_id: ModuleId, program: &Program<'_>) -> ControlFlowGraph {
+    let mut graph = ControlFlowGraph::default();
+    let entry = graph.add_node(module_id, ControlFlowNodeKind::Entry);
+    let mut previous = entry;
+
+    for (index, statement) in program.body.iter().enumerate() {
+        previous = append_statement_flow(module_id, &mut graph, previous, statement, index == 0);
+    }
+
+    let exit = graph.add_node(module_id, ControlFlowNodeKind::Exit);
+    let edge_kind = if previous == entry {
+        ControlFlowEdgeKind::Entry
+    } else {
+        ControlFlowEdgeKind::Sequential
+    };
+    graph.add_edge(module_id, previous, exit, edge_kind);
+    graph
+}
+
+fn append_statement_flow(
+    module_id: ModuleId,
+    graph: &mut ControlFlowGraph,
+    previous: FlowNodeId,
+    statement: &Statement<'_>,
+    is_first_statement: bool,
+) -> FlowNodeId {
+    let kind = control_flow_node_kind(statement);
+    let current = graph.add_node(module_id, kind);
+    let edge_kind = if is_first_statement {
+        ControlFlowEdgeKind::Entry
+    } else if matches!(
+        kind,
+        ControlFlowNodeKind::Return | ControlFlowNodeKind::Throw
+    ) {
+        ControlFlowEdgeKind::Termination
+    } else {
+        ControlFlowEdgeKind::Sequential
+    };
+    graph.add_edge(module_id, previous, current, edge_kind);
+
+    match statement {
+        Statement::IfStatement(statement) => {
+            add_conditional_statement(module_id, graph, current, &statement.consequent);
+            if let Some(alternate) = &statement.alternate {
+                add_conditional_statement(module_id, graph, current, alternate);
+            }
+        }
+        Statement::ForStatement(statement) => {
+            add_loop_body(module_id, graph, current, &statement.body);
+        }
+        Statement::ForInStatement(statement) => {
+            add_loop_body(module_id, graph, current, &statement.body);
+        }
+        Statement::ForOfStatement(statement) => {
+            add_loop_body(module_id, graph, current, &statement.body);
+        }
+        Statement::WhileStatement(statement) => {
+            add_loop_body(module_id, graph, current, &statement.body);
+        }
+        Statement::DoWhileStatement(statement) => {
+            add_loop_body(module_id, graph, current, &statement.body);
+        }
+        _ => {}
+    }
+
+    if kind == ControlFlowNodeKind::Loop {
+        graph.add_edge(module_id, current, current, ControlFlowEdgeKind::LoopBack);
+    }
+
+    current
+}
+
+fn add_conditional_statement(
+    module_id: ModuleId,
+    graph: &mut ControlFlowGraph,
+    branch: FlowNodeId,
+    statement: &Statement<'_>,
+) {
+    let target = graph.add_node(module_id, control_flow_node_kind(statement));
+    graph.add_edge(module_id, branch, target, ControlFlowEdgeKind::Conditional);
+}
+
+fn add_loop_body(
+    module_id: ModuleId,
+    graph: &mut ControlFlowGraph,
+    loop_node: FlowNodeId,
+    statement: &Statement<'_>,
+) {
+    let body = graph.add_node(module_id, control_flow_node_kind(statement));
+    graph.add_edge(module_id, loop_node, body, ControlFlowEdgeKind::Conditional);
+}
+
+fn control_flow_node_kind(statement: &Statement<'_>) -> ControlFlowNodeKind {
+    match statement {
+        Statement::IfStatement(_) | Statement::SwitchStatement(_) => ControlFlowNodeKind::Branch,
+        Statement::ForStatement(_)
+        | Statement::ForInStatement(_)
+        | Statement::ForOfStatement(_)
+        | Statement::WhileStatement(_)
+        | Statement::DoWhileStatement(_) => ControlFlowNodeKind::Loop,
+        Statement::ReturnStatement(_) => ControlFlowNodeKind::Return,
+        Statement::ThrowStatement(_) => ControlFlowNodeKind::Throw,
+        _ => ControlFlowNodeKind::Statement,
     }
 }
 
@@ -905,7 +1030,7 @@ mod tests {
     use reverts_input::{
         InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
     };
-    use reverts_ir::{BindingConstraintKind, ModuleId};
+    use reverts_ir::{BindingConstraintKind, ControlFlowEdgeKind, ControlFlowNodeKind, ModuleId};
 
     use super::{AstFactKind, AstWrapperKind, RevertsGraph};
 
@@ -1067,6 +1192,64 @@ mod tests {
                 .exports_for(ModuleId(1))
                 .iter()
                 .any(|binding| binding.as_str() == "local")
+        );
+    }
+
+    #[test]
+    fn ast_fact_extractor_projects_control_flow_shape() {
+        let source = r#"
+            if (flag) {
+                work();
+            } else {
+                fallback();
+            }
+            while (flag) {
+                tick();
+            }
+            return;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let flow = graph.control_flow();
+
+        assert!(
+            flow.nodes_for(ModuleId(1))
+                .iter()
+                .any(|node| { node.kind == ControlFlowNodeKind::Entry })
+        );
+        assert!(
+            flow.nodes_for(ModuleId(1))
+                .iter()
+                .any(|node| { node.kind == ControlFlowNodeKind::Branch })
+        );
+        assert!(
+            flow.nodes_for(ModuleId(1))
+                .iter()
+                .any(|node| { node.kind == ControlFlowNodeKind::Loop })
+        );
+        assert!(
+            flow.nodes_for(ModuleId(1))
+                .iter()
+                .any(|node| { node.kind == ControlFlowNodeKind::Return })
+        );
+        assert!(
+            flow.edges_for(ModuleId(1))
+                .iter()
+                .any(|edge| { edge.kind == ControlFlowEdgeKind::Conditional })
+        );
+        assert!(
+            flow.edges_for(ModuleId(1))
+                .iter()
+                .any(|edge| { edge.kind == ControlFlowEdgeKind::LoopBack })
         );
     }
 

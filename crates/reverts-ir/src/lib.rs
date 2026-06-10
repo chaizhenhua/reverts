@@ -221,6 +221,166 @@ impl DefUseGraph {
     pub fn constraints(&self) -> &[BindingConstraint] {
         &self.constraints
     }
+
+    #[must_use]
+    pub fn data_dependence_edges(&self) -> Vec<DataDependenceEdge> {
+        let mut edges = Vec::new();
+        for (module_id, binding) in &self.reads {
+            self.push_data_dependence_edge(&mut edges, *module_id, binding, BindingUseKind::Read);
+        }
+        for (module_id, binding) in &self.writes {
+            self.push_data_dependence_edge(&mut edges, *module_id, binding, BindingUseKind::Write);
+        }
+        edges
+    }
+
+    fn push_data_dependence_edge(
+        &self,
+        edges: &mut Vec<DataDependenceEdge>,
+        module_id: ModuleId,
+        binding: &BindingName,
+        target: BindingUseKind,
+    ) {
+        let source = if self.definitions.contains(&(module_id, binding.clone())) {
+            BindingSourceKind::Definition
+        } else if self.imports.contains(&(module_id, binding.clone())) {
+            BindingSourceKind::Import
+        } else {
+            return;
+        };
+
+        edges.push(DataDependenceEdge {
+            module_id,
+            binding: binding.clone(),
+            source,
+            target,
+        });
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BindingSourceKind {
+    Definition,
+    Import,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BindingUseKind {
+    Read,
+    Write,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataDependenceEdge {
+    pub module_id: ModuleId,
+    pub binding: BindingName,
+    pub source: BindingSourceKind,
+    pub target: BindingUseKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FlowNodeId(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ControlFlowNodeKind {
+    Entry,
+    Statement,
+    Branch,
+    Loop,
+    Return,
+    Throw,
+    Exit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ControlFlowEdgeKind {
+    Entry,
+    Sequential,
+    Conditional,
+    LoopBack,
+    Termination,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFlowNode {
+    pub id: FlowNodeId,
+    pub module_id: ModuleId,
+    pub kind: ControlFlowNodeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlFlowEdge {
+    pub module_id: ModuleId,
+    pub from: FlowNodeId,
+    pub to: FlowNodeId,
+    pub kind: ControlFlowEdgeKind,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ControlFlowGraph {
+    next_node_id: u32,
+    nodes: BTreeMap<ModuleId, Vec<ControlFlowNode>>,
+    edges: BTreeMap<ModuleId, Vec<ControlFlowEdge>>,
+}
+
+impl ControlFlowGraph {
+    pub fn add_node(&mut self, module_id: ModuleId, kind: ControlFlowNodeKind) -> FlowNodeId {
+        let id = FlowNodeId(self.next_node_id);
+        self.next_node_id += 1;
+        self.nodes
+            .entry(module_id)
+            .or_default()
+            .push(ControlFlowNode {
+                id,
+                module_id,
+                kind,
+            });
+        id
+    }
+
+    pub fn add_edge(
+        &mut self,
+        module_id: ModuleId,
+        from: FlowNodeId,
+        to: FlowNodeId,
+        kind: ControlFlowEdgeKind,
+    ) {
+        self.edges
+            .entry(module_id)
+            .or_default()
+            .push(ControlFlowEdge {
+                module_id,
+                from,
+                to,
+                kind,
+            });
+    }
+
+    pub fn extend(&mut self, other: Self) {
+        for (module_id, nodes) in other.nodes {
+            self.nodes.entry(module_id).or_default().extend(nodes);
+        }
+        for (module_id, edges) in other.edges {
+            self.edges.entry(module_id).or_default().extend(edges);
+        }
+        self.next_node_id = self.next_node_id.max(other.next_node_id);
+    }
+
+    #[must_use]
+    pub fn nodes_for(&self, module_id: ModuleId) -> &[ControlFlowNode] {
+        self.nodes
+            .get(&module_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn edges_for(&self, module_id: ModuleId) -> &[ControlFlowEdge] {
+        self.edges
+            .get(&module_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -369,8 +529,9 @@ fn normalize_subpath(subpath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution, DefUseGraph,
-        ModuleId, PackageSurface, is_valid_package_name,
+        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution,
+        BindingSourceKind, BindingUseKind, ControlFlowEdgeKind, ControlFlowGraph,
+        ControlFlowNodeKind, DefUseGraph, ModuleId, PackageSurface, is_valid_package_name,
     };
 
     #[test]
@@ -396,6 +557,50 @@ mod tests {
         graph.write(ModuleId(1), "namespace");
 
         assert!(graph.unresolved_writes().is_empty());
+    }
+
+    #[test]
+    fn data_dependence_edges_connect_resolved_reads_and_writes_to_sources() {
+        let mut graph = DefUseGraph::default();
+        graph.define(ModuleId(1), "local");
+        graph.import(ModuleId(1), "external");
+        graph.read(ModuleId(1), "local");
+        graph.write(ModuleId(1), "external");
+        graph.read(ModuleId(1), "missing");
+
+        let edges = graph.data_dependence_edges();
+
+        assert!(edges.iter().any(|edge| {
+            edge.binding.as_str() == "local"
+                && edge.source == BindingSourceKind::Definition
+                && edge.target == BindingUseKind::Read
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.binding.as_str() == "external"
+                && edge.source == BindingSourceKind::Import
+                && edge.target == BindingUseKind::Write
+        }));
+        assert!(!edges.iter().any(|edge| edge.binding.as_str() == "missing"));
+    }
+
+    #[test]
+    fn control_flow_graph_records_nodes_and_edges_by_module() {
+        let mut graph = ControlFlowGraph::default();
+        let entry = graph.add_node(ModuleId(1), ControlFlowNodeKind::Entry);
+        let statement = graph.add_node(ModuleId(1), ControlFlowNodeKind::Statement);
+        graph.add_edge(
+            ModuleId(1),
+            entry,
+            statement,
+            ControlFlowEdgeKind::Sequential,
+        );
+
+        assert_eq!(graph.nodes_for(ModuleId(1)).len(), 2);
+        assert_eq!(graph.edges_for(ModuleId(1)).len(), 1);
+        assert_eq!(
+            graph.edges_for(ModuleId(1))[0].kind,
+            ControlFlowEdgeKind::Sequential
+        );
     }
 
     #[test]
