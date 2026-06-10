@@ -1,9 +1,13 @@
 use std::path::Path;
 
 use oxc_allocator::Allocator;
+use oxc_ast::{
+    AstBuilder, NONE,
+    ast::{ImportOrExportKind, Statement},
+};
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
+use oxc_span::{SPAN, SourceType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -22,6 +26,36 @@ pub type Result<T> = std::result::Result<T, JsError>;
 pub enum ParseGoal {
     JavaScript,
     TypeScript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedImport {
+    pub namespace: String,
+    pub specifier: String,
+}
+
+impl GeneratedImport {
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, specifier: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            specifier: specifier.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedExport {
+    pub binding: String,
+}
+
+impl GeneratedExport {
+    #[must_use]
+    pub fn new(binding: impl Into<String>) -> Self {
+        Self {
+            binding: binding.into(),
+        }
+    }
 }
 
 #[must_use]
@@ -109,6 +143,107 @@ pub fn format_source_pretty(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+pub fn format_source_with_module_items(
+    body_source: &str,
+    generated_imports: &[GeneratedImport],
+    generated_exports: &[GeneratedExport],
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<String> {
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let allocator = Allocator::default();
+        let mut parsed = Parser::new(&allocator, body_source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let builder = AstBuilder::new(&allocator);
+        for generated_import in generated_imports.iter().rev() {
+            parsed
+                .program
+                .body
+                .insert(0, generated_import_statement(&builder, generated_import));
+        }
+        for generated_export in generated_exports {
+            parsed
+                .program
+                .body
+                .push(generated_export_statement(&builder, generated_export));
+        }
+        if parsed.program.body.is_empty() {
+            parsed.program.body.push(empty_export_statement(&builder));
+        }
+
+        let output = CodeGenerator::new()
+            .with_options(CodegenOptions {
+                single_quote: true,
+                minify: false,
+                ..Default::default()
+            })
+            .build(&parsed.program);
+        return Ok(output.code);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+fn generated_import_statement<'a>(
+    builder: &AstBuilder<'a>,
+    generated_import: &GeneratedImport,
+) -> Statement<'a> {
+    let local = builder.binding_identifier(SPAN, generated_import.namespace.as_str());
+    let specifier = builder.import_declaration_specifier_import_namespace_specifier(SPAN, local);
+    let specifiers = Some(builder.vec1(specifier));
+    let source = builder.string_literal(SPAN, generated_import.specifier.as_str(), None);
+    Statement::ImportDeclaration(builder.alloc_import_declaration(
+        SPAN,
+        specifiers,
+        source,
+        None,
+        NONE,
+        ImportOrExportKind::Value,
+    ))
+}
+
+fn generated_export_statement<'a>(
+    builder: &AstBuilder<'a>,
+    generated_export: &GeneratedExport,
+) -> Statement<'a> {
+    let local =
+        builder.module_export_name_identifier_reference(SPAN, generated_export.binding.as_str());
+    let exported =
+        builder.module_export_name_identifier_name(SPAN, generated_export.binding.as_str());
+    let specifier = builder.export_specifier(SPAN, local, exported, ImportOrExportKind::Value);
+    let specifiers = builder.vec1(specifier);
+    Statement::ExportNamedDeclaration(builder.alloc_export_named_declaration(
+        SPAN,
+        None,
+        specifiers,
+        None,
+        ImportOrExportKind::Value,
+        NONE,
+    ))
+}
+
+fn empty_export_statement<'a>(builder: &AstBuilder<'a>) -> Statement<'a> {
+    Statement::ExportNamedDeclaration(builder.alloc_export_named_declaration(
+        SPAN,
+        None,
+        builder.vec(),
+        None,
+        ImportOrExportKind::Value,
+        NONE,
+    ))
 }
 
 fn parse_options_for(source_type: SourceType) -> ParseOptions {
@@ -212,7 +347,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        JsError, ParseGoal, format_source_pretty, normalize_source_for_pipeline, parse_source,
+        GeneratedExport, GeneratedImport, JsError, ParseGoal, format_source_pretty,
+        format_source_with_module_items, normalize_source_for_pipeline, parse_source,
         sanitize_identifier,
     };
 
@@ -246,6 +382,36 @@ mod tests {
 
         assert!(normalized.contains("export function add(a, b)"));
         assert!(normalized.contains("return a + b;"));
+    }
+
+    #[test]
+    fn module_item_formatting_builds_imports_and_exports_as_ast_nodes() {
+        let formatted = format_source_with_module_items(
+            "const answer = __pkg.answer;",
+            &[GeneratedImport::new("__pkg", "pkg")],
+            &[GeneratedExport::new("answer")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as __pkg from 'pkg';"));
+        assert!(formatted.contains("const answer = __pkg.answer;"));
+        assert!(formatted.contains("export { answer };"));
+    }
+
+    #[test]
+    fn empty_module_item_formatting_emits_parseable_empty_module() {
+        let formatted = format_source_with_module_items(
+            "",
+            &[],
+            &[],
+            Some(Path::new("src/empty.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("empty module should format");
+
+        assert_eq!(formatted.trim(), "export {};");
     }
 
     #[test]

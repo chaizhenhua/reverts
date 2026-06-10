@@ -3,7 +3,9 @@ use std::fmt;
 use std::path::Path;
 
 use reverts_ir::BindingName;
-use reverts_js::{JsError, format_source_pretty, sanitize_identifier};
+use reverts_js::{
+    GeneratedExport, GeneratedImport, JsError, format_source_with_module_items, sanitize_identifier,
+};
 use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
 
@@ -27,43 +29,34 @@ pub fn emit_project(plan: &EmitPlan) -> Result<EmittedProject, EmitError> {
 }
 
 fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
-    let mut lines = Vec::new();
+    let mut generated_imports = Vec::new();
 
     for import in &file.imports {
         if import.source_backed {
             continue;
         }
         if let Some(specifier) = accepted_specifier(&import.resolution) {
-            lines.push(format!(
-                "import * as {} from '{}';",
+            generated_imports.push(GeneratedImport::new(
                 emit_binding_name(&import.namespace),
-                specifier
+                specifier,
             ));
         }
     }
 
-    for line in &file.body {
-        lines.push(line.clone());
-    }
+    let body_source = file.body.join("\n");
+    let mut generated_exports = Vec::new();
 
     for export in &file.exports {
         if export.source_backed {
             continue;
         }
-        lines.push(format!(
-            "export {{ {} }};",
-            emit_binding_name(&export.binding)
-        ));
+        generated_exports.push(GeneratedExport::new(emit_binding_name(&export.binding)));
     }
 
-    let source = if lines.is_empty() {
-        "export {};".to_string()
-    } else {
-        lines.join("\n")
-    };
-
-    let formatted = format_source_pretty(
-        &source,
+    let formatted = format_source_with_module_items(
+        &body_source,
+        &generated_imports,
+        &generated_exports,
         emit_path_hint(file),
         file.source_strategy().parse_goal(),
     )
@@ -139,7 +132,9 @@ impl Error for EmitError {}
 
 #[cfg(test)]
 mod tests {
-    use reverts_planner::{EmitPlan, PlannedFile};
+    use reverts_ir::BindingName;
+    use reverts_package::PackageResolution;
+    use reverts_planner::{EmitPlan, PlannedFile, PlannedImport};
 
     use super::emit_project;
 
@@ -155,5 +150,29 @@ mod tests {
         assert_eq!(project.files[0].path, "src/index.ts");
         assert!(project.files[0].source.contains("export const answer = 42"));
         assert!(!project.files[0].source.contains("undefined as any"));
+    }
+
+    #[test]
+    fn planned_structural_imports_and_exports_are_emitted_through_ast_codegen() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.add_import(PlannedImport {
+            namespace: BindingName::new("__pkg"),
+            resolution: PackageResolution::External {
+                package_name: "pkg".to_string(),
+                specifier: "pkg".to_string(),
+            },
+            source_backed: false,
+        });
+        file.push_source("const answer = __pkg.answer;");
+        file.add_export(BindingName::new("answer"));
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        let source = project.files[0].source.as_str();
+        assert!(source.contains("import * as __pkg from 'pkg';"));
+        assert!(source.contains("const answer = __pkg.answer;"));
+        assert!(source.contains("export { answer };"));
     }
 }
