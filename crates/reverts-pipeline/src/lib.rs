@@ -10,8 +10,8 @@ use reverts_input::{
 };
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    DeclarationCallability, ParseGoal, classify_top_level_bindings, collect_string_literals,
-    parse_error_message, parse_source,
+    DeclarationCallability, ParseGoal, classify_top_level_bindings,
+    collect_static_resource_specifiers, collect_string_literals, parse_error_message, parse_source,
 };
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -179,7 +179,7 @@ fn collect_required_asset_references_from_parts(
         let Some((source_file_path, source)) = source_for_module(module.id) else {
             continue;
         };
-        let Ok(literals) = collect_string_literals(
+        let Ok(literals) = collect_static_resource_specifiers(
             source.as_str(),
             Some(Path::new(source_file_path.as_str())),
             ParseGoal::TypeScript,
@@ -228,18 +228,15 @@ fn is_asset_reference_literal(value: &str) -> bool {
     if path.starts_with("/$bunfs/root/") || path.starts_with("bun:/") {
         return true;
     }
-    if path == "rg"
-        || path == "rg.exe"
-        || path == "ripgrep"
-        || path == "ripgrep.exe"
-        || path.starts_with("vendor/")
-        || path.contains("/vendor/")
-    {
-        return true;
-    }
 
+    if path.trim() != path || path.is_empty() || path.chars().any(char::is_whitespace) {
+        return false;
+    }
+    let is_relative = path.starts_with("./") || path.starts_with("../");
+    let is_absolute = path.starts_with('/');
+    let is_vendor_path = path.starts_with("vendor/") || path.contains("/vendor/");
     let lower = path.to_ascii_lowercase();
-    matches!(
+    let has_asset_extension = matches!(
         Path::new(lower.as_str())
             .extension()
             .and_then(std::ffi::OsStr::to_str),
@@ -265,7 +262,9 @@ fn is_asset_reference_literal(value: &str) -> bool {
                 | "css"
                 | "html"
         )
-    )
+    );
+
+    has_asset_extension && (is_relative || is_absolute || is_vendor_path)
 }
 
 fn strip_query_and_fragment(value: &str) -> &str {
@@ -681,8 +680,9 @@ mod tests {
 
     #[test]
     fn pipeline_carries_input_assets_to_output_run() {
-        let mut rows =
-            rows_with_application_source("export const rgPath = '/$bunfs/root/vendor/rg';");
+        let mut rows = rows_with_application_source(
+            "const rgPath = require('/$bunfs/root/vendor/rg'); export { rgPath };",
+        );
         rows.assets.push(AssetInput::new(
             100,
             "/$bunfs/root/vendor/rg",
@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn pipeline_rejects_asset_reference_missing_from_project_assets_without_fallback() {
         let rows = rows_with_application_source(
-            "const native = '/$bunfs/root/addon.node'; export { native };",
+            "const native = require('/$bunfs/root/addon.node'); export { native };",
         );
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn pipeline_emits_only_assets_referenced_by_source_literals() {
         let mut rows = rows_with_application_source(
-            "const native = '/$bunfs/root/addon.node'; export { native };",
+            "const native = require('/$bunfs/root/addon.node'); export { native };",
         );
         rows.assets.push(AssetInput::new(
             100,
@@ -750,6 +750,22 @@ mod tests {
         assert_eq!(run.assets.len(), 1);
         assert_eq!(run.assets[0].path, "modules/1-app/addon.node");
         assert_eq!(run.assets[0].bytes, b"native");
+    }
+
+    #[test]
+    fn asset_audit_ignores_inert_string_literals_and_bare_commands() {
+        let rows = rows_with_application_source(
+            "const message = 'install bash.exe from C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe';\n\
+             const cssSuffix = '.bundle.css';\n\
+             const command = 'rg';\n\
+             export { message, cssSuffix, command };",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert!(run.assets.is_empty());
     }
 
     #[test]

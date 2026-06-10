@@ -5,10 +5,15 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, NONE, Visit,
     ast::{
-        Argument, BindingPatternKind, Declaration, ExportDefaultDeclarationKind, Expression,
-        ImportOrExportKind, Statement, StringLiteral, VariableDeclarator,
+        Argument, BindingPatternKind, CallExpression, Declaration, ExportAllDeclaration,
+        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, ImportDeclaration,
+        ImportExpression, ImportOrExportKind, NewExpression, Statement, StringLiteral,
+        VariableDeclarator,
     },
-    visit::walk::walk_string_literal,
+    visit::walk::{
+        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
+        walk_import_declaration, walk_import_expression, walk_new_expression, walk_string_literal,
+    },
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
@@ -152,6 +157,34 @@ pub fn collect_string_literals(
     Err(JsError::ParseFailed(errors))
 }
 
+pub fn collect_static_resource_specifiers(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<StringLiteralFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = StaticResourceSpecifierCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.specifiers);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
 #[derive(Debug, Default)]
 struct StringLiteralCollector {
     literals: Vec<StringLiteralFact>,
@@ -165,6 +198,91 @@ impl<'a> Visit<'a> for StringLiteralCollector {
             byte_end: literal.span.end,
         });
         walk_string_literal(self, literal);
+    }
+}
+
+#[derive(Debug, Default)]
+struct StaticResourceSpecifierCollector {
+    specifiers: Vec<StringLiteralFact>,
+}
+
+impl<'a> Visit<'a> for StaticResourceSpecifierCollector {
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        self.push_literal(&declaration.source);
+        walk_import_declaration(self, declaration);
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if let Some(source) = declaration.source.as_ref() {
+            self.push_literal(source);
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        self.push_literal(&declaration.source);
+        walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(source) = &expression.source {
+            self.push_literal(source);
+        }
+        walk_import_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if call_callee_accepts_static_resource(&expression.callee)
+            && let Some(Argument::StringLiteral(source)) = expression.arguments.first()
+        {
+            self.push_literal(source);
+        }
+        walk_call_expression(self, expression);
+    }
+
+    fn visit_new_expression(&mut self, expression: &NewExpression<'a>) {
+        if expression_identifier(&expression.callee) == Some("URL")
+            && let Some(Argument::StringLiteral(source)) = expression.arguments.first()
+        {
+            self.push_literal(source);
+        }
+        walk_new_expression(self, expression);
+    }
+}
+
+impl StaticResourceSpecifierCollector {
+    fn push_literal(&mut self, literal: &StringLiteral<'_>) {
+        self.specifiers.push(StringLiteralFact {
+            value: literal.value.as_str().to_string(),
+            byte_start: literal.span.start,
+            byte_end: literal.span.end,
+        });
+    }
+}
+
+fn call_callee_accepts_static_resource(callee: &Expression<'_>) -> bool {
+    if expression_identifier(callee) == Some("require") {
+        return true;
+    }
+
+    let Expression::StaticMemberExpression(member) = callee else {
+        return false;
+    };
+    let property = member.property.name.as_str();
+    matches!(
+        (expression_identifier(&member.object), property),
+        (Some("require"), "resolve")
+            | (Some("Bun"), "file")
+            | (Some("fs"), "readFile")
+            | (Some("fs"), "readFileSync")
+            | (Some("fs"), "createReadStream")
+    )
+}
+
+fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
     }
 }
 
@@ -587,8 +705,9 @@ mod tests {
 
     use super::{
         CompilerLowering, GeneratedExport, GeneratedImport, JsError, ParseGoal,
-        collect_string_literals, format_source_pretty, format_source_with_module_items,
-        normalize_source_for_pipeline, parse_error_message, parse_source, sanitize_identifier,
+        collect_static_resource_specifiers, collect_string_literals, format_source_pretty,
+        format_source_with_module_items, normalize_source_for_pipeline, parse_error_message,
+        parse_source, sanitize_identifier,
     };
 
     #[test]
@@ -618,6 +737,34 @@ mod tests {
                 .iter()
                 .all(|literal| literal.byte_end > literal.byte_start)
         );
+    }
+
+    #[test]
+    fn collects_static_resource_specifiers_from_ast_contexts_only() {
+        let source = r#"
+            import './style.css';
+            export * from './icons.svg';
+            const native = require('/$bunfs/root/addon.node');
+            const wasm = new URL('./parser.wasm', import.meta.url);
+            const ignored = 'bash.exe';
+        "#;
+
+        let specifiers = collect_static_resource_specifiers(
+            source,
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("static resource specifiers should be collected");
+
+        let values = specifiers
+            .iter()
+            .map(|literal| literal.value.as_str())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"./style.css"));
+        assert!(values.contains(&"./icons.svg"));
+        assert!(values.contains(&"/$bunfs/root/addon.node"));
+        assert!(values.contains(&"./parser.wasm"));
+        assert!(!values.contains(&"bash.exe"));
     }
 
     #[test]

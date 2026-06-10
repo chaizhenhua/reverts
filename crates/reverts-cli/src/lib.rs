@@ -342,7 +342,7 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
             "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--apply]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --package-name <NAME>     Restrict matching to one package name; repeatable\n    --apply                   Persist accepted package attributions and surfaces"
         }
         HelpTopic::ExtractAssets => {
-            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR>] [--apply]\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --asset-root <DIR>    Root directory for absolute bundle asset references\n    --apply               Persist discovered project_assets rows"
+            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR-OR-BUN-EXE>] [--apply]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --asset-root <DIR-OR-BUN-EXE>   Root directory for asset files, or a Bun standalone executable for /$bunfs/root assets\n    --apply                         Persist discovered project_assets rows"
         }
     }
 }
@@ -427,10 +427,16 @@ pub struct ExtractAssetsOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredProjectAsset {
     reference: AssetReference,
-    source_path: PathBuf,
+    source: DiscoveredAssetSource,
     output_path: String,
     kind: AssetKind,
     executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DiscoveredAssetSource {
+    File(PathBuf),
+    EmbeddedBunFile { bytes: Vec<u8> },
 }
 
 pub fn match_packages_from_sqlite(
@@ -528,7 +534,13 @@ pub fn extract_assets_from_connection(
         .collect::<BTreeSet<_>>();
     let discovered = discover_project_assets(&rows, &references, args.asset_root.as_deref())?;
     let written_assets = if args.apply {
-        persist_project_assets(connection, rows.project.id, &discovered)?
+        let materialized_root = materialized_asset_root(args.input.as_path(), rows.project.id);
+        persist_project_assets(
+            connection,
+            rows.project.id,
+            &discovered,
+            materialized_root.as_path(),
+        )?
     } else {
         0
     };
@@ -580,20 +592,20 @@ fn discover_project_assets(
         else {
             continue;
         };
-        let source_path = asset_source_path(
+        let source = discover_asset_source(
             reference.logical_path.as_str(),
             source_file.path.as_str(),
             asset_root,
-        );
-        if !source_path.is_file() {
+        )?;
+        let Some(source) = source else {
             continue;
-        }
+        };
         let Some(output_path) = asset_output_path(module, reference.logical_path.as_str()) else {
             continue;
         };
         discovered.push(DiscoveredProjectAsset {
             reference: reference.clone(),
-            source_path,
+            source,
             output_path,
             kind: infer_asset_kind(reference.logical_path.as_str()),
             executable: infer_asset_executable(reference.logical_path.as_str()),
@@ -601,6 +613,31 @@ fn discover_project_assets(
     }
 
     Ok(discovered)
+}
+
+fn discover_asset_source(
+    logical_path: &str,
+    source_file_path: &str,
+    asset_root: &Path,
+) -> Result<Option<DiscoveredAssetSource>, ExtractAssetsError> {
+    if bun_root_relative_path(logical_path).is_some()
+        && asset_root.is_file()
+        && let Some(bytes) = extract_bun_embedded_asset(asset_root, logical_path)?
+    {
+        return Ok(Some(DiscoveredAssetSource::EmbeddedBunFile { bytes }));
+    }
+
+    let physical_asset_root = if asset_root.is_file() {
+        asset_root.parent().unwrap_or_else(|| Path::new(""))
+    } else {
+        asset_root
+    };
+    let source_path = asset_source_path(logical_path, source_file_path, physical_asset_root);
+    if source_path.is_file() {
+        Ok(Some(DiscoveredAssetSource::File(source_path)))
+    } else {
+        Ok(None)
+    }
 }
 
 fn asset_source_path(logical_path: &str, source_file_path: &str, asset_root: &Path) -> PathBuf {
@@ -710,10 +747,215 @@ fn infer_asset_executable(logical_path: &str) -> bool {
             .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
 }
 
+fn extract_bun_embedded_asset(
+    executable_path: &Path,
+    logical_path: &str,
+) -> Result<Option<Vec<u8>>, ExtractAssetsError> {
+    let bytes = fs::read(executable_path).map_err(|source| ExtractAssetsError::ReadAsset {
+        path: executable_path.to_path_buf(),
+        source,
+    })?;
+    Ok(extract_bun_embedded_asset_from_bytes(
+        bytes.as_slice(),
+        logical_path,
+    ))
+}
+
+fn extract_bun_embedded_asset_from_bytes(executable: &[u8], logical_path: &str) -> Option<Vec<u8>> {
+    let needle = logical_path.as_bytes();
+    if needle.is_empty() {
+        return None;
+    }
+    let mut cursor = 0usize;
+    while let Some(relative) = find_bytes(&executable[cursor..], needle) {
+        let path_start = cursor + relative;
+        let data_start = path_start.checked_add(needle.len())?.checked_add(1)?;
+        if executable.get(path_start + needle.len()).copied() != Some(0) {
+            cursor = path_start + 1;
+            continue;
+        }
+        let payload = executable.get(data_start..)?;
+        if let Some(size) = embedded_asset_payload_size(payload)
+            && data_start.checked_add(size)? <= executable.len()
+        {
+            return Some(payload[..size].to_vec());
+        }
+        cursor = path_start + 1;
+    }
+    None
+}
+
+fn embedded_asset_payload_size(payload: &[u8]) -> Option<usize> {
+    parse_elf_file_size(payload)
+        .or_else(|| parse_wasm_file_size(payload))
+        .filter(|size| *size > 0 && *size <= payload.len())
+}
+
+fn parse_elf_file_size(payload: &[u8]) -> Option<usize> {
+    if payload.len() < 0x40 || &payload[..4] != b"\x7fELF" || payload.get(5).copied()? != 1 {
+        return None;
+    }
+    match payload.get(4).copied()? {
+        1 => parse_elf32_file_size(payload),
+        2 => parse_elf64_file_size(payload),
+        _ => None,
+    }
+}
+
+fn parse_elf64_file_size(payload: &[u8]) -> Option<usize> {
+    let phoff = read_u64(payload, 0x20)?;
+    let shoff = read_u64(payload, 0x28)?;
+    let ehsize = u64::from(read_u16(payload, 0x34)?);
+    let phentsize = u64::from(read_u16(payload, 0x36)?);
+    let phnum = u64::from(read_u16(payload, 0x38)?);
+    let shentsize = u64::from(read_u16(payload, 0x3a)?);
+    let shnum = u64::from(read_u16(payload, 0x3c)?);
+    let mut size = ehsize;
+    size = size.max(table_end(phoff, phentsize, phnum)?);
+    size = size.max(table_end(shoff, shentsize, shnum)?);
+    for index in 0..phnum {
+        let header = phoff.checked_add(index.checked_mul(phentsize)?)?;
+        let p_offset = read_u64(payload, usize::try_from(header.checked_add(0x08)?).ok()?)?;
+        let p_filesz = read_u64(payload, usize::try_from(header.checked_add(0x20)?).ok()?)?;
+        size = size.max(p_offset.checked_add(p_filesz)?);
+    }
+    usize::try_from(size).ok()
+}
+
+fn parse_elf32_file_size(payload: &[u8]) -> Option<usize> {
+    if payload.len() < 0x34 {
+        return None;
+    }
+    let phoff = u64::from(read_u32(payload, 0x1c)?);
+    let shoff = u64::from(read_u32(payload, 0x20)?);
+    let ehsize = u64::from(read_u16(payload, 0x28)?);
+    let phentsize = u64::from(read_u16(payload, 0x2a)?);
+    let phnum = u64::from(read_u16(payload, 0x2c)?);
+    let shentsize = u64::from(read_u16(payload, 0x2e)?);
+    let shnum = u64::from(read_u16(payload, 0x30)?);
+    let mut size = ehsize;
+    size = size.max(table_end(phoff, phentsize, phnum)?);
+    size = size.max(table_end(shoff, shentsize, shnum)?);
+    for index in 0..phnum {
+        let header = phoff.checked_add(index.checked_mul(phentsize)?)?;
+        let p_offset = u64::from(read_u32(
+            payload,
+            usize::try_from(header.checked_add(0x04)?).ok()?,
+        )?);
+        let p_filesz = u64::from(read_u32(
+            payload,
+            usize::try_from(header.checked_add(0x10)?).ok()?,
+        )?);
+        size = size.max(p_offset.checked_add(p_filesz)?);
+    }
+    usize::try_from(size).ok()
+}
+
+fn parse_wasm_file_size(payload: &[u8]) -> Option<usize> {
+    if payload.len() < 8 || &payload[..4] != b"\0asm" {
+        return None;
+    }
+    let mut cursor = 8usize;
+    let mut last_non_custom_section = 0u8;
+    while cursor < payload.len() {
+        let section_start = cursor;
+        let section_id = *payload.get(cursor)?;
+        if section_id > 12 {
+            return Some(section_start);
+        }
+        cursor = cursor.checked_add(1)?;
+        let Some((section_len, next)) = read_leb128_usize(payload, cursor) else {
+            return Some(section_start);
+        };
+        if section_id != 0 {
+            if section_id <= last_non_custom_section {
+                return Some(section_start);
+            }
+            last_non_custom_section = section_id;
+        }
+        let Some(next_cursor) = next.checked_add(section_len) else {
+            return Some(section_start);
+        };
+        if next_cursor > payload.len() {
+            return Some(section_start);
+        }
+        cursor = next_cursor;
+    }
+    Some(cursor)
+}
+
+fn read_leb128_usize(payload: &[u8], mut cursor: usize) -> Option<(usize, usize)> {
+    let mut value = 0usize;
+    let mut shift = 0usize;
+    loop {
+        let byte = *payload.get(cursor)?;
+        cursor += 1;
+        value |= usize::from(byte & 0x7f).checked_shl(u32::try_from(shift).ok()?)?;
+        if byte & 0x80 == 0 {
+            return Some((value, cursor));
+        }
+        shift = shift.checked_add(7)?;
+        if shift >= usize::BITS as usize {
+            return None;
+        }
+    }
+}
+
+fn table_end(offset: u64, entry_size: u64, count: u64) -> Option<u64> {
+    if offset == 0 || entry_size == 0 || count == 0 {
+        return Some(0);
+    }
+    offset.checked_add(entry_size.checked_mul(count)?)
+}
+
+fn read_u16(payload: &[u8], offset: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(
+        payload
+            .get(offset..offset.checked_add(2)?)?
+            .try_into()
+            .ok()?,
+    ))
+}
+
+fn read_u32(payload: &[u8], offset: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(
+        payload
+            .get(offset..offset.checked_add(4)?)?
+            .try_into()
+            .ok()?,
+    ))
+}
+
+fn read_u64(payload: &[u8], offset: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(
+        payload
+            .get(offset..offset.checked_add(8)?)?
+            .try_into()
+            .ok()?,
+    ))
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn materialized_asset_root(database_path: &Path, project_id: u32) -> PathBuf {
+    let database_dir = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    database_dir
+        .join("project-assets")
+        .join(project_id.to_string())
+}
+
 fn persist_project_assets(
     connection: &mut Connection,
     project_id: u32,
     assets: &[DiscoveredProjectAsset],
+    materialized_root: &Path,
 ) -> Result<usize, ExtractAssetsError> {
     if assets.is_empty() {
         return Ok(0);
@@ -724,7 +966,7 @@ fn persist_project_assets(
         .map_err(ExtractAssetsError::WriteAsset)?;
     let mut written = 0;
     for asset in assets {
-        persist_project_asset(&transaction, project_id, asset)?;
+        persist_project_asset(&transaction, project_id, asset, materialized_root)?;
         written += 1;
     }
     transaction
@@ -761,7 +1003,9 @@ fn persist_project_asset(
     connection: &Connection,
     project_id: u32,
     asset: &DiscoveredProjectAsset,
+    materialized_root: &Path,
 ) -> Result<(), ExtractAssetsError> {
+    let source_path = materialize_project_asset_source(asset, materialized_root)?;
     connection
         .execute(
             "DELETE FROM project_assets WHERE project_id = ?1 AND logical_path = ?2",
@@ -780,12 +1024,67 @@ fn persist_project_asset(
                 i64::from(project_id),
                 asset.reference.logical_path.as_str(),
                 asset.output_path.as_str(),
-                asset.source_path.to_string_lossy().as_ref(),
+                source_path.to_string_lossy().as_ref(),
                 asset.kind.as_str(),
                 if asset.executable { 1_i64 } else { 0_i64 },
             ],
         )
         .map_err(ExtractAssetsError::WriteAsset)?;
+    Ok(())
+}
+
+fn materialize_project_asset_source(
+    asset: &DiscoveredProjectAsset,
+    materialized_root: &Path,
+) -> Result<PathBuf, ExtractAssetsError> {
+    match &asset.source {
+        DiscoveredAssetSource::File(path) => Ok(path.clone()),
+        DiscoveredAssetSource::EmbeddedBunFile { bytes, .. } => {
+            let relative = output_relative_asset_path(asset.reference.logical_path.as_str())
+                .ok_or_else(|| ExtractAssetsError::InvalidAssetPath {
+                    logical_path: asset.reference.logical_path.clone(),
+                })?;
+            let path = materialized_root.join(relative);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|source| {
+                    ExtractAssetsError::WriteMaterializedAsset {
+                        path: parent.to_path_buf(),
+                        source,
+                    }
+                })?;
+            }
+            fs::write(path.as_path(), bytes).map_err(|source| {
+                ExtractAssetsError::WriteMaterializedAsset {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            set_materialized_executable_bit(path.as_path(), asset.executable).map_err(
+                |source| ExtractAssetsError::WriteMaterializedAsset {
+                    path: path.clone(),
+                    source,
+                },
+            )?;
+            Ok(path)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn set_materialized_executable_bit(path: &Path, executable: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !executable {
+        return Ok(());
+    }
+    let metadata = fs::metadata(path)?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o755);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(unix))]
+fn set_materialized_executable_bit(_path: &Path, _executable: bool) -> io::Result<()> {
     Ok(())
 }
 
@@ -1533,6 +1832,17 @@ pub enum ExtractAssetsError {
     CannotInferAssetRoot {
         project_id: u32,
     },
+    ReadAsset {
+        path: PathBuf,
+        source: io::Error,
+    },
+    WriteMaterializedAsset {
+        path: PathBuf,
+        source: io::Error,
+    },
+    InvalidAssetPath {
+        logical_path: String,
+    },
     WriteAsset(rusqlite::Error),
 }
 
@@ -1552,6 +1862,23 @@ impl fmt::Display for ExtractAssetsError {
                     "cannot infer asset root for project {project_id} without source files"
                 )
             }
+            Self::ReadAsset { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read asset {}: {source}",
+                    path.display()
+                )
+            }
+            Self::WriteMaterializedAsset { path, source } => {
+                write!(
+                    formatter,
+                    "failed to materialize asset {}: {source}",
+                    path.display()
+                )
+            }
+            Self::InvalidAssetPath { logical_path } => {
+                write!(formatter, "invalid asset path {logical_path}")
+            }
             Self::WriteAsset(source) => {
                 write!(formatter, "failed to write project asset: {source}")
             }
@@ -1565,8 +1892,11 @@ impl Error for ExtractAssetsError {
             Self::OpenDatabase { source, .. }
             | Self::ConfigureDatabase(source)
             | Self::WriteAsset(source) => Some(source),
+            Self::ReadAsset { source, .. } | Self::WriteMaterializedAsset { source, .. } => {
+                Some(source)
+            }
             Self::LoadInput(source) => Some(source),
-            Self::CannotInferAssetRoot { .. } => None,
+            Self::CannotInferAssetRoot { .. } | Self::InvalidAssetPath { .. } => None,
         }
     }
 }
@@ -1636,8 +1966,8 @@ mod tests {
 
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, checked_output_path, help_text, match_packages_from_connection, run,
-        version_text, write_emitted_project,
+        MatchPackagesArgs, checked_output_path, extract_bun_embedded_asset_from_bytes, help_text,
+        match_packages_from_connection, run, version_text, write_emitted_project,
     };
 
     #[test]
@@ -1781,7 +2111,7 @@ mod tests {
         assert!(help_text(HelpTopic::TopLevel).contains("extract-assets"));
         assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
-        assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR>"));
+        assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
         assert!(version_text().starts_with("reverts-cli "));
     }
 
@@ -2186,6 +2516,127 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM project_assets", [], |row| row.get(0))
             .expect("count project assets");
         assert_eq!(stored_asset_count, 1);
+    }
+
+    #[test]
+    fn cli_extract_assets_can_materialize_bun_embedded_native_asset() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("input.db");
+        let app_source_path = tempdir.path().join("app.ts");
+        let bun_executable_path = tempdir.path().join("fixture-bun");
+        let output_dir = tempdir.path().join("out");
+        let logical_path = "/$bunfs/root/native.node";
+        let native_bytes = minimal_elf64_bytes();
+        let app_source = format!("const native = require('{logical_path}'); export {{ native }};");
+        let mut bun_executable = Vec::new();
+        bun_executable.extend_from_slice(b"not the asset /$bunfs/root/native.node);");
+        bun_executable.extend_from_slice(logical_path.as_bytes());
+        bun_executable.push(0);
+        bun_executable.extend_from_slice(native_bytes.as_slice());
+        bun_executable.extend_from_slice(b"\0---- Bun! ----\n");
+        fs::write(app_source_path.as_path(), app_source.as_str()).expect("write app source");
+        fs::write(bun_executable_path.as_path(), bun_executable).expect("write bun executable");
+        let connection = Connection::open(database_path.as_path()).expect("open fixture database");
+        create_match_generate_schema(&connection);
+        connection
+            .execute("INSERT INTO projects (id, name) VALUES (1, 'fixture')", [])
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (1, ?1)",
+                [app_source_path.to_string_lossy().as_ref()],
+            )
+            .expect("insert source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 1)",
+                [],
+            )
+            .expect("insert project file");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (1, 1, 'entry', 'src/index', 'application', NULL, NULL, 0, ?1)
+                ",
+                [app_source.len() as i64],
+            )
+            .expect("insert app module");
+        drop(connection);
+
+        run([
+            "extract-assets".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--asset-root".to_string(),
+            bun_executable_path.to_string_lossy().into_owned(),
+            "--apply".to_string(),
+        ])
+        .expect("asset extraction should persist embedded asset");
+        run([
+            "generate-project-v2".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--output".to_string(),
+            output_dir.to_string_lossy().into_owned(),
+        ])
+        .expect("generation should consume persisted embedded asset");
+
+        assert_eq!(
+            fs::read(output_dir.join("modules/1-src/native.node"))
+                .expect("embedded asset should be written"),
+            native_bytes
+        );
+        let connection = Connection::open(database_path).expect("reopen fixture database");
+        let stored_source_path: String = connection
+            .query_row(
+                "SELECT source_path FROM project_assets WHERE logical_path = ?1",
+                [logical_path],
+                |row| row.get(0),
+            )
+            .expect("stored embedded asset");
+        assert!(PathBuf::from(stored_source_path).is_file());
+    }
+
+    #[test]
+    fn bun_embedded_asset_extractor_reads_wasm_payload_without_trailing_bun_metadata() {
+        let mut executable = Vec::new();
+        executable.extend_from_slice(b"prefix");
+        executable.extend_from_slice(b"/$bunfs/root/parser.wasm");
+        executable.push(0);
+        executable.extend_from_slice(minimal_wasm_bytes().as_slice());
+        executable.extend_from_slice(b"\0---- Bun! ----\nmetadata");
+
+        let extracted = extract_bun_embedded_asset_from_bytes(
+            executable.as_slice(),
+            "/$bunfs/root/parser.wasm",
+        )
+        .expect("wasm asset should be extracted");
+
+        assert_eq!(extracted, minimal_wasm_bytes());
+    }
+
+    fn minimal_elf64_bytes() -> Vec<u8> {
+        let mut bytes = vec![0; 128];
+        bytes[..4].copy_from_slice(b"\x7fELF");
+        bytes[4] = 2;
+        bytes[5] = 1;
+        bytes[6] = 1;
+        bytes[0x28..0x30].copy_from_slice(&(64_u64).to_le_bytes());
+        bytes[0x34..0x36].copy_from_slice(&(64_u16).to_le_bytes());
+        bytes[0x3a..0x3c].copy_from_slice(&(64_u16).to_le_bytes());
+        bytes[0x3c..0x3e].copy_from_slice(&(1_u16).to_le_bytes());
+        bytes
+    }
+
+    fn minimal_wasm_bytes() -> Vec<u8> {
+        b"\0asm\x01\0\0\0".to_vec()
     }
 
     fn package_match_connection(
