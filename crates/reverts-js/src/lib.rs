@@ -515,11 +515,13 @@ pub fn format_source_with_module_items(
                 .program
                 .body
                 .retain(|statement| !is_babel_es_module_marker(statement));
-            if !program_references_interop_require_default(&parsed.program) {
-                parsed
-                    .program
-                    .body
-                    .retain(|statement| !is_babel_interop_require_default_helper(statement));
+            for helper in BABEL_INTEROP_HELPERS {
+                if !program_references_named_identifier(&parsed.program, helper.name) {
+                    parsed
+                        .program
+                        .body
+                        .retain(|statement| !is_babel_interop_helper_definition(statement, helper));
+                }
             }
         }
 
@@ -553,10 +555,46 @@ pub fn format_source_with_module_items(
     Err(JsError::ParseFailed(errors))
 }
 
+/// Catalog of Babel CJS interop helpers we know how to lower. Each entry
+/// names the helper, the legal argument-count window for its call site, and
+/// the source-level replacement template used when rewriting a
+/// `var X = HELPER(require("Y"))` declarator init.
+struct BabelInteropHelper {
+    name: &'static str,
+    min_call_args: usize,
+    max_call_args: usize,
+    replacement: fn(&str) -> String,
+}
+
+fn replace_with_default_wrapped_require(require_arg: &str) -> String {
+    format!("{{ default: require({require_arg}) }}")
+}
+
+fn replace_with_bare_require(require_arg: &str) -> String {
+    format!("require({require_arg})")
+}
+
+const BABEL_INTEROP_HELPERS: &[BabelInteropHelper] = &[
+    BabelInteropHelper {
+        name: "_interopRequireDefault",
+        min_call_args: 1,
+        max_call_args: 1,
+        replacement: replace_with_default_wrapped_require,
+    },
+    BabelInteropHelper {
+        name: "_interopRequireWildcard",
+        min_call_args: 1,
+        max_call_args: 2,
+        replacement: replace_with_bare_require,
+    },
+];
+
 /// Apply compiler-specific source-level rewrites before the main format pass.
-/// Currently handles Babel's `_interopRequireDefault(require("X"))` pattern,
-/// reducing it to `{ default: require("X") }` so the helper call disappears
-/// while `.default` access on the wrapped binding stays valid.
+/// Currently handles Babel's `_interopRequireDefault(require("X"))` and
+/// `_interopRequireWildcard(require("X"))` patterns: the helper call is
+/// dropped, leaving a literal `{ default: require(...) }` or a bare
+/// `require(...)` respectively. Both keep downstream `.<member>` access
+/// valid.
 fn apply_source_level_lowerings(
     source: &str,
     path_hint: Option<&Path>,
@@ -583,16 +621,19 @@ fn apply_source_level_lowerings(
                 let Some(init) = declarator.init.as_ref() else {
                     continue;
                 };
-                let Some(arg_span) = babel_interop_require_default_arg_span(init) else {
-                    continue;
-                };
-                let init_span = init.span();
-                let arg_text = &source[arg_span.start as usize..arg_span.end as usize];
-                replacements.push((
-                    init_span.start,
-                    init_span.end,
-                    format!("{{ default: require({arg_text}) }}"),
-                ));
+                for helper in BABEL_INTEROP_HELPERS {
+                    let Some(arg_span) = babel_interop_helper_arg_span(init, helper) else {
+                        continue;
+                    };
+                    let init_span = init.span();
+                    let arg_text = &source[arg_span.start as usize..arg_span.end as usize];
+                    replacements.push((
+                        init_span.start,
+                        init_span.end,
+                        (helper.replacement)(arg_text),
+                    ));
+                    break;
+                }
             }
         }
         if replacements.is_empty() {
@@ -610,17 +651,23 @@ fn apply_source_level_lowerings(
     source.to_string()
 }
 
-/// Recognise the canonical Babel interop wrapper `_interopRequireDefault(require("X"))`.
-/// Returns the span of the inner string-literal specifier so the caller can
-/// re-use the original quoting and escaping when constructing the rewrite.
-fn babel_interop_require_default_arg_span(expression: &Expression<'_>) -> Option<Span> {
+/// Recognise the canonical Babel interop wrapper `HELPER(require("X"))` for
+/// the supplied `helper` entry. Returns the span of the inner string-literal
+/// specifier so the caller can re-use the original quoting and escaping.
+fn babel_interop_helper_arg_span(
+    expression: &Expression<'_>,
+    helper: &BabelInteropHelper,
+) -> Option<Span> {
     let Expression::CallExpression(outer) = expression else {
         return None;
     };
     let Expression::Identifier(callee) = &outer.callee else {
         return None;
     };
-    if callee.name.as_str() != "_interopRequireDefault" || outer.arguments.len() != 1 {
+    if callee.name.as_str() != helper.name
+        || outer.arguments.len() < helper.min_call_args
+        || outer.arguments.len() > helper.max_call_args
+    {
         return None;
     }
     let Argument::CallExpression(inner) = &outer.arguments[0] else {
@@ -638,46 +685,50 @@ fn babel_interop_require_default_arg_span(expression: &Expression<'_>) -> Option
     Some(specifier.span())
 }
 
-/// Returns true if any expression in the program refers to
-/// `_interopRequireDefault` as an identifier (i.e. uses it as a value).
-/// The function's own `BindingIdentifier` does NOT show up as an
-/// `IdentifierReference`, so when the count is zero the helper declaration
-/// is genuinely dead and can be safely stripped.
-fn program_references_interop_require_default(program: &Program<'_>) -> bool {
-    let mut counter = InteropRequireDefaultReferenceCounter::default();
+/// Returns true if any expression in the program refers to `name` as an
+/// identifier (i.e. uses it as a value). Function declarations' own
+/// `BindingIdentifier` does NOT show up as an `IdentifierReference`, so when
+/// the count is zero the matching helper declaration is genuinely dead.
+fn program_references_named_identifier(program: &Program<'_>, name: &str) -> bool {
+    let mut counter = NamedIdentifierReferenceCounter {
+        target: name,
+        count: 0,
+    };
     counter.visit_program(program);
     counter.count > 0
 }
 
-#[derive(Debug, Default)]
-struct InteropRequireDefaultReferenceCounter {
+struct NamedIdentifierReferenceCounter<'name> {
+    target: &'name str,
     count: usize,
 }
 
-impl<'a> Visit<'a> for InteropRequireDefaultReferenceCounter {
+impl<'a, 'name> Visit<'a> for NamedIdentifierReferenceCounter<'name> {
     fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
-        if identifier.name.as_str() == "_interopRequireDefault" {
+        if identifier.name.as_str() == self.target {
             self.count += 1;
         }
     }
 }
 
-/// Recognise the canonical Babel CJS interop helper declaration:
-/// `function _interopRequireDefault(<param>) { return <param> && <param>.__esModule ? <param> : { default: <param> }; }`.
-/// The strict-name + single-param + single-return-statement check stays
+/// Recognise a Babel interop helper declaration that we can strip once dead.
+/// The strict-name + non-empty-params + single-return-statement check stays
 /// narrow enough that a user-written function with the same name but a
-/// different signature is left alone.
-fn is_babel_interop_require_default_helper(statement: &Statement<'_>) -> bool {
+/// different shape is left alone.
+fn is_babel_interop_helper_definition(
+    statement: &Statement<'_>,
+    helper: &BabelInteropHelper,
+) -> bool {
     let Statement::FunctionDeclaration(function) = statement else {
         return false;
     };
     let Some(name) = function.id.as_ref() else {
         return false;
     };
-    if name.name.as_str() != "_interopRequireDefault" {
+    if name.name.as_str() != helper.name {
         return false;
     }
-    if function.params.items.len() != 1 {
+    if function.params.items.is_empty() {
         return false;
     }
     let Some(body) = function.body.as_ref() else {

@@ -1869,6 +1869,62 @@ mod tests {
     }
 
     #[test]
+    fn babel_interop_require_wildcard_call_is_rewritten_to_bare_require() {
+        // Babel's `_interopRequireWildcard(require("X"))` wraps a CJS namespace
+        // import. Lowering it to a bare `require("X")` is safe for ESM and
+        // CJS-with-named-exports — the common cases babel targets. The helper
+        // definition becomes dead and must be stripped.
+        let source = "var foo = _interopRequireWildcard(require('./foo'), true);\n\
+                      function _interopRequireWildcard(e, t) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var bar = foo.bar;\n";
+        let run = run_with_source(source, &["foo", "_interopRequireWildcard", "bar"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("var foo = require('./foo')"),
+            "wildcard call must be lowered to bare require; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("_interopRequireWildcard(require("),
+            "wildcard helper call must be removed; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("function _interopRequireWildcard"),
+            "wildcard helper definition must be stripped once dead; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var bar = foo.bar"),
+            "downstream member access must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn babel_interop_require_wildcard_helper_is_kept_when_a_call_remains_unrewritten() {
+        // If a wildcard call cannot be rewritten (e.g. a non-var-init usage)
+        // the helper must stay alive — same protective invariant as for the
+        // _interopRequireDefault helper.
+        let source = "var foo = _interopRequireWildcard(require('./foo'));\n\
+                      function _interopRequireWildcard(e) { return e && e.__esModule ? e : { default: e }; }\n\
+                      var bar = _interopRequireWildcard({});\n\
+                      var entry = foo.entry;\n\
+                      var inert = bar.default;\n";
+        let run = run_with_source(
+            source,
+            &["foo", "_interopRequireWildcard", "bar", "entry", "inert"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("function _interopRequireWildcard"),
+            "wildcard helper definition must remain because a call survives; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("_interopRequireWildcard({})"),
+            "untouched wildcard call must be present; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn babel_interop_require_default_helper_is_kept_when_a_call_remains_unrewritten() {
         // The helper definition may only be stripped when nothing in the
         // emitted output still references it. A non-rewritable use (e.g.
