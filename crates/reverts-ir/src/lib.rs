@@ -143,6 +143,12 @@ pub struct BindingConstraint {
     pub module_id: ModuleId,
     pub binding: BindingName,
     pub kind: BindingConstraintKind,
+    /// Optional property name when the constraint records a member access
+    /// on `binding` (e.g. `ns.foo` records `property = Some("foo")`).
+    /// Paper #7 (Anderson) — required to materialise NamespaceObject
+    /// shapes with known members. Default `None` keeps existing callers
+    /// constructing shape-only constraints unchanged.
+    pub property: Option<BindingName>,
 }
 
 impl BindingConstraint {
@@ -156,7 +162,15 @@ impl BindingConstraint {
             module_id,
             binding: BindingName::new(binding),
             kind,
+            property: None,
         }
+    }
+
+    /// Attach a property name to a member-access constraint.
+    #[must_use]
+    pub fn with_property(mut self, property: impl Into<String>) -> Self {
+        self.property = Some(BindingName::new(property));
+        self
     }
 }
 
@@ -220,6 +234,23 @@ impl DefUseGraph {
     #[must_use]
     pub fn constraints(&self) -> &[BindingConstraint] {
         &self.constraints
+    }
+
+    /// Collect the deduplicated set of property names accessed on
+    /// `(module_id, binding)` across all member-access constraints. Returns
+    /// an empty set when the binding has no recorded property accesses.
+    #[must_use]
+    pub fn members_accessed_on(&self, module_id: ModuleId, binding: &str) -> BTreeSet<BindingName> {
+        let target = BindingName::new(binding);
+        self.constraints
+            .iter()
+            .filter_map(|constraint| {
+                if constraint.module_id != module_id || constraint.binding != target {
+                    return None;
+                }
+                constraint.property.clone()
+            })
+            .collect()
     }
 
     #[must_use]
@@ -538,7 +569,7 @@ fn normalize_subpath(subpath: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution,
+        BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
         BindingSourceKind, BindingUseKind, ControlFlowEdgeKind, ControlFlowGraph,
         ControlFlowNodeKind, DefUseGraph, ModuleId, PackageSurface, is_valid_package_name,
     };
@@ -702,6 +733,42 @@ mod tests {
             solution.shape_of(ModuleId(1), "Service"),
             BindingShape::ClassLike
         );
+    }
+
+    #[test]
+    fn def_use_graph_collects_property_names_per_member_access_binding() {
+        // Paper #7 (Anderson JS shape) requires constraint-level property
+        // tracking so a `NamespaceObject` shape can later carry its known
+        // members. The constraint carries an optional property name; the
+        // graph aggregates them per (module, binding).
+        let mut graph = DefUseGraph::default();
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("foo"),
+        );
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("bar"),
+        );
+        // Same name twice — must dedup.
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("foo"),
+        );
+        // A MemberRead WITHOUT a property name (older callers) must not
+        // pollute the per-binding member set.
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "ns",
+            BindingConstraintKind::MemberRead,
+        ));
+
+        let members = graph.members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<_> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo"]);
+
+        // Unknown binding returns an empty set.
+        assert!(graph.members_accessed_on(ModuleId(1), "absent").is_empty());
     }
 
     #[test]
