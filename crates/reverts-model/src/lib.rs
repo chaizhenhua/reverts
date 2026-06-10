@@ -79,6 +79,7 @@ pub struct PackageImportDecision {
     pub from_module_id: ModuleId,
     pub namespace_binding: BindingName,
     pub resolution: PackageResolution,
+    pub source_backed: bool,
 }
 
 impl PackageImportDecision {
@@ -88,10 +89,21 @@ impl PackageImportDecision {
         namespace_binding: BindingName,
         resolution: PackageResolution,
     ) -> Self {
+        Self::with_source_backed(from_module_id, namespace_binding, resolution, false)
+    }
+
+    #[must_use]
+    pub fn with_source_backed(
+        from_module_id: ModuleId,
+        namespace_binding: BindingName,
+        resolution: PackageResolution,
+        source_backed: bool,
+    ) -> Self {
         Self {
             from_module_id,
             namespace_binding,
             resolution,
+            source_backed,
         }
     }
 }

@@ -135,6 +135,7 @@ fn audit_file_synthesis(file: &PlannedFile) -> AuditReport {
 fn planned_declarations(file: &PlannedFile) -> std::collections::BTreeSet<BindingName> {
     file.imports
         .iter()
+        .filter(|import| !import.source_backed)
         .map(|import| import.namespace.clone())
         .chain(file.bindings.iter().map(|binding| binding.emitted.clone()))
         .collect()
@@ -269,6 +270,38 @@ mod tests {
         assert!(source.contains("import * as __pkg_lodash_map from 'lodash/map';"));
         assert!(source.contains("export function activate()"));
         assert!(!source.contains("undefined as any"));
+    }
+
+    #[test]
+    fn source_backed_package_import_is_not_emitted_twice() {
+        let mut rows = rows_with_application_source(
+            "import { map } from 'lodash/map'; export const answer = map;",
+        );
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "lodash_map",
+            "node_modules/lodash/map.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("import { map } from 'lodash/map';"));
+        assert!(!source.contains("__pkg_lodash_map"));
+        assert_eq!(source.matches("from 'lodash/map'").count(), 1);
     }
 
     #[test]

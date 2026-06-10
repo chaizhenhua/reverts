@@ -52,7 +52,14 @@ impl PlannedFile {
     }
 
     pub fn add_export(&mut self, binding: BindingName) {
-        self.exports.push(PlannedExport { binding });
+        self.add_export_with_source_backed(binding, false);
+    }
+
+    pub fn add_export_with_source_backed(&mut self, binding: BindingName, source_backed: bool) {
+        self.exports.push(PlannedExport {
+            binding,
+            source_backed,
+        });
     }
 
     pub fn push_source(&mut self, source: impl Into<String>) {
@@ -68,6 +75,7 @@ impl PlannedFile {
 pub struct PlannedImport {
     pub namespace: BindingName,
     pub resolution: PackageResolution,
+    pub source_backed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +106,7 @@ impl PlannedBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedExport {
     pub binding: BindingName,
+    pub source_backed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -162,10 +171,13 @@ impl ImportExportPlanner {
                 file.add_import(PlannedImport {
                     namespace: decision.namespace_binding.clone(),
                     resolution: decision.resolution.clone(),
+                    source_backed: decision.source_backed,
                 });
             }
 
             let source_definitions = ast_definitions_for(program.model().graph(), module.id);
+            let source_imports = ast_imports_for(program.model().graph(), module.id);
+            let mut planned_bindings = BTreeSet::<BindingName>::new();
             for original in program.model().graph().definitions_for(module.id) {
                 let emitted = program
                     .semantic_names()
@@ -174,7 +186,20 @@ impl ImportExportPlanner {
                     .unwrap_or_else(|| original.clone());
                 let shape = program.binding_shape(module.id, original.as_str());
                 let source_backed = source_definitions.contains(&original);
+                planned_bindings.insert(original.clone());
                 file.add_binding(PlannedBinding::new(original, emitted, shape, source_backed));
+            }
+
+            for original in source_imports {
+                if planned_bindings.contains(&original) {
+                    continue;
+                }
+                file.add_binding(PlannedBinding::new(
+                    original.clone(),
+                    original,
+                    BindingShape::Unknown,
+                    true,
+                ));
             }
 
             if let Some(source) = program.model().input().module_source_slice(module.id) {
@@ -185,6 +210,20 @@ impl ImportExportPlanner {
                     source_strategy,
                 )?;
                 file.push_source(normalized);
+            }
+
+            for export in program
+                .model()
+                .graph()
+                .import_export()
+                .exports_for(module.id)
+            {
+                let emitted = program
+                    .semantic_names()
+                    .binding_name(module.id, export.as_str())
+                    .cloned()
+                    .unwrap_or(export);
+                file.add_export_with_source_backed(emitted, true);
             }
 
             plan.push_file(file);
@@ -213,6 +252,15 @@ fn ast_definitions_for(graph: &RevertsGraph, module_id: ModuleId) -> BTreeSet<Bi
         .ast_facts()
         .iter()
         .filter(|fact| fact.module_id == module_id && fact.kind == AstFactKind::Definition)
+        .filter_map(|fact| fact.binding.clone())
+        .collect()
+}
+
+fn ast_imports_for(graph: &RevertsGraph, module_id: ModuleId) -> BTreeSet<BindingName> {
+    graph
+        .ast_facts()
+        .iter()
+        .filter(|fact| fact.module_id == module_id && fact.kind == AstFactKind::Import)
         .filter_map(|fact| fact.binding.clone())
         .collect()
 }
@@ -513,5 +561,69 @@ mod tests {
             .find(|binding| binding.original.as_str() == "missing")
             .expect("input symbol should be planned");
         assert!(!missing.source_backed);
+    }
+
+    #[test]
+    fn enriched_program_plans_source_backed_ast_exports() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("const answer = 42; export { answer };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        assert_eq!(plan.files[0].exports.len(), 1);
+        assert_eq!(plan.files[0].exports[0].binding.as_str(), "answer");
+        assert!(plan.files[0].exports[0].source_backed);
+    }
+
+    #[test]
+    fn source_imported_binding_can_back_source_export() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("import { answer } from 'pkg'; export { answer };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        assert!(
+            plan.files[0]
+                .bindings
+                .iter()
+                .any(|binding| { binding.original.as_str() == "answer" && binding.source_backed })
+        );
+        assert_eq!(plan.files[0].exports[0].binding.as_str(), "answer");
     }
 }

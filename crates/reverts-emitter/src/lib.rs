@@ -30,6 +30,9 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
     let mut lines = Vec::new();
 
     for import in &file.imports {
+        if import.source_backed {
+            continue;
+        }
         if let Some(specifier) = accepted_specifier(&import.resolution) {
             lines.push(format!(
                 "import * as {} from '{}';",
@@ -44,6 +47,9 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
     }
 
     for export in &file.exports {
+        if export.source_backed {
+            continue;
+        }
         lines.push(format!(
             "export {{ {} }};",
             emit_binding_name(&export.binding)

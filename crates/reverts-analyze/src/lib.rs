@@ -505,26 +505,45 @@ fn resolve_package_imports(
     package_index: &PackageSurfaceIndex,
     audit: &mut AuditReport,
 ) -> Vec<PackageImportDecision> {
-    let mut decisions = Vec::new();
-
+    let mut requested_imports = BTreeMap::<(ModuleId, String), bool>::new();
     for dependency in &model.input().dependencies {
         let ModuleDependencyTarget::Package { specifier } = &dependency.target else {
             continue;
         };
+        requested_imports
+            .entry((dependency.from_module_id, specifier.clone()))
+            .or_insert(false);
+    }
 
-        let resolution = package_index.resolve(specifier);
+    for fact in model
+        .graph()
+        .ast_facts()
+        .iter()
+        .filter(|fact| fact.kind == AstFactKind::PackageImport)
+    {
+        let Some(specifier) = &fact.binding else {
+            continue;
+        };
+        requested_imports.insert((fact.module_id, specifier.as_str().to_string()), true);
+    }
+
+    let mut decisions = Vec::new();
+
+    for ((from_module_id, specifier), source_backed) in requested_imports {
+        let resolution = package_index.resolve(&specifier);
         if let PackageResolution::Rejected { reason, .. } = &resolution {
             audit.push(
                 AuditFinding::error(FindingCode::UnresolvableBareImport, reason.clone())
-                    .with_module(dependency.from_module_id.0.to_string())
+                    .with_module(from_module_id.0.to_string())
                     .with_binding(specifier.clone()),
             );
         }
 
-        decisions.push(PackageImportDecision::new(
-            dependency.from_module_id,
-            BindingName::new(package_namespace_binding(specifier)),
+        decisions.push(PackageImportDecision::with_source_backed(
+            from_module_id,
+            BindingName::new(package_namespace_binding(&specifier)),
             resolution,
+            source_backed,
         ));
     }
 
@@ -631,6 +650,60 @@ mod tests {
             output.program.package_imports()[0].resolution,
             PackageResolution::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn ast_bare_import_uses_package_surface_resolution_without_duplicate_dependency_rows() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("import { map } from 'lodash/map'; export const answer = map;".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "lodash_map",
+            "node_modules/lodash/map.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.is_clean());
+        assert_eq!(output.program.package_imports().len(), 1);
+        assert!(output.program.package_imports()[0].source_backed);
+    }
+
+    #[test]
+    fn ast_bare_import_without_surface_reports_unresolvable_import() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("import { map } from 'lodash/map'; export const answer = map;".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::UnresolvableBareImport));
+        assert_eq!(output.program.package_imports().len(), 1);
+        assert!(output.program.package_imports()[0].source_backed);
     }
 
     #[test]

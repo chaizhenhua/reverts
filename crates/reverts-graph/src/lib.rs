@@ -24,7 +24,10 @@ use oxc_syntax::{
     scope::ScopeFlags,
 };
 use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput};
-use reverts_ir::{BindingConstraint, BindingConstraintKind, BindingName, DefUseGraph, ModuleId};
+use reverts_ir::{
+    BindingConstraint, BindingConstraintKind, BindingName, DefUseGraph, ModuleId,
+    split_bare_specifier,
+};
 use reverts_js::{JsError, ParseError, ParseGoal, source_type_candidates};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,15 @@ impl AstFact {
     }
 
     #[must_use]
+    pub fn package_import(module_id: ModuleId, specifier: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(specifier)),
+            kind: AstFactKind::PackageImport,
+        }
+    }
+
+    #[must_use]
     pub fn export(module_id: ModuleId, binding: impl Into<String>) -> Self {
         Self {
             module_id,
@@ -119,6 +131,7 @@ pub enum AstFactKind {
     Read,
     Write,
     Import,
+    PackageImport,
     Export,
     BindingConstraint(BindingConstraintKind),
     WrapperRegion(AstWrapperKind),
@@ -287,6 +300,11 @@ fn apply_ast_fact(
                 def_use.import(fact.module_id, binding.as_str());
             }
         }
+        AstFactKind::PackageImport => {
+            if let Some(specifier) = &fact.binding {
+                import_export.record_package_import(fact.module_id, specifier.as_str());
+            }
+        }
         AstFactKind::Export => {
             if let Some(binding) = &fact.binding {
                 import_export.record_export(fact.module_id, binding.as_str());
@@ -378,6 +396,11 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
+        let specifier = it.source.value.as_str();
+        if split_bare_specifier(specifier).is_some() {
+            self.package_import(specifier);
+        }
+
         if let Some(specifiers) = &it.specifiers {
             for specifier in specifiers {
                 match specifier {
@@ -418,22 +441,16 @@ impl<'a> Visit<'a> for AstFactVisitor {
             ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
                     self.export(id.name.as_str());
-                } else {
-                    self.export("default");
                 }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
                     self.export(id.name.as_str());
-                } else {
-                    self.export("default");
                 }
             }
             declaration => {
                 if let Some(binding) = export_default_expression_identifier(declaration) {
                     self.export(binding);
-                } else {
-                    self.export("default");
                 }
             }
         }
@@ -442,11 +459,6 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
-        if let Some(exported) = &it.exported
-            && let Some(binding) = module_export_name(exported)
-        {
-            self.export(binding);
-        }
         walk_export_all_declaration(self, it);
     }
 
@@ -590,6 +602,11 @@ impl AstFactVisitor {
 
     fn import(&mut self, binding: &str) {
         self.facts.push(AstFact::import(self.module_id, binding));
+    }
+
+    fn package_import(&mut self, specifier: &str) {
+        self.facts
+            .push(AstFact::package_import(self.module_id, specifier));
     }
 
     fn export(&mut self, binding: &str) {
@@ -1031,6 +1048,12 @@ mod tests {
                     .as_ref()
                     .is_some_and(|binding| binding.as_str() == "alias")
         }));
+        assert!(
+            graph
+                .import_export()
+                .package_imports_for(ModuleId(1))
+                .contains(&"pkg")
+        );
         assert!(graph.ast_facts().iter().any(|fact| {
             fact.kind == AstFactKind::Write
                 && fact
