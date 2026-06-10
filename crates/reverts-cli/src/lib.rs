@@ -120,7 +120,7 @@ pub struct ExtractAssetsArgs {
     pub input: PathBuf,
     pub project_id: u32,
     pub apply: bool,
-    pub asset_root: Option<PathBuf>,
+    pub asset_roots: Vec<PathBuf>,
 }
 
 impl ExtractAssetsArgs {
@@ -128,7 +128,7 @@ impl ExtractAssetsArgs {
         let mut input = None;
         let mut project_id = None;
         let mut apply = false;
-        let mut asset_root = None;
+        let mut asset_roots = Vec::new();
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -144,7 +144,7 @@ impl ExtractAssetsArgs {
                 "--project-id" => {
                     project_id = Some(parse_project_id(next_value(&mut args, "--project-id")?)?);
                 }
-                "--asset-root" => asset_root = Some(next_path(&mut args, "--asset-root")?),
+                "--asset-root" => asset_roots.push(next_path(&mut args, "--asset-root")?),
                 "--apply" => apply = true,
                 other => return Err(CliError::UnknownArgument(other.to_string())),
             }
@@ -154,7 +154,7 @@ impl ExtractAssetsArgs {
             input: input.ok_or(CliError::MissingArgument("--input"))?,
             project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
             apply,
-            asset_root,
+            asset_roots,
         })
     }
 }
@@ -342,7 +342,7 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
             "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--apply]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --package-name <NAME>     Restrict matching to one package name; repeatable\n    --apply                   Persist accepted package attributions and surfaces"
         }
         HelpTopic::ExtractAssets => {
-            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR-OR-BUN-EXE>] [--apply]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --asset-root <DIR-OR-BUN-EXE>   Root directory for asset files, or a Bun standalone executable for /$bunfs/root assets\n    --apply                         Persist discovered project_assets rows"
+            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR-OR-BUN-EXE>]... [--apply]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --asset-root <DIR-OR-BUN-EXE>   Root directory for asset files, or a Bun standalone executable for /$bunfs/root assets (repeatable)\n    --apply                         Persist discovered project_assets rows"
         }
     }
 }
@@ -532,7 +532,7 @@ pub fn extract_assets_from_connection(
         .iter()
         .map(|reference| reference.logical_path.as_str())
         .collect::<BTreeSet<_>>();
-    let discovered = discover_project_assets(&rows, &references, args.asset_root.as_deref())?;
+    let discovered = discover_project_assets(&rows, &references, &args.asset_roots)?;
     let written_assets = if args.apply {
         let materialized_root = materialized_asset_root(args.input.as_path(), rows.project.id);
         persist_project_assets(
@@ -559,13 +559,17 @@ pub fn extract_assets_from_connection(
 fn discover_project_assets(
     rows: &InputRows,
     references: &[AssetReference],
-    asset_root: Option<&Path>,
+    asset_roots: &[PathBuf],
 ) -> Result<Vec<DiscoveredProjectAsset>, ExtractAssetsError> {
     let default_asset_root =
         common_source_root(&rows.source_files).ok_or(ExtractAssetsError::CannotInferAssetRoot {
             project_id: rows.project.id,
         })?;
-    let asset_root = asset_root.unwrap_or(default_asset_root.as_path());
+    let effective_asset_roots = if asset_roots.is_empty() {
+        vec![default_asset_root]
+    } else {
+        asset_roots.to_vec()
+    };
     let modules = rows
         .modules
         .iter()
@@ -592,10 +596,10 @@ fn discover_project_assets(
         else {
             continue;
         };
-        let source = discover_asset_source(
+        let source = discover_asset_source_from_roots(
             reference.logical_path.as_str(),
             source_file.path.as_str(),
-            asset_root,
+            &effective_asset_roots,
         )?;
         let Some(source) = source else {
             continue;
@@ -613,6 +617,33 @@ fn discover_project_assets(
     }
 
     Ok(discovered)
+}
+
+fn discover_asset_source_from_roots(
+    logical_path: &str,
+    source_file_path: &str,
+    asset_roots: &[PathBuf],
+) -> Result<Option<DiscoveredAssetSource>, ExtractAssetsError> {
+    let mut matches = Vec::new();
+    for asset_root in asset_roots {
+        if let Some(source) =
+            discover_asset_source(logical_path, source_file_path, asset_root.as_path())?
+        {
+            matches.push(source);
+        }
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.pop()),
+        _ => Err(ExtractAssetsError::AmbiguousAsset {
+            logical_path: logical_path.to_string(),
+            candidates: matches
+                .iter()
+                .map(DiscoveredAssetSource::description)
+                .collect(),
+        }),
+    }
 }
 
 fn discover_asset_source(
@@ -637,6 +668,17 @@ fn discover_asset_source(
         Ok(Some(DiscoveredAssetSource::File(source_path)))
     } else {
         Ok(None)
+    }
+}
+
+impl DiscoveredAssetSource {
+    fn description(&self) -> String {
+        match self {
+            Self::File(path) => path.to_string_lossy().into_owned(),
+            Self::EmbeddedBunFile { bytes } => {
+                format!("embedded bun payload ({} bytes)", bytes.len())
+            }
+        }
     }
 }
 
@@ -1843,6 +1885,10 @@ pub enum ExtractAssetsError {
     InvalidAssetPath {
         logical_path: String,
     },
+    AmbiguousAsset {
+        logical_path: String,
+        candidates: Vec<String>,
+    },
     WriteAsset(rusqlite::Error),
 }
 
@@ -1879,6 +1925,16 @@ impl fmt::Display for ExtractAssetsError {
             Self::InvalidAssetPath { logical_path } => {
                 write!(formatter, "invalid asset path {logical_path}")
             }
+            Self::AmbiguousAsset {
+                logical_path,
+                candidates,
+            } => {
+                write!(
+                    formatter,
+                    "asset {logical_path} matched multiple roots: {}",
+                    candidates.join(", ")
+                )
+            }
             Self::WriteAsset(source) => {
                 write!(formatter, "failed to write project asset: {source}")
             }
@@ -1896,7 +1952,9 @@ impl Error for ExtractAssetsError {
                 Some(source)
             }
             Self::LoadInput(source) => Some(source),
-            Self::CannotInferAssetRoot { .. } | Self::InvalidAssetPath { .. } => None,
+            Self::CannotInferAssetRoot { .. }
+            | Self::InvalidAssetPath { .. }
+            | Self::AmbiguousAsset { .. } => None,
         }
     }
 }
@@ -2037,13 +2095,18 @@ mod tests {
             "13495".to_string(),
             "--asset-root".to_string(),
             "dist".to_string(),
+            "--asset-root".to_string(),
+            "vendor".to_string(),
             "--apply".to_string(),
         ])
         .expect("args should parse");
 
         assert_eq!(args.input, PathBuf::from("input.db"));
         assert_eq!(args.project_id, 13495);
-        assert_eq!(args.asset_root, Some(PathBuf::from("dist")));
+        assert_eq!(
+            args.asset_roots,
+            vec![PathBuf::from("dist"), PathBuf::from("vendor")]
+        );
         assert!(args.apply);
     }
 
@@ -2602,6 +2665,111 @@ mod tests {
             )
             .expect("stored embedded asset");
         assert!(PathBuf::from(stored_source_path).is_file());
+    }
+
+    #[test]
+    fn cli_extract_assets_accepts_multiple_roots_for_bun_and_vendor_assets() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("input.db");
+        let app_source_path = tempdir.path().join("app.ts");
+        let bun_executable_path = tempdir.path().join("fixture-bun");
+        let vendor_root = tempdir.path().join("package-root");
+        let output_dir = tempdir.path().join("out");
+        let native_logical_path = "/$bunfs/root/native.node";
+        let native_bytes = minimal_elf64_bytes();
+        let rg_path = vendor_root.join("vendor/ripgrep/x64-linux/rg");
+        let app_source = format!(
+            "\
+            const native = require('{native_logical_path}');\n\
+            const POL = {{ fileURLToPath(value) {{ return value; }} }};\n\
+            const ODH = {{ join(...parts) {{ return parts.join('/'); }}, resolve(...parts) {{ return parts.join('/'); }} }};\n\
+            const here = POL.fileURLToPath('file:///home/runner/work/app/src/tools/ripgrep.ts');\n\
+            const base = ODH.join(here, '../');\n\
+            const vendor = ODH.resolve(base, 'vendor', 'ripgrep');\n\
+            const rg = ODH.resolve(vendor, 'x64-linux', 'rg');\n\
+            export {{ native, rg }};"
+        );
+        let mut bun_executable = Vec::new();
+        bun_executable.extend_from_slice(native_logical_path.as_bytes());
+        bun_executable.push(0);
+        bun_executable.extend_from_slice(native_bytes.as_slice());
+        bun_executable.extend_from_slice(b"\0---- Bun! ----\n");
+        fs::write(app_source_path.as_path(), app_source.as_str()).expect("write app source");
+        fs::write(bun_executable_path.as_path(), bun_executable).expect("write bun executable");
+        fs::create_dir_all(rg_path.parent().expect("rg parent")).expect("create vendor dirs");
+        fs::write(rg_path.as_path(), b"rg-binary").expect("write rg");
+        let connection = Connection::open(database_path.as_path()).expect("open fixture database");
+        create_match_generate_schema(&connection);
+        connection
+            .execute("INSERT INTO projects (id, name) VALUES (1, 'fixture')", [])
+            .expect("insert project");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (1, ?1)",
+                [app_source_path.to_string_lossy().as_ref()],
+            )
+            .expect("insert source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 1)",
+                [],
+            )
+            .expect("insert project file");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (1, 1, 'entry', 'src/index', 'application', NULL, NULL, 0, ?1)
+                ",
+                [app_source.len() as i64],
+            )
+            .expect("insert app module");
+        drop(connection);
+
+        run([
+            "extract-assets".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--asset-root".to_string(),
+            bun_executable_path.to_string_lossy().into_owned(),
+            "--asset-root".to_string(),
+            vendor_root.to_string_lossy().into_owned(),
+            "--apply".to_string(),
+        ])
+        .expect("asset extraction should persist assets from both roots");
+        run([
+            "generate-project-v2".to_string(),
+            "--input".to_string(),
+            database_path.to_string_lossy().into_owned(),
+            "--project-id".to_string(),
+            "1".to_string(),
+            "--output".to_string(),
+            output_dir.to_string_lossy().into_owned(),
+        ])
+        .expect("generation should consume persisted multi-root assets");
+
+        assert_eq!(
+            fs::read(output_dir.join("modules/1-src/native.node")).expect("native asset"),
+            native_bytes
+        );
+        assert_eq!(
+            fs::read(output_dir.join("modules/1-src/vendor/ripgrep/x64-linux/rg"))
+                .expect("rg asset"),
+            b"rg-binary"
+        );
+        let generated_source = fs::read_to_string(output_dir.join("modules/1-src/index.ts"))
+            .expect("generated source");
+        assert!(generated_source.contains("POL.fileURLToPath(import.meta.url)"));
+        assert!(!generated_source.contains("/home/runner/work/app"));
+        let connection = Connection::open(database_path).expect("reopen fixture database");
+        let stored_assets: i64 = connection
+            .query_row("SELECT COUNT(*) FROM project_assets", [], |row| row.get(0))
+            .expect("count project assets");
+        assert_eq!(stored_assets, 2);
     }
 
     #[test]

@@ -75,6 +75,20 @@ pub struct StringLiteralFact {
     pub byte_end: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLocationRewriteFact {
+    pub value: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathBuilderCallFact {
+    pub string_arguments: Vec<String>,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
 #[must_use]
 pub fn source_type_candidates(path_hint: Option<&Path>, goal: ParseGoal) -> Vec<SourceType> {
     let mut candidates = Vec::new();
@@ -185,6 +199,62 @@ pub fn collect_static_resource_specifiers(
     Err(JsError::ParseFailed(errors))
 }
 
+pub fn collect_file_url_source_location_rewrites(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<SourceLocationRewriteFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = FileUrlSourceLocationCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.rewrites);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_path_builder_calls(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<PathBuilderCallFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = PathBuilderCallCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.calls);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
 #[derive(Debug, Default)]
 struct StringLiteralCollector {
     literals: Vec<StringLiteralFact>,
@@ -276,6 +346,86 @@ fn call_callee_accepts_static_resource(callee: &Expression<'_>) -> bool {
             | (Some("fs"), "readFile")
             | (Some("fs"), "readFileSync")
             | (Some("fs"), "createReadStream")
+    )
+}
+
+#[derive(Debug, Default)]
+struct FileUrlSourceLocationCollector {
+    rewrites: Vec<SourceLocationRewriteFact>,
+}
+
+impl<'a> Visit<'a> for FileUrlSourceLocationCollector {
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if call_callee_property_or_identifier(&expression.callee) == Some("fileURLToPath")
+            && let Some(Argument::StringLiteral(source)) = expression.arguments.first()
+            && is_file_url_source_location(source.value.as_str())
+        {
+            self.rewrites.push(SourceLocationRewriteFact {
+                value: source.value.as_str().to_string(),
+                byte_start: source.span.start,
+                byte_end: source.span.end,
+            });
+        }
+        walk_call_expression(self, expression);
+    }
+}
+
+#[derive(Debug, Default)]
+struct PathBuilderCallCollector {
+    calls: Vec<PathBuilderCallFact>,
+}
+
+impl<'a> Visit<'a> for PathBuilderCallCollector {
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if matches!(
+            call_callee_property_or_identifier(&expression.callee),
+            Some("join" | "resolve")
+        ) {
+            let string_arguments = expression
+                .arguments
+                .iter()
+                .filter_map(argument_string_literal_value)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            if !string_arguments.is_empty() {
+                self.calls.push(PathBuilderCallFact {
+                    string_arguments,
+                    byte_start: expression.span.start,
+                    byte_end: expression.span.end,
+                });
+            }
+        }
+        walk_call_expression(self, expression);
+    }
+}
+
+fn argument_string_literal_value<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
+    match argument {
+        Argument::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
+    }
+}
+
+fn call_callee_property_or_identifier<'a>(callee: &'a Expression<'a>) -> Option<&'a str> {
+    match callee {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        Expression::StaticMemberExpression(member) => Some(member.property.name.as_str()),
+        _ => None,
+    }
+}
+
+fn is_file_url_source_location(value: &str) -> bool {
+    let Some(path) = value.strip_prefix("file://") else {
+        return false;
+    };
+    let path = path.strip_prefix("localhost").unwrap_or(path);
+    let extension = Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+    matches!(
+        extension.as_deref(),
+        Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx")
     )
 }
 
@@ -705,6 +855,7 @@ mod tests {
 
     use super::{
         CompilerLowering, GeneratedExport, GeneratedImport, JsError, ParseGoal,
+        collect_file_url_source_location_rewrites, collect_path_builder_calls,
         collect_static_resource_specifiers, collect_string_literals, format_source_pretty,
         format_source_with_module_items, normalize_source_for_pipeline, parse_error_message,
         parse_source, sanitize_identifier,
@@ -765,6 +916,51 @@ mod tests {
         assert!(values.contains(&"/$bunfs/root/addon.node"));
         assert!(values.contains(&"./parser.wasm"));
         assert!(!values.contains(&"bash.exe"));
+    }
+
+    #[test]
+    fn collects_file_url_source_location_rewrite_spans_from_ast_context() {
+        let source = "const here = url.fileURLToPath('file:///home/runner/work/app/src/tool.ts');";
+
+        let rewrites = collect_file_url_source_location_rewrites(
+            source,
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("file url source location should parse");
+
+        assert_eq!(rewrites.len(), 1);
+        assert_eq!(
+            rewrites[0].value,
+            "file:///home/runner/work/app/src/tool.ts"
+        );
+        assert_eq!(
+            &source[rewrites[0].byte_start as usize..rewrites[0].byte_end as usize],
+            "'file:///home/runner/work/app/src/tool.ts'"
+        );
+    }
+
+    #[test]
+    fn collects_path_builder_string_arguments_from_ast_context() {
+        let source = "\
+            const vendor = path.resolve(root, 'vendor', 'ripgrep');\n\
+            const command = path.resolve(vendor, 'x64-linux', 'rg');\n\
+            const inert = ['vendor', 'ripgrep', 'rg'];";
+
+        let calls = collect_path_builder_calls(
+            source,
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("path builder calls should parse");
+
+        let arguments = calls
+            .iter()
+            .map(|call| call.string_arguments.as_slice())
+            .collect::<Vec<_>>();
+        assert!(arguments.contains(&["vendor".to_string(), "ripgrep".to_string()].as_slice()));
+        assert!(arguments.contains(&["x64-linux".to_string(), "rg".to_string()].as_slice()));
+        assert_eq!(calls.len(), 2);
     }
 
     #[test]

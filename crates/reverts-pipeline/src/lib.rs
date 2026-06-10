@@ -11,6 +11,7 @@ use reverts_input::{
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     DeclarationCallability, ParseGoal, classify_top_level_bindings,
+    collect_file_url_source_location_rewrites, collect_path_builder_calls,
     collect_static_resource_specifiers, collect_string_literals, parse_error_message, parse_source,
 };
 use reverts_model::{EnrichedProgram, ProgramModel};
@@ -81,6 +82,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
 
     let module_output_paths = module_output_paths(&enrichment.program);
     let mut project = emit_project(&plan).map_err(PipelineError::Emit)?;
+    canonicalize_emitted_source_locations(&mut project);
     rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
 
     audit.extend(audit_emitted_project_parse(&project));
@@ -196,8 +198,104 @@ fn collect_required_asset_references_from_parts(
                 });
             }
         }
+        for logical_path in
+            collect_dynamic_asset_references(source.as_str(), source_file_path.as_str())
+        {
+            references.insert(AssetReference {
+                module_id: module.id,
+                logical_path,
+            });
+        }
     }
     references.into_iter().collect()
+}
+
+fn collect_dynamic_asset_references(source: &str, source_file_path: &str) -> Vec<String> {
+    let Ok(path_calls) = collect_path_builder_calls(
+        source,
+        Some(Path::new(source_file_path)),
+        ParseGoal::TypeScript,
+    ) else {
+        return Vec::new();
+    };
+
+    let values = path_calls
+        .iter()
+        .flat_map(|call| call.string_arguments.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    let has_ripgrep_vendor_prefix = path_calls
+        .iter()
+        .any(|call| contains_adjacent_segments(&call.string_arguments, &["vendor", "ripgrep"]))
+        || (values.contains("vendor") && values.contains("ripgrep"));
+
+    if !has_ripgrep_vendor_prefix {
+        return Vec::new();
+    }
+
+    let mut references = BTreeSet::<String>::new();
+    for call in &path_calls {
+        for platform_dir in call
+            .string_arguments
+            .iter()
+            .map(String::as_str)
+            .filter(|value| is_node_platform_dir(value))
+        {
+            if call.string_arguments.iter().any(|value| value == "rg") {
+                references.insert(format!("vendor/ripgrep/{platform_dir}/rg"));
+            }
+            if call.string_arguments.iter().any(|value| value == "rg.exe") {
+                references.insert(format!("vendor/ripgrep/{platform_dir}/rg.exe"));
+            }
+        }
+
+        let call_source = source
+            .get(call.byte_start as usize..call.byte_end as usize)
+            .unwrap_or_default();
+        if call.string_arguments.iter().any(|value| value == "rg")
+            && call_source.contains("process.arch")
+            && call_source.contains("process.platform")
+            && let Some(platform_dir) = current_node_platform_dir()
+        {
+            references.insert(format!("vendor/ripgrep/{platform_dir}/rg"));
+        }
+    }
+
+    references.into_iter().collect()
+}
+
+fn contains_adjacent_segments(arguments: &[String], segments: &[&str]) -> bool {
+    if segments.is_empty() || arguments.len() < segments.len() {
+        return false;
+    }
+    arguments.windows(segments.len()).any(|window| {
+        window
+            .iter()
+            .map(String::as_str)
+            .eq(segments.iter().copied())
+    })
+}
+
+fn is_node_platform_dir(value: &str) -> bool {
+    let Some((arch, platform)) = value.split_once('-') else {
+        return false;
+    };
+    matches!(arch, "x64" | "arm64" | "arm") && matches!(platform, "linux" | "darwin" | "win32")
+}
+
+fn current_node_platform_dir() -> Option<String> {
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "arm" => "arm",
+        _ => return None,
+    };
+    let platform = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "darwin",
+        "windows" => "win32",
+        _ => return None,
+    };
+    Some(format!("{arch}-{platform}"))
 }
 
 fn audit_required_assets(input: &InputBundle, references: &[AssetReference]) -> AuditReport {
@@ -309,6 +407,30 @@ fn rewrite_emitted_asset_references(
         file.source =
             rewrite_string_literal_values(file.source.as_str(), file.path.as_str(), rewrites);
     }
+}
+
+fn canonicalize_emitted_source_locations(project: &mut EmittedProject) {
+    for file in &mut project.files {
+        file.source = rewrite_file_url_source_locations(file.source.as_str(), file.path.as_str());
+    }
+}
+
+fn rewrite_file_url_source_locations(source: &str, path_hint: &str) -> String {
+    let Ok(rewrites) = collect_file_url_source_location_rewrites(
+        source,
+        Some(Path::new(path_hint)),
+        ParseGoal::TypeScript,
+    ) else {
+        return source.to_string();
+    };
+    let mut output = source.to_string();
+    for rewrite in rewrites.iter().rev() {
+        output.replace_range(
+            rewrite.byte_start as usize..rewrite.byte_end as usize,
+            "import.meta.url",
+        );
+    }
+    output
 }
 
 fn rewrite_string_literal_values(
@@ -597,7 +719,10 @@ mod tests {
     use reverts_observe::FindingCode;
     use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
-    use super::{OutputRun, audit_emit_plan_synthesis, generate_project_from_input};
+    use super::{
+        OutputRun, audit_emit_plan_synthesis, collect_dynamic_asset_references,
+        current_node_platform_dir, generate_project_from_input,
+    };
 
     fn rows_with_application_module() -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -769,6 +894,63 @@ mod tests {
     }
 
     #[test]
+    fn asset_audit_recovers_dynamic_ripgrep_vendor_binary_path() {
+        let source = "\
+            const root = path.resolve(base, 'vendor', 'ripgrep');\n\
+            const command = path.resolve(root, `${process.arch}-${process.platform}`, 'rg');\n\
+            export { command };";
+        let references = collect_dynamic_asset_references(source, "fixture.ts");
+        let Some(platform_dir) = current_node_platform_dir() else {
+            return;
+        };
+
+        assert_eq!(
+            references,
+            vec![format!("vendor/ripgrep/{platform_dir}/rg")]
+        );
+    }
+
+    #[test]
+    fn asset_audit_recovers_hardcoded_ripgrep_vendor_binary_path_from_path_builders() {
+        let source = "\
+            const root = ODH.resolve(base, 'vendor', 'ripgrep');\n\
+            const command = ODH.resolve(root, 'x64-linux', 'rg');\n\
+            const inert = ['vendor', 'ripgrep', 'rg'];\n\
+            export { command };";
+
+        let references = collect_dynamic_asset_references(source, "fixture.ts");
+
+        assert_eq!(references, vec!["vendor/ripgrep/x64-linux/rg".to_string()]);
+    }
+
+    #[test]
+    fn asset_audit_keeps_ripgrep_binary_name_bound_to_its_platform_call() {
+        let source = "\
+            const root = path.resolve(base, 'vendor', 'ripgrep');\n\
+            const command = process.platform === 'win32'\n\
+                ? path.resolve(root, 'x64-win32', 'rg.exe')\n\
+                : path.resolve(root, `${process.arch}-${process.platform}`, 'rg');\n\
+            export { command };";
+        let references = collect_dynamic_asset_references(source, "fixture.ts");
+        let Some(platform_dir) = current_node_platform_dir() else {
+            return;
+        };
+
+        assert_eq!(
+            references,
+            vec![
+                format!("vendor/ripgrep/{platform_dir}/rg"),
+                "vendor/ripgrep/x64-win32/rg.exe".to_string(),
+            ]
+        );
+        assert!(
+            !references
+                .iter()
+                .any(|reference| reference == "vendor/ripgrep/x64-win32/rg")
+        );
+    }
+
+    #[test]
     fn pipeline_rewrites_matched_asset_literals_to_relative_emitted_paths() {
         let mut rows = rows_with_application_source(
             "const native = require('/$bunfs/root/addon.node'); export { native };",
@@ -790,6 +972,38 @@ mod tests {
         assert!(source.contains("require('./addon.node')"));
         assert!(!source.contains("/$bunfs/root/addon.node"));
         assert_eq!(run.assets[0].path, "src/addon.node");
+    }
+
+    #[test]
+    fn pipeline_canonicalizes_build_file_url_source_locations_for_asset_paths() {
+        let mut rows = rows_with_application_source(
+            "\
+            const POL = { fileURLToPath(value) { return value; } };\n\
+            const ODH = { join(...parts) { return parts.join('/'); }, resolve(...parts) { return parts.join('/'); } };\n\
+            const yL9 = POL.fileURLToPath('file:///home/runner/work/claude-cli-internal/claude-cli-internal/src/utils/ripgrep.ts');\n\
+            const hL9 = ODH.join(yL9, '../');\n\
+            const root = ODH.resolve(hL9, 'vendor', 'ripgrep');\n\
+            const command = ODH.resolve(root, 'x64-linux', 'rg');\n\
+            export { command };",
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "vendor/ripgrep/x64-linux/rg",
+            "src/vendor/ripgrep/x64-linux/rg",
+            b"rg".to_vec(),
+            AssetKind::Executable,
+            true,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        assert_eq!(run.assets.len(), 1);
+        assert_eq!(run.assets[0].path, "src/vendor/ripgrep/x64-linux/rg");
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("POL.fileURLToPath(import.meta.url)"));
+        assert!(!source.contains("/home/runner/work/claude-cli-internal"));
     }
 
     #[test]
