@@ -13,7 +13,6 @@ The workspace currently contains these output-v2 crates:
 | `reverts-js` | existing | OXC parsing, code generation, source-type selection, and identifier utilities |
 | `reverts-ir` | existing | Shared domain primitives: modules, bindings, binding shapes, package surfaces, and def-use basics |
 | `reverts-observe` | existing | Audit reports, finding codes, severity, and telemetry event types |
-| `reverts-output-core` | existing | Early output-v2 mechanisms: shape solving, package decisions, entry dispatching, parse audit, and emitter fixtures |
 | `reverts-input` | existing | In-memory input bundle and row conversion contract |
 | `reverts-graph` | existing | Graph construction from input bundles |
 | `reverts-package` | existing | Package surface and import specifier resolution |
@@ -161,8 +160,8 @@ access, real package installations, real project databases, or prior run state.
 
 ## Output-V2 Crate Split
 
-`reverts-output-core` currently hosts several early output-v2 mechanisms while
-the workspace is small. New work should follow these final ownership rules:
+The temporary `reverts-output-core` host has been retired. Output-v2 mechanisms
+now live only in their final owner crates:
 
 | Mechanism | Final owner |
 | --- | --- |
@@ -177,8 +176,9 @@ the workspace is small. New work should follow these final ownership rules:
 | CLI command wiring | `reverts-cli` |
 | Self-contained builders for tests | `reverts-fixtures` |
 
-When a final owner crate exists, new code for that responsibility should be
-added there instead of expanding `reverts-output-core`.
+New code must be added to the owner crate for its responsibility. Reintroducing
+a parallel output-core host would create a second implementation path and is not
+allowed.
 
 ## Test Placement
 

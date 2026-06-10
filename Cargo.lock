@@ -782,15 +782,6 @@ name = "reverts-observe"
 version = "0.1.0"
 
 [[package]]
-name = "reverts-output-core"
-version = "0.1.0"
-dependencies = [
- "reverts-ir",
- "reverts-js",
- "reverts-observe",
-]
-
-[[package]]
 name = "reverts-package"
 version = "0.1.0"
 dependencies = [

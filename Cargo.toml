@@ -10,7 +10,6 @@ members = [
     "crates/reverts-js",
     "crates/reverts-model",
     "crates/reverts-observe",
-    "crates/reverts-output-core",
     "crates/reverts-package",
     "crates/reverts-package-matcher",
     "crates/reverts-pipeline",
