@@ -76,7 +76,7 @@ The architectural consequences are:
 InputBundle
   -> AstFactExtractor
   -> RevertsGraph
-  -> DefUseGraph
+  -> DefUseGraph / ControlFlowGraph / ImportExportGraph
   -> ProgramModel
   -> BindingShapeSolver
   -> PackageSurfaceResolver
@@ -98,19 +98,22 @@ repair. Its detailed field and validation contract is documented in
 ### AstFactExtractor
 
 The extractor parses source with `reverts-js` and emits facts such as top-level
-definitions, references, call sites, member access, exports, and wrapper
-regions. Failures become structured findings rather than panics.
+definitions, references, call sites, member access, exports, wrapper regions,
+and lightweight control-flow nodes/edges. Failures become structured findings
+rather than panics.
 
 ### RevertsGraph
 
 The graph connects modules, files, symbols, package attribution, imports,
-exports, and AST facts. It is the query surface for audit and planning.
+exports, AST facts, and lightweight control-flow/data-dependence facts. It is
+the query surface for audit and planning.
 
 ### DefUseGraph
 
 The def-use graph records binding definitions, imports, reads, writes, and usage
-constraints. Missing definitions, duplicate definitions, and unresolved reads
-are graph-level findings.
+constraints. It also exposes data-dependence edges from resolved definitions or
+imports to reads/writes. Missing definitions, duplicate definitions, and
+unresolved reads/writes are graph-level findings.
 
 ### ProgramModel
 
@@ -180,7 +183,8 @@ missing declarations, patch imports, or run repair passes.
 | `ProgramModel` | Input plus constructed graphs for one output run | Downstream analysis never depends on live database reads |
 | `SemanticNameMap` | Module-path and binding-name recovery results | Sanitized names are deterministic and valid identifiers |
 | `EnrichedProgram` | Analysis handoff to planning | Package decisions, semantic names, and shapes are available before emission |
-| `DefUseGraph` | Definitions, imports, reads, and constraints | Unresolved reads are observable findings |
+| `DefUseGraph` | Definitions, imports, reads, writes, constraints, and data-dependence edges | Unresolved reads/writes are observable findings |
+| `ControlFlowGraph` | Lightweight entry/statement/branch/loop/exit graph extracted from module AST | Structured control facts are available before planning without text rescans |
 | `BindingConstraint` | Usage-derived shape evidence | Call/member/construct/class/enum usage is not lost |
 | `BindingShapeSolution` | Solved shape per binding | Materialization follows the strongest required shape |
 | `PackageSurface` | Known legal package subpaths | Bare imports are accepted only against this surface |

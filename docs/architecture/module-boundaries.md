@@ -11,10 +11,10 @@ The workspace currently contains these output-v2 crates:
 | Crate | Status | Responsibility |
 | --- | --- | --- |
 | `reverts-js` | existing | OXC parsing, code generation, source-type selection, and identifier utilities |
-| `reverts-ir` | existing | Shared domain primitives: modules, bindings, binding shapes, package surfaces, and def-use basics |
+| `reverts-ir` | existing | Shared domain primitives: modules, bindings, binding shapes, package surfaces, def-use basics, and lightweight flow/dependence records |
 | `reverts-observe` | existing | Audit reports, finding codes, severity, and telemetry event types |
 | `reverts-input` | existing | In-memory input bundle and row conversion contract |
-| `reverts-graph` | existing | Graph construction from input bundles |
+| `reverts-graph` | existing | Graph, def-use, import/export, and lightweight control-flow construction from input bundles |
 | `reverts-package` | existing | Package surface and import specifier resolution |
 | `reverts-model` | existing | Program and enriched-program handoff records |
 | `reverts-analyze` | existing | Semantic naming, package-decision enrichment, and shape-solution wiring |
@@ -32,10 +32,10 @@ planning, emission, and command orchestration.
 | Crate | Layer | Responsibility |
 | --- | --- | --- |
 | `reverts-js` | foundation | Parse and format JavaScript/TypeScript through OXC and validate generated source |
-| `reverts-ir` | foundation | Own shared IDs, binding names, module records, binding shapes, package surfaces, and graph-neutral domain records |
+| `reverts-ir` | foundation | Own shared IDs, binding names, module records, binding shapes, package surfaces, def-use records, and graph-neutral flow/dependence records |
 | `reverts-observe` | foundation | Own structured findings, audit reports, telemetry records, and acceptance diagnostics |
 | `reverts-input` | input | Convert database rows, inline fixtures, and other source records into `InputBundle` |
-| `reverts-graph` | analysis | Build `RevertsGraph`, `DefUseGraph`, and `ImportExportGraph` from input and AST facts |
+| `reverts-graph` | analysis | Build `RevertsGraph`, `DefUseGraph`, `ImportExportGraph`, and lightweight `ControlFlowGraph` from input and AST facts |
 | `reverts-model` | analysis | Hold `ProgramModel`, `SemanticNameMap`, and `EnrichedProgram` as the typed handoff from analysis to planning |
 | `reverts-analyze` | analysis | Enrich the program model with semantic names, binding-shape solutions, and package-import decisions |
 | `reverts-package` | analysis | Resolve package names, builtins, exports, subpaths, and package surfaces without emitting source |
@@ -93,14 +93,17 @@ crate tests / integration tests
 
 - `reverts-js` owns parsing, formatting, source-type selection, and identifier
   sanitization. Other crates should not duplicate JavaScript syntax rules.
-- `reverts-ir` owns shared domain types only. It should not know about file
+- `reverts-ir` owns shared domain types only, including graph-neutral control
+  flow and data-dependence records. It should not know about file
   writing, CLI arguments, databases, package registries, or audit policy.
 - `reverts-observe` owns structured diagnostics only. It should not decide how
   to recover from a finding.
 - `reverts-input` owns conversion into `InputBundle`. It may validate input
   shape, but it must not plan imports, infer binding shapes, or emit source.
-- `reverts-graph` owns graph construction and graph invariants. It reports
-  unresolved reads, duplicate definitions, and dependency inconsistencies.
+- `reverts-graph` owns graph construction and graph invariants. It constructs
+  AST facts, def-use, import/export, control-flow, and dependence views; it
+  reports unresolved reads, duplicate definitions, and dependency
+  inconsistencies through downstream audit.
 - `reverts-model` owns stable program snapshots and enriched analysis records.
   It must not inspect databases, fetch packages, or emit source.
 - `reverts-analyze` owns pure enrichment from `ProgramModel` to
@@ -166,7 +169,7 @@ now live only in their final owner crates:
 | Mechanism | Final owner |
 | --- | --- |
 | `InputBundle` and row conversion | `reverts-input` |
-| `RevertsGraph`, `DefUseGraph`, and `ImportExportGraph` construction | `reverts-graph` |
+| `RevertsGraph`, `DefUseGraph`, `ImportExportGraph`, and `ControlFlowGraph` construction | `reverts-graph` |
 | Program snapshots and enrichment records | `reverts-model` |
 | Semantic naming, package-decision enrichment, and shape-solution wiring | `reverts-analyze` |
 | Package name, builtin, exports, and subpath resolution | `reverts-package` |

@@ -109,12 +109,13 @@ Reverts Next should implement these mechanisms as code-level boundaries:
 
 - `reverts-js`: AST parsing, codegen, identifier handling, and source-type
   selection.
-- `reverts-ir`: module, symbol, def-use, import-export, package-surface, and
-  binding-shape primitives.
+- `reverts-ir`: module, symbol, def-use, data-dependence, control-flow,
+  import-export, package-surface, and binding-shape primitives.
 - `reverts-graph`, `reverts-analyze`, `reverts-planner`, `reverts-emitter`,
-  and `reverts-pipeline`: graph construction, audit/enrichment, emit planning,
-  AST-backed emission, and in-memory orchestration. The pipeline accepts
-  in-memory input and returns emitted files plus structured findings.
+  and `reverts-pipeline`: AST fact/control-flow construction,
+  audit/enrichment, emit planning, AST-backed emission, and in-memory
+  orchestration. The pipeline accepts in-memory input and returns emitted files
+  plus structured findings.
 - `reverts-observe`: structured telemetry and audit codes. Logs are diagnostic;
   audit reports decide acceptance.
 
