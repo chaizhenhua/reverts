@@ -1,14 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::AstFactKind;
-use reverts_input::{
-    ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-    PackageSurfaceInput,
-};
-use reverts_ir::{
-    BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId, PackageSurface,
-    split_bare_specifier,
-};
+use reverts_input::ModuleDependencyTarget;
+use reverts_ir::{BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId};
 use reverts_js::sanitize_identifier;
 use reverts_model::{
     CompilerEvidence, CompilerKind, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
@@ -28,7 +22,7 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let semantic_names = assign_semantic_names(&model);
     let binding_shapes = solve_binding_shapes(&model);
     let compiler_profile = detect_compiler_profile(&model);
-    let package_index = build_package_surface_index(
+    let package_index = PackageSurfaceIndex::from_attributions(
         model.input().package_attributions.as_slice(),
         model.input().package_surfaces.as_slice(),
     );
@@ -477,82 +471,6 @@ const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "_possibleConstructorReturn",
     "regeneratorRuntime",
 ];
-
-fn build_package_surface_index(
-    attributions: &[PackageAttributionInput],
-    package_surfaces: &[PackageSurfaceInput],
-) -> PackageSurfaceIndex {
-    let mut surfaces = BTreeMap::<String, PackageSurface>::new();
-
-    for attribution in attributions {
-        if attribution.status != PackageAttributionStatus::Accepted
-            || attribution.emission_mode != PackageEmissionMode::ExternalImport
-        {
-            continue;
-        }
-
-        if let Some(specifier) = attribution.export_specifier.as_deref() {
-            insert_surface_specifier(&mut surfaces, attribution.package_name.as_str(), specifier);
-        }
-
-        if let Some(subpath) = attribution.subpath.as_deref() {
-            insert_surface_subpath(&mut surfaces, attribution.package_name.as_str(), subpath);
-        }
-    }
-
-    for package_surface in package_surfaces {
-        if package_surface.status != PackageAttributionStatus::Accepted {
-            continue;
-        }
-        insert_surface_specifier(
-            &mut surfaces,
-            package_surface.package_name.as_str(),
-            package_surface.export_specifier.as_str(),
-        );
-    }
-
-    let mut index = PackageSurfaceIndex::default();
-    for surface in surfaces.into_values() {
-        index.insert(surface);
-    }
-    index
-}
-
-fn insert_surface_specifier(
-    surfaces: &mut BTreeMap<String, PackageSurface>,
-    package_name: &str,
-    specifier: &str,
-) {
-    let Some((resolved_package, subpath)) = split_bare_specifier(specifier) else {
-        return;
-    };
-    if resolved_package != package_name {
-        return;
-    }
-
-    match subpath {
-        Some(subpath) => insert_surface_subpath(surfaces, package_name, subpath.as_str()),
-        None => {
-            let surface = surfaces
-                .remove(package_name)
-                .unwrap_or_else(|| PackageSurface::new(package_name))
-                .with_root_importable();
-            surfaces.insert(package_name.to_string(), surface);
-        }
-    }
-}
-
-fn insert_surface_subpath(
-    surfaces: &mut BTreeMap<String, PackageSurface>,
-    package_name: &str,
-    subpath: &str,
-) {
-    let surface = surfaces
-        .remove(package_name)
-        .unwrap_or_else(|| PackageSurface::new(package_name))
-        .with_subpath(subpath);
-    surfaces.insert(package_name.to_string(), surface);
-}
 
 fn resolve_package_imports(
     model: &ProgramModel,

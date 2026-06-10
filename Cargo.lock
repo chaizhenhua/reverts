@@ -785,6 +785,7 @@ version = "0.1.0"
 name = "reverts-package"
 version = "0.1.0"
 dependencies = [
+ "reverts-input",
  "reverts-ir",
 ]
 

@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use reverts_input::{
+    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+};
 use reverts_ir::{PackageSurface, is_valid_package_name, split_bare_specifier};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -10,6 +13,51 @@ pub struct PackageSurfaceIndex {
 impl PackageSurfaceIndex {
     pub fn insert(&mut self, surface: PackageSurface) {
         self.surfaces.insert(surface.package_name.clone(), surface);
+    }
+
+    #[must_use]
+    pub fn from_attributions(
+        attributions: &[PackageAttributionInput],
+        package_surfaces: &[PackageSurfaceInput],
+    ) -> Self {
+        let mut surfaces = BTreeMap::<String, PackageSurface>::new();
+
+        for attribution in attributions {
+            if attribution.status != PackageAttributionStatus::Accepted
+                || attribution.emission_mode != PackageEmissionMode::ExternalImport
+            {
+                continue;
+            }
+
+            if let Some(specifier) = attribution.export_specifier.as_deref() {
+                insert_surface_specifier(
+                    &mut surfaces,
+                    attribution.package_name.as_str(),
+                    specifier,
+                );
+            }
+
+            if let Some(subpath) = attribution.subpath.as_deref() {
+                insert_surface_subpath(&mut surfaces, attribution.package_name.as_str(), subpath);
+            }
+        }
+
+        for package_surface in package_surfaces {
+            if package_surface.status != PackageAttributionStatus::Accepted {
+                continue;
+            }
+            insert_surface_specifier(
+                &mut surfaces,
+                package_surface.package_name.as_str(),
+                package_surface.export_specifier.as_str(),
+            );
+        }
+
+        let mut index = Self::default();
+        for surface in surfaces.into_values() {
+            index.insert(surface);
+        }
+        index
     }
 
     #[must_use]
@@ -93,6 +141,42 @@ impl PackageResolution {
     }
 }
 
+fn insert_surface_specifier(
+    surfaces: &mut BTreeMap<String, PackageSurface>,
+    package_name: &str,
+    specifier: &str,
+) {
+    let Some((resolved_package, subpath)) = split_bare_specifier(specifier) else {
+        return;
+    };
+    if resolved_package != package_name {
+        return;
+    }
+
+    match subpath {
+        Some(subpath) => insert_surface_subpath(surfaces, package_name, subpath.as_str()),
+        None => {
+            let surface = surfaces
+                .remove(package_name)
+                .unwrap_or_else(|| PackageSurface::new(package_name))
+                .with_root_importable();
+            surfaces.insert(package_name.to_string(), surface);
+        }
+    }
+}
+
+fn insert_surface_subpath(
+    surfaces: &mut BTreeMap<String, PackageSurface>,
+    package_name: &str,
+    subpath: &str,
+) {
+    let surface = surfaces
+        .remove(package_name)
+        .unwrap_or_else(|| PackageSurface::new(package_name))
+        .with_subpath(subpath);
+    surfaces.insert(package_name.to_string(), surface);
+}
+
 #[must_use]
 pub fn is_node_builtin(specifier: &str) -> bool {
     normalize_builtin(specifier).is_some()
@@ -162,9 +246,80 @@ fn normalize_builtin(specifier: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use reverts_ir::PackageSurface;
+    use reverts_input::{
+        PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+    };
+    use reverts_ir::{ModuleId, PackageSurface};
 
     use super::{PackageResolution, PackageSurfaceIndex, is_node_builtin};
+
+    #[test]
+    fn from_attributions_builds_index_from_accepted_external_imports() {
+        let attributions = [
+            PackageAttributionInput::accepted_external(ModuleId(1), "lodash", "4.17.21", "lodash"),
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        ];
+
+        let index = PackageSurfaceIndex::from_attributions(&attributions, &[]);
+
+        assert!(matches!(
+            index.resolve("lodash"),
+            PackageResolution::External { .. }
+        ));
+        assert!(matches!(
+            index.resolve("lodash/map"),
+            PackageResolution::External { .. }
+        ));
+        assert!(matches!(
+            index.resolve("lodash/_internal"),
+            PackageResolution::Rejected { .. }
+        ));
+    }
+
+    #[test]
+    fn from_attributions_ignores_non_accepted_or_non_external_attributions() {
+        let mut vendored =
+            PackageAttributionInput::accepted_external(ModuleId(1), "lodash", "4.17.21", "lodash");
+        vendored.emission_mode = PackageEmissionMode::VendoredAsset;
+        let proposed = PackageAttributionInput::proposed(
+            ModuleId(2),
+            "lodash",
+            Some("4.17.21".to_string()),
+            PackageEmissionMode::ExternalImport,
+        );
+        let attributions = [vendored, proposed];
+
+        let index = PackageSurfaceIndex::from_attributions(&attributions, &[]);
+
+        assert!(matches!(
+            index.resolve("lodash"),
+            PackageResolution::Rejected { reason, .. } if reason == "package surface is unknown"
+        ));
+    }
+
+    #[test]
+    fn from_attributions_includes_accepted_package_surface_inputs() {
+        let surfaces = [PackageSurfaceInput {
+            package_name: "react".to_string(),
+            package_version: Some("18.2.0".to_string()),
+            export_specifier: "react/jsx-runtime".to_string(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        }];
+
+        let index = PackageSurfaceIndex::from_attributions(&[], &surfaces);
+
+        assert!(matches!(
+            index.resolve("react/jsx-runtime"),
+            PackageResolution::External { .. }
+        ));
+    }
 
     #[test]
     fn builtin_modules_are_classified_without_package_surface() {
