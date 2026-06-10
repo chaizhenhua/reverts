@@ -35,6 +35,7 @@ fn external_corpus_pipeline_coverage_report() {
     let mut pipeline_failed = 0usize;
     let mut findings_by_code: BTreeMap<FindingCode, usize> = BTreeMap::new();
     let mut missing_definitions_by_binding: BTreeMap<String, usize> = BTreeMap::new();
+    let mut babel_lowering = BabelLoweringMetrics::default();
 
     for case in &cases {
         let outcome = outcomes
@@ -74,6 +75,13 @@ fn external_corpus_pipeline_coverage_report() {
                 continue;
             }
         };
+
+        if detected == CompilerKind::Babel {
+            babel_lowering.observe(
+                &source,
+                run.project.files.first().map(|file| file.source.as_str()),
+            );
+        }
 
         if run.audit.is_clean() {
             audit_clean += 1;
@@ -119,6 +127,20 @@ fn external_corpus_pipeline_coverage_report() {
             println!("    {code:?}: {count}");
         }
     }
+    println!("  babel lowering coverage (over babel-detected cases):");
+    println!(
+        "    __esModule strip: applied {} / missed {} (no opportunity {})",
+        babel_lowering.es_module_marker_stripped,
+        babel_lowering.es_module_marker_missed,
+        babel_lowering.es_module_marker_absent,
+    );
+    println!(
+        "    _interopRequireDefault rewrite: applied {} / missed {} (no opportunity {})",
+        babel_lowering.interop_default_rewritten,
+        babel_lowering.interop_default_missed,
+        babel_lowering.interop_default_absent,
+    );
+
     if !missing_definitions_by_binding.is_empty() {
         let mut top = missing_definitions_by_binding
             .iter()
@@ -150,6 +172,42 @@ struct BundlerOutcome {
     matched: usize,
     banner_missing: usize,
     banner_disagreed: usize,
+}
+
+#[derive(Debug, Default)]
+struct BabelLoweringMetrics {
+    es_module_marker_stripped: usize,
+    es_module_marker_missed: usize,
+    es_module_marker_absent: usize,
+    interop_default_rewritten: usize,
+    interop_default_missed: usize,
+    interop_default_absent: usize,
+}
+
+impl BabelLoweringMetrics {
+    fn observe(&mut self, source: &str, emit_text: Option<&str>) {
+        let emit_text = emit_text.unwrap_or("");
+        let marker = "Object.defineProperty(exports, \"__esModule\"";
+        if source.contains(marker) {
+            if emit_text.contains(marker) {
+                self.es_module_marker_missed += 1;
+            } else {
+                self.es_module_marker_stripped += 1;
+            }
+        } else {
+            self.es_module_marker_absent += 1;
+        }
+        let interop = "_interopRequireDefault(require(";
+        if source.contains(interop) {
+            if emit_text.contains(interop) {
+                self.interop_default_missed += 1;
+            } else {
+                self.interop_default_rewritten += 1;
+            }
+        } else {
+            self.interop_default_absent += 1;
+        }
+    }
 }
 
 fn build_bundle(case: &ExternalCase, source: &str) -> Option<InputBundle> {
