@@ -2274,6 +2274,67 @@ mod tests {
     }
 
     #[test]
+    fn esbuild_helper_strip_descends_into_top_level_iife_wrapper() {
+        // Real esbuild bundles wrap everything in a top-level IIFE. The
+        // helper-strip pass must descend into the IIFE body so the
+        // unreferenced helpers actually disappear.
+        let source = "(() => {\n\
+                        var __commonJS = (cb, mod) => function () { return mod; };\n\
+                        var __defProp = Object.defineProperty;\n\
+                        var __export = (target, all) => { return target; };\n\
+                        var entry = 42;\n\
+                      })();\n";
+        let run = run_with_source(source, &[]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: esbuild"),
+            "esbuild fixture must carry esbuild banner; got:\n{emitted}",
+        );
+        for helper in ["__commonJS", "__defProp", "__export"] {
+            assert!(
+                !emitted.contains(&format!("var {helper}")),
+                "IIFE-internal unreferenced helper `{helper}` must be stripped; got:\n{emitted}",
+            );
+        }
+        assert!(
+            emitted.contains("var entry = 42"),
+            "unrelated IIFE-internal declarations must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn webpack_helper_strip_descends_into_top_level_iife_wrapper() {
+        let source = "(() => {\n\
+                        var __webpack_modules__ = {};\n\
+                        var __webpack_module_cache__ = {};\n\
+                        function __webpack_require__(id) { return id; }\n\
+                        var entry = __webpack_require__(1);\n\
+                      })();\n";
+        let run = run_with_source(source, &[]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "webpack fixture must carry webpack banner; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function __webpack_require__"),
+            "referenced webpack helper must remain inside the IIFE; got:\n{emitted}",
+        );
+        for helper in ["__webpack_modules__", "__webpack_module_cache__"] {
+            assert!(
+                !emitted.contains(&format!("var {helper}")),
+                "unreferenced webpack helper `{helper}` must be stripped from inside IIFE; got:\n{emitted}",
+            );
+        }
+        assert!(
+            emitted.contains("var entry = __webpack_require__(1)"),
+            "IIFE-internal call site must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.

@@ -558,23 +558,22 @@ pub fn format_source_with_module_items(
             }
         }
         if matches!(lowering, CompilerLowering::Esbuild) {
+            let mut unreferenced = Vec::new();
             for helper_name in ESBUILD_RUNTIME_HELPERS {
                 if !program_references_named_identifier(&parsed.program, helper_name) {
-                    parsed.program.body.retain(|statement| {
-                        !is_top_level_var_declaration_named(statement, helper_name)
-                    });
+                    unreferenced.push(*helper_name);
                 }
             }
+            strip_named_var_declarations_in_program(&mut parsed.program, &unreferenced);
         }
         if matches!(lowering, CompilerLowering::Webpack) {
+            let mut unreferenced = Vec::new();
             for helper_name in WEBPACK_RUNTIME_HELPERS {
                 if !program_references_named_identifier(&parsed.program, helper_name) {
-                    parsed.program.body.retain(|statement| {
-                        !is_top_level_var_declaration_named(statement, helper_name)
-                            && !is_top_level_function_declaration_named(statement, helper_name)
-                    });
+                    unreferenced.push(*helper_name);
                 }
             }
+            strip_named_declarations_in_program(&mut parsed.program, &unreferenced);
         }
 
         let builder = AstBuilder::new(&allocator);
@@ -819,6 +818,84 @@ fn is_top_level_function_declaration_named(statement: &Statement<'_>, target_nam
         .id
         .as_ref()
         .is_some_and(|id| id.name.as_str() == target_name)
+}
+
+/// Strip `var <name> = ...` declarations matching `helper_names` from both
+/// the program top-level and the body of any top-level IIFE. Real esbuild
+/// bundles wrap the runtime in `(() => { ... })()`, so module-scope strip
+/// alone never fires on them; descending into the IIFE handles that case.
+fn strip_named_var_declarations_in_program(program: &mut Program<'_>, helper_names: &[&str]) {
+    program.body.retain(|statement| {
+        !helper_names
+            .iter()
+            .any(|name| is_top_level_var_declaration_named(statement, name))
+    });
+    for statement in program.body.iter_mut() {
+        let Some(iife_body) = top_level_iife_body_statements_mut(statement) else {
+            continue;
+        };
+        iife_body.retain(|statement| {
+            !helper_names
+                .iter()
+                .any(|name| is_top_level_var_declaration_named(statement, name))
+        });
+    }
+}
+
+/// Strip `var <name> = ...` AND `function <name>(...) { ... }` declarations
+/// matching `helper_names` from program top-level and any top-level IIFE
+/// body. Webpack helpers come in both shapes (`__webpack_modules__` is a var,
+/// `__webpack_require__` is a function declaration).
+fn strip_named_declarations_in_program(program: &mut Program<'_>, helper_names: &[&str]) {
+    let matches_helper = |statement: &Statement<'_>| {
+        helper_names.iter().any(|name| {
+            is_top_level_var_declaration_named(statement, name)
+                || is_top_level_function_declaration_named(statement, name)
+        })
+    };
+    program.body.retain(|statement| !matches_helper(statement));
+    for statement in program.body.iter_mut() {
+        let Some(iife_body) = top_level_iife_body_statements_mut(statement) else {
+            continue;
+        };
+        iife_body.retain(|statement| !matches_helper(statement));
+    }
+}
+
+/// Return a mutable reference to the body statements of a top-level IIFE
+/// expressed as `(() => { ... })()` or `(function () { ... })()`. The IIFE
+/// must take no arguments — the arg-bearing webpack module-table form
+/// (`(function(modules){...})([...])`) is intentionally excluded so we never
+/// strip helpers from a parameterised module table.
+fn top_level_iife_body_statements_mut<'a, 'p>(
+    statement: &'p mut Statement<'a>,
+) -> Option<&'p mut oxc_allocator::Vec<'a, Statement<'a>>> {
+    let Statement::ExpressionStatement(expression_statement) = statement else {
+        return None;
+    };
+    let Expression::CallExpression(call) = &mut expression_statement.expression else {
+        return None;
+    };
+    if !call.arguments.is_empty() {
+        return None;
+    }
+    let callee = unwrap_parenthesized_mut(&mut call.callee);
+    match callee {
+        Expression::ArrowFunctionExpression(arrow) => Some(&mut arrow.body.statements),
+        Expression::FunctionExpression(function) => {
+            function.body.as_mut().map(|body| &mut body.statements)
+        }
+        _ => None,
+    }
+}
+
+fn unwrap_parenthesized_mut<'a, 'p>(
+    mut expression: &'p mut Expression<'a>,
+) -> &'p mut Expression<'a> {
+    while let Expression::ParenthesizedExpression(parenthesized) = expression {
+        expression = &mut parenthesized.expression;
+    }
+    expression
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:
