@@ -2335,6 +2335,39 @@ mod tests {
     }
 
     #[test]
+    fn webpack_lowering_strips_no_op_runtime_make_namespace_call() {
+        // `__webpack_require__.r(exports)` is webpack's CJS-to-ESM marker:
+        // it sets `__esModule` on the exports object. In an ESM emit
+        // context the call is either a no-op (when exports is bound) or a
+        // runtime error (when it isn't). Lowering must drop it the same way
+        // babel `__esModule` strip drops its sibling.
+        let source = "(() => {\n\
+                        function __webpack_require__(id) { return id; }\n\
+                        __webpack_require__.r(__webpack_exports__);\n\
+                        var entry = __webpack_require__(1);\n\
+                      })();\n";
+        let run = run_with_source(source, &[]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "webpack fixture must carry webpack banner; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("__webpack_require__.r("),
+            "the no-op `__webpack_require__.r(...)` marker must be stripped; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var entry = __webpack_require__(1)"),
+            "ordinary `__webpack_require__(N)` call sites must remain; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function __webpack_require__"),
+            "referenced helper must remain; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.

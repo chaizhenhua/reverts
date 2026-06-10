@@ -567,6 +567,7 @@ pub fn format_source_with_module_items(
             strip_named_var_declarations_in_program(&mut parsed.program, &unreferenced);
         }
         if matches!(lowering, CompilerLowering::Webpack) {
+            strip_webpack_make_namespace_markers_in_program(&mut parsed.program);
             let mut unreferenced = Vec::new();
             for helper_name in WEBPACK_RUNTIME_HELPERS {
                 if !program_references_named_identifier(&parsed.program, helper_name) {
@@ -896,6 +897,46 @@ fn unwrap_parenthesized_mut<'a, 'p>(
         expression = &mut parenthesized.expression;
     }
     expression
+}
+
+/// Strip webpack's `__webpack_require__.r(exports)` make-namespace marker
+/// from program top-level and any top-level IIFE body. The call sets
+/// `__esModule` on its argument; in an ESM emit context it is at best a
+/// no-op and at worst a runtime ReferenceError, so dropping it always
+/// improves output.
+fn strip_webpack_make_namespace_markers_in_program(program: &mut Program<'_>) {
+    program
+        .body
+        .retain(|statement| !is_webpack_make_namespace_marker(statement));
+    for statement in program.body.iter_mut() {
+        let Some(iife_body) = top_level_iife_body_statements_mut(statement) else {
+            continue;
+        };
+        iife_body.retain(|statement| !is_webpack_make_namespace_marker(statement));
+    }
+}
+
+/// Match a top-level `__webpack_require__.r(<single-arg>)` expression
+/// statement. The argument may be any identifier (`exports`,
+/// `__webpack_exports__`, etc.) since webpack picks the binding name from
+/// the wrapping module function's parameter list.
+fn is_webpack_make_namespace_marker(statement: &Statement<'_>) -> bool {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return false;
+    };
+    let Expression::CallExpression(call) = &statement.expression else {
+        return false;
+    };
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return false;
+    };
+    let Expression::Identifier(callee_object) = &callee.object else {
+        return false;
+    };
+    callee_object.name.as_str() == "__webpack_require__"
+        && callee.property.name.as_str() == "r"
+        && call.arguments.len() == 1
+        && matches!(call.arguments[0], Argument::Identifier(_))
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:
