@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_graph::AstFactKind;
+use reverts_graph::{AstFactKind, AstWrapperKind};
 use reverts_input::ModuleDependencyTarget;
 use reverts_ir::{BindingConstraintKind, BindingName, BindingShapeSolution, ModuleId};
 use reverts_js::sanitize_identifier;
@@ -299,12 +299,19 @@ fn reserve_unique_name(
 
 fn detect_compiler_profile(model: &ProgramModel) -> CompilerProfile {
     let mut identifiers_by_module = BTreeMap::<ModuleId, BTreeSet<String>>::new();
+    let mut wrappers_by_module = BTreeMap::<ModuleId, BTreeSet<AstWrapperKind>>::new();
     for fact in model.graph().ast_facts() {
         if let Some(binding) = &fact.binding {
             identifiers_by_module
                 .entry(fact.module_id)
                 .or_default()
                 .insert(binding.as_str().to_string());
+        }
+        if let AstFactKind::WrapperRegion(kind) = fact.kind {
+            wrappers_by_module
+                .entry(fact.module_id)
+                .or_default()
+                .insert(kind);
         }
     }
 
@@ -317,9 +324,13 @@ fn detect_compiler_profile(model: &ProgramModel) -> CompilerProfile {
             .get(&module.id)
             .cloned()
             .unwrap_or_default();
+        let wrappers = wrappers_by_module
+            .get(&module.id)
+            .cloned()
+            .unwrap_or_default();
         profile.insert_module(
             module.id,
-            detect_module_compiler_profile(source.source, &identifiers),
+            detect_module_compiler_profile(source.source, &identifiers, &wrappers),
         );
     }
     profile
@@ -328,11 +339,15 @@ fn detect_compiler_profile(model: &ProgramModel) -> CompilerProfile {
 fn detect_module_compiler_profile(
     source: &str,
     identifiers: &BTreeSet<String>,
+    wrappers: &BTreeSet<AstWrapperKind>,
 ) -> ModuleCompilerProfile {
     let mut evidence = Vec::new();
     let minified = looks_minified(source);
     if minified {
         evidence.push(CompilerEvidence::MinifiedLayout);
+    }
+    for wrapper in wrappers {
+        evidence.push(CompilerEvidence::TopLevelIife(*wrapper));
     }
 
     let compiler =
@@ -777,27 +792,40 @@ mod tests {
 
     #[test]
     fn compiler_profile_detector_classifies_runtime_fingerprints() {
+        let no_wrappers = BTreeSet::new();
         assert_eq!(
-            detect_module_compiler_profile("", &identifiers(["__webpack_require__"])).compiler,
+            detect_module_compiler_profile("", &identifiers(["__webpack_require__"]), &no_wrappers)
+                .compiler,
             CompilerKind::Webpack
         );
         assert_eq!(
-            detect_module_compiler_profile("", &identifiers(["__toCommonJS"])).compiler,
+            detect_module_compiler_profile("", &identifiers(["__toCommonJS"]), &no_wrappers)
+                .compiler,
             CompilerKind::Esbuild
         );
         assert_eq!(
-            detect_module_compiler_profile("Object.freeze({ answer: 42 })", &BTreeSet::new())
-                .compiler,
+            detect_module_compiler_profile(
+                "Object.freeze({ answer: 42 })",
+                &BTreeSet::new(),
+                &no_wrappers
+            )
+            .compiler,
             CompilerKind::Rollup
         );
         assert_eq!(
-            detect_module_compiler_profile("", &identifiers(["_interopRequireDefault"])).compiler,
+            detect_module_compiler_profile(
+                "",
+                &identifiers(["_interopRequireDefault"]),
+                &no_wrappers
+            )
+            .compiler,
             CompilerKind::Babel
         );
         assert_eq!(
             detect_module_compiler_profile(
                 "function a(b){return b?b.c?b.c.d:b.c:b}var c={};for(var d=0;d<200;d++)c[d]=a({c:{d:d}});module.exports=c;function e(f){return f&&f.g?f.g.h:0}exports.e=e;",
-                &BTreeSet::new()
+                &BTreeSet::new(),
+                &no_wrappers
             )
             .compiler,
             CompilerKind::Terser
@@ -825,6 +853,40 @@ mod tests {
                 .module(ModuleId(1))
                 .compiler,
             CompilerKind::Webpack
+        );
+    }
+
+    #[test]
+    fn top_level_iife_wrappers_are_recorded_as_compiler_evidence() {
+        use reverts_graph::AstWrapperKind;
+        use reverts_model::CompilerEvidence;
+
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("(function(){ var x = 1; })();\n(()=>{ var y = 2; })();\n".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        let evidence = &output
+            .program
+            .compiler_profile()
+            .module(ModuleId(1))
+            .evidence;
+        assert!(
+            evidence.contains(&CompilerEvidence::TopLevelIife(
+                AstWrapperKind::FunctionIife
+            )),
+            "expected FunctionIife evidence, got: {evidence:?}",
+        );
+        assert!(
+            evidence.contains(&CompilerEvidence::TopLevelIife(AstWrapperKind::ArrowIife)),
+            "expected ArrowIife evidence, got: {evidence:?}",
         );
     }
 

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use reverts_graph::RevertsGraph;
+use reverts_graph::{AstWrapperKind, RevertsGraph};
 use reverts_input::{InputBundle, ModuleInput, SymbolInput};
 use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
 use reverts_package::PackageResolution;
@@ -234,6 +234,7 @@ pub enum CompilerEvidence {
     Identifier(String),
     SourcePattern(&'static str),
     MinifiedLayout,
+    TopLevelIife(AstWrapperKind),
 }
 
 #[cfg(test)]

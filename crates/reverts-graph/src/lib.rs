@@ -266,7 +266,7 @@ pub enum AstFactKind {
     WrapperRegion(AstWrapperKind),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AstWrapperKind {
     FunctionIife,
     ArrowIife,
