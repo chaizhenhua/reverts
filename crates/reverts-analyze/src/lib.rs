@@ -23,12 +23,25 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let binding_shapes = solve_binding_shapes(&model);
     let package_index = build_package_surface_index(model.input().package_attributions.as_slice());
     let mut audit = AuditReport::default();
+    audit.extend(audit_ast_fact_extraction(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     EnrichmentOutput {
         program: EnrichedProgram::new(model, semantic_names, package_imports, binding_shapes),
         audit,
     }
+}
+
+fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for error in model.graph().ast_errors() {
+        audit.push(
+            AuditFinding::error(FindingCode::AstFactExtractionFailed, error.message.clone())
+                .with_module(error.module_id.0.to_string())
+                .with_binding(error.path.clone()),
+        );
+    }
+    audit
 }
 
 fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
@@ -182,7 +195,7 @@ fn package_namespace_binding(specifier: &str) -> String {
 mod tests {
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SymbolInput,
+        PackageAttributionInput, ProjectInput, SourceFileInput, SymbolInput,
     };
     use reverts_ir::ModuleId;
     use reverts_observe::FindingCode;
@@ -270,5 +283,22 @@ mod tests {
             output.program.package_imports()[0].resolution,
             PackageResolution::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn ast_fact_extraction_failure_is_reported_as_audit_finding() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "broken.js",
+            Some("const =".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::AstFactExtractionFailed));
     }
 }
