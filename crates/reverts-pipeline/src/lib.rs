@@ -300,7 +300,7 @@ mod tests {
     use reverts_observe::FindingCode;
     use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
-    use super::{audit_emit_plan_synthesis, generate_project_from_input};
+    use super::{OutputRun, audit_emit_plan_synthesis, generate_project_from_input};
 
     fn rows_with_application_module() -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -998,6 +998,73 @@ mod tests {
         assert!(
             !emitted.contains("reverts-recovery"),
             "unknown-compiler module must not include a recovery banner, got:\n{emitted}",
+        );
+    }
+
+    fn run_with_source(source: &str, symbols: &[&str]) -> OutputRun {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/bundle.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "bundle", "src/bundle.ts").with_source_file(1),
+        );
+        for symbol in symbols {
+            rows.symbols.push(SymbolInput::new(ModuleId(1), *symbol));
+        }
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        generate_project_from_input(input).expect("fixture should emit")
+    }
+
+    #[test]
+    fn esbuild_runtime_identifier_in_function_emits_esbuild_banner() {
+        let source = "function setup() {\n  __toCommonJS({});\n}\n";
+        let run = run_with_source(source, &["setup"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: esbuild"),
+            "esbuild fixture must carry esbuild banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn rollup_object_freeze_pattern_emits_rollup_banner() {
+        let source = "var frozen = Object.freeze({ answer: 42 });\n";
+        let run = run_with_source(source, &["frozen"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: rollup"),
+            "rollup fixture must carry rollup banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn babel_interop_helper_in_function_emits_babel_banner() {
+        let source = "function load(mod) {\n  return _interopRequireDefault(mod);\n}\n";
+        let run = run_with_source(source, &["load"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: babel"),
+            "babel fixture must carry babel banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn terser_minified_source_emits_terser_banner() {
+        // Long single-line source with low whitespace ratio triggers looks_minified
+        // without matching any specific compiler runtime identifier.
+        let source = "var a=function(b){return b?b.c?b.c.d:b.c:b};var c={};for(var d=0;d<200;d++)c[d]=a({c:{d:d}});var e=function(f){return f&&f.g?f.g.h:0};var x=c[0];var y=e(x);\n";
+        let run = run_with_source(source, &["a", "c", "d", "e", "x", "y"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: terser"),
+            "terser fixture must carry terser banner, got:\n{emitted}",
         );
     }
 }
