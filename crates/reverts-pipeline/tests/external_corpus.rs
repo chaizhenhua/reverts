@@ -10,12 +10,13 @@
 
 use std::collections::BTreeMap;
 
+use reverts_analyze::enrich_program;
 use reverts_fixtures::external_corpus::{ExternalCase, load_external_cases};
 use reverts_input::{
     InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
 };
 use reverts_ir::ModuleId;
-use reverts_model::CompilerKind;
+use reverts_model::{CompilerKind, ProgramModel};
 use reverts_pipeline::generate_project_from_input;
 
 #[test]
@@ -24,7 +25,7 @@ fn external_corpus_pipeline_coverage_report() {
     let cases = load_external_cases().expect("corpus should load");
     let total = cases.len();
 
-    let mut detection_outcomes: BTreeMap<String, BundlerOutcome> = BTreeMap::new();
+    let mut outcomes: BTreeMap<String, BundlerOutcome> = BTreeMap::new();
     let mut audit_clean = 0usize;
     let mut emit_succeeded = 0usize;
     let mut input_invalid = 0usize;
@@ -32,7 +33,7 @@ fn external_corpus_pipeline_coverage_report() {
     let mut pipeline_failed = 0usize;
 
     for case in &cases {
-        let outcome = detection_outcomes
+        let outcome = outcomes
             .entry(case.manifest.expectations.bundler_family.clone())
             .or_default();
         outcome.total += 1;
@@ -45,6 +46,22 @@ fn external_corpus_pipeline_coverage_report() {
             input_invalid += 1;
             continue;
         };
+
+        // Detection happens in analyze, *before* any audit gate. Inspect the
+        // enriched program independently so per-family detection accuracy
+        // reflects what the detector decides, not whether the case happens to
+        // emit cleanly.
+        let model = ProgramModel::from_input(bundle.clone());
+        let enrichment = enrich_program(model);
+        let detected = enrichment
+            .program
+            .compiler_profile()
+            .module(ModuleId(1))
+            .compiler;
+        let expected_kind = expected_compiler_for(&case.manifest.expectations.bundler_family);
+        if matches!(expected_kind, Some(kind) if kind == detected) {
+            outcome.matched += 1;
+        }
 
         let run = match generate_project_from_input(bundle) {
             Ok(run) => run,
@@ -59,15 +76,18 @@ fn external_corpus_pipeline_coverage_report() {
         }
         if !run.project.files.is_empty() {
             emit_succeeded += 1;
-        }
-
-        // The pipeline currently exposes the compiler decision only via the
-        // banner string in the emitted source. Surface it here so we can
-        // measure detection accuracy against the case-declared family.
-        let detected = detect_compiler_from_emit(&run);
-        let expected_kind = expected_compiler_for(&case.manifest.expectations.bundler_family);
-        if matches!(detected, Some(kind) if Some(kind) == expected_kind) {
-            outcome.matched += 1;
+            if !run.audit.is_clean() {
+                continue;
+            }
+            // When emit happens AND audit is clean, the banner must mirror
+            // the analyze-time detection. This ties the two halves of the
+            // pipeline together as a regression guard.
+            let banner = banner_compiler(&run);
+            if banner.is_none() && detected != CompilerKind::Unknown {
+                outcome.banner_missing += 1;
+            } else if matches!(banner, Some(kind) if kind != detected) {
+                outcome.banner_disagreed += 1;
+            }
         }
     }
 
@@ -78,16 +98,16 @@ fn external_corpus_pipeline_coverage_report() {
     println!("  pipeline error:     {pipeline_failed}");
     println!("  emit succeeded:     {emit_succeeded}");
     println!("  audit clean:        {audit_clean}");
-    println!("  per-family detection accuracy:");
-    for (family, outcome) in &detection_outcomes {
+    println!("  per-family detection accuracy (analyze stage):");
+    for (family, outcome) in &outcomes {
         let percent = if outcome.total == 0 {
             0
         } else {
             outcome.matched * 100 / outcome.total
         };
         println!(
-            "    {family:>10}: {} / {} ({percent}%)",
-            outcome.matched, outcome.total
+            "    {family:>10}: {} / {} ({percent}%) — emit-stage banner mismatches: missing={} disagreed={}",
+            outcome.matched, outcome.total, outcome.banner_missing, outcome.banner_disagreed,
         );
     }
 }
@@ -96,6 +116,8 @@ fn external_corpus_pipeline_coverage_report() {
 struct BundlerOutcome {
     total: usize,
     matched: usize,
+    banner_missing: usize,
+    banner_disagreed: usize,
 }
 
 fn build_bundle(case: &ExternalCase, source: &str) -> Option<InputBundle> {
@@ -114,7 +136,7 @@ fn build_bundle(case: &ExternalCase, source: &str) -> Option<InputBundle> {
     InputBundle::from_rows(rows).ok()
 }
 
-fn detect_compiler_from_emit(run: &reverts_pipeline::OutputRun) -> Option<CompilerKind> {
+fn banner_compiler(run: &reverts_pipeline::OutputRun) -> Option<CompilerKind> {
     let emitted = run.project.files.first()?.source.as_str();
     if emitted.contains("// reverts-recovery: webpack") {
         Some(CompilerKind::Webpack)
