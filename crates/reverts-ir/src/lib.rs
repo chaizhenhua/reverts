@@ -72,7 +72,7 @@ impl BindingShape {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BindingConstraintKind {
     Read,
     Call,
@@ -94,6 +94,36 @@ impl BindingConstraintKind {
             Self::EnumInitializer => BindingShape::EnumObject,
             Self::ClassDeclaration => BindingShape::ClassLike,
         }
+    }
+
+    #[must_use]
+    pub fn conflicts_with(self, other: Self) -> bool {
+        use BindingConstraintKind::{
+            Call, ClassDeclaration, Construct, EnumInitializer, MemberRead, MemberWrite, Read,
+        };
+
+        let self_kind = match self {
+            Read | MemberRead | MemberWrite => return false,
+            EnumInitializer => EnumInitializer,
+            Call => Call,
+            Construct => Construct,
+            ClassDeclaration => ClassDeclaration,
+        };
+        let other_kind = match other {
+            Read | MemberRead | MemberWrite => return false,
+            EnumInitializer => EnumInitializer,
+            Call => Call,
+            Construct => Construct,
+            ClassDeclaration => ClassDeclaration,
+        };
+
+        matches!(
+            (self_kind, other_kind),
+            (EnumInitializer, Call | Construct | ClassDeclaration)
+                | (Call | Construct | ClassDeclaration, EnumInitializer)
+                | (ClassDeclaration, Call)
+                | (Call, ClassDeclaration)
+        )
     }
 }
 
@@ -171,12 +201,44 @@ impl DefUseGraph {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BindingShapeSolution {
     shapes: BTreeMap<(ModuleId, BindingName), BindingShape>,
+    constraint_kinds: BTreeMap<(ModuleId, BindingName), BTreeSet<BindingConstraintKind>>,
+    conflicts: Vec<BindingShapeConflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingShapeConflict {
+    pub module_id: ModuleId,
+    pub binding: BindingName,
+    pub existing_kind: BindingConstraintKind,
+    pub incoming_kind: BindingConstraintKind,
+    pub existing_shape: BindingShape,
+    pub incoming_shape: BindingShape,
 }
 
 impl BindingShapeSolution {
     pub fn add_constraint(&mut self, constraint: &BindingConstraint) {
         let key = (constraint.module_id, constraint.binding.clone());
         let required = constraint.kind.required_shape();
+        let existing_kinds = self.constraint_kinds.entry(key.clone()).or_default();
+        if existing_kinds.insert(constraint.kind) {
+            self.conflicts
+                .extend(existing_kinds.iter().copied().filter_map(|existing_kind| {
+                    if existing_kind == constraint.kind
+                        || !existing_kind.conflicts_with(constraint.kind)
+                    {
+                        return None;
+                    }
+
+                    Some(BindingShapeConflict {
+                        module_id: constraint.module_id,
+                        binding: constraint.binding.clone(),
+                        existing_kind,
+                        incoming_kind: constraint.kind,
+                        existing_shape: existing_kind.required_shape(),
+                        incoming_shape: required,
+                    })
+                }));
+        }
         self.shapes
             .entry(key)
             .and_modify(|shape| *shape = shape.merge(required))
@@ -189,6 +251,11 @@ impl BindingShapeSolution {
             .get(&(module_id, BindingName::new(binding)))
             .copied()
             .unwrap_or(BindingShape::Unknown)
+    }
+
+    #[must_use]
+    pub fn conflicts(&self) -> &[BindingShapeConflict] {
+        &self.conflicts
     }
 }
 
@@ -276,7 +343,10 @@ fn normalize_subpath(subpath: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BindingShape, PackageSurface, is_valid_package_name};
+    use super::{
+        BindingConstraint, BindingConstraintKind, BindingShape, BindingShapeSolution, ModuleId,
+        PackageSurface, is_valid_package_name,
+    };
 
     #[test]
     fn package_surface_does_not_accept_absent_subpath() {
@@ -298,6 +368,56 @@ mod tests {
         assert_eq!(
             BindingShape::PlainObject.merge(BindingShape::Callable),
             BindingShape::Callable
+        );
+    }
+
+    #[test]
+    fn binding_shape_solution_records_incompatible_constraints() {
+        let mut solution = BindingShapeSolution::default();
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "NativeModuleType",
+            BindingConstraintKind::EnumInitializer,
+        ));
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "NativeModuleType",
+            BindingConstraintKind::Call,
+        ));
+
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "NativeModuleType"),
+            BindingShape::Callable
+        );
+        assert_eq!(solution.conflicts().len(), 1);
+        assert_eq!(
+            solution.conflicts()[0].existing_kind,
+            BindingConstraintKind::EnumInitializer
+        );
+        assert_eq!(
+            solution.conflicts()[0].incoming_kind,
+            BindingConstraintKind::Call
+        );
+    }
+
+    #[test]
+    fn class_declaration_and_construct_constraints_are_compatible() {
+        let mut solution = BindingShapeSolution::default();
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "Service",
+            BindingConstraintKind::ClassDeclaration,
+        ));
+        solution.add_constraint(&BindingConstraint::new(
+            ModuleId(1),
+            "Service",
+            BindingConstraintKind::Construct,
+        ));
+
+        assert_eq!(solution.conflicts(), &[]);
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "Service"),
+            BindingShape::ClassLike
         );
     }
 }

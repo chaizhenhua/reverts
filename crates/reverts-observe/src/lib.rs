@@ -15,6 +15,7 @@ pub enum FindingCode {
     DuplicateTopLevelBinding,
     SyntheticReferenceWithoutDeclaration,
     AstFactExtractionFailed,
+    AmbiguousBindingShape,
     UnparseableOutput,
     UnparseablePackageSource,
     AmbiguousPackageMatch,

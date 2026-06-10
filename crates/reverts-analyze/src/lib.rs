@@ -24,6 +24,7 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let package_index = build_package_surface_index(model.input().package_attributions.as_slice());
     let mut audit = AuditReport::default();
     audit.extend(audit_ast_fact_extraction(&model));
+    audit.extend(audit_binding_shape_conflicts(&binding_shapes));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     EnrichmentOutput {
@@ -39,6 +40,27 @@ fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
             AuditFinding::error(FindingCode::AstFactExtractionFailed, error.message.clone())
                 .with_module(error.module_id.0.to_string())
                 .with_binding(error.path.clone()),
+        );
+    }
+    audit
+}
+
+fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for conflict in binding_shapes.conflicts() {
+        audit.push(
+            AuditFinding::error(
+                FindingCode::AmbiguousBindingShape,
+                format!(
+                    "binding has incompatible shape constraints: {:?} requires {:?}, {:?} requires {:?}",
+                    conflict.existing_kind,
+                    conflict.existing_shape,
+                    conflict.incoming_kind,
+                    conflict.incoming_shape
+                ),
+            )
+            .with_module(conflict.module_id.0.to_string())
+            .with_binding(conflict.binding.as_str().to_string()),
         );
     }
     audit
@@ -300,5 +322,31 @@ mod tests {
         let output = enrich_program(ProgramModel::from_input(input));
 
         assert!(output.audit.has(FindingCode::AstFactExtractionFailed));
+    }
+
+    #[test]
+    fn incompatible_ast_shape_facts_are_reported_as_audit_finding() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "enum-conflict.js",
+            Some(
+                r#"
+var NativeModuleType;
+(function (NativeModuleType) {
+    NativeModuleType[NativeModuleType["File"] = 0] = "File";
+})(NativeModuleType || (NativeModuleType = {}));
+NativeModuleType();
+"#
+                .to_string(),
+            ),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(output.audit.has(FindingCode::AmbiguousBindingShape));
     }
 }
