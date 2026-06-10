@@ -8,9 +8,10 @@ use oxc_ast::{
         BindingPatternKind, CallExpression, Class, ComputedMemberExpression, Declaration,
         ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
-        ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression, Program,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarator,
+        ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression,
+        ObjectExpression, ObjectPropertyKind, Program, PropertyKind, SimpleAssignmentTarget,
+        Statement, StaticMemberExpression, UpdateExpression, VariableDeclaration,
+        VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -53,6 +54,7 @@ pub struct RuntimePrelude {
     pub source: String,
     pub bindings: BTreeMap<BindingName, RuntimePreludeBindingKind>,
     pub snippets: BTreeMap<BindingName, RuntimePreludeSnippet>,
+    pub namespace_exports: Vec<RuntimeNamespaceExport>,
     pub entrypoint: Option<RuntimeEntrypoint>,
 }
 
@@ -110,6 +112,16 @@ impl RuntimePrelude {
                     needed.insert(candidate);
                 }
             }
+            for namespace_export in &self.namespace_exports {
+                if namespace_export.namespace != binding {
+                    continue;
+                }
+                for target in namespace_export.exports.values() {
+                    if self.bindings.contains_key(target) && !visited.contains(target) {
+                        needed.insert(target.clone());
+                    }
+                }
+            }
         }
 
         visited
@@ -119,6 +131,14 @@ impl RuntimePrelude {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimePreludeSnippet {
     pub source: String,
+    pub byte_start: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeNamespaceExport {
+    pub namespace: BindingName,
+    pub helper: BindingName,
+    pub exports: BTreeMap<String, BindingName>,
     pub byte_start: u32,
 }
 
@@ -552,12 +572,13 @@ fn parse_runtime_prelude(
             .with_options(parse_options_for(source_type))
             .parse();
         if parsed.errors.is_empty() && !parsed.panicked {
-            let (bindings, snippets, source, entrypoint) = collect_runtime_prelude_declarations(
-                source_file_id,
-                &parsed.program,
-                source,
-                module_spans,
-            );
+            let (bindings, snippets, namespace_exports, source, entrypoint) =
+                collect_runtime_prelude_declarations(
+                    source_file_id,
+                    &parsed.program,
+                    source,
+                    module_spans,
+                );
             if bindings.is_empty() {
                 return None;
             }
@@ -567,6 +588,7 @@ fn parse_runtime_prelude(
                 source,
                 bindings,
                 snippets,
+                namespace_exports,
                 entrypoint,
             });
         }
@@ -583,12 +605,14 @@ fn collect_runtime_prelude_declarations(
 ) -> (
     BTreeMap<BindingName, RuntimePreludeBindingKind>,
     BTreeMap<BindingName, RuntimePreludeSnippet>,
+    Vec<RuntimeNamespaceExport>,
     String,
     Option<RuntimeEntrypoint>,
 ) {
     let mut bindings = BTreeMap::new();
     let mut snippets_by_binding = BTreeMap::new();
     let mut snippets = Vec::new();
+    let mut namespace_exports = Vec::new();
     let mut entrypoint_candidate = None;
     let mut entrypoint_side_effects = Vec::new();
     let tail_runtime_start = module_spans.iter().map(|(_, end)| *end).max().unwrap_or(0);
@@ -603,10 +627,8 @@ fn collect_runtime_prelude_declarations(
             candidate.side_effects = entrypoint_side_effects.clone();
             entrypoint_candidate = Some(candidate);
         }
-        if let Some(namespace_initializer) =
-            runtime_namespace_initializer_statement(statement, source)
-        {
-            snippets.push(namespace_initializer);
+        if let Some(namespace_export) = runtime_namespace_export_from_statement(statement) {
+            namespace_exports.push(namespace_export);
         }
         let declarations = runtime_prelude_declarations_from_statement(statement, source);
         if declarations.is_empty() {
@@ -635,6 +657,7 @@ fn collect_runtime_prelude_declarations(
     (
         bindings,
         snippets_by_binding,
+        namespace_exports,
         snippets.join("\n"),
         entrypoint,
     )
@@ -666,27 +689,120 @@ fn runtime_entrypoint_from_statement(
     })
 }
 
-fn runtime_namespace_initializer_statement(
+fn runtime_namespace_export_from_statement(
     statement: &Statement<'_>,
-    source: &str,
-) -> Option<String> {
+) -> Option<RuntimeNamespaceExport> {
     let Statement::ExpressionStatement(statement) = statement else {
         return None;
     };
-    let Expression::CallExpression(_) = &statement.expression else {
+    let Expression::CallExpression(call) = &statement.expression else {
         return None;
     };
-    let span = statement.span();
-    let statement_source = source.get(span.start as usize..span.end as usize)?;
-    (statement_source.contains("=>") && statement_source.contains('{'))
-        .then(|| statement_source.to_string())
+    let Expression::Identifier(callee) = &call.callee else {
+        return None;
+    };
+    let namespace = argument_identifier(call.arguments.first()?)?;
+    let object = argument_object_expression(call.arguments.get(1)?)?;
+    let exports = namespace_export_object_from_ast(object);
+    if exports.is_empty() {
+        return None;
+    }
+    Some(RuntimeNamespaceExport {
+        namespace: BindingName::new(namespace),
+        helper: BindingName::new(callee.name.as_str()),
+        exports,
+        byte_start: statement.span().start,
+    })
+}
+
+fn argument_identifier<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
+    match argument {
+        Argument::Identifier(identifier) => Some(identifier.name.as_str()),
+        Argument::ParenthesizedExpression(parenthesized) => {
+            expression_identifier(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
+fn argument_object_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a ObjectExpression<'a>> {
+    match argument {
+        Argument::ObjectExpression(object) => Some(object),
+        Argument::ParenthesizedExpression(parenthesized) => {
+            expression_object_expression(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
+fn expression_object_expression<'a>(
+    expression: &'a Expression<'a>,
+) -> Option<&'a ObjectExpression<'a>> {
+    match expression {
+        Expression::ObjectExpression(object) => Some(object),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            expression_object_expression(&parenthesized.expression)
+        }
+        _ => None,
+    }
+}
+
+fn namespace_export_object_from_ast(
+    object: &ObjectExpression<'_>,
+) -> BTreeMap<String, BindingName> {
+    let mut exports = BTreeMap::new();
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        if property.kind != PropertyKind::Init || property.computed {
+            continue;
+        }
+        let Some(export_name) = property.key.static_name() else {
+            continue;
+        };
+        let Some(target) = namespace_export_target(&property.value) else {
+            continue;
+        };
+        exports.insert(export_name.into_owned(), BindingName::new(target));
+    }
+    exports
+}
+
+fn namespace_export_target<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::ArrowFunctionExpression(arrow) => function_body_return_identifier(&arrow.body),
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_ref()
+            .and_then(|body| function_body_return_identifier(body)),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            namespace_export_target(&parenthesized.expression)
+        }
+        _ => expression_identifier(expression),
+    }
+}
+
+fn function_body_return_identifier<'a>(
+    body: &'a oxc_ast::ast::FunctionBody<'a>,
+) -> Option<&'a str> {
+    let [statement] = body.statements.as_slice() else {
+        return None;
+    };
+    match statement {
+        Statement::ExpressionStatement(statement) => expression_identifier(&statement.expression),
+        Statement::ReturnStatement(statement) => {
+            statement.argument.as_ref().and_then(expression_identifier)
+        }
+        _ => None,
+    }
 }
 
 fn runtime_entrypoint_side_effect_from_statement(
     statement: &Statement<'_>,
     source: &str,
 ) -> Option<RuntimePreludeSideEffect> {
-    if runtime_namespace_initializer_statement(statement, source).is_some() {
+    if runtime_namespace_export_from_statement(statement).is_some() {
         return None;
     }
     match statement {
@@ -2642,6 +2758,49 @@ mod tests {
         assert!(source.contains("var dependency"));
         assert!(!source.contains("unused"));
         assert!(!source.contains("Missing"));
+    }
+
+    #[test]
+    fn graph_records_runtime_namespace_exports_as_facts() {
+        let prelude = concat!(
+            "function expose(target, exports) {}\n",
+            "var ns = {};\n",
+            "expose(ns, { ready: () => ready, 'other-name': () => other });\n",
+            "function ready() { return true; }\n",
+            "function other() { return false; }\n",
+        );
+        let body = "export const moduleValue = ns;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let namespace_export = prelude
+            .namespace_exports
+            .iter()
+            .find(|export| export.namespace.as_str() == "ns")
+            .expect("namespace export should be recovered");
+        let ns = BindingName::new("ns");
+        let source = prelude.source_for_bindings(std::iter::once(&ns));
+
+        assert_eq!(namespace_export.helper.as_str(), "expose");
+        assert_eq!(namespace_export.exports["ready"].as_str(), "ready");
+        assert_eq!(namespace_export.exports["other-name"].as_str(), "other");
+        assert!(source.contains("var ns = {};"));
+        assert!(source.contains("function ready()"));
+        assert!(source.contains("function other()"));
+        assert!(!source.contains("function expose"));
+        assert!(!source.contains("expose(ns"));
     }
 
     #[test]

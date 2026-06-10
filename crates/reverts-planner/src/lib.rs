@@ -3,8 +3,8 @@ use std::error::Error;
 use std::fmt;
 
 use reverts_graph::{
-    RevertsGraph, RuntimeEntrypoint, RuntimePrelude, RuntimePreludeBindingKind,
-    RuntimePreludeImport,
+    RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
+    RuntimePreludeBindingKind, RuntimePreludeImport,
 };
 use reverts_input::{ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
@@ -506,7 +506,7 @@ impl ImportExportPlanner {
             let mut file = PlannedFile::new(runtime_prelude_path(*source_file_id));
             let mut source_bindings = prelude.required_bindings_for(exported_bindings.iter());
             let namespace_exports =
-                runtime_namespace_exports_for_helpers(prelude.source.as_str(), &source_bindings);
+                runtime_namespace_exports_for_helpers(prelude, &source_bindings);
             for namespace_export in &namespace_exports {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
@@ -554,7 +554,7 @@ impl ImportExportPlanner {
             let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
             let mut source_bindings = prelude.required_bindings_for(helper_bindings.iter());
             let namespace_exports =
-                runtime_namespace_exports_for_helpers(prelude.source.as_str(), &source_bindings);
+                runtime_namespace_exports_for_helpers(prelude, &source_bindings);
             for namespace_export in &namespace_exports {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
@@ -703,12 +703,6 @@ struct RuntimeModuleWiring {
     namespace_exports_by_prelude: BTreeMap<u32, Vec<RuntimeNamespaceExport>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeNamespaceExport {
-    namespace: BindingName,
-    exports: BTreeMap<String, BindingName>,
-}
-
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct SourceModuleWiring {
     imports_by_module: BTreeMap<ModuleId, BTreeMap<ModuleId, BTreeSet<BindingName>>>,
@@ -727,7 +721,6 @@ fn runtime_entrypoint_module_wiring(
             continue;
         };
         let prelude_source = runtime_entrypoint_source(prelude, entrypoint);
-        let namespace_exports = runtime_namespace_exports(prelude.source.as_str());
         for identifier in runtime_import_identifiers_in_source(prelude_source.as_str()) {
             let binding = BindingName::new(identifier);
             if prelude.defines(&binding) {
@@ -749,35 +742,38 @@ fn runtime_entrypoint_module_wiring(
                 .or_default()
                 .insert(binding);
         }
-        for (namespace, exports) in namespace_exports {
-            if !contains_identifier_reference(prelude_source.as_str(), namespace.as_str()) {
+        for namespace_export in &prelude.namespace_exports {
+            if !contains_identifier_reference(
+                prelude_source.as_str(),
+                namespace_export.namespace.as_str(),
+            ) {
                 continue;
             }
-            let Some(init_binding) =
-                find_namespace_initializer(prelude.source.as_str(), namespace.as_str())
-            else {
-                continue;
-            };
-            let Some(Some(module_id)) = definition_modules.get(&init_binding) else {
-                continue;
-            };
-            wiring
-                .imports_by_prelude
-                .entry(prelude.source_file_id)
-                .or_default()
-                .entry(*module_id)
-                .or_default()
-                .extend(exports.values().cloned());
-            wiring
-                .exports_by_module
-                .entry(*module_id)
-                .or_default()
-                .extend(exports.values().cloned());
+            for target in namespace_export.exports.values() {
+                if prelude.defines(target) {
+                    continue;
+                }
+                let Some(Some(module_id)) = definition_modules.get(target) else {
+                    continue;
+                };
+                wiring
+                    .imports_by_prelude
+                    .entry(prelude.source_file_id)
+                    .or_default()
+                    .entry(*module_id)
+                    .or_default()
+                    .insert(target.clone());
+                wiring
+                    .exports_by_module
+                    .entry(*module_id)
+                    .or_default()
+                    .insert(target.clone());
+            }
             wiring
                 .namespace_exports_by_prelude
                 .entry(prelude.source_file_id)
                 .or_default()
-                .push(RuntimeNamespaceExport { namespace, exports });
+                .push(namespace_export.clone());
         }
     }
 
@@ -1213,236 +1209,16 @@ fn ensure_planned_module_exports(
     }
 }
 
-fn runtime_namespace_exports(source: &str) -> BTreeMap<BindingName, BTreeMap<String, BindingName>> {
-    let namespaces = empty_object_namespace_bindings(source);
-    let mut exports_by_namespace = BTreeMap::new();
-    for namespace in namespaces {
-        let mut cursor = 0usize;
-        while let Some(start) = find_identifier_occurrence(source, namespace.as_str(), cursor) {
-            cursor = start + namespace.as_str().len();
-            let Some(before) = previous_non_ws(source.as_bytes(), start) else {
-                continue;
-            };
-            if source.as_bytes().get(before) != Some(&b'(') {
-                continue;
-            }
-            let comma = skip_ws(source.as_bytes(), cursor);
-            if source.as_bytes().get(comma) != Some(&b',') {
-                continue;
-            }
-            let object_start = skip_ws(source.as_bytes(), comma + 1);
-            if source.as_bytes().get(object_start) != Some(&b'{') {
-                continue;
-            }
-            let Some(object_end) = find_matching_brace(source, object_start) else {
-                continue;
-            };
-            let exports = parse_namespace_export_object(&source[object_start + 1..object_end]);
-            if !exports.is_empty() {
-                exports_by_namespace
-                    .entry(namespace.clone())
-                    .or_insert_with(BTreeMap::new)
-                    .extend(exports);
-            }
-        }
-    }
-    exports_by_namespace
-}
-
 fn runtime_namespace_exports_for_helpers(
-    prelude_source: &str,
+    prelude: &RuntimePrelude,
     helper_bindings: &BTreeSet<BindingName>,
 ) -> Vec<RuntimeNamespaceExport> {
-    runtime_namespace_exports(prelude_source)
-        .into_iter()
-        .filter(|(namespace, _exports)| helper_bindings.contains(namespace))
-        .map(|(namespace, exports)| RuntimeNamespaceExport { namespace, exports })
+    prelude
+        .namespace_exports
+        .iter()
+        .filter(|namespace_export| helper_bindings.contains(&namespace_export.namespace))
+        .cloned()
         .collect()
-}
-
-fn empty_object_namespace_bindings(source: &str) -> BTreeSet<BindingName> {
-    let mut bindings = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' | b'[' | b'{' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b')' | b']' | b'}' => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "var") => {
-                cursor = collect_empty_object_namespace_declarations(
-                    source,
-                    cursor + "var".len(),
-                    &mut bindings,
-                );
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "let") => {
-                cursor = collect_empty_object_namespace_declarations(
-                    source,
-                    cursor + "let".len(),
-                    &mut bindings,
-                );
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "const") => {
-                cursor = collect_empty_object_namespace_declarations(
-                    source,
-                    cursor + "const".len(),
-                    &mut bindings,
-                );
-            }
-            _ => cursor += 1,
-        }
-    }
-    bindings
-}
-
-fn collect_empty_object_namespace_declarations(
-    source: &str,
-    mut cursor: usize,
-    bindings: &mut BTreeSet<BindingName>,
-) -> usize {
-    let bytes = source.as_bytes();
-    loop {
-        cursor = skip_ws(bytes, cursor);
-        let Some((binding, after_binding)) = parse_identifier(source, cursor) else {
-            return cursor + 1;
-        };
-        cursor = skip_ws(bytes, after_binding);
-        if bytes.get(cursor) == Some(&b'=') {
-            let object_start = skip_ws(bytes, cursor + 1);
-            if bytes.get(object_start) == Some(&b'{')
-                && bytes.get(skip_ws(bytes, object_start + 1)) == Some(&b'}')
-            {
-                bindings.insert(BindingName::new(binding));
-            }
-        }
-
-        let mut nested = 0usize;
-        while cursor < bytes.len() {
-            match bytes[cursor] {
-                b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-                b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                    cursor = skip_line_comment(bytes, cursor + 2);
-                }
-                b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                    cursor = skip_block_comment(bytes, cursor + 2);
-                }
-                b'/' if looks_like_regex_literal(bytes, cursor) => {
-                    cursor = skip_regex_literal(bytes, cursor);
-                }
-                b'(' | b'[' | b'{' => {
-                    nested += 1;
-                    cursor += 1;
-                }
-                b')' | b']' | b'}' => {
-                    if nested == 0 {
-                        return cursor;
-                    }
-                    nested -= 1;
-                    cursor += 1;
-                }
-                b',' if nested == 0 => {
-                    cursor += 1;
-                    break;
-                }
-                b';' if nested == 0 => return cursor + 1,
-                _ => cursor += 1,
-            }
-        }
-        if cursor >= bytes.len() {
-            return cursor;
-        }
-    }
-}
-
-fn parse_namespace_export_object(source: &str) -> BTreeMap<String, BindingName> {
-    split_top_level_properties(source)
-        .into_iter()
-        .filter_map(|property| {
-            let colon = property.find(':')?;
-            let export_name = property[..colon].trim().trim_matches(['"', '\'']);
-            let target = property[colon + 1..].split("=>").nth(1)?.trim();
-            let (binding, _) = parse_identifier(target, 0)?;
-            Some((export_name.to_string(), BindingName::new(binding)))
-        })
-        .collect()
-}
-
-fn split_top_level_properties(source: &str) -> Vec<&str> {
-    let mut properties = Vec::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-    let mut start = 0usize;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'(' | b'[' | b'{' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b')' | b']' | b'}' => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b',' if depth == 0 => {
-                let property = source[start..cursor].trim();
-                if !property.is_empty() {
-                    properties.push(property);
-                }
-                cursor += 1;
-                start = cursor;
-            }
-            _ => cursor += 1,
-        }
-    }
-    let property = source[start..].trim();
-    if !property.is_empty() {
-        properties.push(property);
-    }
-    properties
-}
-
-fn find_namespace_initializer(source: &str, namespace: &str) -> Option<BindingName> {
-    let mut cursor = 0usize;
-    while let Some(start) = find_identifier_occurrence(source, namespace, cursor) {
-        cursor = start + namespace.len();
-        let comma = previous_non_ws(source.as_bytes(), start)?;
-        if source.as_bytes().get(comma) != Some(&b',') {
-            continue;
-        }
-        let close = previous_non_ws(source.as_bytes(), comma)?;
-        if source.as_bytes().get(close) != Some(&b')') {
-            continue;
-        }
-        let open = find_matching_paren_backward(source.as_bytes(), close)?;
-        let ident_end = previous_non_ws(source.as_bytes(), open)?;
-        let (identifier, _) = parse_identifier_backward(source, ident_end + 1)?;
-        return Some(BindingName::new(identifier));
-    }
-    None
 }
 
 fn find_identifier_occurrence(source: &str, identifier: &str, from: usize) -> Option<usize> {
@@ -1471,36 +1247,6 @@ fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
         cursor = cursor.checked_sub(1)?;
     }
     Some(cursor)
-}
-
-fn find_matching_paren_backward(bytes: &[u8], close: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut cursor = close;
-    loop {
-        match bytes[cursor] {
-            b')' => depth += 1,
-            b'(' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(cursor);
-                }
-            }
-            _ => {}
-        }
-        cursor = cursor.checked_sub(1)?;
-    }
-}
-
-fn parse_identifier_backward(source: &str, end: usize) -> Option<(&str, usize)> {
-    let bytes = source.as_bytes();
-    let mut start = end.checked_sub(1)?;
-    if !is_identifier_continue(*bytes.get(start)?) {
-        return None;
-    }
-    while start > 0 && is_identifier_continue(bytes[start - 1]) {
-        start -= 1;
-    }
-    parse_identifier(source, start)
 }
 
 fn externalized_package_modules(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
@@ -1778,10 +1524,7 @@ fn lower_runtime_helpers(
             RuntimePreludeBindingKind::LazyInitializer => {
                 lower_lazy_initializer_helper(lowered.as_str(), helper.as_str())
             }
-            RuntimePreludeBindingKind::SourceBacked => {
-                lower_commonjs_wrapper_helper(lowered.as_str(), helper.as_str())
-                    .or_else(|| lower_lazy_initializer_helper(lowered.as_str(), helper.as_str()))
-            }
+            RuntimePreludeBindingKind::SourceBacked => None,
         };
         if let Some(next) = result {
             let helper_removed = !contains_call_to_identifier(next.as_str(), helper.as_str());
@@ -2670,6 +2413,47 @@ fn bracket_starts_member_access(source: &str, bracket_start: usize) -> bool {
         })
 }
 
+fn split_top_level_properties(source: &str) -> Vec<&str> {
+    let mut properties = Vec::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if depth == 0 => {
+                let property = source[start..cursor].trim();
+                if !property.is_empty() {
+                    properties.push(property);
+                }
+                cursor += 1;
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    let property = source[start..].trim();
+    if !property.is_empty() {
+        properties.push(property);
+    }
+    properties
+}
+
 fn parse_object_pattern_bindings(source: &str) -> Vec<(String, BindingName)> {
     split_top_level_properties(source)
         .into_iter()
@@ -3501,6 +3285,24 @@ mod tests {
     }
 
     #[test]
+    fn source_backed_helper_calls_are_not_lowered_by_shape() {
+        let source = concat!(
+            "var schemaCache = pvH(() => { return { keys: ['name'] }; });\n",
+            "schemaCache.value.keys;\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("pvH"),
+            RuntimePreludeBindingKind::SourceBacked,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds);
+
+        assert_eq!(lowered.source, source);
+        assert!(lowered.lowered_helpers.is_empty());
+        assert!(lowered.remaining_helpers.contains(&BindingName::new("pvH")));
+    }
+
+    #[test]
     fn enriched_program_normalizes_source_before_emit_plan() {
         let planner = ImportExportPlanner;
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -4112,18 +3914,6 @@ mod tests {
         assert!(!identifiers.contains("buffer"));
         assert!(!identifiers.contains("start"));
         assert!(!identifiers.contains("stop"));
-    }
-
-    #[test]
-    fn runtime_namespace_exports_ignore_local_empty_objects() {
-        let exports = super::runtime_namespace_exports(
-            "function local() { var localNs = {}; expose(localNs, { bad: () => missing }); }\n\
-             var ns = {};\n\
-             expose(ns, { ok: () => ready });",
-        );
-
-        assert!(exports.contains_key(&BindingName::new("ns")));
-        assert!(!exports.contains_key(&BindingName::new("localNs")));
     }
 
     #[test]
