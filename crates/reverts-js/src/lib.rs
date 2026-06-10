@@ -478,7 +478,21 @@ pub enum CompilerLowering {
     None,
     Babel,
     Esbuild,
+    Webpack,
 }
+
+/// Canonical webpack runtime helper names. Webpack 5 emits these at the top
+/// of its IIFE bootstrap; when `output.iife: false` the same definitions
+/// appear at module scope where this strip applies directly. The IIFE-
+/// wrapped case is left for a future slice that descends into the IIFE.
+const WEBPACK_RUNTIME_HELPERS: &[&str] = &[
+    "__webpack_require__",
+    "__webpack_exports__",
+    "__webpack_modules__",
+    "__webpack_module_cache__",
+    "webpackChunk",
+    "webpackJsonp",
+];
 
 /// Canonical esbuild runtime helper names. Each is declared at the top of
 /// esbuild bundles whether or not it is referenced; the lowering pass strips
@@ -548,6 +562,16 @@ pub fn format_source_with_module_items(
                 if !program_references_named_identifier(&parsed.program, helper_name) {
                     parsed.program.body.retain(|statement| {
                         !is_top_level_var_declaration_named(statement, helper_name)
+                    });
+                }
+            }
+        }
+        if matches!(lowering, CompilerLowering::Webpack) {
+            for helper_name in WEBPACK_RUNTIME_HELPERS {
+                if !program_references_named_identifier(&parsed.program, helper_name) {
+                    parsed.program.body.retain(|statement| {
+                        !is_top_level_var_declaration_named(statement, helper_name)
+                            && !is_top_level_function_declaration_named(statement, helper_name)
                     });
                 }
             }
@@ -781,6 +805,20 @@ fn is_top_level_var_declaration_named(statement: &Statement<'_>, target_name: &s
         return false;
     };
     identifier.name.as_str() == target_name && declarator.init.is_some()
+}
+
+/// Recognise a top-level `function NAME(...)` declaration whose name matches
+/// `target_name`. Used by the webpack helper-strip pass for helpers that
+/// webpack emits as function declarations rather than var initializers
+/// (e.g. `function __webpack_require__(id) { ... }`).
+fn is_top_level_function_declaration_named(statement: &Statement<'_>, target_name: &str) -> bool {
+    let Statement::FunctionDeclaration(function) = statement else {
+        return false;
+    };
+    function
+        .id
+        .as_ref()
+        .is_some_and(|id| id.name.as_str() == target_name)
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:

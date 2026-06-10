@@ -82,8 +82,8 @@ const fn compiler_lowering(action: CompilerRecoveryAction) -> CompilerLowering {
     match action {
         CompilerRecoveryAction::PreserveBabelTranspiledOutput => CompilerLowering::Babel,
         CompilerRecoveryAction::PreserveEsbuildHelpers => CompilerLowering::Esbuild,
+        CompilerRecoveryAction::PreserveWebpackRuntime => CompilerLowering::Webpack,
         CompilerRecoveryAction::DirectModuleSource
-        | CompilerRecoveryAction::PreserveWebpackRuntime
         | CompilerRecoveryAction::PreserveRollupFacade
         | CompilerRecoveryAction::PreserveTerserMinifiedOutput => CompilerLowering::None,
     }

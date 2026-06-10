@@ -2024,6 +2024,78 @@ mod tests {
     }
 
     #[test]
+    fn webpack_runtime_helper_definitions_are_stripped_when_unused() {
+        // Webpack 5 typically wraps its runtime helpers inside a top-level
+        // IIFE; the no-IIFE case (`output.iife: false`) emits the helpers at
+        // module scope where this strip applies directly. The pass is the
+        // same `if-unreferenced` pattern used for esbuild.
+        let source = "var __webpack_modules__ = {};\n\
+                      var __webpack_module_cache__ = {};\n\
+                      function __webpack_require__(id) { return id; }\n\
+                      var entry = 42;\n";
+        let run = run_with_source(
+            source,
+            &[
+                "__webpack_modules__",
+                "__webpack_module_cache__",
+                "__webpack_require__",
+                "entry",
+            ],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "webpack fixture must carry webpack banner; got:\n{emitted}",
+        );
+        for helper in [
+            "__webpack_modules__",
+            "__webpack_module_cache__",
+            "__webpack_require__",
+        ] {
+            let pattern_a = format!("var {helper}");
+            let pattern_b = format!("function {helper}");
+            assert!(
+                !emitted.contains(&pattern_a) && !emitted.contains(&pattern_b),
+                "unreferenced webpack helper `{helper}` must be stripped; got:\n{emitted}",
+            );
+        }
+        assert!(
+            emitted.contains("var entry = 42"),
+            "unrelated declarations must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn webpack_runtime_helper_definitions_are_kept_when_referenced() {
+        let source = "function __webpack_require__(id) { return id; }\n\
+                      var __webpack_modules__ = {};\n\
+                      var entry = __webpack_require__(1);\n";
+        let run = run_with_source(
+            source,
+            &["__webpack_require__", "__webpack_modules__", "entry"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: webpack"),
+            "webpack fixture must carry webpack banner; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("function __webpack_require__"),
+            "referenced helper must remain; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("var __webpack_modules__"),
+            "unreferenced helper `__webpack_modules__` must still be stripped; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var entry = __webpack_require__(1)"),
+            "call site must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.
