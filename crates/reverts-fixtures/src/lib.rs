@@ -27,6 +27,9 @@ pub fn minimal_bundle() -> Result<InputBundle, InputBundleError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use reverts_ir::ModuleId;
 
     use super::minimal_bundle;
@@ -36,5 +39,19 @@ mod tests {
         let bundle = minimal_bundle().expect("minimal fixture should be valid");
 
         assert!(bundle.module_ids().contains(&ModuleId(1)));
+    }
+
+    #[test]
+    fn retired_output_core_crate_is_not_a_parallel_implementation() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let crates_dir = manifest_dir.parent().expect("fixture crate has parent dir");
+        let workspace_dir = crates_dir
+            .parent()
+            .expect("crates dir has workspace parent");
+        let workspace_manifest = fs::read_to_string(workspace_dir.join("Cargo.toml"))
+            .expect("workspace manifest should be readable");
+
+        assert!(!crates_dir.join("reverts-output-core").exists());
+        assert!(!workspace_manifest.contains("reverts-output-core"));
     }
 }

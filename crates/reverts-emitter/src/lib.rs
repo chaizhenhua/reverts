@@ -134,4 +134,51 @@ mod tests {
         assert!(source.contains("const answer = __pkg.answer;"));
         assert!(source.contains("export { answer };"));
     }
+
+    #[test]
+    fn source_backed_imports_and_exports_are_not_emitted_twice() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.add_import(PlannedImport {
+            namespace: BindingName::new("__pkg"),
+            resolution: PackageResolution::External {
+                package_name: "pkg".to_string(),
+                specifier: "pkg".to_string(),
+            },
+            source_backed: true,
+        });
+        file.push_source("import { answer } from 'pkg'; export { answer };");
+        file.add_export_with_source_backed(BindingName::new("answer"), true);
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        let source = project.files[0].source.as_str();
+        assert_eq!(source.matches("from 'pkg'").count(), 1);
+        assert_eq!(source.matches("export { answer };").count(), 1);
+        assert!(!source.contains("import * as __pkg"));
+    }
+
+    #[test]
+    fn synthetic_structural_items_sanitize_identifiers_before_ast_codegen() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.add_import(PlannedImport {
+            namespace: BindingName::new("pkg-name/value"),
+            resolution: PackageResolution::External {
+                package_name: "pkg-name".to_string(),
+                specifier: "pkg-name/value".to_string(),
+            },
+            source_backed: false,
+        });
+        file.push_source("const _class = pkg_name_value.answer;");
+        file.add_export(BindingName::new("class"));
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        let source = project.files[0].source.as_str();
+        assert!(source.contains("import * as pkg_name_value from 'pkg-name/value';"));
+        assert!(source.contains("export { _class };"));
+    }
 }
