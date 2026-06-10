@@ -372,6 +372,10 @@ fn detect_module_compiler_profile(
         } else if collect_identifier_evidence(identifiers, BABEL_RUNTIME_IDENTIFIERS, &mut evidence)
         {
             CompilerKind::Babel
+        } else if wrappers.contains(&AstWrapperKind::ArrowIife) {
+            // Top-level arrow IIFE is the signature shape of esbuild's bundle output
+            // and is rare in hand-written or non-bundled code.
+            CompilerKind::Esbuild
         } else if minified {
             CompilerKind::Terser
         } else {
@@ -887,6 +891,33 @@ mod tests {
         assert!(
             evidence.contains(&CompilerEvidence::TopLevelIife(AstWrapperKind::ArrowIife)),
             "expected ArrowIife evidence, got: {evidence:?}",
+        );
+    }
+
+    #[test]
+    fn top_level_arrow_iife_alone_classifies_as_esbuild() {
+        // Top-level arrow IIFE is rare in hand-written code but is the signature
+        // shape of esbuild's bundle output. With no identifier or pattern hits,
+        // the wrapper alone should tip classification away from Unknown.
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("(()=>{ var x = 1; x.foo = 2; })();\n".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert_eq!(
+            output
+                .program
+                .compiler_profile()
+                .module(ModuleId(1))
+                .compiler,
+            CompilerKind::Esbuild,
         );
     }
 
