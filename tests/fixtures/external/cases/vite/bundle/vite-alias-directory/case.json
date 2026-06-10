@@ -1,0 +1,52 @@
+{
+  "id": "vite-alias-directory",
+  "title": "vite alias directory",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "vite",
+    "project_version": "8.0.3",
+    "project_commit": "a248a410426a08916771ba82f37b3496375636b8",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "playground/alias/dir/test.js"
+  },
+  "artifact": {
+    "tool": "vite",
+    "version": "8.0.3",
+    "entry": "artifacts/vite@8.0.3/assets/index.js",
+    "outputs": [
+      "artifacts/vite@8.0.3/assets/index.js",
+      "artifacts/vite@8.0.3/index.html"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "vite",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/main",
+      "src/dir/test"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/main",
+        "name": "fileMsg"
+      },
+      {
+        "module": "src/main",
+        "name": "regexMsg"
+      },
+      {
+        "module": "src/dir/test",
+        "name": "msg"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

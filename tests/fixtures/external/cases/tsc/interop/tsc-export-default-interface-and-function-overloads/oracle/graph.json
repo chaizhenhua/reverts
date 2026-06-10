@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

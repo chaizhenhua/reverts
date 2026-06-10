@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/src/components/button.js",
+      "decompiled_module": "Users/user/project/src/src/components/button"
+    },
+    {
+      "original": "input/Users/user/project/src/src/utils/format.js",
+      "decompiled_module": "Users/user/project/src/src/utils/format"
+    }
+  ]
+}

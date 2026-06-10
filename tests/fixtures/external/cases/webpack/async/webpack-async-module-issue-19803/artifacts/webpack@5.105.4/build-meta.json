@@ -1,0 +1,25 @@
+{
+  "tool": "webpack",
+  "version": "5.105.4",
+  "source_ref": "test/configCases/async-module/issue-19803",
+  "command": [
+    "node",
+    "-e",
+    "webpack(config)",
+    "# source=test/configCases/async-module/issue-19803"
+  ],
+  "config_kind": "config",
+  "entry": "./index.js",
+  "target": "async-node",
+  "mode": "production",
+  "output": {
+    "filename": "bundle.js",
+    "chunk_filename": "chunks/[name].js"
+  },
+  "experiments": {
+    "topLevelAwait": true
+  },
+  "optimization": {
+    "minimize": false
+  }
+}

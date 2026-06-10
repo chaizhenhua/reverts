@@ -1,0 +1,103 @@
+{
+  "modules": [
+    {
+      "name": "js",
+      "path": "js.js"
+    },
+    {
+      "name": "ts",
+      "path": "ts.ts"
+    },
+    {
+      "name": "jsx-components",
+      "path": "jsx-components.jsx"
+    },
+    {
+      "name": "jsx-a",
+      "path": "jsx-a.jsx"
+    },
+    {
+      "name": "jsx-b",
+      "path": "jsx-b.jsx"
+    },
+    {
+      "name": "jsx-c",
+      "path": "jsx-c.jsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "js",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "js",
+      "to": "c",
+      "kind": "import_default",
+      "name": "c"
+    },
+    {
+      "from": "js",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "ts",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "ts",
+      "to": "c",
+      "kind": "import_default",
+      "name": "c"
+    },
+    {
+      "from": "ts",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "jsx-components",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "jsx-components",
+      "to": "c",
+      "kind": "import_default",
+      "name": "C"
+    },
+    {
+      "from": "jsx-components",
+      "to": "b",
+      "kind": "import_named",
+      "name": "B"
+    },
+    {
+      "from": "jsx-a",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "jsx-b",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "jsx-c",
+      "to": "c",
+      "kind": "import_default",
+      "name": "c"
+    }
+  ],
+  "exports": []
+}

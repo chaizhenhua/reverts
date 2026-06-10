@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "level1",
+      "path": "level1.js"
+    },
+    {
+      "name": "level2",
+      "path": "level2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "level1",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "level1",
+      "to": "level2",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

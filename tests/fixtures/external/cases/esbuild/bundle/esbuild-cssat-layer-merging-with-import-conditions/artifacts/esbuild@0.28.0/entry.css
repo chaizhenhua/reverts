@@ -1,0 +1,23 @@
+@supports (color: first) {
+  @layer a;
+}
+@import "http://example.com/a.css" supports(color: first);
+@import "http://example.com/a.css" supports(color: second);
+@import "http://example.com/b.css" supports(color: second);
+@import "http://example.com/b.css" supports(color: first);
+@supports (color: second) {
+  @layer a, b;
+}
+
+/* input/a.css */
+@supports (color: first) {
+  @layer b;
+}
+
+/* input/a.css */
+
+/* input/b.css */
+
+/* input/b.css */
+
+/* input/entry.css */

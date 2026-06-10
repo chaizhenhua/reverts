@@ -1,0 +1,6 @@
+/* media-colon.css */
+@media screen {
+  :hover {
+    color: red;
+  }
+}

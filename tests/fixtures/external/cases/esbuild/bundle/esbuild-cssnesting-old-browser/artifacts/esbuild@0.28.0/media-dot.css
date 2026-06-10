@@ -1,0 +1,6 @@
+/* media-dot.css */
+@media screen {
+  .cls {
+    color: red;
+  }
+}

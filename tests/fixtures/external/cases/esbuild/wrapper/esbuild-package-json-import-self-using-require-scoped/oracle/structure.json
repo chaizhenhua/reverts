@@ -1,0 +1,11 @@
+{
+  "bundler_family": "esbuild",
+  "wrapper_names": [
+    "__commonJS"
+  ],
+  "interop_helpers": [],
+  "runtime_helpers": [
+    "__commonJS",
+    "__require"
+  ]
+}

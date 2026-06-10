@@ -1,0 +1,67 @@
+{
+  "id": "esbuild-import-default-namespace-combo-issue446",
+  "title": "esbuild TestImportDefaultNamespaceComboIssue446",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_importstar_test.go::TestImportDefaultNamespaceComboIssue446"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/external-def.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/external-def.js",
+      "artifacts/esbuild@0.28.0/external-default.js",
+      "artifacts/esbuild@0.28.0/external-default2.js",
+      "artifacts/esbuild@0.28.0/external-ns-def.js",
+      "artifacts/esbuild@0.28.0/external-ns-default.js",
+      "artifacts/esbuild@0.28.0/external-ns.js",
+      "artifacts/esbuild@0.28.0/internal-def.js",
+      "artifacts/esbuild@0.28.0/internal-default.js",
+      "artifacts/esbuild@0.28.0/internal-default2.js",
+      "artifacts/esbuild@0.28.0/internal-ns-def.js",
+      "artifacts/esbuild@0.28.0/internal-ns-default.js",
+      "artifacts/esbuild@0.28.0/internal-ns.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [
+      "__toESM"
+    ],
+    "must_recover_modules": [
+      "external-default2",
+      "external-ns",
+      "external-ns-default",
+      "external-ns-def",
+      "external-default",
+      "external-def",
+      "internal-default2",
+      "internal-ns",
+      "internal-ns-default",
+      "internal-ns-def",
+      "internal-default",
+      "internal-def",
+      "internal"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "internal",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

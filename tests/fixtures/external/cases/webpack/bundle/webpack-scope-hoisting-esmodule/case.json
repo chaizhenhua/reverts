@@ -1,0 +1,57 @@
+{
+  "id": "webpack-scope-hoisting-esmodule",
+  "title": "webpack configCases scope hoisting esModule",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "webpack",
+    "project_version": "5.105.4",
+    "project_commit": "27c13b44c861908793f160f9f7413b32543c0522",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/configCases/scope-hoisting/esModule"
+  },
+  "artifact": {
+    "tool": "webpack",
+    "version": "5.105.4",
+    "entry": "artifacts/webpack@5.105.4/bundle.js",
+    "outputs": [
+      "artifacts/webpack@5.105.4/bundle.js",
+      "artifacts/webpack@5.105.4/chunks/module_js.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_require__.d",
+      "__webpack_require__.r",
+      "__webpack_require__.e",
+      "__webpack_require__.u",
+      "__webpack_modules__",
+      "__webpack_exports__"
+    ],
+    "must_recover_modules": [
+      "index",
+      "module",
+      "other"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "module",
+        "name": "default"
+      },
+      {
+        "module": "other",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

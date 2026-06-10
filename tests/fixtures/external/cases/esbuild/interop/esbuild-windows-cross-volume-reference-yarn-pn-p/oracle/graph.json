@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "D:/project/entry",
+      "path": "D:/project/entry.jsx"
+    },
+    {
+      "name": "C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/index",
+      "path": "C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "D:/project/entry",
+      "to": "react",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/index",
+      "name": "createElement",
+      "kind": "value"
+    }
+  ]
+}

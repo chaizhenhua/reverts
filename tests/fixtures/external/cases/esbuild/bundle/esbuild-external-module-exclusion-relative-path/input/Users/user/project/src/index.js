@@ -1,0 +1,3 @@
+
+				import './nested/folder/test'
+			

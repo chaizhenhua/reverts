@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "foo"
+    }
+  ],
+  "exports": []
+}

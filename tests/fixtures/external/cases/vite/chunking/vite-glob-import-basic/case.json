@@ -1,0 +1,53 @@
+{
+  "id": "vite-glob-import-basic",
+  "title": "vite glob import basic",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "vite",
+    "project_version": "8.0.3",
+    "project_commit": "a248a410426a08916771ba82f37b3496375636b8",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "playground/glob-import/transform-visibility.js"
+  },
+  "artifact": {
+    "tool": "vite",
+    "version": "8.0.3",
+    "entry": "artifacts/vite@8.0.3/assets/index.js",
+    "outputs": [
+      "artifacts/vite@8.0.3/assets/index.js",
+      "artifacts/vite@8.0.3/index.html"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "vite",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/main",
+      "src/dir/foo",
+      "src/dir/bar"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/main",
+        "name": "modules"
+      },
+      {
+        "module": "src/dir/foo",
+        "name": "default"
+      },
+      {
+        "module": "src/dir/bar",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+
+				{
+					"extends": "@package/foo/tsconfig.json"
+				}
+			

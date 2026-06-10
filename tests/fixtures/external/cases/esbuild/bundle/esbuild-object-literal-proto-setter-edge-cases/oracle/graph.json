@@ -1,0 +1,47 @@
+{
+  "modules": [
+    {
+      "name": "local-shorthand",
+      "path": "local-shorthand.js"
+    },
+    {
+      "name": "local-normal",
+      "path": "local-normal.js"
+    },
+    {
+      "name": "import-shorthand",
+      "path": "import-shorthand.js"
+    },
+    {
+      "name": "import-normal",
+      "path": "import-normal.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "import-shorthand",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "__proto__"
+    },
+    {
+      "from": "import-shorthand",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "import-normal",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "__proto__"
+    },
+    {
+      "from": "import-normal",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "bar"
+    }
+  ],
+  "exports": []
+}

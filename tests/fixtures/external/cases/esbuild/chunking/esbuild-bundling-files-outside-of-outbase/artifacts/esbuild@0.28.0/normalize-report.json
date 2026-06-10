@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable entry and chunk names were requested at build time so committed fixture paths do not depend on content hashes."
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "id": "esbuild-tsimplicit-extensions",
+  "title": "esbuild TestTSImplicitExtensions",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_ts_test.go::TestTSImplicitExtensions"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/out.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/out.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "entry",
+      "pick-js",
+      "pick-js",
+      "pick-ts",
+      "pick-ts",
+      "pick-jsx",
+      "pick-jsx",
+      "pick-tsx",
+      "pick-tsx",
+      "order-js",
+      "order-js",
+      "order-jsx",
+      "order-jsx",
+      "node_modules/pkg/foo-js",
+      "node_modules/pkg/foo-jsx",
+      "node_modules/pkg-exports/abc-js",
+      "node_modules/pkg-exports/abc-jsx",
+      "node_modules/pkg-exports/lib/foo-js",
+      "node_modules/pkg-exports/lib/foo-jsx",
+      "node_modules/pkg-imports/index",
+      "node_modules/pkg-imports/abc-js",
+      "node_modules/pkg-imports/abc-jsx",
+      "node_modules/pkg-imports/lib/foo-js",
+      "node_modules/pkg-imports/lib/foo-jsx"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "id": "rolldown-jsx-default-automatic",
+  "title": "rolldown jsx default automatic runtime",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rolldown",
+    "project_version": "1.0.0-rc.13",
+    "project_commit": "a48ca341e83a2f909774b09925c390ea27d4b848",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/rolldown/tests/fixtures/jsx/default-automatic"
+  },
+  "artifact": {
+    "tool": "rolldown",
+    "version": "1.0.0-rc.13",
+    "entry": "artifacts/rolldown@1.0.0-rc.13/main.js",
+    "outputs": [
+      "artifacts/rolldown@1.0.0-rc.13/main.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "rolldown",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "main"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

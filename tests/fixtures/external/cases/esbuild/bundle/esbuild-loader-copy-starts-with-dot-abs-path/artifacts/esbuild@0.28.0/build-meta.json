@@ -1,0 +1,60 @@
+{
+  "tool": "esbuild",
+  "version": "0.28.0",
+  "command": [
+    "npx",
+    "--yes",
+    "esbuild@0.28.0",
+    "input/project/src/.htaccess",
+    "input/project/src/entry.js",
+    "input/project/src/.ts",
+    "--bundle",
+    "--loader:.js=js",
+    "--loader:.ts=ts",
+    "--loader:.htaccess=copy",
+    "--outdir=artifacts/esbuild@0.28.0",
+    "--outbase=input",
+    "--entry-names=[dir]/[name]"
+  ],
+  "entry_points": [
+    "input/project/src/.htaccess",
+    "input/project/src/entry.js",
+    "input/project/src/.ts"
+  ],
+  "options": {
+    "mode": "bundle",
+    "bundle": true,
+    "format": null,
+    "platform": null,
+    "target": null,
+    "supported": null,
+    "code_splitting": false,
+    "external": [],
+    "loader": {
+      ".js": "js",
+      ".ts": "ts",
+      ".htaccess": "copy"
+    },
+    "abs_output_base": null,
+    "public_path": null,
+    "entry_names": null,
+    "chunk_names": null,
+    "asset_names": null,
+    "jsx": {
+      "factory": null,
+      "fragment": null,
+      "parse": false,
+      "preserve": false,
+      "automatic": false,
+      "importSource": null,
+      "development": false,
+      "sideEffects": false,
+      "mode": null
+    },
+    "minify_syntax": false,
+    "minify_identifiers": false,
+    "minify_whitespace": false,
+    "stable_entry_names": true,
+    "stable_chunk_names": false
+  }
+}

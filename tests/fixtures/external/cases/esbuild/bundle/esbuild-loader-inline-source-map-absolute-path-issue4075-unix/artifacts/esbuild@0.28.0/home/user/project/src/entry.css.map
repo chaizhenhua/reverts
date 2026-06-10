@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../../../../../../../../../../../../../../../../out/src/styles1.scss", "../../../../../../../../../../../../../../../../../../out/src/styles2.scss"],
+  "sourcesContent": ["/* You can add global styles to this file, and also import other style files */\n* {\n  content: \"foo\"\n}\n", "/* You can add global styles to this file, and also import other style files */\n* {\n  content: \"bar\"\n}\n"],
+  "mappings": ";AACA;AACE,WAAS;;;;ACDX;AACE,WAAS;;",
+  "names": []
+}

@@ -1,0 +1,65 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/nested-worker",
+      "path": "src/nested-worker.js"
+    },
+    {
+      "name": "src/sub-worker",
+      "path": "src/sub-worker.js"
+    },
+    {
+      "name": "src/worker-module",
+      "path": "src/worker-module.js"
+    },
+    {
+      "name": "src/worker-extra",
+      "path": "src/worker-extra.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "./nested-worker.js?worker",
+      "kind": "import_default",
+      "name": "NestedWorker"
+    },
+    {
+      "from": "src/nested-worker",
+      "to": "./sub-worker.js?worker",
+      "kind": "import_default",
+      "name": "SubWorker"
+    },
+    {
+      "from": "src/nested-worker",
+      "to": "src/worker-module",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "src/sub-worker",
+      "to": "src/worker-extra",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "start",
+      "kind": "value"
+    },
+    {
+      "module": "src/worker-module",
+      "name": "moduleValue",
+      "kind": "value"
+    },
+    {
+      "module": "src/worker-extra",
+      "name": "extraValue",
+      "kind": "value"
+    }
+  ]
+}

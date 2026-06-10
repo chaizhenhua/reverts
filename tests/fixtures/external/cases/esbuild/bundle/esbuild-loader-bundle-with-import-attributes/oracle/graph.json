@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./data.json",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "entry",
+      "to": "./data.json",
+      "kind": "import_default",
+      "name": "y"
+    },
+    {
+      "from": "entry",
+      "to": "./data.json",
+      "kind": "import_default",
+      "name": "z"
+    }
+  ],
+  "exports": []
+}

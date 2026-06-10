@@ -1,0 +1,43 @@
+{
+  "id": "vite-lib-named-exports",
+  "title": "vite lib named exports",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "vite",
+    "project_version": "8.0.3",
+    "project_commit": "a248a410426a08916771ba82f37b3496375636b8",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "playground/lib/vite.named-exports.config.js"
+  },
+  "artifact": {
+    "tool": "vite",
+    "version": "8.0.3",
+    "entry": "artifacts/vite@8.0.3/my-lib-named.umd.js",
+    "outputs": [
+      "artifacts/vite@8.0.3/my-lib-named.iife.js",
+      "artifacts/vite@8.0.3/my-lib-named.umd.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "vite",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/main-named"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/main-named",
+        "name": "foo"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

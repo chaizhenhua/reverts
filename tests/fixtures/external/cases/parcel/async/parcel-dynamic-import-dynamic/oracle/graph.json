@@ -1,0 +1,40 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

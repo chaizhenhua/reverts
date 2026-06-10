@@ -1,0 +1,43 @@
+/* cycles/008/green.css */
+@layer {
+  .box {
+    background-color: green;
+  }
+}
+
+/* cycles/008/red.css */
+@layer {
+  .box {
+    background-color: red;
+  }
+}
+
+/* cycles/008/a.css */
+
+/* cycles/008/b.css */
+
+/* cycles/008/red.css */
+@layer {
+  @layer {
+    .box {
+      background-color: red;
+    }
+  }
+}
+
+/* cycles/008/green.css */
+@layer {
+  @layer {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* cycles/008/b.css */
+
+/* cycles/008/a.css */
+
+/* cycles/008/c.css */
+
+/* cycles/008/style.css */

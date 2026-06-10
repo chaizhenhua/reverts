@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/project/test.jsx",
+      "decompiled_module": "project/test"
+    },
+    {
+      "original": "input/project/node_modules/pkg/button.jsx",
+      "decompiled_module": "project/node_modules/pkg/button"
+    },
+    {
+      "original": "input/project/node_modules/pkg/styles.js",
+      "decompiled_module": "project/node_modules/pkg/styles"
+    }
+  ]
+}

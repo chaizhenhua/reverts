@@ -1,0 +1,3 @@
+
+				if (false) for await (let x of y) await 0
+			

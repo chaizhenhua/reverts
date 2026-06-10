@@ -1,0 +1,23 @@
+let keep1 = class {
+  [x] = "x";
+};
+let keep2 = class {
+  [x]() {
+  }
+};
+let keep3 = class {
+  get [x]() {
+  }
+};
+let keep4 = class {
+  set [x](_) {
+  }
+};
+let keep5 = class {
+  async [x]() {
+  }
+};
+let keep6 = class {
+  [{ toString() {
+  } }] = "x";
+};

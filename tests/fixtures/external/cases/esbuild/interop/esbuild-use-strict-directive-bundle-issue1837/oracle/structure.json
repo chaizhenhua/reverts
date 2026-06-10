@@ -1,0 +1,16 @@
+{
+  "bundler_family": "esbuild",
+  "wrapper_names": [
+    "__commonJS",
+    "__esm"
+  ],
+  "interop_helpers": [
+    "__toESM"
+  ],
+  "runtime_helpers": [
+    "__commonJS",
+    "__esm",
+    "__toESM",
+    "__require"
+  ]
+}

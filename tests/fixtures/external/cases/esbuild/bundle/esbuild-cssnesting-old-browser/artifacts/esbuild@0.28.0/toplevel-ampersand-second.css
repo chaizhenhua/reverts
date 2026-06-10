@@ -1,0 +1,5 @@
+/* toplevel-ampersand-second.css */
+a,
+:scope {
+  color: red;
+}

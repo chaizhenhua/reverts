@@ -1,0 +1,6 @@
+/* media-plus.css */
+@media screen {
+  + b {
+    color: red;
+  }
+}

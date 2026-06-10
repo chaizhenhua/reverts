@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "class",
+      "path": "class.js"
+    },
+    {
+      "name": "object",
+      "path": "object.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

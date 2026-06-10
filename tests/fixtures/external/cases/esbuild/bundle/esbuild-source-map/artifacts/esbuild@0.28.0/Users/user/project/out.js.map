@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../../../../input/Users/user/project/src/bar.js", "../../../../../input/Users/user/project/src/data.txt", "../../../../../input/Users/user/project/src/entry.js"],
+  "sourcesContent": ["\n\t\t\t\texport function bar() { throw new Error('test') }\n\t\t\t", "#2041", "\n\t\t\t\timport {bar} from './bar'\n\t\t\t\timport data from './data.txt'\n\t\t\t\tfunction foo() { bar() }\n\t\t\t\tfoo()\n\t\t\t\tconsole.log(data)\n\t\t\t"],
+  "mappings": ";;AACW,WAAS,MAAM;AAAE,UAAM,IAAI,MAAM,MAAM;AAAA,EAAE;;;ACDpD;;;ACGI,WAAS,MAAM;AAAE,QAAI;AAAA,EAAE;AACvB,MAAI;AACJ,UAAQ,IAAI,YAAI;",
+  "names": []
+}

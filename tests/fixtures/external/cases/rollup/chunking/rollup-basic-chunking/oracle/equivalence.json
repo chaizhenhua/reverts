@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main1.js",
+      "decompiled_module": "main1"
+    },
+    {
+      "original": "input/main2.js",
+      "decompiled_module": "main2"
+    },
+    {
+      "original": "input/dep1.js",
+      "decompiled_module": "dep1"
+    },
+    {
+      "original": "input/dep2.js",
+      "decompiled_module": "dep2"
+    },
+    {
+      "original": "input/dep3.js",
+      "decompiled_module": "dep3"
+    },
+    {
+      "original": "input/lib1.js",
+      "decompiled_module": "lib1"
+    },
+    {
+      "original": "input/lib2.js",
+      "decompiled_module": "lib2"
+    }
+  ]
+}

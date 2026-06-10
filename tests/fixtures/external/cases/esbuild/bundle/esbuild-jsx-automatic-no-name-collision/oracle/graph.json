@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.jsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "@remix-run/react",
+      "kind": "import_named",
+      "name": "Link"
+    }
+  ],
+  "exports": []
+}

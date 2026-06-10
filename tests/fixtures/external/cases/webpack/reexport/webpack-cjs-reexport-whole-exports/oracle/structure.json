@@ -1,0 +1,13 @@
+{
+  "bundler_family": "webpack",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__webpack_modules__",
+    "__webpack_exports__"
+  ],
+  "runtime_helpers": [
+    "__webpack_require__",
+    "__webpack_modules__",
+    "__webpack_exports__"
+  ]
+}

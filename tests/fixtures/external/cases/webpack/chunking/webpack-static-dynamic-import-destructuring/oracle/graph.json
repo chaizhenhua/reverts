@@ -1,0 +1,93 @@
+{
+  "modules": [
+    {
+      "name": "dir1/a",
+      "path": "dir1/a.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "lib/a",
+      "path": "lib/a.js"
+    },
+    {
+      "name": "lib/b",
+      "path": "lib/b.js"
+    },
+    {
+      "name": "lib/index",
+      "path": "lib/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "dir1/a",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "lib/index",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "lib/index",
+      "to": "lib/a",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "lib/index",
+      "to": "lib/b",
+      "kind": "reexport_namespace"
+    }
+  ],
+  "exports": [
+    {
+      "module": "dir1/a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dir1/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "dir1/a",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "lib/a",
+      "name": "aaa",
+      "kind": "value"
+    },
+    {
+      "module": "lib/a",
+      "name": "bbb",
+      "kind": "value"
+    },
+    {
+      "module": "lib/a",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "lib/b",
+      "name": "aaa",
+      "kind": "value"
+    },
+    {
+      "module": "lib/b",
+      "name": "bbb",
+      "kind": "value"
+    },
+    {
+      "module": "lib/b",
+      "name": "usedExports",
+      "kind": "value"
+    }
+  ]
+}

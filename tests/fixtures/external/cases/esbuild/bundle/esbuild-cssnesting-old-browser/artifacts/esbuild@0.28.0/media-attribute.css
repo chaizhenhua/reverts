@@ -1,0 +1,6 @@
+/* media-attribute.css */
+@media screen {
+  [href] {
+    color: red;
+  }
+}

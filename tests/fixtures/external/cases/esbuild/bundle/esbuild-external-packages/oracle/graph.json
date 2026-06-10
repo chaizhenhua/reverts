@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "project/entry",
+      "path": "project/entry.js"
+    },
+    {
+      "name": "project/file",
+      "path": "project/file.js"
+    },
+    {
+      "name": "project/node_modules/pkg2/index",
+      "path": "project/node_modules/pkg2/index.js"
+    },
+    {
+      "name": "project/libs/pkg3",
+      "path": "project/libs/pkg3.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

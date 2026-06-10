@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/app/entry.ts",
+      "decompiled_module": "Users/user/project/src/app/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/node_modules/foo/index.js",
+      "decompiled_module": "Users/user/project/src/node_modules/foo/index"
+    },
+    {
+      "original": "input/Users/user/project/src/foo-bad.ts",
+      "decompiled_module": "Users/user/project/src/foo-bad"
+    },
+    {
+      "original": "input/Users/user/project/other/foo-good.ts",
+      "decompiled_module": "Users/user/project/other/foo-good"
+    }
+  ]
+}

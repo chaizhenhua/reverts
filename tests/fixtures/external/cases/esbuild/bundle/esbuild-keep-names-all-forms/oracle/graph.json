@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "keep",
+      "path": "keep.js"
+    },
+    {
+      "name": "do-not-keep",
+      "path": "do-not-keep.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

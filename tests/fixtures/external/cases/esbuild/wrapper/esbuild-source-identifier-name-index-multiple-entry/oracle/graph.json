@@ -1,0 +1,64 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/home/index",
+      "path": "Users/user/project/home/index.js"
+    },
+    {
+      "name": "Users/user/project/about/index",
+      "path": "Users/user/project/about/index.js"
+    },
+    {
+      "name": "Users/user/project/common/index",
+      "path": "Users/user/project/common/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/index",
+      "path": "Users/user/project/node_modules/pkg/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/home/index",
+      "to": ".",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/home/index",
+      "to": "pkg",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/home/index",
+      "to": "../common",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/about/index",
+      "to": ".",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/about/index",
+      "to": "pkg",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/about/index",
+      "to": "../common",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/common/index",
+      "name": "common",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/pkg/index",
+      "name": "pkg",
+      "kind": "value"
+    }
+  ]
+}

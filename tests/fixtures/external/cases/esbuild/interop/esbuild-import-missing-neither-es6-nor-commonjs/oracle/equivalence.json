@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/named.js",
+      "decompiled_module": "named"
+    },
+    {
+      "original": "input/star.js",
+      "decompiled_module": "star"
+    },
+    {
+      "original": "input/star-capture.js",
+      "decompiled_module": "star-capture"
+    },
+    {
+      "original": "input/bare.js",
+      "decompiled_module": "bare"
+    },
+    {
+      "original": "input/require.js",
+      "decompiled_module": "require"
+    },
+    {
+      "original": "input/import.js",
+      "decompiled_module": "import"
+    },
+    {
+      "original": "input/foo.js",
+      "decompiled_module": "foo"
+    }
+  ]
+}

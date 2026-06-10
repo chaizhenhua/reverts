@@ -1,0 +1,7 @@
+{
+  "normalized": true,
+  "renamed_outputs": {},
+  "notes": [
+    "Parcel chunk filenames with hash suffixes were renamed to stable filenames and internal references were updated."
+  ]
+}

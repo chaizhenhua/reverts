@@ -1,0 +1,82 @@
+{
+  "id": "rollup-basic-chunking",
+  "title": "rollup basic chunking",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rollup",
+    "project_version": "4.60.1",
+    "project_commit": "ae871d762f6bbeb4320d28fe179211168f27a434",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/chunking-form/samples/basic-chunking"
+  },
+  "artifact": {
+    "tool": "rollup",
+    "version": "4.60.1",
+    "entry": "artifacts/rollup@4.60.1/main1.js",
+    "outputs": [
+      "artifacts/rollup@4.60.1/chunks/dep2.js",
+      "artifacts/rollup@4.60.1/main1.js",
+      "artifacts/rollup@4.60.1/main2.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "rollup",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "main1",
+      "main2",
+      "dep1",
+      "dep2",
+      "dep3",
+      "lib1",
+      "lib2"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "main1",
+        "name": "default"
+      },
+      {
+        "module": "main2",
+        "name": "default"
+      },
+      {
+        "module": "dep1",
+        "name": "fn"
+      },
+      {
+        "module": "dep2",
+        "name": "fn"
+      },
+      {
+        "module": "dep3",
+        "name": "default"
+      },
+      {
+        "module": "dep3",
+        "name": "fn"
+      },
+      {
+        "module": "lib1",
+        "name": "fn"
+      },
+      {
+        "module": "lib1",
+        "name": "treeshaked"
+      },
+      {
+        "module": "lib2",
+        "name": "fn"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

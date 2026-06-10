@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.ts",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/test.ts",
+      "decompiled_module": "Users/user/project/src/test"
+    }
+  ]
+}

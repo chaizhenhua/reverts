@@ -1,0 +1,7 @@
+
+				{
+					"exports": {
+						"./config": "./configs/tsconfig.json"
+					}
+				}
+			

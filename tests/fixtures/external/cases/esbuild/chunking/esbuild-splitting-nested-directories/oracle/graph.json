@@ -1,0 +1,37 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/pages/pageA/page",
+      "path": "Users/user/project/src/pages/pageA/page.js"
+    },
+    {
+      "name": "Users/user/project/src/pages/pageB/page",
+      "path": "Users/user/project/src/pages/pageB/page.js"
+    },
+    {
+      "name": "Users/user/project/src/pages/shared",
+      "path": "Users/user/project/src/pages/shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/pages/pageA/page",
+      "to": "Users/user/project/src/pages/shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "Users/user/project/src/pages/pageB/page",
+      "to": "Users/user/project/src/pages/shared",
+      "kind": "import_default",
+      "name": "x"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/pages/shared",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

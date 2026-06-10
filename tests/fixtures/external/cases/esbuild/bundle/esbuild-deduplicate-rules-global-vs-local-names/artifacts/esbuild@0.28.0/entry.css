@@ -1,0 +1,44 @@
+/* input/a.css */
+b {
+  color: green;
+}
+.bar {
+  color: green;
+}
+.a_foo {
+  color: red;
+}
+.a_bar {
+  color: green;
+}
+div {
+  animation-name: a_anim_local;
+}
+
+/* input/b.css */
+a {
+  color: red;
+}
+b {
+  color: #00f;
+}
+.foo {
+  color: red;
+}
+.bar {
+  color: #00f;
+}
+.b_foo {
+  color: red;
+}
+.b_bar {
+  color: #00f;
+}
+div {
+  animation-name: anim_global;
+}
+div {
+  animation-name: b_anim_local;
+}
+
+/* input/entry.css */

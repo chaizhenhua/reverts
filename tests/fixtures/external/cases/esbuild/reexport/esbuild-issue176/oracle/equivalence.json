@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/folders/index.js",
+      "decompiled_module": "folders/index"
+    },
+    {
+      "original": "input/folders/child/index.js",
+      "decompiled_module": "folders/child/index"
+    },
+    {
+      "original": "input/folders/child/foo.js",
+      "decompiled_module": "folders/child/foo"
+    }
+  ]
+}

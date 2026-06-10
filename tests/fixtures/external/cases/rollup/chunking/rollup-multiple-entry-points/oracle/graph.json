@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "other",
+      "path": "other.js"
+    },
+    {
+      "name": "shared",
+      "path": "shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "shared",
+      "kind": "import_named",
+      "name": "sharedValue"
+    }
+  ],
+  "exports": [
+    {
+      "module": "other",
+      "name": "sharedValue",
+      "kind": "value"
+    },
+    {
+      "module": "shared",
+      "name": "sharedValue",
+      "kind": "value"
+    }
+  ]
+}

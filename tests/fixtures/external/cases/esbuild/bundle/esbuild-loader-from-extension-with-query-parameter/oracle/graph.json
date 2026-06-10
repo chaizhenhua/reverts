@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./file.abc?query.xyz",
+      "kind": "import_default",
+      "name": "foo"
+    }
+  ],
+  "exports": []
+}

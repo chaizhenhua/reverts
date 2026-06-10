@@ -1,0 +1,75 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "enums",
+      "path": "enums.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "a_num"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "b_num"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "c_num"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "d_num"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "e_num"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "a_str"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "b_str"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "c_str"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "d_str"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "e_str"
+    }
+  ],
+  "exports": []
+}

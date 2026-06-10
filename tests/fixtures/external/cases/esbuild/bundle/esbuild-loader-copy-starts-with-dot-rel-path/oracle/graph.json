@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "project/src/",
+      "path": "project/src/.htaccess"
+    },
+    {
+      "name": "project/src/entry",
+      "path": "project/src/entry.js"
+    },
+    {
+      "name": "project/src/",
+      "path": "project/src/.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

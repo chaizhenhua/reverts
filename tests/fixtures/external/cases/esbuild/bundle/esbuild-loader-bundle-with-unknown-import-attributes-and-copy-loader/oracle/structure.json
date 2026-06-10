@@ -1,0 +1,11 @@
+{
+  "bundler_family": "esbuild",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__toESM"
+  ],
+  "runtime_helpers": [
+    "__toESM",
+    "__require"
+  ]
+}

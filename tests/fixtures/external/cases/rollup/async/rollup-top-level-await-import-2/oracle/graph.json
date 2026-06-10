@@ -1,0 +1,62 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    },
+    {
+      "name": "foo-prefix",
+      "path": "foo-prefix.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "getFoo"
+    },
+    {
+      "from": "lib",
+      "to": "foo-prefix",
+      "kind": "import_named",
+      "name": "fooPrefix"
+    },
+    {
+      "from": "lib",
+      "to": "foo",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "foo",
+      "to": "foo-prefix",
+      "kind": "import_named",
+      "name": "fooPrefix"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "getFoo",
+      "kind": "value"
+    },
+    {
+      "module": "foo",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "foo-prefix",
+      "name": "fooPrefix",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "maths",
+      "path": "maths.js"
+    },
+    {
+      "name": "square",
+      "path": "square.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "square",
+      "kind": "import_default",
+      "name": "square"
+    },
+    {
+      "from": "main",
+      "to": "maths",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "maths",
+      "to": "square",
+      "kind": "import_default",
+      "name": "square"
+    }
+  ],
+  "exports": [
+    {
+      "module": "maths",
+      "name": "cube",
+      "kind": "value"
+    },
+    {
+      "module": "maths",
+      "name": "square",
+      "kind": "value"
+    },
+    {
+      "module": "square",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

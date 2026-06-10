@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.jsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "project/entry",
+      "path": "project/entry.js"
+    },
+    {
+      "name": "project/node_modules/pkg/a",
+      "path": "project/node_modules/pkg/a.js"
+    },
+    {
+      "name": "project/node_modules/pkg/b",
+      "path": "project/node_modules/pkg/b.js"
+    },
+    {
+      "name": "project/node_modules/pkg/c",
+      "path": "project/node_modules/pkg/c.js"
+    },
+    {
+      "name": "project/node_modules/pkg/d",
+      "path": "project/node_modules/pkg/d.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

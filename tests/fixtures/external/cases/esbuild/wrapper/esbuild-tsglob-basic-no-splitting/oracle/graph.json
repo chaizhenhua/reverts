@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "src/a",
+      "path": "src/a.ts"
+    },
+    {
+      "name": "src/b",
+      "path": "src/b.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "src/a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/b",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "id": "esbuild-const-value-inlining-nobundle",
+  "title": "esbuild TestConstValueInliningNoBundle",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestConstValueInliningNoBundle"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/top-level.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/backwards-reference-nested-function.js",
+      "artifacts/esbuild@0.28.0/backwards-reference-top-level.js",
+      "artifacts/esbuild@0.28.0/comment-before.js",
+      "artifacts/esbuild@0.28.0/debugger-before.js",
+      "artifacts/esbuild@0.28.0/directive-before.js",
+      "artifacts/esbuild@0.28.0/disabled-tdz.js",
+      "artifacts/esbuild@0.28.0/exprs-before.js",
+      "artifacts/esbuild@0.28.0/issue-3125.js",
+      "artifacts/esbuild@0.28.0/namespace-export.js",
+      "artifacts/esbuild@0.28.0/nested-block.js",
+      "artifacts/esbuild@0.28.0/nested-function.js",
+      "artifacts/esbuild@0.28.0/semicolon-before.js",
+      "artifacts/esbuild@0.28.0/top-level.js",
+      "artifacts/esbuild@0.28.0/type-before.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "top-level",
+      "nested-block",
+      "nested-function",
+      "namespace-export",
+      "comment-before",
+      "directive-before",
+      "semicolon-before",
+      "debugger-before",
+      "type-before",
+      "exprs-before",
+      "disabled-tdz",
+      "backwards-reference-top-level",
+      "backwards-reference-nested-function",
+      "issue-3125"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "namespace-export",
+        "name": "y_keep"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

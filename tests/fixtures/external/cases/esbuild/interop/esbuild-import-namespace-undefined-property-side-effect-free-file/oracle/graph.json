@@ -1,0 +1,39 @@
+{
+  "modules": [
+    {
+      "name": "entry-nope",
+      "path": "entry-nope.js"
+    },
+    {
+      "name": "entry-default",
+      "path": "entry-default.js"
+    },
+    {
+      "name": "foo/no-side-effects",
+      "path": "foo/no-side-effects.js"
+    },
+    {
+      "name": "foo/no-side-effects",
+      "path": "foo/no-side-effects.mjs"
+    },
+    {
+      "name": "foo/no-side-effects",
+      "path": "foo/no-side-effects.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry-nope",
+      "to": "foo/no-side-effects",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry-default",
+      "to": "foo/no-side-effects",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

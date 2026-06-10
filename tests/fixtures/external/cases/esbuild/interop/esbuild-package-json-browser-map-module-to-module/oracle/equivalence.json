@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/node-pkg-browser/index.js",
+      "decompiled_module": "Users/user/project/node_modules/node-pkg-browser/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/index.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/node-pkg/index.js",
+      "decompiled_module": "Users/user/project/node_modules/node-pkg/index"
+    }
+  ]
+}

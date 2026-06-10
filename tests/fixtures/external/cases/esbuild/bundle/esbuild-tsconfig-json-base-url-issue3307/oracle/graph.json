@@ -1,0 +1,25 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/test",
+      "path": "Users/user/project/src/test.ts"
+    },
+    {
+      "name": "Users/user/project/src/subdir/test",
+      "path": "Users/user/project/src/subdir/test.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "Users/user/project/src/test",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/subdir/test",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

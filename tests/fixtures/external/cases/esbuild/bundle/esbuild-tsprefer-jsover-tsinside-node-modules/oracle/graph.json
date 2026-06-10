@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/main",
+      "path": "Users/user/project/src/main.ts"
+    },
+    {
+      "name": "Users/user/project/src/relative/path",
+      "path": "Users/user/project/src/relative/path.ts"
+    },
+    {
+      "name": "Users/user/project/src/relative/path",
+      "path": "Users/user/project/src/relative/path.js"
+    },
+    {
+      "name": "Users/user/project/src/relative2/path",
+      "path": "Users/user/project/src/relative2/path.ts"
+    },
+    {
+      "name": "Users/user/project/src/relative2/path",
+      "path": "Users/user/project/src/relative2/path.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/package/path",
+      "path": "Users/user/project/node_modules/package/path.ts"
+    },
+    {
+      "name": "Users/user/project/node_modules/package/path",
+      "path": "Users/user/project/node_modules/package/path.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/package2/path",
+      "path": "Users/user/project/node_modules/package2/path.ts"
+    },
+    {
+      "name": "Users/user/project/node_modules/package2/path",
+      "path": "Users/user/project/node_modules/package2/path.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

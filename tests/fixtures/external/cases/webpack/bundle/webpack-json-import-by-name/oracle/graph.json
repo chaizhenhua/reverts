@@ -1,0 +1,101 @@
+{
+  "modules": [
+    {
+      "name": "c",
+      "path": "c.json"
+    },
+    {
+      "name": "e",
+      "path": "e.json"
+    },
+    {
+      "name": "f",
+      "path": "f.json"
+    },
+    {
+      "name": "g",
+      "path": "g.json"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "c",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "e",
+      "kind": "import_named",
+      "name": "bb"
+    },
+    {
+      "from": "index",
+      "to": "e",
+      "kind": "import_named",
+      "name": "aa"
+    }
+  ],
+  "exports": [
+    {
+      "module": "c",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "f",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "g",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "aa",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "bb",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "f",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "g",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "gnamed",
+      "kind": "value"
+    }
+  ]
+}

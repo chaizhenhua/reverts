@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/src/a.ts",
+      "decompiled_module": "src/a"
+    },
+    {
+      "original": "input/src/b.ts",
+      "decompiled_module": "src/b"
+    }
+  ]
+}

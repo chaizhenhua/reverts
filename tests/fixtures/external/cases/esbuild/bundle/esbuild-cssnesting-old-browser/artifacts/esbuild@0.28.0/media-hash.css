@@ -1,0 +1,6 @@
+/* media-hash.css */
+@media screen {
+  #id {
+    color: red;
+  }
+}

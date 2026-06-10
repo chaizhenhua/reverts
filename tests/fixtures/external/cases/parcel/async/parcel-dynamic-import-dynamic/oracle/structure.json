@@ -1,0 +1,20 @@
+{
+  "bundler_family": "parcel",
+  "wrapper_names": [
+    "parcelRequire"
+  ],
+  "interop_helpers": [
+    "$parcel$export",
+    "$parcel$resolve",
+    "$parcel$extendImportMap",
+    "parcelRequire",
+    "parcelRegister"
+  ],
+  "runtime_helpers": [
+    "$parcel$export",
+    "$parcel$resolve",
+    "$parcel$extendImportMap",
+    "parcelRequire",
+    "parcelRegister"
+  ]
+}

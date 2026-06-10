@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/re-export.js",
+      "decompiled_module": "re-export"
+    },
+    {
+      "original": "input/re-export-star.js",
+      "decompiled_module": "re-export-star"
+    },
+    {
+      "original": "input/enums.ts",
+      "decompiled_module": "enums"
+    }
+  ]
+}

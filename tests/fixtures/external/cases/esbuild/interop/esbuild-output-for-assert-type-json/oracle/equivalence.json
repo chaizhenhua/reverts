@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/js-entry.js",
+      "decompiled_module": "js-entry"
+    },
+    {
+      "original": "input/ts-entry.ts",
+      "decompiled_module": "ts-entry"
+    }
+  ]
+}

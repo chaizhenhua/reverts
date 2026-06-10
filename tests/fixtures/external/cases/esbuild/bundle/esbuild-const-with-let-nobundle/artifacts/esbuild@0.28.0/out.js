@@ -1,0 +1,5 @@
+const a = 1;
+console.log(1), console.log(2), unknownFn(3);
+for (const c = x; ; ) console.log(c);
+for (const d in x) console.log(d);
+for (const e of x) console.log(e);

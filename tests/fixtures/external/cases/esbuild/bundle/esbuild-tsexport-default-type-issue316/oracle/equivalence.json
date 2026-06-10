@@ -1,0 +1,61 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/keep/declare-class.ts",
+      "decompiled_module": "keep/declare-class"
+    },
+    {
+      "original": "input/keep/declare-let.ts",
+      "decompiled_module": "keep/declare-let"
+    },
+    {
+      "original": "input/keep/interface-merged.ts",
+      "decompiled_module": "keep/interface-merged"
+    },
+    {
+      "original": "input/keep/interface-nested.ts",
+      "decompiled_module": "keep/interface-nested"
+    },
+    {
+      "original": "input/keep/type-nested.ts",
+      "decompiled_module": "keep/type-nested"
+    },
+    {
+      "original": "input/keep/value-namespace.ts",
+      "decompiled_module": "keep/value-namespace"
+    },
+    {
+      "original": "input/keep/value-namespace-merged.ts",
+      "decompiled_module": "keep/value-namespace-merged"
+    },
+    {
+      "original": "input/remove/interface.ts",
+      "decompiled_module": "remove/interface"
+    },
+    {
+      "original": "input/remove/interface-exported.ts",
+      "decompiled_module": "remove/interface-exported"
+    },
+    {
+      "original": "input/remove/type.ts",
+      "decompiled_module": "remove/type"
+    },
+    {
+      "original": "input/remove/type-exported.ts",
+      "decompiled_module": "remove/type-exported"
+    },
+    {
+      "original": "input/remove/type-only-namespace.ts",
+      "decompiled_module": "remove/type-only-namespace"
+    },
+    {
+      "original": "input/remove/type-only-namespace-exported.ts",
+      "decompiled_module": "remove/type-only-namespace-exported"
+    }
+  ]
+}

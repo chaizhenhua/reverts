@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg1/dir/bar",
+      "path": "Users/user/project/node_modules/pkg1/dir/bar.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

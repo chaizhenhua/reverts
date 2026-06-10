@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/cjs-dynamic.js",
+      "decompiled_module": "cjs-dynamic"
+    },
+    {
+      "original": "input/cjs-esmodule.js",
+      "decompiled_module": "cjs-esmodule"
+    },
+    {
+      "original": "input/cjs.js",
+      "decompiled_module": "cjs"
+    },
+    {
+      "original": "input/index.mjs",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/package.json",
+      "decompiled_module": "package"
+    }
+  ]
+}

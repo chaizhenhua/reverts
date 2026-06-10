@@ -1,0 +1,8 @@
+/* input/a.css */
+@layer first {
+  body {
+    color: red;
+  }
+}
+
+/* input/case1.css */

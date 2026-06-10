@@ -1,0 +1,17 @@
+/* at-layer/008/b.css */
+@layer {
+  @layer {
+    .box {
+      background-color: red;
+    }
+  }
+}
+
+/* at-layer/008/a.css */
+@layer {
+  .box {
+    background-color: green;
+  }
+}
+
+/* at-layer/008/style.css */

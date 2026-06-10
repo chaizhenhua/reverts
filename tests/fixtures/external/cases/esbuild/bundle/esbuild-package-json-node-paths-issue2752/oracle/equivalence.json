@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/entry.js",
+      "decompiled_module": "src/entry"
+    },
+    {
+      "original": "input/usr/lib/pkg/pkg1/foo.js",
+      "decompiled_module": "usr/lib/pkg/pkg1/foo"
+    },
+    {
+      "original": "input/lib/pkg/pkg2/bar.js",
+      "decompiled_module": "lib/pkg/pkg2/bar"
+    },
+    {
+      "original": "input/var/lib/pkg/@scope/pkg3/baz-browser.js",
+      "decompiled_module": "var/lib/pkg/@scope/pkg3/baz-browser"
+    },
+    {
+      "original": "input/tmp/pkg/@scope/pkg4/bat.js",
+      "decompiled_module": "tmp/pkg/@scope/pkg4/bat"
+    }
+  ]
+}

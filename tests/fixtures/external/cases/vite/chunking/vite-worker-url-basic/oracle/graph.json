@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/url-worker",
+      "path": "src/url-worker.js"
+    },
+    {
+      "name": "src/worker-shared",
+      "path": "src/worker-shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/url-worker",
+      "to": "src/worker-shared",
+      "kind": "import_named",
+      "name": "message"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "getWorker",
+      "kind": "value"
+    },
+    {
+      "module": "src/worker-shared",
+      "name": "message",
+      "kind": "value"
+    }
+  ]
+}

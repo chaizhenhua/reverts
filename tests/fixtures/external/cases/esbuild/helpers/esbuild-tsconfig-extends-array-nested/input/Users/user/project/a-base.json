@@ -1,0 +1,8 @@
+{
+				"compilerOptions": {
+					"jsxFactory": "aBase",
+					"jsxFragmentFactory": "aBase",
+					"target": "ES2022",
+					"verbatimModuleSyntax": true,
+				},
+			}

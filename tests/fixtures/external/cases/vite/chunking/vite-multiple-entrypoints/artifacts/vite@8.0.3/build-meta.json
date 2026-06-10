@@ -1,0 +1,31 @@
+{
+  "tool": "vite",
+  "version": "8.0.3",
+  "source_ref": "playground/multiple-entrypoints",
+  "config_kind": "app",
+  "build": {
+    "outDir": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/artifacts/vite@8.0.3",
+    "emptyOutDir": true,
+    "sourcemap": false,
+    "rollupOptions": {
+      "input": {
+        "index": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/index.html",
+        "a0": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/entrypoints/a0.js",
+        "b0": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/entrypoints/b0.js"
+      }
+    },
+    "rolldownOptions": {
+      "input": {
+        "index": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/index.html",
+        "a0": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/entrypoints/a0.js",
+        "b0": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/chunking/vite-multiple-entrypoints/input/entrypoints/b0.js"
+      }
+    }
+  },
+  "command": [
+    "node",
+    "-e",
+    "vite.build(config)",
+    "# source=playground/multiple-entrypoints"
+  ]
+}

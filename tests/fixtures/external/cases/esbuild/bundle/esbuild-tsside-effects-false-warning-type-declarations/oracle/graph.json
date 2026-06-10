@@ -1,0 +1,30 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "node_modules/some-js/foo",
+      "path": "node_modules/some-js/foo.js"
+    },
+    {
+      "name": "node_modules/some-ts/foo",
+      "path": "node_modules/some-ts/foo.ts"
+    },
+    {
+      "name": "node_modules/empty-js/foo",
+      "path": "node_modules/empty-js/foo.js"
+    },
+    {
+      "name": "node_modules/empty-ts/foo",
+      "path": "node_modules/empty-ts/foo.ts"
+    },
+    {
+      "name": "node_modules/empty-dts/foo.d",
+      "path": "node_modules/empty-dts/foo.d.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

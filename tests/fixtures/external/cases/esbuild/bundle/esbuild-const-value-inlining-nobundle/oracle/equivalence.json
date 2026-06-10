@@ -1,0 +1,61 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/top-level.js",
+      "decompiled_module": "top-level"
+    },
+    {
+      "original": "input/nested-block.js",
+      "decompiled_module": "nested-block"
+    },
+    {
+      "original": "input/nested-function.js",
+      "decompiled_module": "nested-function"
+    },
+    {
+      "original": "input/namespace-export.ts",
+      "decompiled_module": "namespace-export"
+    },
+    {
+      "original": "input/comment-before.js",
+      "decompiled_module": "comment-before"
+    },
+    {
+      "original": "input/directive-before.js",
+      "decompiled_module": "directive-before"
+    },
+    {
+      "original": "input/semicolon-before.js",
+      "decompiled_module": "semicolon-before"
+    },
+    {
+      "original": "input/debugger-before.js",
+      "decompiled_module": "debugger-before"
+    },
+    {
+      "original": "input/type-before.ts",
+      "decompiled_module": "type-before"
+    },
+    {
+      "original": "input/exprs-before.js",
+      "decompiled_module": "exprs-before"
+    },
+    {
+      "original": "input/disabled-tdz.js",
+      "decompiled_module": "disabled-tdz"
+    },
+    {
+      "original": "input/backwards-reference-top-level.js",
+      "decompiled_module": "backwards-reference-top-level"
+    },
+    {
+      "original": "input/backwards-reference-nested-function.js",
+      "decompiled_module": "backwards-reference-nested-function"
+    },
+    {
+      "original": "input/issue-3125.js",
+      "decompiled_module": "issue-3125"
+    }
+  ]
+}

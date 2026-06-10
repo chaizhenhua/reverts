@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../input/entry.css"],
+  "sourcesContent": ["\n\t\t\t\t@import 'a.empty';\n\t\t\t\ta { background: url(b.empty) }\n\t\t\t"],
+  "mappings": ";AAEI;AAAI,cAAY;AAAa;",
+  "names": []
+}

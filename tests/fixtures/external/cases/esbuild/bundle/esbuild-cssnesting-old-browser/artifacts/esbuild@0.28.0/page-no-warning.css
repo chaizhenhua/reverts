@@ -1,0 +1,6 @@
+/* page-no-warning.css */
+@page {
+  @top-left {
+    background: red;
+  }
+}

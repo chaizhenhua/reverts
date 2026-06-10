@@ -1,0 +1,7 @@
+(() => {
+  // outside-node-modules/index.jsx
+  console.log({ a: 1, a: 2 }, /* @__PURE__ */ React.createElement("div", { a2: true, a2: 3 }));
+
+  // node_modules/inside-node-modules/index.jsx
+  console.log({ c: 1, c: 2 }, /* @__PURE__ */ React.createElement("div", { c2: true, c2: 3 }));
+})();

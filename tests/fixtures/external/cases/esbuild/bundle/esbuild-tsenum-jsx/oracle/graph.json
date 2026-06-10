@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "element",
+      "path": "element.tsx"
+    },
+    {
+      "name": "fragment",
+      "path": "fragment.tsx"
+    },
+    {
+      "name": "nested-element",
+      "path": "nested-element.tsx"
+    },
+    {
+      "name": "nested-fragment",
+      "path": "nested-fragment.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

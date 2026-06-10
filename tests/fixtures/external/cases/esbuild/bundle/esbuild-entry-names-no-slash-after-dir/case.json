@@ -1,0 +1,41 @@
+{
+  "id": "esbuild-entry-names-no-slash-after-dir",
+  "title": "esbuild TestEntryNamesNoSlashAfterDir",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestEntryNamesNoSlashAfterDir"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/-customPath.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/-customPath.js",
+      "artifacts/esbuild@0.28.0/src/app1-main.js",
+      "artifacts/esbuild@0.28.0/src/app2-main.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/app1/main",
+      "src/app2/main",
+      "src/app3/main"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "modules": [
+    {
+      "name": "let",
+      "path": "let.ts"
+    },
+    {
+      "name": "function",
+      "path": "function.ts"
+    },
+    {
+      "name": "class",
+      "path": "class.ts"
+    },
+    {
+      "name": "namespace",
+      "path": "namespace.ts"
+    },
+    {
+      "name": "enum",
+      "path": "enum.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "let",
+      "name": "y",
+      "kind": "value"
+    },
+    {
+      "module": "let",
+      "name": "z",
+      "kind": "value"
+    },
+    {
+      "module": "function",
+      "name": "y",
+      "kind": "value"
+    },
+    {
+      "module": "function",
+      "name": "z",
+      "kind": "value"
+    },
+    {
+      "module": "class",
+      "name": "y",
+      "kind": "value"
+    },
+    {
+      "module": "class",
+      "name": "z",
+      "kind": "value"
+    },
+    {
+      "module": "namespace",
+      "name": "z",
+      "kind": "value"
+    },
+    {
+      "module": "enum",
+      "name": "z",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "enums",
+      "path": "enums.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "a_DROP"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "b_DROP"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "c_DROP"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "a_keep"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "b_keep"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "c_keep"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "d_keep"
+    },
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "e_keep"
+    }
+  ],
+  "exports": [
+    {
+      "module": "enums",
+      "name": "e_keep",
+      "kind": "value"
+    }
+  ]
+}

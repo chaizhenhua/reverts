@@ -1,0 +1,39 @@
+{
+  "tool": "webpack",
+  "version": "5.105.4",
+  "source_ref": "test/configCases/graph/conditional-reexport",
+  "command": [
+    "node",
+    "-e",
+    "webpack(config)",
+    "# source=test/configCases/graph/conditional-reexport"
+  ],
+  "config_kind": "config",
+  "entry": {
+    "a": "./a.js",
+    "b": "./b.js"
+  },
+  "target": "web",
+  "mode": "production",
+  "output": {
+    "filename": "[name].js",
+    "chunk_filename": "chunks/[name].js"
+  },
+  "experiments": {
+    "topLevelAwait": true
+  },
+  "optimization": {
+    "concatenateModules": false,
+    "splitChunks": {
+      "cacheGroups": {
+        "lib": {
+          "name": "lib",
+          "test": {},
+          "chunks": "all",
+          "minSize": 0
+        }
+      }
+    },
+    "minimize": false
+  }
+}

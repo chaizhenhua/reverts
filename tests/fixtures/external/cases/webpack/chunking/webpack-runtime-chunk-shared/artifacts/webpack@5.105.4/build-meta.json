@@ -1,0 +1,39 @@
+{
+  "tool": "webpack",
+  "version": "5.105.4",
+  "source_ref": "test/configCases/split-chunks/runtime-chunk",
+  "command": [
+    "node",
+    "-e",
+    "webpack(config)",
+    "# source=test/configCases/split-chunks/runtime-chunk"
+  ],
+  "config_kind": "config",
+  "entry": {
+    "a": "./a.js",
+    "b": "./b.js"
+  },
+  "target": "web",
+  "mode": "production",
+  "output": {
+    "filename": "[name].js",
+    "chunk_filename": "chunks/[name].js"
+  },
+  "experiments": {
+    "topLevelAwait": true
+  },
+  "optimization": {
+    "chunkIds": "named",
+    "runtimeChunk": "single",
+    "splitChunks": {
+      "cacheGroups": {
+        "dep": {
+          "chunks": "all",
+          "test": {},
+          "enforce": true
+        }
+      }
+    },
+    "minimize": false
+  }
+}

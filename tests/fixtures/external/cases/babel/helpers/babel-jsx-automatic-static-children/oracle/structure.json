@@ -1,0 +1,12 @@
+{
+  "bundler_family": "babel",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "_jsx",
+    "_jsxs"
+  ],
+  "runtime_helpers": [
+    "_jsx",
+    "_jsxs"
+  ]
+}

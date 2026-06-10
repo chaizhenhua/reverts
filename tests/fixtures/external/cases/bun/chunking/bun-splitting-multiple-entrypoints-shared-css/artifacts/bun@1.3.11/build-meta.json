@@ -1,0 +1,27 @@
+{
+  "tool": "bun",
+  "version": "1.3.11",
+  "source_ref": "test/bundler/bundler_splitting.test.ts::splitting/MultipleEntryPointsWithSharedCSS",
+  "command": [
+    "/tmp/bun-bin.cOj18u/bun-linux-x64/bun",
+    "build",
+    "/entry1.js",
+    "/entry2.js",
+    "--outdir",
+    "artifacts/bun@1.3.11",
+    "--target",
+    "browser",
+    "--format",
+    "esm",
+    "--splitting"
+  ],
+  "entry_points": [
+    "entry1.js",
+    "entry2.js"
+  ],
+  "advanced_entry_points": null,
+  "options": {
+    "bundle": true,
+    "entry_names": "[dir]/[name].[ext]"
+  }
+}

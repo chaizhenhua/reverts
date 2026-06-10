@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "src/app1/main",
+      "path": "src/app1/main.ts"
+    },
+    {
+      "name": "src/app2/main",
+      "path": "src/app2/main.ts"
+    },
+    {
+      "name": "src/app3/main",
+      "path": "src/app3/main.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

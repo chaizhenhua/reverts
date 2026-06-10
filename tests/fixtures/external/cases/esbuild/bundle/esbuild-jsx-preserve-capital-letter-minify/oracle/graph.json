@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.jsx"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "mustStartWithUpperCaseLetter as XYYYY"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "mustStartWithUpperCaseLetter",
+      "kind": "value"
+    }
+  ]
+}

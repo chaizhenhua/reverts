@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.ts",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/web/foo.ts",
+      "decompiled_module": "Users/user/project/src/web/foo"
+    },
+    {
+      "original": "input/Users/user/project/src/web/bar/foo/foo.ts",
+      "decompiled_module": "Users/user/project/src/web/bar/foo/foo"
+    },
+    {
+      "original": "input/Users/user/project/src/web/bar/foo/index.ts",
+      "decompiled_module": "Users/user/project/src/web/bar/foo/index"
+    }
+  ]
+}

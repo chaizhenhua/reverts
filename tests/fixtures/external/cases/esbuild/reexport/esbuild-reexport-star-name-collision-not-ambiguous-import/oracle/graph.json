@@ -1,0 +1,60 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "common",
+      "path": "common.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "common",
+      "kind": "import_named",
+      "name": "x"
+    },
+    {
+      "from": "entry",
+      "to": "common",
+      "kind": "import_named",
+      "name": "y"
+    },
+    {
+      "from": "common",
+      "to": "a",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "common",
+      "to": "b",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "a",
+      "to": "c",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "c",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

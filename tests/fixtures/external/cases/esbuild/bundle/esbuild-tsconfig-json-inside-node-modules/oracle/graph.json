@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/app/entry",
+      "path": "Users/user/project/src/app/entry.tsx"
+    },
+    {
+      "name": "Users/user/project/src/node_modules/foo/index",
+      "path": "Users/user/project/src/node_modules/foo/index.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

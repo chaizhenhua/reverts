@@ -1,0 +1,5 @@
+{
+  "name": "vite-resolve-exports-module-condition",
+  "private": true,
+  "type": "module"
+}

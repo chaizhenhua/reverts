@@ -1,0 +1,17 @@
+//! Copyright notice 1
+/*
+ * @license
+ * Copyright notice 2
+ */
+// @preserve This is another comment
+
+Bundled license information:
+
+some-other-pkg/js/index.js:
+  /*
+   * @preserve
+   * (c) Evil Software Corp
+   */
+
+some-pkg/js/index.js:
+  //! (c) Good Software Corp

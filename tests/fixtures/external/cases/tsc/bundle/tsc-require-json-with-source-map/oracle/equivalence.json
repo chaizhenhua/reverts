@@ -1,0 +1,13 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/b.json",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/file1.ts",
+      "decompiled_module": "file1"
+    }
+  ]
+}

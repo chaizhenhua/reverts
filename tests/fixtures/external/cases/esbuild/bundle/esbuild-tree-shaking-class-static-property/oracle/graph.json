@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

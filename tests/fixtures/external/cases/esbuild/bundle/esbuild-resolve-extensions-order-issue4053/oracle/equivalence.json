@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/Test.web.tsx",
+      "decompiled_module": "Test.web"
+    },
+    {
+      "original": "input/Test.tsx",
+      "decompiled_module": "Test"
+    },
+    {
+      "original": "input/node_modules/expo-image/index.js",
+      "decompiled_module": "node_modules/expo-image/index"
+    },
+    {
+      "original": "input/node_modules/expo-image/Image.web.tsx",
+      "decompiled_module": "node_modules/expo-image/Image.web"
+    },
+    {
+      "original": "input/node_modules/expo-image/Image.tsx",
+      "decompiled_module": "node_modules/expo-image/Image"
+    }
+  ]
+}

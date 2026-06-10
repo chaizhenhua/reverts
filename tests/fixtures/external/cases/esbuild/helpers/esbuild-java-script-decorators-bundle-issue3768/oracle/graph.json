@@ -1,0 +1,54 @@
+{
+  "modules": [
+    {
+      "name": "base-instance-method",
+      "path": "base-instance-method.js"
+    },
+    {
+      "name": "base-instance-field",
+      "path": "base-instance-field.js"
+    },
+    {
+      "name": "base-instance-accessor",
+      "path": "base-instance-accessor.js"
+    },
+    {
+      "name": "base-static-method",
+      "path": "base-static-method.js"
+    },
+    {
+      "name": "base-static-field",
+      "path": "base-static-field.js"
+    },
+    {
+      "name": "base-static-accessor",
+      "path": "base-static-accessor.js"
+    },
+    {
+      "name": "derived-instance-method",
+      "path": "derived-instance-method.js"
+    },
+    {
+      "name": "derived-instance-field",
+      "path": "derived-instance-field.js"
+    },
+    {
+      "name": "derived-instance-accessor",
+      "path": "derived-instance-accessor.js"
+    },
+    {
+      "name": "derived-static-method",
+      "path": "derived-static-method.js"
+    },
+    {
+      "name": "derived-static-field",
+      "path": "derived-static-field.js"
+    },
+    {
+      "name": "derived-static-accessor",
+      "path": "derived-static-accessor.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

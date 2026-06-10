@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "named",
+      "path": "named.js"
+    },
+    {
+      "name": "star",
+      "path": "star.js"
+    },
+    {
+      "name": "star-capture",
+      "path": "star-capture.js"
+    },
+    {
+      "name": "bare",
+      "path": "bare.js"
+    },
+    {
+      "name": "require",
+      "path": "require.js"
+    },
+    {
+      "name": "import",
+      "path": "import.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "star",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "star-capture",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "require",
+      "to": "foo",
+      "kind": "require"
+    },
+    {
+      "from": "import",
+      "to": "foo",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

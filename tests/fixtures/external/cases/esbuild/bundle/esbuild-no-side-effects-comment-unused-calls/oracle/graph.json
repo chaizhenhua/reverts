@@ -1,0 +1,28 @@
+{
+  "modules": [
+    {
+      "name": "stmt-fn",
+      "path": "stmt-fn.js"
+    },
+    {
+      "name": "stmt-local",
+      "path": "stmt-local.js"
+    },
+    {
+      "name": "expr-fn",
+      "path": "expr-fn.js"
+    },
+    {
+      "name": "stmt-export-default-fn",
+      "path": "stmt-export-default-fn.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "stmt-export-default-fn",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

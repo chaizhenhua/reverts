@@ -1,0 +1,15 @@
+{
+  "tool": "rolldown",
+  "version": "1.0.0-rc.13",
+  "source_ref": "packages/rolldown/tests/fixtures/lazy-barrel/dynamic-import-entry",
+  "input_options": {
+    "input": "main.js",
+    "experimental": {
+      "lazyBarrel": true
+    }
+  },
+  "output_options": {
+    "format": "esm",
+    "entryFileNames": "[name].js"
+  }
+}

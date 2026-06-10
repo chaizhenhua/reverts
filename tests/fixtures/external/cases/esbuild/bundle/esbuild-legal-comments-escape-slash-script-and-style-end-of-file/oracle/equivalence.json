@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/project/entry.js",
+      "decompiled_module": "project/entry"
+    },
+    {
+      "original": "input/project/node_modules/js-pkg/index.js",
+      "decompiled_module": "project/node_modules/js-pkg/index"
+    }
+  ]
+}

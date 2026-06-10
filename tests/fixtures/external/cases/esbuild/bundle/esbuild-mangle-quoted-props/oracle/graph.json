@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "keep",
+      "path": "keep.js"
+    },
+    {
+      "name": "mangle",
+      "path": "mangle.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

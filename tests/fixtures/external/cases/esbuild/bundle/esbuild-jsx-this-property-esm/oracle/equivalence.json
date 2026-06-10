@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/factory.jsx",
+      "decompiled_module": "factory"
+    },
+    {
+      "original": "input/fragment.jsx",
+      "decompiled_module": "fragment"
+    }
+  ]
+}

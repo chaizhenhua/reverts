@@ -1,0 +1,67 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/test-main",
+      "path": "Users/user/project/src/test-main.js"
+    },
+    {
+      "name": "Users/user/project/src/test-module",
+      "path": "Users/user/project/src/test-module.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/main",
+      "path": "Users/user/project/node_modules/demo-pkg/main.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/module",
+      "path": "Users/user/project/node_modules/demo-pkg/module.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/main.browser",
+      "path": "Users/user/project/node_modules/demo-pkg/main.browser.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/module.browser",
+      "path": "Users/user/project/node_modules/demo-pkg/module.browser.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/test-main",
+      "to": "demo-pkg",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/src/test-module",
+      "to": "demo-pkg",
+      "kind": "import_default",
+      "name": "value"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/main",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/module",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/main.browser",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/module.browser",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

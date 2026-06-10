@@ -1,0 +1,36 @@
+{
+  "tool": "vite",
+  "version": "8.0.3",
+  "source_ref": "playground/lib",
+  "config_kind": "lib",
+  "build": {
+    "outDir": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-mode-basic/artifacts/vite@8.0.3",
+    "emptyOutDir": true,
+    "target": "chrome46",
+    "lib": {
+      "entry": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-mode-basic/input/src/main.js",
+      "name": "MyLib",
+      "formats": [
+        "es",
+        "umd",
+        "iife"
+      ]
+    },
+    "rollupOptions": {
+      "output": {
+        "comments": false
+      }
+    },
+    "rolldownOptions": {
+      "output": {
+        "comments": false
+      }
+    }
+  },
+  "command": [
+    "node",
+    "-e",
+    "vite.build(config)",
+    "# source=playground/lib"
+  ]
+}

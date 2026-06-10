@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    },
+    {
+      "original": "input/maths.js",
+      "decompiled_module": "maths"
+    },
+    {
+      "original": "input/square.js",
+      "decompiled_module": "square"
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+/* at-media/001/default/a.css */
+@media screen {
+  .box {
+    background-color: green;
+  }
+}
+
+/* at-media/001/default/style.css */

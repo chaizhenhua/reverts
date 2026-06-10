@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "code",
+      "path": "code.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "code",
+      "kind": "import_named",
+      "name": "code"
+    }
+  ],
+  "exports": [
+    {
+      "module": "code",
+      "name": "code",
+      "kind": "value"
+    }
+  ]
+}

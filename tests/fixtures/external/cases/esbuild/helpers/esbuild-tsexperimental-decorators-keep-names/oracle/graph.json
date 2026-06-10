@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "Foo",
+      "kind": "value"
+    }
+  ]
+}

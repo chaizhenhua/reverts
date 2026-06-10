@@ -1,0 +1,99 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-known-0",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-known-1",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-known-2",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-default-1",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-default",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-x",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-x-default",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-continue-0",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-continue-2",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-return-0",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-return-2",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-fallthrough-a",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-fallthrough-d",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./FAIL-fallthrough-e",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

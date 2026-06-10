@@ -1,0 +1,53 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/a/index",
+      "path": "Users/user/project/node_modules/a/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/b1/index",
+      "path": "Users/user/project/node_modules/b1/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/b2/index",
+      "path": "Users/user/project/node_modules/b2/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/c/index",
+      "path": "Users/user/project/node_modules/c/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/d/index",
+      "path": "Users/user/project/node_modules/d/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "a",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "Users/user/project/node_modules/a/index",
+      "to": "b1",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "Users/user/project/node_modules/a/index",
+      "to": "b2",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/d/index",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

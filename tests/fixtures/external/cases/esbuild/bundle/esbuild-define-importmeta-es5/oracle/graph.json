@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "replaced",
+      "path": "replaced.js"
+    },
+    {
+      "name": "kept",
+      "path": "kept.js"
+    },
+    {
+      "name": "dead-code",
+      "path": "dead-code.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

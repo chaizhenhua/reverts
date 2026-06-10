@@ -1,0 +1,4 @@
+(() => {
+  // entry.js
+  some.stuff();
+})();

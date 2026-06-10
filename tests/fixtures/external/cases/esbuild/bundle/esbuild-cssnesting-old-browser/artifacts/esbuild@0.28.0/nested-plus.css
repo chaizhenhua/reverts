@@ -1,0 +1,4 @@
+/* nested-plus.css */
+a + b {
+  color: red;
+}

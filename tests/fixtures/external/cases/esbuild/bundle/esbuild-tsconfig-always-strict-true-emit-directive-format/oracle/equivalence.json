@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/implicit.ts",
+      "decompiled_module": "Users/user/project/src/implicit"
+    },
+    {
+      "original": "input/Users/user/project/src/explicit.ts",
+      "decompiled_module": "Users/user/project/src/explicit"
+    }
+  ]
+}

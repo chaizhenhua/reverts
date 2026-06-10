@@ -1,0 +1,65 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inject",
+      "path": "inject.js"
+    },
+    {
+      "name": "node_modules/unused/index",
+      "path": "node_modules/unused/index.js"
+    },
+    {
+      "name": "node_modules/sideEffects-false/index",
+      "path": "node_modules/sideEffects-false/index.js"
+    },
+    {
+      "name": "replacement",
+      "path": "replacement.js"
+    },
+    {
+      "name": "collision",
+      "path": "collision.js"
+    },
+    {
+      "name": "re-export",
+      "path": "re-export.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "inject",
+      "name": "obj",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "sideEffects",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "noSideEffects",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "injectedAndDefined",
+      "kind": "value"
+    },
+    {
+      "module": "replacement",
+      "name": "replace",
+      "kind": "value"
+    },
+    {
+      "module": "collision",
+      "name": "collide",
+      "kind": "value"
+    }
+  ]
+}

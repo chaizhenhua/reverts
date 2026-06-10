@@ -1,0 +1,55 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    },
+    {
+      "name": "reexport-whole-exports",
+      "path": "reexport-whole-exports.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport-whole-exports",
+      "kind": "require"
+    },
+    {
+      "from": "reexport-whole-exports",
+      "to": "module",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "def",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-whole-exports",
+      "name": "module1",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-whole-exports",
+      "name": "module2",
+      "kind": "value"
+    }
+  ]
+}

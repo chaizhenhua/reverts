@@ -1,0 +1,4 @@
+
+				@decoratorMustComeAfterName
+				export class Foo {}
+			

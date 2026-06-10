@@ -1,0 +1,48 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "esm",
+      "path": "esm.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "esm",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "a",
+      "kind": "import_default",
+      "name": "aDefault"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "test",
+      "kind": "value"
+    },
+    {
+      "module": "esm",
+      "name": "a",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+/* tests/fixtures/external/cases/bun/chunking/bun-splitting-static-and-dynamic-css-imports/input/dynamic.css */
+.dynamic {
+  color: purple;
+}

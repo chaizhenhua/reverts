@@ -1,0 +1,53 @@
+{
+  "id": "tsc-require-json-with-source-map",
+  "title": "tsc require json with source map",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "typescript",
+    "project_version": "6.0.2",
+    "project_commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/cases/compiler/requireOfJsonFileWithSourceMap.ts"
+  },
+  "artifact": {
+    "tool": "tsc",
+    "version": "6.0.2",
+    "entry": "artifacts/tsc@6.0.2/file1.js",
+    "outputs": [
+      "artifacts/tsc@6.0.2/b.json",
+      "artifacts/tsc@6.0.2/file1.js",
+      "artifacts/tsc@6.0.2/file1.js.map"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "tsc",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "b",
+      "file1"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "b",
+        "name": "default"
+      },
+      {
+        "module": "b",
+        "name": "a"
+      },
+      {
+        "module": "b",
+        "name": "b"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

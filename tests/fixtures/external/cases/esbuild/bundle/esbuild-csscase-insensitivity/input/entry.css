@@ -1,0 +1,6 @@
+
+				/* "@IMPORT" should be recognized as an import */
+				/* "LAYER(...)" should wrap with "@layer" */
+				/* "SUPPORTS(...)" should wrap with "@supports" */
+				@IMPORT Url("nested.css") LAYER(layer-name) SUPPORTS(supports-condition) list-of-media-queries;
+			

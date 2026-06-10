@@ -1,0 +1,8 @@
+/* at-supports/001/a.css */
+@supports (display: block) {
+  .box {
+    background-color: green;
+  }
+}
+
+/* at-supports/001/style.css */

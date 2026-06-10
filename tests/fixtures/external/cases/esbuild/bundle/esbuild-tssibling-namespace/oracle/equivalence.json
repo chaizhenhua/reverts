@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/let.ts",
+      "decompiled_module": "let"
+    },
+    {
+      "original": "input/function.ts",
+      "decompiled_module": "function"
+    },
+    {
+      "original": "input/class.ts",
+      "decompiled_module": "class"
+    },
+    {
+      "original": "input/namespace.ts",
+      "decompiled_module": "namespace"
+    },
+    {
+      "original": "input/enum.ts",
+      "decompiled_module": "enum"
+    }
+  ]
+}

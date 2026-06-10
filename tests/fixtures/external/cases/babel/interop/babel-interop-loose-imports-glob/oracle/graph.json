@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "foo"
+    }
+  ],
+  "exports": []
+}

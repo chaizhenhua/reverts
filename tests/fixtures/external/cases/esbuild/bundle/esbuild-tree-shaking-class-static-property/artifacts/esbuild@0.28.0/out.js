@@ -1,0 +1,29 @@
+let keep1 = class {
+  static x = x;
+};
+let keep2 = class {
+  static ["x"] = x;
+};
+let keep3 = class {
+  static [x] = "x";
+};
+let keep4 = class {
+  static [x]() {
+  }
+};
+let keep5 = class {
+  static get [x]() {
+  }
+};
+let keep6 = class {
+  static set [x](_) {
+  }
+};
+let keep7 = class {
+  static async [x]() {
+  }
+};
+let keep8 = class {
+  static [{ toString() {
+  } }] = "x";
+};

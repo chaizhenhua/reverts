@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "lib",
+      "path": "lib.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "Bar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "enum",
+      "kind": "value"
+    }
+  ]
+}

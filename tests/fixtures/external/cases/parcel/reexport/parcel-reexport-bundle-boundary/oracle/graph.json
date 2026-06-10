@@ -1,0 +1,82 @@
+{
+  "modules": [
+    {
+      "name": "async",
+      "path": "async.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "switcher/index",
+      "path": "switcher/index.js"
+    },
+    {
+      "name": "types/index",
+      "path": "types/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "async",
+      "to": "switcher",
+      "kind": "import_named",
+      "name": "UI_EVENT_TYPE"
+    },
+    {
+      "from": "index",
+      "to": "types",
+      "kind": "import_named",
+      "name": "OPERATIONAL_EVENT_TYPE"
+    },
+    {
+      "from": "index",
+      "to": "async",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "switcher/index",
+      "to": "types",
+      "kind": "import_named",
+      "name": "UI_EVENT_TYPE"
+    }
+  ],
+  "exports": [
+    {
+      "module": "async",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "switcher/index",
+      "name": "UI_EVENT_TYPE",
+      "kind": "value"
+    },
+    {
+      "module": "types/index",
+      "name": "UI_EVENT_TYPE",
+      "kind": "value"
+    },
+    {
+      "module": "types/index",
+      "name": "TRACK_EVENT_TYPE",
+      "kind": "value"
+    },
+    {
+      "module": "types/index",
+      "name": "SCREEN_EVENT_TYPE",
+      "kind": "value"
+    },
+    {
+      "module": "types/index",
+      "name": "OPERATIONAL_EVENT_TYPE",
+      "kind": "value"
+    },
+    {
+      "module": "types/index",
+      "name": "DEFAULT_SOURCE",
+      "kind": "value"
+    }
+  ]
+}

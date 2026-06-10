@@ -1,0 +1,14 @@
+{
+  "bundler_family": "rolldown",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__commonJSMin",
+    "__commonJS",
+    "__toESM"
+  ],
+  "runtime_helpers": [
+    "__commonJSMin",
+    "__commonJS",
+    "__toESM"
+  ]
+}

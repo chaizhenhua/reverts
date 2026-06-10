@@ -1,0 +1,132 @@
+{
+  "modules": [
+    {
+      "name": "src/barrel/a",
+      "path": "src/barrel/a.js"
+    },
+    {
+      "name": "src/barrel/b",
+      "path": "src/barrel/b.js"
+    },
+    {
+      "name": "src/barrel/index",
+      "path": "src/barrel/index.js"
+    },
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/non-barrel/c",
+      "path": "src/non-barrel/c.js"
+    },
+    {
+      "name": "src/non-barrel/d",
+      "path": "src/non-barrel/d.js"
+    },
+    {
+      "name": "src/non-barrel/index",
+      "path": "src/non-barrel/index.js"
+    },
+    {
+      "name": "src/other",
+      "path": "src/other.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/barrel/index",
+      "to": "src/barrel/a",
+      "kind": "reexport_named",
+      "name": "a"
+    },
+    {
+      "from": "src/barrel/index",
+      "to": "src/barrel/b",
+      "kind": "reexport_named",
+      "name": "b"
+    },
+    {
+      "from": "src/main",
+      "to": "src/barrel/index",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "src/main",
+      "to": "src/non-barrel/index",
+      "kind": "import_named",
+      "name": "c"
+    },
+    {
+      "from": "src/main",
+      "to": "src/other",
+      "kind": "reexport_named",
+      "name": "other"
+    },
+    {
+      "from": "src/non-barrel/index",
+      "to": "src/non-barrel/c",
+      "kind": "reexport_named",
+      "name": "c"
+    },
+    {
+      "from": "src/non-barrel/index",
+      "to": "src/non-barrel/d",
+      "kind": "reexport_named",
+      "name": "d"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/barrel/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "src/barrel/b",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "src/barrel/index",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "src/barrel/index",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "other",
+      "kind": "value"
+    },
+    {
+      "module": "src/non-barrel/c",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "src/non-barrel/d",
+      "name": "d",
+      "kind": "value"
+    },
+    {
+      "module": "src/non-barrel/index",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "src/non-barrel/index",
+      "name": "d",
+      "kind": "value"
+    },
+    {
+      "module": "src/other",
+      "name": "other",
+      "kind": "value"
+    }
+  ]
+}

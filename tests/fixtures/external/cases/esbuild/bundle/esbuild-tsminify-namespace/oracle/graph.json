@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.ts"
+    },
+    {
+      "name": "b",
+      "path": "b.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

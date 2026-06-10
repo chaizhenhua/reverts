@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "other",
+      "path": "other.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "c"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "d"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "e"
+    },
+    {
+      "from": "entry",
+      "to": "other",
+      "kind": "import_named",
+      "name": "real"
+    }
+  ],
+  "exports": [
+    {
+      "module": "other",
+      "name": "real",
+      "kind": "value"
+    }
+  ]
+}

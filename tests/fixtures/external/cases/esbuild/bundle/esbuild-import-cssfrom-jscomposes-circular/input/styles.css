@@ -1,0 +1,11 @@
+
+				.foo {
+					composes: bar;
+				}
+				.bar {
+					composes: foo;
+				}
+				.baz {
+					composes: baz;
+				}
+			

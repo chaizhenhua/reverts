@@ -1,0 +1,19 @@
+/* at-supports/004/b.css */
+@supports (display: block) {
+  @layer a {
+    @supports (width: 10px) {
+      @layer b {
+        .box {
+          background-color: green;
+        }
+      }
+    }
+  }
+}
+
+/* at-supports/004/a.css */
+@supports (display: block) {
+  @layer a;
+}
+
+/* at-supports/004/style.css */

@@ -1,0 +1,39 @@
+{
+  "modules": [
+    {
+      "name": "entry-nope",
+      "path": "entry-nope.js"
+    },
+    {
+      "name": "entry-default",
+      "path": "entry-default.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.mjs"
+    },
+    {
+      "name": "empty",
+      "path": "empty.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry-nope",
+      "to": "empty",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry-default",
+      "to": "empty",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

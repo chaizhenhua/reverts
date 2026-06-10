@@ -1,0 +1,31 @@
+{
+  "tool": "vite",
+  "version": "8.0.3",
+  "source_ref": "playground/resolve/exports-with-module-condition",
+  "config_kind": "app",
+  "build": {
+    "outDir": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-resolve-exports-module-condition/artifacts/vite@8.0.3",
+    "emptyOutDir": true,
+    "sourcemap": false,
+    "rollupOptions": {
+      "output": {
+        "entryFileNames": "assets/[name].js",
+        "chunkFileNames": "assets/chunks/[name].js",
+        "assetFileNames": "assets/[name][extname]"
+      }
+    },
+    "rolldownOptions": {
+      "output": {
+        "entryFileNames": "assets/[name].js",
+        "chunkFileNames": "assets/chunks/[name].js",
+        "assetFileNames": "assets/[name][extname]"
+      }
+    }
+  },
+  "command": [
+    "node",
+    "-e",
+    "vite.build(config)",
+    "# source=playground/resolve/exports-with-module-condition"
+  ]
+}

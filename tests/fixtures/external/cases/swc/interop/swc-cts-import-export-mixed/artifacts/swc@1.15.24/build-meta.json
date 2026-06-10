@@ -1,0 +1,19 @@
+{
+  "tool": "swc",
+  "version": "1.15.24",
+  "source_ref": "crates/swc_ecma_transforms_module/tests/fixture/common/cts-import-export/mixed",
+  "swc_options": {
+    "module": {
+      "type": "commonjs"
+    },
+    "jsc": {
+      "target": "es2015",
+      "parser": {
+        "syntax": "typescript",
+        "tsx": false,
+        "dynamicImport": true,
+        "importMeta": true
+      }
+    }
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry1",
+      "path": "Users/user/project/src/entry1.js"
+    },
+    {
+      "name": "Users/user/project/src/entry2",
+      "path": "Users/user/project/src/entry2.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/package/index",
+      "path": "Users/user/project/node_modules/package/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry1",
+      "to": "package",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "Users/user/project/src/entry2",
+      "to": "package",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

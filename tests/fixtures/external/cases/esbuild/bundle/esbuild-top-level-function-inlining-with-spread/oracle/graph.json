@@ -1,0 +1,86 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inner",
+      "path": "inner.js"
+    },
+    {
+      "name": "entry-outer",
+      "path": "entry-outer.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "empty1"
+    },
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "empty2"
+    },
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "empty3"
+    },
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "identity1"
+    },
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "identity2"
+    },
+    {
+      "from": "entry-outer",
+      "to": "inner",
+      "kind": "import_named",
+      "name": "identity3"
+    }
+  ],
+  "exports": [
+    {
+      "module": "inner",
+      "name": "empty1",
+      "kind": "value"
+    },
+    {
+      "module": "inner",
+      "name": "empty2",
+      "kind": "value"
+    },
+    {
+      "module": "inner",
+      "name": "empty3",
+      "kind": "value"
+    },
+    {
+      "module": "inner",
+      "name": "identity1",
+      "kind": "value"
+    },
+    {
+      "module": "inner",
+      "name": "identity2",
+      "kind": "value"
+    },
+    {
+      "module": "inner",
+      "name": "identity3",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/index.js",
+      "decompiled_module": "Users/user/project/index"
+    },
+    {
+      "original": "input/Users/user/project/nested/index.js",
+      "decompiled_module": "Users/user/project/nested/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg/index.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg/index"
+    }
+  ]
+}

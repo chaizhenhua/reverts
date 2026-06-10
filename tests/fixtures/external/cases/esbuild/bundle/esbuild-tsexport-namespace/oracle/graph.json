@@ -1,0 +1,37 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.ts"
+    },
+    {
+      "name": "b",
+      "path": "b.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_named",
+      "name": "Foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

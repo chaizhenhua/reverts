@@ -1,0 +1,9 @@
+
+				// Implicit extensions
+				import './relative/path'
+				import 'package/path'
+
+				// Explicit extensions
+				import './relative2/path.js'
+				import 'package2/path.js'
+			

@@ -1,0 +1,3 @@
+
+				exports.bar = 123
+			

@@ -1,0 +1,61 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/nested3/index.js",
+      "decompiled_module": "nested3/index"
+    },
+    {
+      "original": "input/nested3/node_modules/alias3/index.js",
+      "decompiled_module": "nested3/node_modules/alias3/index"
+    },
+    {
+      "original": "input/node_modules/alias1/index.js",
+      "decompiled_module": "node_modules/alias1/index"
+    },
+    {
+      "original": "input/node_modules/alias2/foo.js",
+      "decompiled_module": "node_modules/alias2/foo"
+    },
+    {
+      "original": "input/node_modules/alias3/index.js",
+      "decompiled_module": "node_modules/alias3/index"
+    },
+    {
+      "original": "input/node_modules/alias4/index.js",
+      "decompiled_module": "node_modules/alias4/index"
+    },
+    {
+      "original": "input/node_modules/alias5/foo.js",
+      "decompiled_module": "node_modules/alias5/foo"
+    },
+    {
+      "original": "input/alias6/dir/index.js",
+      "decompiled_module": "alias6/dir/index"
+    },
+    {
+      "original": "input/alias7/dir/foo/index.js",
+      "decompiled_module": "alias7/dir/foo/index"
+    },
+    {
+      "original": "input/alias8/dir/pkg8/index.js",
+      "decompiled_module": "alias8/dir/pkg8/index"
+    },
+    {
+      "original": "input/alias9/some/file.js",
+      "decompiled_module": "alias9/some/file"
+    },
+    {
+      "original": "input/node_modules/prefix-foo/index.js",
+      "decompiled_module": "node_modules/prefix-foo/index"
+    },
+    {
+      "original": "input/node_modules/@scope/prefix-foo/index.js",
+      "decompiled_module": "node_modules/@scope/prefix-foo/index"
+    }
+  ]
+}

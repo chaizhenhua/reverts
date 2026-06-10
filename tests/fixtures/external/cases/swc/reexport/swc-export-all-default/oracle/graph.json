@@ -1,0 +1,28 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "react",
+      "kind": "import_default",
+      "name": "_default"
+    },
+    {
+      "from": "input",
+      "to": "react",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "input",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

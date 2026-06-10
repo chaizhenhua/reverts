@@ -1,0 +1,57 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/external-default2.js",
+      "decompiled_module": "external-default2"
+    },
+    {
+      "original": "input/external-ns.js",
+      "decompiled_module": "external-ns"
+    },
+    {
+      "original": "input/external-ns-default.js",
+      "decompiled_module": "external-ns-default"
+    },
+    {
+      "original": "input/external-ns-def.js",
+      "decompiled_module": "external-ns-def"
+    },
+    {
+      "original": "input/external-default.js",
+      "decompiled_module": "external-default"
+    },
+    {
+      "original": "input/external-def.js",
+      "decompiled_module": "external-def"
+    },
+    {
+      "original": "input/internal-default2.js",
+      "decompiled_module": "internal-default2"
+    },
+    {
+      "original": "input/internal-ns.js",
+      "decompiled_module": "internal-ns"
+    },
+    {
+      "original": "input/internal-ns-default.js",
+      "decompiled_module": "internal-ns-default"
+    },
+    {
+      "original": "input/internal-ns-def.js",
+      "decompiled_module": "internal-ns-def"
+    },
+    {
+      "original": "input/internal-default.js",
+      "decompiled_module": "internal-default"
+    },
+    {
+      "original": "input/internal-def.js",
+      "decompiled_module": "internal-def"
+    },
+    {
+      "original": "input/internal.js",
+      "decompiled_module": "internal"
+    }
+  ]
+}

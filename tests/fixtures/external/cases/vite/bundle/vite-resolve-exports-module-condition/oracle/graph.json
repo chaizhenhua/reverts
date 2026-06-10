@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry",
+      "path": "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry",
+      "path": "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry.mjs"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-with-module-condition/require-entry",
+      "path": "node_modules/@vitejs/test-resolve-exports-with-module-condition/require-entry.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-resolve-exports-with-module-condition",
+      "kind": "import_named",
+      "name": "msg"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry",
+      "name": "msg",
+      "kind": "value"
+    }
+  ]
+}

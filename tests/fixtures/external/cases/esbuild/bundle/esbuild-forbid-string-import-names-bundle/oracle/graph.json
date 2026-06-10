@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "nested",
+      "path": "nested.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "nested",
+      "kind": "import_named",
+      "name": "\"nest ed\" as nested"
+    },
+    {
+      "from": "nested",
+      "to": "external",
+      "kind": "import_named",
+      "name": "\"some import\" as nested"
+    }
+  ],
+  "exports": []
+}

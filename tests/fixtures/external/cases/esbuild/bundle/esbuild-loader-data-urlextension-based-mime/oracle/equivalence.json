@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/example.js",
+      "decompiled_module": "example"
+    },
+    {
+      "original": "input/example.mjs",
+      "decompiled_module": "example"
+    }
+  ]
+}

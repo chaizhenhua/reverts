@@ -1,0 +1,78 @@
+{
+  "modules": [
+    {
+      "name": "app",
+      "path": "app.jsx"
+    },
+    {
+      "name": "in2",
+      "path": "in2.jsx"
+    },
+    {
+      "name": "import",
+      "path": "import.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "app",
+      "to": "import",
+      "kind": "import_named",
+      "name": "p as Part"
+    },
+    {
+      "from": "app",
+      "to": "import",
+      "kind": "import_named",
+      "name": "h"
+    },
+    {
+      "from": "app",
+      "to": "import",
+      "kind": "import_named",
+      "name": "render"
+    },
+    {
+      "from": "app",
+      "to": "in2",
+      "kind": "import_named",
+      "name": "Internal"
+    },
+    {
+      "from": "in2",
+      "to": "import",
+      "kind": "import_named",
+      "name": "p as Part"
+    },
+    {
+      "from": "in2",
+      "to": "import",
+      "kind": "import_named",
+      "name": "h"
+    },
+    {
+      "from": "import",
+      "to": "preact",
+      "kind": "import_named",
+      "name": "h"
+    },
+    {
+      "from": "import",
+      "to": "preact",
+      "kind": "import_named",
+      "name": "render"
+    }
+  ],
+  "exports": [
+    {
+      "module": "in2",
+      "name": "Internal",
+      "kind": "value"
+    },
+    {
+      "module": "import",
+      "name": "p",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+/* nested-ampersand-twice.css */
+a,
+a {
+  color: red;
+}

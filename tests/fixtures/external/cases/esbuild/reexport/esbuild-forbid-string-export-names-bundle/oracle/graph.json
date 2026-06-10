@@ -1,0 +1,39 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "internal",
+      "path": "internal.js"
+    },
+    {
+      "name": "nested",
+      "path": "nested.js"
+    },
+    {
+      "name": "very-nested",
+      "path": "very-nested.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "internal",
+      "kind": "import_named",
+      "name": "\"o.k.\" as ok"
+    },
+    {
+      "from": "entry",
+      "to": "nested",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "nested",
+      "to": "very-nested",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": []
+}

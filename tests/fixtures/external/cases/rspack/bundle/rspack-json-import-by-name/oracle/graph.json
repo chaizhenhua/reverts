@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "./data/c.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "./data/d.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "./data/e.json",
+      "kind": "import_named",
+      "name": "bb"
+    },
+    {
+      "from": "index",
+      "to": "./data/e.json",
+      "kind": "import_named",
+      "name": "aa"
+    }
+  ],
+  "exports": []
+}

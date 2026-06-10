@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "src/entry",
+      "path": "src/entry.ts"
+    },
+    {
+      "name": "src/inject",
+      "path": "src/inject.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

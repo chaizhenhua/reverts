@@ -1,0 +1,74 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    },
+    {
+      "name": "reexport-reexport-exports",
+      "path": "reexport-reexport-exports.js"
+    },
+    {
+      "name": "reexport-whole-exports",
+      "path": "reexport-whole-exports.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport-reexport-exports",
+      "kind": "require"
+    },
+    {
+      "from": "reexport-reexport-exports",
+      "to": "reexport-whole-exports",
+      "kind": "require"
+    },
+    {
+      "from": "reexport-whole-exports",
+      "to": "module",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "def",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-reexport-exports",
+      "name": "reexport1",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-reexport-exports",
+      "name": "reexport2",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-whole-exports",
+      "name": "module1",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-whole-exports",
+      "name": "module2",
+      "kind": "value"
+    }
+  ]
+}

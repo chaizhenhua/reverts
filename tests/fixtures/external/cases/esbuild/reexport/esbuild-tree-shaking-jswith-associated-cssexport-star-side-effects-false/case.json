@@ -1,0 +1,47 @@
+{
+  "id": "esbuild-tree-shaking-jswith-associated-cssexport-star-side-effects-false",
+  "title": "esbuild TestTreeShakingJSWithAssociatedCSSExportStarSideEffectsFalse",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestTreeShakingJSWithAssociatedCSSExportStarSideEffectsFalse"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/project/test.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/project/test.css",
+      "artifacts/esbuild@0.28.0/project/test.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__commonJS"
+    ],
+    "helpers": [],
+    "must_recover_modules": [
+      "project/test",
+      "project/node_modules/pkg/entry",
+      "project/node_modules/pkg/components"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "project/node_modules/pkg/components",
+        "name": "Button"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "tool": "rolldown",
+  "version": "1.0.0-rc.13",
+  "source_ref": "packages/rolldown/tests/fixtures/function/advanced-chunks/test-fn",
+  "input_options": {
+    "input": "main.js",
+    "optimization": {
+      "inlineConst": false
+    }
+  },
+  "output_options": {
+    "format": "esm",
+    "entryFileNames": "[name].js",
+    "chunkFileNames": "chunks/[name].js",
+    "codeSplitting": {
+      "groups": [
+        {
+          "name": "ab",
+          "test": "/[ab]\\\\.js$/"
+        },
+        {
+          "name": "cd",
+          "test": "/[cd]\\\\.js$/"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "modules": [
+    {
+      "name": "number",
+      "path": "number.ts"
+    },
+    {
+      "name": "string",
+      "path": "string.ts"
+    },
+    {
+      "name": "propagation",
+      "path": "propagation.ts"
+    },
+    {
+      "name": "nested-number",
+      "path": "nested-number.ts"
+    },
+    {
+      "name": "nested-string",
+      "path": "nested-string.ts"
+    },
+    {
+      "name": "nested-propagation",
+      "path": "nested-propagation.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

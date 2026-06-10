@@ -1,0 +1,21 @@
+/* input/case5-foo.css */
+@layer middle {
+  @layer one {
+    @layer two, three.four;
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/case5-foo.css */
+@layer {
+  @layer one {
+    @layer two, three.four;
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/case5.css */

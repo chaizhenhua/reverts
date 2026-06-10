@@ -1,0 +1,60 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "common",
+      "path": "common.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    },
+    {
+      "name": "bar",
+      "path": "bar.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "common",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "common",
+      "to": "foo",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "common",
+      "to": "bar",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "x",
+      "kind": "value"
+    },
+    {
+      "module": "foo",
+      "name": "y",
+      "kind": "value"
+    },
+    {
+      "module": "bar",
+      "name": "y",
+      "kind": "value"
+    },
+    {
+      "module": "bar",
+      "name": "z",
+      "kind": "value"
+    }
+  ]
+}

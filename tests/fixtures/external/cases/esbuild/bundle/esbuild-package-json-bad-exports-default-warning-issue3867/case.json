@@ -1,0 +1,41 @@
+{
+  "id": "esbuild-package-json-bad-exports-default-warning-issue3867",
+  "title": "esbuild TestPackageJsonBadExportsDefaultWarningIssue3867",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_packagejson_test.go::TestPackageJsonBadExportsDefaultWarningIssue3867"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/out.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/out.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "entry",
+      "node_modules/foo/dist/node/index",
+      "node_modules/foo/dist/node/index",
+      "node_modules/foo/dist/browser/index",
+      "node_modules/foo/dist/browser/index"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

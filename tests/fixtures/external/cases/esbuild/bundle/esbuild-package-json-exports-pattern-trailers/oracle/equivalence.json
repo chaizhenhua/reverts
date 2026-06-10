@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg/dir/baz-foo.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg/dir/baz-foo"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg2/public/abc.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg2/public/abc"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg2/public/xyz.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg2/public/xyz"
+    }
+  ]
+}

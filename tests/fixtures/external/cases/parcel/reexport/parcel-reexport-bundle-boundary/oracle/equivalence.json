@@ -1,0 +1,21 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/async.js",
+      "decompiled_module": "async"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/switcher/index.js",
+      "decompiled_module": "switcher/index"
+    },
+    {
+      "original": "input/types/index.js",
+      "decompiled_module": "types/index"
+    }
+  ]
+}

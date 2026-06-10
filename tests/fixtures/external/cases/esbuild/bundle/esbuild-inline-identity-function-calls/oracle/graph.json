@@ -1,0 +1,103 @@
+{
+  "modules": [
+    {
+      "name": "identity",
+      "path": "identity.js"
+    },
+    {
+      "name": "identity-last",
+      "path": "identity-last.js"
+    },
+    {
+      "name": "identity-cross-module",
+      "path": "identity-cross-module.js"
+    },
+    {
+      "name": "identity-cross-module-def",
+      "path": "identity-cross-module-def.js"
+    },
+    {
+      "name": "identity-no-args",
+      "path": "identity-no-args.js"
+    },
+    {
+      "name": "identity-two-args",
+      "path": "identity-two-args.js"
+    },
+    {
+      "name": "identity-first",
+      "path": "identity-first.js"
+    },
+    {
+      "name": "identity-generator",
+      "path": "identity-generator.js"
+    },
+    {
+      "name": "identity-async",
+      "path": "identity-async.js"
+    },
+    {
+      "name": "reassign",
+      "path": "reassign.js"
+    },
+    {
+      "name": "reassign-inc",
+      "path": "reassign-inc.js"
+    },
+    {
+      "name": "reassign-div",
+      "path": "reassign-div.js"
+    },
+    {
+      "name": "reassign-array",
+      "path": "reassign-array.js"
+    },
+    {
+      "name": "reassign-object",
+      "path": "reassign-object.js"
+    },
+    {
+      "name": "not-identity-two-args",
+      "path": "not-identity-two-args.js"
+    },
+    {
+      "name": "not-identity-default",
+      "path": "not-identity-default.js"
+    },
+    {
+      "name": "not-identity-array",
+      "path": "not-identity-array.js"
+    },
+    {
+      "name": "not-identity-object",
+      "path": "not-identity-object.js"
+    },
+    {
+      "name": "not-identity-rest",
+      "path": "not-identity-rest.js"
+    },
+    {
+      "name": "not-identity-return",
+      "path": "not-identity-return.js"
+    },
+    {
+      "name": "identity-simplify-unused-issue-4287",
+      "path": "identity-simplify-unused-issue-4287.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "identity-cross-module",
+      "to": "identity-cross-module-def",
+      "kind": "import_named",
+      "name": "DROP"
+    }
+  ],
+  "exports": [
+    {
+      "module": "identity-cross-module-def",
+      "name": "DROP",
+      "kind": "value"
+    }
+  ]
+}

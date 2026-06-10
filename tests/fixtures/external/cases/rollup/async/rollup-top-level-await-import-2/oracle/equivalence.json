@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    },
+    {
+      "original": "input/lib.js",
+      "decompiled_module": "lib"
+    },
+    {
+      "original": "input/foo.js",
+      "decompiled_module": "foo"
+    },
+    {
+      "original": "input/foo-prefix.js",
+      "decompiled_module": "foo-prefix"
+    }
+  ]
+}

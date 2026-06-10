@@ -1,0 +1,12 @@
+/* at-media/007/b.css */
+@media all {
+  @media screen {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* at-media/007/a.css */
+
+/* at-media/007/style.css */

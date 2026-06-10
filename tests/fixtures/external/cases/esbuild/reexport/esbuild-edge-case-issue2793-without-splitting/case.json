@@ -1,0 +1,50 @@
+{
+  "id": "esbuild-edge-case-issue2793-without-splitting",
+  "title": "esbuild TestEdgeCaseIssue2793WithoutSplitting",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_splitting_test.go::TestEdgeCaseIssue2793WithoutSplitting"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/src/index.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/src/index.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__esm"
+    ],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/a",
+      "src/b",
+      "src/index"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/a",
+        "name": "A"
+      },
+      {
+        "module": "src/b",
+        "name": "B"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

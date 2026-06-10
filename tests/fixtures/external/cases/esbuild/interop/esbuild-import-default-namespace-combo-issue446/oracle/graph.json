@@ -1,0 +1,185 @@
+{
+  "modules": [
+    {
+      "name": "external-default2",
+      "path": "external-default2.js"
+    },
+    {
+      "name": "external-ns",
+      "path": "external-ns.js"
+    },
+    {
+      "name": "external-ns-default",
+      "path": "external-ns-default.js"
+    },
+    {
+      "name": "external-ns-def",
+      "path": "external-ns-def.js"
+    },
+    {
+      "name": "external-default",
+      "path": "external-default.js"
+    },
+    {
+      "name": "external-def",
+      "path": "external-def.js"
+    },
+    {
+      "name": "internal-default2",
+      "path": "internal-default2.js"
+    },
+    {
+      "name": "internal-ns",
+      "path": "internal-ns.js"
+    },
+    {
+      "name": "internal-ns-default",
+      "path": "internal-ns-default.js"
+    },
+    {
+      "name": "internal-ns-def",
+      "path": "internal-ns-def.js"
+    },
+    {
+      "name": "internal-default",
+      "path": "internal-default.js"
+    },
+    {
+      "name": "internal-def",
+      "path": "internal-def.js"
+    },
+    {
+      "name": "internal",
+      "path": "internal.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "external-ns",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "external-ns",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "external-ns-default",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "external-ns-default",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "external-ns-def",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "external-ns-def",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "external-default",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "external-default",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "external-def",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "external-def",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "internal-ns",
+      "to": "internal",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "internal-ns",
+      "to": "internal",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "internal-ns-default",
+      "to": "internal",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "internal-ns-default",
+      "to": "internal",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "internal-ns-def",
+      "to": "internal",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "internal-ns-def",
+      "to": "internal",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "internal-default",
+      "to": "internal",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "internal-default",
+      "to": "internal",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "internal-def",
+      "to": "internal",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "internal-def",
+      "to": "internal",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "internal",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

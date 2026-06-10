@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/index.js",
+      "decompiled_module": "Users/user/project/src/index"
+    },
+    {
+      "original": "input/Users/user/project/src/utils.js",
+      "decompiled_module": "Users/user/project/src/utils"
+    }
+  ]
+}

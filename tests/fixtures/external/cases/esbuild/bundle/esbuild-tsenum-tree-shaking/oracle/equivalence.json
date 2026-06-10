@@ -1,0 +1,37 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/simple-member.ts",
+      "decompiled_module": "simple-member"
+    },
+    {
+      "original": "input/simple-enum.ts",
+      "decompiled_module": "simple-enum"
+    },
+    {
+      "original": "input/sibling-member.ts",
+      "decompiled_module": "sibling-member"
+    },
+    {
+      "original": "input/sibling-enum-before.ts",
+      "decompiled_module": "sibling-enum-before"
+    },
+    {
+      "original": "input/sibling-enum-middle.ts",
+      "decompiled_module": "sibling-enum-middle"
+    },
+    {
+      "original": "input/sibling-enum-after.ts",
+      "decompiled_module": "sibling-enum-after"
+    },
+    {
+      "original": "input/namespace-before.ts",
+      "decompiled_module": "namespace-before"
+    },
+    {
+      "original": "input/namespace-after.ts",
+      "decompiled_module": "namespace-after"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/class.js",
+      "decompiled_module": "class"
+    },
+    {
+      "original": "input/object.js",
+      "decompiled_module": "object"
+    }
+  ]
+}

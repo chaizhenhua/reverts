@@ -1,0 +1,7 @@
+
+				{
+					"compilerOptions": {
+						"jsx": "preserve" // This should be ignored
+					}
+				}
+			

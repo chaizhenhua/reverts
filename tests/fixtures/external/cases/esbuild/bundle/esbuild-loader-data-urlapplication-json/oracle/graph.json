@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "data:application/json,",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "data:application/json;base64,eyJ3b3JrcyI6dHJ1ZX0=",
+      "kind": "import_default",
+      "name": "b"
+    },
+    {
+      "from": "entry",
+      "to": "data:application/json;charset=UTF-8,%31%32%33",
+      "kind": "import_default",
+      "name": "c"
+    },
+    {
+      "from": "entry",
+      "to": "data:application/json;charset=UTF-8;base64,eyJ3b3JrcyI6dHJ1ZX0=",
+      "kind": "import_default",
+      "name": "d"
+    }
+  ],
+  "exports": []
+}

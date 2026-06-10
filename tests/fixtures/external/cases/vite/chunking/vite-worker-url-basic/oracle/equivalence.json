@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/src/url-worker.js",
+      "decompiled_module": "src/url-worker"
+    },
+    {
+      "original": "input/src/worker-shared.js",
+      "decompiled_module": "src/worker-shared"
+    }
+  ]
+}

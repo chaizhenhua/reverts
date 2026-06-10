@@ -1,0 +1,65 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/all.ts",
+      "decompiled_module": "all"
+    },
+    {
+      "original": "input/all_computed.ts",
+      "decompiled_module": "all_computed"
+    },
+    {
+      "original": "input/a.ts",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/b.ts",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/c.ts",
+      "decompiled_module": "c"
+    },
+    {
+      "original": "input/d.ts",
+      "decompiled_module": "d"
+    },
+    {
+      "original": "input/e.ts",
+      "decompiled_module": "e"
+    },
+    {
+      "original": "input/f.ts",
+      "decompiled_module": "f"
+    },
+    {
+      "original": "input/g.ts",
+      "decompiled_module": "g"
+    },
+    {
+      "original": "input/h.ts",
+      "decompiled_module": "h"
+    },
+    {
+      "original": "input/i.ts",
+      "decompiled_module": "i"
+    },
+    {
+      "original": "input/j.ts",
+      "decompiled_module": "j"
+    },
+    {
+      "original": "input/k.ts",
+      "decompiled_module": "k"
+    },
+    {
+      "original": "input/arguments.ts",
+      "decompiled_module": "arguments"
+    }
+  ]
+}

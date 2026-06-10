@@ -1,0 +1,65 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "i",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b1"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "c",
+      "kind": "import_named",
+      "name": "c1"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "c",
+      "kind": "import_named",
+      "name": "type c2"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "d",
+      "kind": "import_named",
+      "name": "d1"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "d",
+      "kind": "import_named",
+      "name": "d2"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "d",
+      "kind": "import_named",
+      "name": "type d3"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "e",
+      "kind": "import_named",
+      "name": "type e1"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "e",
+      "kind": "import_named",
+      "name": "type e2"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,102 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "pick-js",
+      "path": "pick-js.js"
+    },
+    {
+      "name": "pick-js",
+      "path": "pick-js.ts"
+    },
+    {
+      "name": "pick-ts",
+      "path": "pick-ts.jsx"
+    },
+    {
+      "name": "pick-ts",
+      "path": "pick-ts.ts"
+    },
+    {
+      "name": "pick-jsx",
+      "path": "pick-jsx.jsx"
+    },
+    {
+      "name": "pick-jsx",
+      "path": "pick-jsx.tsx"
+    },
+    {
+      "name": "pick-tsx",
+      "path": "pick-tsx.js"
+    },
+    {
+      "name": "pick-tsx",
+      "path": "pick-tsx.tsx"
+    },
+    {
+      "name": "order-js",
+      "path": "order-js.ts"
+    },
+    {
+      "name": "order-js",
+      "path": "order-js.tsx"
+    },
+    {
+      "name": "order-jsx",
+      "path": "order-jsx.ts"
+    },
+    {
+      "name": "order-jsx",
+      "path": "order-jsx.tsx"
+    },
+    {
+      "name": "node_modules/pkg/foo-js",
+      "path": "node_modules/pkg/foo-js.ts"
+    },
+    {
+      "name": "node_modules/pkg/foo-jsx",
+      "path": "node_modules/pkg/foo-jsx.tsx"
+    },
+    {
+      "name": "node_modules/pkg-exports/abc-js",
+      "path": "node_modules/pkg-exports/abc-js.ts"
+    },
+    {
+      "name": "node_modules/pkg-exports/abc-jsx",
+      "path": "node_modules/pkg-exports/abc-jsx.tsx"
+    },
+    {
+      "name": "node_modules/pkg-exports/lib/foo-js",
+      "path": "node_modules/pkg-exports/lib/foo-js.ts"
+    },
+    {
+      "name": "node_modules/pkg-exports/lib/foo-jsx",
+      "path": "node_modules/pkg-exports/lib/foo-jsx.tsx"
+    },
+    {
+      "name": "node_modules/pkg-imports/index",
+      "path": "node_modules/pkg-imports/index.js"
+    },
+    {
+      "name": "node_modules/pkg-imports/abc-js",
+      "path": "node_modules/pkg-imports/abc-js.ts"
+    },
+    {
+      "name": "node_modules/pkg-imports/abc-jsx",
+      "path": "node_modules/pkg-imports/abc-jsx.tsx"
+    },
+    {
+      "name": "node_modules/pkg-imports/lib/foo-js",
+      "path": "node_modules/pkg-imports/lib/foo-js.ts"
+    },
+    {
+      "name": "node_modules/pkg-imports/lib/foo-jsx",
+      "path": "node_modules/pkg-imports/lib/foo-jsx.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

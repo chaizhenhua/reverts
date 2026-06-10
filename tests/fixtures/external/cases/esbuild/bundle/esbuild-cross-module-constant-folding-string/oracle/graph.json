@@ -1,0 +1,99 @@
+{
+  "modules": [
+    {
+      "name": "enum-constants",
+      "path": "enum-constants.ts"
+    },
+    {
+      "name": "enum-entry",
+      "path": "enum-entry.ts"
+    },
+    {
+      "name": "const-constants",
+      "path": "const-constants.js"
+    },
+    {
+      "name": "const-entry",
+      "path": "const-entry.js"
+    },
+    {
+      "name": "nested-constants",
+      "path": "nested-constants.ts"
+    },
+    {
+      "name": "nested-entry",
+      "path": "nested-entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "enum-entry",
+      "to": "enum-constants",
+      "kind": "import_named",
+      "name": "x"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "nested-entry",
+      "to": "nested-constants",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "nested-entry",
+      "to": "nested-constants",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "nested-entry",
+      "to": "nested-constants",
+      "kind": "import_named",
+      "name": "c"
+    },
+    {
+      "from": "nested-entry",
+      "to": "nested-constants",
+      "kind": "import_named",
+      "name": "x"
+    }
+  ],
+  "exports": [
+    {
+      "module": "const-constants",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "const-constants",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "nested-constants",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "nested-constants",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "nested-constants",
+      "name": "c",
+      "kind": "value"
+    }
+  ]
+}

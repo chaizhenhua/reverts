@@ -1,0 +1,7 @@
+/* media-ampersand-first.css */
+@media screen {
+  :scope,
+  a {
+    color: red;
+  }
+}

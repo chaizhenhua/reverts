@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/keep.js",
+      "decompiled_module": "keep"
+    },
+    {
+      "original": "input/do-not-keep.js",
+      "decompiled_module": "do-not-keep"
+    }
+  ]
+}

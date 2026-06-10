@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "top-level",
+      "path": "top-level.js"
+    },
+    {
+      "name": "nested",
+      "path": "nested.js"
+    },
+    {
+      "name": "let",
+      "path": "let.js"
+    },
+    {
+      "name": "function",
+      "path": "function.js"
+    },
+    {
+      "name": "function-nested",
+      "path": "function-nested.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

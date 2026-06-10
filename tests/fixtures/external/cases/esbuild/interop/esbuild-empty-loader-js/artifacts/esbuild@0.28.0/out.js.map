@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../../input/entry.js"],
+  "sourcesContent": ["\n\t\t\t\timport './a.empty'\n\t\t\t\timport * as ns from './b.empty'\n\t\t\t\timport def from './c.empty'\n\t\t\t\timport { named } from './d.empty'\n\t\t\t\tconsole.log(ns, def, named)\n\t\t\t"],
+  "mappings": ";;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;AAEI,WAAoB;AACpB,iBAAgB;AAEhB,UAAQ,IAAI,IAAI,SAAAA,SAAK,MAAK;",
+  "names": ["def"]
+}

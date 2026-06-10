@@ -1,0 +1,6 @@
+/* media-greaterthan.css */
+@media screen {
+  > b {
+    color: red;
+  }
+}

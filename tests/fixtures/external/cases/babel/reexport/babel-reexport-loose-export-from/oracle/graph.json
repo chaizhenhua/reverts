@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.mjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": []
+}

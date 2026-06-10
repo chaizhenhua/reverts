@@ -1,0 +1,4 @@
+/* tests/fixtures/external/cases/bun/chunking/bun-splitting-circular-dynamic-imports-with-css/input/a.css */
+.a {
+  color: red;
+}

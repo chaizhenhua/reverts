@@ -1,0 +1,38 @@
+{
+  "tool": "webpack",
+  "version": "5.105.4",
+  "source_ref": "test/cases/mjs/namespace-object-lazy",
+  "command": [
+    "node",
+    "-e",
+    "webpack(config)",
+    "# source=test/cases/mjs/namespace-object-lazy"
+  ],
+  "config_kind": "template",
+  "entry": "./index.mjs",
+  "target": "async-node",
+  "mode": "none",
+  "output": {
+    "filename": "bundle.js",
+    "chunk_filename": "chunks/[name].js"
+  },
+  "experiments": {
+    "asyncWebAssembly": true,
+    "topLevelAwait": true,
+    "backCompat": false
+  },
+  "optimization": {
+    "removeAvailableModules": true,
+    "removeEmptyChunks": true,
+    "mergeDuplicateChunks": true,
+    "flagIncludedChunks": true,
+    "sideEffects": true,
+    "providedExports": true,
+    "usedExports": true,
+    "mangleExports": true,
+    "emitOnErrors": true,
+    "concatenateModules": false,
+    "moduleIds": "size",
+    "chunkIds": "size"
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "modules": [
+    {
+      "name": "function-this",
+      "path": "function-this.jsx"
+    },
+    {
+      "name": "class-this",
+      "path": "class-this.jsx"
+    },
+    {
+      "name": "normal-constructor",
+      "path": "normal-constructor.jsx"
+    },
+    {
+      "name": "derived-constructor",
+      "path": "derived-constructor.jsx"
+    },
+    {
+      "name": "normal-constructor-arg",
+      "path": "normal-constructor-arg.jsx"
+    },
+    {
+      "name": "derived-constructor-arg",
+      "path": "derived-constructor-arg.jsx"
+    },
+    {
+      "name": "normal-constructor-field",
+      "path": "normal-constructor-field.tsx"
+    },
+    {
+      "name": "derived-constructor-field",
+      "path": "derived-constructor-field.tsx"
+    },
+    {
+      "name": "static-field",
+      "path": "static-field.jsx"
+    },
+    {
+      "name": "top-level-this-esm",
+      "path": "top-level-this-esm.jsx"
+    },
+    {
+      "name": "top-level-this-cjs",
+      "path": "top-level-this-cjs.jsx"
+    },
+    {
+      "name": "typescript-namespace",
+      "path": "typescript-namespace.tsx"
+    },
+    {
+      "name": "typescript-enum",
+      "path": "typescript-enum.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "function-this",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "class-this",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "normal-constructor",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "derived-constructor",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "normal-constructor-arg",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "derived-constructor-arg",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "normal-constructor-field",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "derived-constructor-field",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "static-field",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "top-level-this-esm",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "top-level-this-cjs",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "typescript-namespace",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

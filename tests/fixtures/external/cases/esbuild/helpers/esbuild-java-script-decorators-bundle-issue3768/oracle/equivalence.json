@@ -1,0 +1,53 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/base-instance-method.js",
+      "decompiled_module": "base-instance-method"
+    },
+    {
+      "original": "input/base-instance-field.js",
+      "decompiled_module": "base-instance-field"
+    },
+    {
+      "original": "input/base-instance-accessor.js",
+      "decompiled_module": "base-instance-accessor"
+    },
+    {
+      "original": "input/base-static-method.js",
+      "decompiled_module": "base-static-method"
+    },
+    {
+      "original": "input/base-static-field.js",
+      "decompiled_module": "base-static-field"
+    },
+    {
+      "original": "input/base-static-accessor.js",
+      "decompiled_module": "base-static-accessor"
+    },
+    {
+      "original": "input/derived-instance-method.js",
+      "decompiled_module": "derived-instance-method"
+    },
+    {
+      "original": "input/derived-instance-field.js",
+      "decompiled_module": "derived-instance-field"
+    },
+    {
+      "original": "input/derived-instance-accessor.js",
+      "decompiled_module": "derived-instance-accessor"
+    },
+    {
+      "original": "input/derived-static-method.js",
+      "decompiled_module": "derived-static-method"
+    },
+    {
+      "original": "input/derived-static-field.js",
+      "decompiled_module": "derived-static-field"
+    },
+    {
+      "original": "input/derived-static-accessor.js",
+      "decompiled_module": "derived-static-accessor"
+    }
+  ]
+}

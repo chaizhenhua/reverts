@@ -1,0 +1,25 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/example.js",
+      "decompiled_module": "example"
+    },
+    {
+      "original": "input/node_modules/a.js",
+      "decompiled_module": "node_modules/a"
+    },
+    {
+      "original": "input/node_modules/b.js",
+      "decompiled_module": "node_modules/b"
+    },
+    {
+      "original": "input/node_modules/c.js",
+      "decompiled_module": "node_modules/c"
+    },
+    {
+      "original": "input/node_modules/d.js",
+      "decompiled_module": "node_modules/d"
+    }
+  ]
+}

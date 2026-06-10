@@ -1,0 +1,78 @@
+{
+  "modules": [
+    {
+      "name": "entry-esm",
+      "path": "entry-esm.js"
+    },
+    {
+      "name": "entry-cjs",
+      "path": "entry-cjs.js"
+    },
+    {
+      "name": "esm",
+      "path": "esm.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry-esm",
+      "to": "esm",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry-esm",
+      "to": "cjs",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry-esm",
+      "to": "esm",
+      "kind": "import_named",
+      "name": "esm_foo_"
+    },
+    {
+      "from": "entry-esm",
+      "to": "cjs",
+      "kind": "import_named",
+      "name": "cjs_foo_"
+    },
+    {
+      "from": "entry-cjs",
+      "to": "esm",
+      "kind": "require"
+    },
+    {
+      "from": "entry-cjs",
+      "to": "cjs",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "entry-esm",
+      "name": "bar_",
+      "kind": "value"
+    },
+    {
+      "module": "entry-cjs",
+      "name": "bar_",
+      "kind": "value"
+    },
+    {
+      "module": "esm",
+      "name": "esm_foo_",
+      "kind": "value"
+    },
+    {
+      "module": "cjs",
+      "name": "cjs_foo_",
+      "kind": "value"
+    }
+  ]
+}

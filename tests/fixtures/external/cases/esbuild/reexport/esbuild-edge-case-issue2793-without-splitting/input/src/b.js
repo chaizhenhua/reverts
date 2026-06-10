@@ -1,0 +1,3 @@
+
+				export const B = async () => (await import(".")).A
+			

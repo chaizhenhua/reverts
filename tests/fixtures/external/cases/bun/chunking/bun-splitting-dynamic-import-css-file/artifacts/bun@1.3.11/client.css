@@ -1,0 +1,4 @@
+/* tests/fixtures/external/cases/bun/chunking/bun-splitting-dynamic-import-css-file/input/test.css */
+.aaa {
+  color: red;
+}

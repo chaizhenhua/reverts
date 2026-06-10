@@ -1,0 +1,117 @@
+{
+  "modules": [
+    {
+      "name": "dir1/a",
+      "path": "dir1/a.js"
+    },
+    {
+      "name": "dir4/a",
+      "path": "dir4/a.js"
+    },
+    {
+      "name": "dir4/lib/a",
+      "path": "dir4/lib/a.js"
+    },
+    {
+      "name": "dir4/lib/b",
+      "path": "dir4/lib/b.js"
+    },
+    {
+      "name": "dir4/lib/index",
+      "path": "dir4/lib/index.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "dir4/lib/index",
+      "to": "dir4/lib/a",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "dir4/lib/index",
+      "to": "dir4/lib/b",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "index",
+      "to": "dir1/a",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./dir4/lib",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "dir4/a",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "dir1/a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dir1/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "dir1/a",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/a",
+      "name": "f",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/a",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/a",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/b",
+      "name": "f",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/b",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/b",
+      "name": "usedExports",
+      "kind": "value"
+    },
+    {
+      "module": "dir4/lib/index",
+      "name": "usedExports",
+      "kind": "value"
+    }
+  ]
+}

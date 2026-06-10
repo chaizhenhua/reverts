@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/entry.ts",
+      "decompiled_module": "src/entry"
+    },
+    {
+      "original": "input/src/inject.js",
+      "decompiled_module": "src/inject"
+    }
+  ]
+}

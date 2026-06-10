@@ -1,0 +1,5 @@
+
+				.foo {
+					composes: bar from "file.txt";
+				}
+			

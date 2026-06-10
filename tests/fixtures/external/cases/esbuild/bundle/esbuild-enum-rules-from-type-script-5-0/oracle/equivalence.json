@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/supported.ts",
+      "decompiled_module": "supported"
+    },
+    {
+      "original": "input/not-supported.ts",
+      "decompiled_module": "not-supported"
+    }
+  ]
+}

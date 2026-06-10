@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/id-define.js",
+      "decompiled_module": "id-define"
+    },
+    {
+      "original": "input/dot-define.js",
+      "decompiled_module": "dot-define"
+    }
+  ]
+}

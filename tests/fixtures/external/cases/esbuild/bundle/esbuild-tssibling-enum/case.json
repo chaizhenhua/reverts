@@ -1,0 +1,47 @@
+{
+  "id": "esbuild-tssibling-enum",
+  "title": "esbuild TestTSSiblingEnum",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_ts_test.go::TestTSSiblingEnum"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/number.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/nested-number.js",
+      "artifacts/esbuild@0.28.0/nested-propagation.js",
+      "artifacts/esbuild@0.28.0/nested-string.js",
+      "artifacts/esbuild@0.28.0/number.js",
+      "artifacts/esbuild@0.28.0/propagation.js",
+      "artifacts/esbuild@0.28.0/string.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "number",
+      "string",
+      "propagation",
+      "nested-number",
+      "nested-string",
+      "nested-propagation"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

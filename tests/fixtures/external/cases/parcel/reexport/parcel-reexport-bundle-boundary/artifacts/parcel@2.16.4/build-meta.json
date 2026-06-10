@@ -1,0 +1,11 @@
+{
+  "tool": "parcel",
+  "version": "2.16.4",
+  "source_ref": "integration/scope-hoisting/es6/re-export-bundle-boundary",
+  "entry": "index.js",
+  "parcel_options": {
+    "no_source_maps": true,
+    "no_content_hash": true,
+    "no_optimize": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "modules": [
+    {
+      "name": "1",
+      "path": "1.js"
+    },
+    {
+      "name": "2",
+      "path": "2.js"
+    },
+    {
+      "name": "3",
+      "path": "3.js"
+    },
+    {
+      "name": "4",
+      "path": "4.js"
+    },
+    {
+      "name": "5",
+      "path": "5.js"
+    },
+    {
+      "name": "6",
+      "path": "6.js"
+    },
+    {
+      "name": "7",
+      "path": "7.js"
+    },
+    {
+      "name": "8",
+      "path": "8.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

@@ -1,0 +1,110 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo1",
+      "path": "foo1.js"
+    },
+    {
+      "name": "foo2",
+      "path": "foo2.js"
+    },
+    {
+      "name": "foo3",
+      "path": "foo3.js"
+    },
+    {
+      "name": "foo4",
+      "path": "foo4.js"
+    },
+    {
+      "name": "bar1",
+      "path": "bar1.js"
+    },
+    {
+      "name": "bar2",
+      "path": "bar2.js"
+    },
+    {
+      "name": "bar3",
+      "path": "bar3.js"
+    },
+    {
+      "name": "bar4",
+      "path": "bar4.js"
+    },
+    {
+      "name": "baz1",
+      "path": "baz1.js"
+    },
+    {
+      "name": "baz2",
+      "path": "baz2.js"
+    },
+    {
+      "name": "outer",
+      "path": "outer.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "foo1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo3",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo4",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "bar1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "bar2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "bar3",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "bar4",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "baz1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "baz2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "outer",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

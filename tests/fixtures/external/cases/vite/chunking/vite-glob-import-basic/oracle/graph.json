@@ -1,0 +1,34 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/dir/foo",
+      "path": "src/dir/foo.js"
+    },
+    {
+      "name": "src/dir/bar",
+      "path": "src/dir/bar.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "modules",
+      "kind": "value"
+    },
+    {
+      "module": "src/dir/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/dir/bar",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

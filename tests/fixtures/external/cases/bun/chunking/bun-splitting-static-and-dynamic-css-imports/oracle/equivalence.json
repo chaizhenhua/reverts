@@ -1,0 +1,13 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/dynamic.js",
+      "decompiled_module": "dynamic"
+    },
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    }
+  ]
+}

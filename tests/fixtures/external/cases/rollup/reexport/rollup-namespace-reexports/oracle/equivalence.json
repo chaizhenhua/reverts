@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/hsl2hsv.js",
+      "decompiled_module": "hsl2hsv"
+    }
+  ]
+}

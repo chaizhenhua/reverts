@@ -1,0 +1,1 @@
+{ "browser": { "./baz.js": "./baz-browser.js" } }

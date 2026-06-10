@@ -1,0 +1,273 @@
+{
+  "modules": [
+    {
+      "name": "exported-entry",
+      "path": "exported-entry.js"
+    },
+    {
+      "name": "re-exported-entry",
+      "path": "re-exported-entry.js"
+    },
+    {
+      "name": "re-exported-constants",
+      "path": "re-exported-constants.js"
+    },
+    {
+      "name": "re-exported-2-entry",
+      "path": "re-exported-2-entry.js"
+    },
+    {
+      "name": "re-exported-2-constants",
+      "path": "re-exported-2-constants.js"
+    },
+    {
+      "name": "re-exported-star-entry",
+      "path": "re-exported-star-entry.js"
+    },
+    {
+      "name": "re-exported-star-constants",
+      "path": "re-exported-star-constants.js"
+    },
+    {
+      "name": "cross-module-entry",
+      "path": "cross-module-entry.js"
+    },
+    {
+      "name": "cross-module-constants",
+      "path": "cross-module-constants.js"
+    },
+    {
+      "name": "print-shorthand-entry",
+      "path": "print-shorthand-entry.js"
+    },
+    {
+      "name": "print-shorthand-constants",
+      "path": "print-shorthand-constants.js"
+    },
+    {
+      "name": "circular-import-entry",
+      "path": "circular-import-entry.js"
+    },
+    {
+      "name": "circular-import-constants",
+      "path": "circular-import-constants.js"
+    },
+    {
+      "name": "circular-import-cycle",
+      "path": "circular-import-cycle.js"
+    },
+    {
+      "name": "circular-re-export-entry",
+      "path": "circular-re-export-entry.js"
+    },
+    {
+      "name": "circular-re-export-constants",
+      "path": "circular-re-export-constants.js"
+    },
+    {
+      "name": "circular-re-export-cycle",
+      "path": "circular-re-export-cycle.js"
+    },
+    {
+      "name": "circular-re-export-star-entry",
+      "path": "circular-re-export-star-entry.js"
+    },
+    {
+      "name": "circular-re-export-star-constants",
+      "path": "circular-re-export-star-constants.js"
+    },
+    {
+      "name": "circular-re-export-star-cycle",
+      "path": "circular-re-export-star-cycle.js"
+    },
+    {
+      "name": "non-circular-export-entry",
+      "path": "non-circular-export-entry.js"
+    },
+    {
+      "name": "non-circular-export-constants",
+      "path": "non-circular-export-constants.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "re-exported-entry",
+      "to": "re-exported-constants",
+      "kind": "import_named",
+      "name": "x_REMOVE"
+    },
+    {
+      "from": "re-exported-entry",
+      "to": "re-exported-constants",
+      "kind": "import_named",
+      "name": "y_keep"
+    },
+    {
+      "from": "re-exported-star-entry",
+      "to": "re-exported-star-constants",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "cross-module-entry",
+      "to": "cross-module-constants",
+      "kind": "import_named",
+      "name": "x_REMOVE"
+    },
+    {
+      "from": "cross-module-entry",
+      "to": "cross-module-constants",
+      "kind": "import_named",
+      "name": "y_keep"
+    },
+    {
+      "from": "print-shorthand-entry",
+      "to": "print-shorthand-constants",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "print-shorthand-entry",
+      "to": "print-shorthand-constants",
+      "kind": "import_named",
+      "name": "_bar"
+    },
+    {
+      "from": "circular-import-cycle",
+      "to": "circular-import-constants",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "circular-re-export-entry",
+      "to": "circular-re-export-constants",
+      "kind": "import_named",
+      "name": "baz"
+    },
+    {
+      "from": "circular-re-export-cycle",
+      "to": "circular-re-export-constants",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "circular-re-export-star-constants",
+      "to": "circular-re-export-star-cycle",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "circular-re-export-star-cycle",
+      "to": "circular-re-export-star-constants",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "non-circular-export-entry",
+      "to": "non-circular-export-constants",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "non-circular-export-entry",
+      "to": "non-circular-export-constants",
+      "kind": "import_named",
+      "name": "bar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "exported-entry",
+      "name": "y_keep",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-constants",
+      "name": "x_REMOVE",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-constants",
+      "name": "y_keep",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-2-constants",
+      "name": "x_REMOVE",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-2-constants",
+      "name": "y_keep",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-star-constants",
+      "name": "x_keep",
+      "kind": "value"
+    },
+    {
+      "module": "re-exported-star-constants",
+      "name": "y_keep",
+      "kind": "value"
+    },
+    {
+      "module": "cross-module-constants",
+      "name": "x_REMOVE",
+      "kind": "value"
+    },
+    {
+      "module": "cross-module-constants",
+      "name": "y_keep",
+      "kind": "value"
+    },
+    {
+      "module": "cross-module-constants",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "print-shorthand-constants",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "print-shorthand-constants",
+      "name": "_bar",
+      "kind": "value"
+    },
+    {
+      "module": "circular-import-constants",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "circular-import-constants",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "circular-re-export-constants",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "circular-re-export-constants",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "circular-re-export-cycle",
+      "name": "baz",
+      "kind": "value"
+    },
+    {
+      "module": "circular-re-export-star-constants",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "circular-re-export-star-constants",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

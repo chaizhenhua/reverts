@@ -1,0 +1,39 @@
+{
+  "id": "esbuild-mangle-quoted-props",
+  "title": "esbuild TestMangleQuotedProps",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestMangleQuotedProps"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/keep.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/keep.js",
+      "artifacts/esbuild@0.28.0/mangle.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "keep",
+      "mangle"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

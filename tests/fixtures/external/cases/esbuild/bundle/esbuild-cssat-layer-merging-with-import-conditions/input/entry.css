@@ -1,0 +1,14 @@
+
+				@import "a.css" supports(color: first);
+
+				@import "a.css" supports(color: second);
+				@import "b.css" supports(color: second);
+
+				@import "a.css" supports(color: first);
+				@import "b.css" supports(color: first);
+
+				@import "a.css" supports(color: second);
+				@import "b.css" supports(color: second);
+
+				@import "b.css" supports(color: first);
+			

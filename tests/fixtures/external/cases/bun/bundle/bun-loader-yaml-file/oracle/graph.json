@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./hello.notyaml",
+      "kind": "import_default",
+      "name": "hello"
+    }
+  ],
+  "exports": []
+}

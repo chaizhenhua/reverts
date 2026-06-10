@@ -1,0 +1,3 @@
+{
+				"extends": "@whatever/tsconfig/a/b/c"
+			}

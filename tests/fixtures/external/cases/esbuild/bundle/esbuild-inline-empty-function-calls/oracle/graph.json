@@ -1,0 +1,75 @@
+{
+  "modules": [
+    {
+      "name": "empty",
+      "path": "empty.js"
+    },
+    {
+      "name": "empty-comma",
+      "path": "empty-comma.js"
+    },
+    {
+      "name": "empty-if-else",
+      "path": "empty-if-else.js"
+    },
+    {
+      "name": "empty-last",
+      "path": "empty-last.js"
+    },
+    {
+      "name": "empty-cross-module",
+      "path": "empty-cross-module.js"
+    },
+    {
+      "name": "empty-cross-module-def",
+      "path": "empty-cross-module-def.js"
+    },
+    {
+      "name": "empty-first",
+      "path": "empty-first.js"
+    },
+    {
+      "name": "empty-generator",
+      "path": "empty-generator.js"
+    },
+    {
+      "name": "empty-async",
+      "path": "empty-async.js"
+    },
+    {
+      "name": "reassign",
+      "path": "reassign.js"
+    },
+    {
+      "name": "reassign-inc",
+      "path": "reassign-inc.js"
+    },
+    {
+      "name": "reassign-div",
+      "path": "reassign-div.js"
+    },
+    {
+      "name": "reassign-array",
+      "path": "reassign-array.js"
+    },
+    {
+      "name": "reassign-object",
+      "path": "reassign-object.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "empty-cross-module",
+      "to": "empty-cross-module-def",
+      "kind": "import_named",
+      "name": "DROP"
+    }
+  ],
+  "exports": [
+    {
+      "module": "empty-cross-module-def",
+      "name": "DROP",
+      "kind": "value"
+    }
+  ]
+}

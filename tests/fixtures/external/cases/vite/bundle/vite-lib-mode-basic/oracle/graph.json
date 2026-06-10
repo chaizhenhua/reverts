@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/message",
+      "path": "src/message.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "src/message",
+      "kind": "import_default",
+      "name": "message"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/message",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

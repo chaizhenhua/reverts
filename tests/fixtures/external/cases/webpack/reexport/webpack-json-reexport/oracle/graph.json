@@ -1,0 +1,88 @@
+{
+  "modules": [
+    {
+      "name": "data",
+      "path": "data.json"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "other",
+      "path": "other.json"
+    },
+    {
+      "name": "reexport",
+      "path": "reexport.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "data"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "named"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "ns"
+    },
+    {
+      "from": "reexport",
+      "to": "other",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "data",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "ns",
+      "kind": "value"
+    },
+    {
+      "module": "other",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "ns",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    },
+    {
+      "name": "d",
+      "path": "d.js"
+    },
+    {
+      "name": "e",
+      "path": "e.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "a",
+      "to": "a",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "varName",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "letName",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "constName",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "Func",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "Class",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "d",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

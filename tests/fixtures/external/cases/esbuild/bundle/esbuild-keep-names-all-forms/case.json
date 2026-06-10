@@ -1,0 +1,39 @@
+{
+  "id": "esbuild-keep-names-all-forms",
+  "title": "esbuild TestKeepNamesAllForms",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestKeepNamesAllForms"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/do-not-keep.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/do-not-keep.js",
+      "artifacts/esbuild@0.28.0/keep.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "keep",
+      "do-not-keep"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

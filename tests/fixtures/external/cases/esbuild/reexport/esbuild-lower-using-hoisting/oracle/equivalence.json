@@ -1,0 +1,81 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/hoist-use-strict.js",
+      "decompiled_module": "hoist-use-strict"
+    },
+    {
+      "original": "input/hoist-directive.js",
+      "decompiled_module": "hoist-directive"
+    },
+    {
+      "original": "input/hoist-import.js",
+      "decompiled_module": "hoist-import"
+    },
+    {
+      "original": "input/hoist-export-star.js",
+      "decompiled_module": "hoist-export-star"
+    },
+    {
+      "original": "input/hoist-export-from.js",
+      "decompiled_module": "hoist-export-from"
+    },
+    {
+      "original": "input/hoist-export-clause.js",
+      "decompiled_module": "hoist-export-clause"
+    },
+    {
+      "original": "input/hoist-export-local-direct.js",
+      "decompiled_module": "hoist-export-local-direct"
+    },
+    {
+      "original": "input/hoist-export-local-indirect.js",
+      "decompiled_module": "hoist-export-local-indirect"
+    },
+    {
+      "original": "input/hoist-export-class-direct.js",
+      "decompiled_module": "hoist-export-class-direct"
+    },
+    {
+      "original": "input/hoist-export-class-indirect.js",
+      "decompiled_module": "hoist-export-class-indirect"
+    },
+    {
+      "original": "input/hoist-export-function-direct.js",
+      "decompiled_module": "hoist-export-function-direct"
+    },
+    {
+      "original": "input/hoist-export-function-indirect.js",
+      "decompiled_module": "hoist-export-function-indirect"
+    },
+    {
+      "original": "input/hoist-export-default-class-name-unused.js",
+      "decompiled_module": "hoist-export-default-class-name-unused"
+    },
+    {
+      "original": "input/hoist-export-default-class-name-used.js",
+      "decompiled_module": "hoist-export-default-class-name-used"
+    },
+    {
+      "original": "input/hoist-export-default-class-anonymous.js",
+      "decompiled_module": "hoist-export-default-class-anonymous"
+    },
+    {
+      "original": "input/hoist-export-default-function-name-unused.js",
+      "decompiled_module": "hoist-export-default-function-name-unused"
+    },
+    {
+      "original": "input/hoist-export-default-function-name-used.js",
+      "decompiled_module": "hoist-export-default-function-name-used"
+    },
+    {
+      "original": "input/hoist-export-default-function-anonymous.js",
+      "decompiled_module": "hoist-export-default-function-anonymous"
+    },
+    {
+      "original": "input/hoist-export-default-expr.js",
+      "decompiled_module": "hoist-export-default-expr"
+    }
+  ]
+}

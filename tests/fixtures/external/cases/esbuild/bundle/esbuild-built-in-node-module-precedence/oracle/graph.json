@@ -1,0 +1,48 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "node_modules/fs/abc",
+      "path": "node_modules/fs/abc.js"
+    },
+    {
+      "name": "node_modules/fs/index",
+      "path": "node_modules/fs/index.js"
+    },
+    {
+      "name": "node_modules/fs/promises",
+      "path": "node_modules/fs/promises.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "fs",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "fs/promises",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "node:foo",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "fs/abc",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "fs/",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

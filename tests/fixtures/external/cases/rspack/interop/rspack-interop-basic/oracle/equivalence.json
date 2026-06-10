@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/a.js",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/esm.js",
+      "decompiled_module": "esm"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    }
+  ]
+}

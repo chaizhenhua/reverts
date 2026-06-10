@@ -1,0 +1,54 @@
+{
+  "id": "rolldown-lazy-barrel-circular-star-exports",
+  "title": "rolldown lazy barrel circular star exports",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rolldown",
+    "project_version": "1.0.0-rc.13",
+    "project_commit": "a48ca341e83a2f909774b09925c390ea27d4b848",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/rolldown/tests/fixtures/lazy-barrel/circular-star-exports"
+  },
+  "artifact": {
+    "tool": "rolldown",
+    "version": "1.0.0-rc.13",
+    "entry": "artifacts/rolldown@1.0.0-rc.13/main.js",
+    "outputs": [
+      "artifacts/rolldown@1.0.0-rc.13/main.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "rolldown",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "barrel-a/a",
+      "barrel-a/index",
+      "barrel-b/b",
+      "barrel-b/index",
+      "main"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "barrel-a/a",
+        "name": "a"
+      },
+      {
+        "module": "barrel-a/index",
+        "name": "a"
+      },
+      {
+        "module": "barrel-b/b",
+        "name": "b"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

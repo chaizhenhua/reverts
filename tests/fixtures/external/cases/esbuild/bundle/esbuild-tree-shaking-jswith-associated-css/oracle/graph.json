@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "project/test",
+      "path": "project/test.jsx"
+    },
+    {
+      "name": "project/node_modules/pkg/button",
+      "path": "project/node_modules/pkg/button.js"
+    },
+    {
+      "name": "project/node_modules/pkg/menu",
+      "path": "project/node_modules/pkg/menu.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "project/test",
+      "to": "pkg/button",
+      "kind": "import_named",
+      "name": "Button"
+    },
+    {
+      "from": "project/test",
+      "to": "pkg/menu",
+      "kind": "import_named",
+      "name": "Menu"
+    }
+  ],
+  "exports": [
+    {
+      "module": "project/node_modules/pkg/button",
+      "name": "Button",
+      "kind": "value"
+    },
+    {
+      "module": "project/node_modules/pkg/menu",
+      "name": "Menu",
+      "kind": "value"
+    }
+  ]
+}

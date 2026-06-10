@@ -1,0 +1,69 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "d_WRAP",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "h_WRAP",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "i_WRAP",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "j_WRAP",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "e_WRAP",
+      "kind": "import_default",
+      "name": "e"
+    },
+    {
+      "from": "entry",
+      "to": "b_nowrap",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "entry",
+      "to": "f_WRAP",
+      "kind": "import_named",
+      "name": "default as f"
+    },
+    {
+      "from": "entry",
+      "to": "g_WRAP",
+      "kind": "import_named",
+      "name": "__esModule as g"
+    },
+    {
+      "from": "entry",
+      "to": "c_nowrap",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "entry",
+      "to": "k_WRAP",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

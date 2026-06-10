@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/home/index.js",
+      "decompiled_module": "Users/user/project/home/index"
+    },
+    {
+      "original": "input/Users/user/project/about/index.js",
+      "decompiled_module": "Users/user/project/about/index"
+    },
+    {
+      "original": "input/Users/user/project/common/index.js",
+      "decompiled_module": "Users/user/project/common/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg/index.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg/index"
+    }
+  ]
+}

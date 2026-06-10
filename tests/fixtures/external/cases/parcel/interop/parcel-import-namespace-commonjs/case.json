@@ -1,0 +1,53 @@
+{
+  "id": "parcel-import-namespace-commonjs",
+  "title": "parcel import namespace commonjs with splitting",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "parcel",
+    "project_version": "2.16.4",
+    "project_commit": "59484858a1a0bcbb71f74088956bb437a2db6505",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "integration/scope-hoisting/es6/import-namespace-commonjs"
+  },
+  "artifact": {
+    "tool": "parcel",
+    "version": "2.16.4",
+    "entry": "artifacts/parcel@2.16.4/a.js",
+    "outputs": [
+      "artifacts/parcel@2.16.4/a.js",
+      "artifacts/parcel@2.16.4/b0.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "parcel",
+    "wrappers": [
+      "parcelRequire"
+    ],
+    "helpers": [
+      "$parcel$export",
+      "$parcel$resolve",
+      "$parcel$extendImportMap",
+      "parcelRequire",
+      "parcelRegister"
+    ],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "b",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

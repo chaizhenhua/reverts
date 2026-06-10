@@ -1,0 +1,35 @@
+
+				@import url(http://example.com/foo.css);
+				@import url(http://example.com/foo.css) layer;
+				@import url(http://example.com/foo.css) layer(layer-name);
+				@import url(http://example.com/foo.css) layer(layer-name) supports(supports-condition);
+				@import url(http://example.com/foo.css) layer(layer-name) supports(supports-condition) list-of-media-queries;
+				@import url(http://example.com/foo.css) layer(layer-name) list-of-media-queries;
+				@import url(http://example.com/foo.css) supports(supports-condition);
+				@import url(http://example.com/foo.css) supports(supports-condition) list-of-media-queries;
+				@import url(http://example.com/foo.css) list-of-media-queries;
+
+				@import url(foo.css);
+				@import url(foo.css) layer;
+				@import url(foo.css) layer(layer-name);
+				@import url(foo.css) layer(layer-name) supports(supports-condition);
+				@import url(foo.css) layer(layer-name) supports(supports-condition) list-of-media-queries;
+				@import url(foo.css) layer(layer-name) list-of-media-queries;
+				@import url(foo.css) supports(supports-condition);
+				@import url(foo.css) supports(supports-condition) list-of-media-queries;
+				@import url(foo.css) list-of-media-queries;
+
+				@import url(empty-1.css) layer(empty-1);
+				@import url(empty-2.css) supports(empty: 2);
+				@import url(empty-3.css) (empty: 3);
+
+				@import "nested-layer.css" layer(outer);
+				@import "nested-layer.css" supports(outer: true);
+				@import "nested-layer.css" (outer: true);
+				@import "nested-supports.css" layer(outer);
+				@import "nested-supports.css" supports(outer: true);
+				@import "nested-supports.css" (outer: true);
+				@import "nested-media.css" layer(outer);
+				@import "nested-media.css" supports(outer: true);
+				@import "nested-media.css" (outer: true);
+			

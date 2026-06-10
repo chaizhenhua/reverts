@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "node_modules/pkg/main",
+      "path": "node_modules/pkg/main.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

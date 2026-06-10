@@ -1,0 +1,37 @@
+{
+  "id": "swc-import-meta-commonjs",
+  "title": "swc import meta commonjs lowering",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "swc",
+    "project_version": "1.15.24",
+    "project_commit": "87dee576923cc85687b281bc762b9e56c26ab7c6",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "crates/swc_ecma_transforms_module/tests/fixture/common/import-meta"
+  },
+  "artifact": {
+    "tool": "swc",
+    "version": "1.15.24",
+    "entry": "artifacts/swc@1.15.24/input.js",
+    "outputs": [
+      "artifacts/swc@1.15.24/input.js"
+    ],
+    "format": "bundle",
+    "module_kind": "commonjs"
+  },
+  "expectations": {
+    "bundler_family": "swc",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "input"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

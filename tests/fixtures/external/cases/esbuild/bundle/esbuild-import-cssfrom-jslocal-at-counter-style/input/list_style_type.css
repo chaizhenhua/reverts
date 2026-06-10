@@ -1,0 +1,18 @@
+
+				@counter-style local { symbols: A B C }
+
+				div :global { list-style-type: GLOBAL }
+				div :local { list-style-type: local }
+
+				/* Must not accept invalid type values */
+				div :local { list-style-type: none }
+				div :local { list-style-type: INITIAL }
+				div :local { list-style-type: decimal }
+				div :local { list-style-type: disc }
+				div :local { list-style-type: SQUARE }
+				div :local { list-style-type: circle }
+				div :local { list-style-type: disclosure-OPEN }
+				div :local { list-style-type: DISCLOSURE-closed }
+				div :local { list-style-type: LAO }
+				div :local { list-style-type: "\1F44D" }
+			

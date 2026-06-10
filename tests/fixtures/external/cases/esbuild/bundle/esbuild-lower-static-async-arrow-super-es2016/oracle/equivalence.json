@@ -1,0 +1,53 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/foo1.js",
+      "decompiled_module": "foo1"
+    },
+    {
+      "original": "input/foo2.js",
+      "decompiled_module": "foo2"
+    },
+    {
+      "original": "input/foo3.js",
+      "decompiled_module": "foo3"
+    },
+    {
+      "original": "input/foo4.js",
+      "decompiled_module": "foo4"
+    },
+    {
+      "original": "input/bar1.js",
+      "decompiled_module": "bar1"
+    },
+    {
+      "original": "input/bar2.js",
+      "decompiled_module": "bar2"
+    },
+    {
+      "original": "input/bar3.js",
+      "decompiled_module": "bar3"
+    },
+    {
+      "original": "input/bar4.js",
+      "decompiled_module": "bar4"
+    },
+    {
+      "original": "input/baz1.js",
+      "decompiled_module": "baz1"
+    },
+    {
+      "original": "input/baz2.js",
+      "decompiled_module": "baz2"
+    },
+    {
+      "original": "input/outer.js",
+      "decompiled_module": "outer"
+    }
+  ]
+}

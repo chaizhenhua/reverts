@@ -1,0 +1,66 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.js"
+    },
+    {
+      "name": "lib-used",
+      "path": "lib-used.js"
+    },
+    {
+      "name": "lib-variant",
+      "path": "lib-variant.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "getInfo"
+    },
+    {
+      "from": "main",
+      "to": "lib-variant",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "lib-used",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "getInfo"
+    },
+    {
+      "from": "lib-variant",
+      "to": "lib-used",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main",
+      "name": "getCommonInfo",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "getInfo",
+      "kind": "value"
+    },
+    {
+      "module": "lib-used",
+      "name": "getInfoWithUsed",
+      "kind": "value"
+    },
+    {
+      "module": "lib-variant",
+      "name": "getInfoWithVariant",
+      "kind": "value"
+    }
+  ]
+}

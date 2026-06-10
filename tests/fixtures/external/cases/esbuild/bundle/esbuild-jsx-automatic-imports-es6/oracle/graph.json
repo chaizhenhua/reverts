@@ -1,0 +1,38 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.jsx"
+    },
+    {
+      "name": "custom-react",
+      "path": "custom-react.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "custom-react",
+      "kind": "import_named",
+      "name": "jsx"
+    },
+    {
+      "from": "entry",
+      "to": "custom-react",
+      "kind": "import_named",
+      "name": "Fragment"
+    }
+  ],
+  "exports": [
+    {
+      "module": "custom-react",
+      "name": "jsx",
+      "kind": "value"
+    },
+    {
+      "module": "custom-react",
+      "name": "Fragment",
+      "kind": "value"
+    }
+  ]
+}

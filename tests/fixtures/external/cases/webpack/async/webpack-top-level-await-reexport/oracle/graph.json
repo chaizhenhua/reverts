@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    },
+    {
+      "name": "reexport",
+      "path": "reexport.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "reexport",
+      "to": "module",
+      "kind": "import_default",
+      "name": "value"
+    }
+  ],
+  "exports": [
+    {
+      "module": "module",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "other",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

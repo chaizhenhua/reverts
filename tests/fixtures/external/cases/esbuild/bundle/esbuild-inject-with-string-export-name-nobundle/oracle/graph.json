@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inject",
+      "path": "inject.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

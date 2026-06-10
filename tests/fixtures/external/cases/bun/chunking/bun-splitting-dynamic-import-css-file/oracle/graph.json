@@ -1,0 +1,20 @@
+{
+  "modules": [
+    {
+      "name": "client",
+      "path": "client.tsx"
+    },
+    {
+      "name": "test",
+      "path": "test.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "client",
+      "to": "test",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

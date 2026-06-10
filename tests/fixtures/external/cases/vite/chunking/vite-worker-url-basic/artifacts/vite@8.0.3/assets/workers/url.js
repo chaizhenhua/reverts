@@ -1,0 +1,1 @@
+const e=`from-worker-shared`;self.onmessage=t=>{self.postMessage({type:`url-worker`,message:e,echo:t.data})},self.postMessage({type:`init`,message:e});

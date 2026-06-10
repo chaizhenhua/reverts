@@ -1,0 +1,24 @@
+{
+  "tool": "bun",
+  "version": "1.3.11",
+  "source_ref": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_import_syntax_named_and_default",
+  "command": [
+    "/tmp/bun-bin.cOj18u/bun-linux-x64/bun",
+    "build",
+    "/entry.js",
+    "--outdir",
+    "artifacts/bun@1.3.11",
+    "--target",
+    "bun",
+    "--format",
+    "esm"
+  ],
+  "entry_points": [
+    "entry.js"
+  ],
+  "advanced_entry_points": null,
+  "options": {
+    "bundle": true,
+    "entry_names": "[dir]/[name].[ext]"
+  }
+}

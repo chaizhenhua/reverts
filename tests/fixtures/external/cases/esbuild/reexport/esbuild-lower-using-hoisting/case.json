@@ -1,0 +1,130 @@
+{
+  "id": "esbuild-lower-using-hoisting",
+  "title": "esbuild TestLowerUsingHoisting",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_lower_test.go::TestLowerUsingHoisting"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/hoist-use-strict.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/hoist-directive.js",
+      "artifacts/esbuild@0.28.0/hoist-export-class-direct.js",
+      "artifacts/esbuild@0.28.0/hoist-export-class-indirect.js",
+      "artifacts/esbuild@0.28.0/hoist-export-clause.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-class-anonymous.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-class-name-unused.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-class-name-used.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-expr.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-function-anonymous.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-function-name-unused.js",
+      "artifacts/esbuild@0.28.0/hoist-export-default-function-name-used.js",
+      "artifacts/esbuild@0.28.0/hoist-export-from.js",
+      "artifacts/esbuild@0.28.0/hoist-export-function-direct.js",
+      "artifacts/esbuild@0.28.0/hoist-export-function-indirect.js",
+      "artifacts/esbuild@0.28.0/hoist-export-local-direct.js",
+      "artifacts/esbuild@0.28.0/hoist-export-local-indirect.js",
+      "artifacts/esbuild@0.28.0/hoist-export-star.js",
+      "artifacts/esbuild@0.28.0/hoist-import.js",
+      "artifacts/esbuild@0.28.0/hoist-use-strict.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "hoist-use-strict",
+      "hoist-directive",
+      "hoist-import",
+      "hoist-export-star",
+      "hoist-export-from",
+      "hoist-export-clause",
+      "hoist-export-local-direct",
+      "hoist-export-local-indirect",
+      "hoist-export-class-direct",
+      "hoist-export-class-indirect",
+      "hoist-export-function-direct",
+      "hoist-export-function-indirect",
+      "hoist-export-default-class-name-unused",
+      "hoist-export-default-class-name-used",
+      "hoist-export-default-class-anonymous",
+      "hoist-export-default-function-name-unused",
+      "hoist-export-default-function-name-used",
+      "hoist-export-default-function-anonymous",
+      "hoist-export-default-expr"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "hoist-export-local-direct",
+        "name": "ac1"
+      },
+      {
+        "module": "hoist-export-local-direct",
+        "name": "a1"
+      },
+      {
+        "module": "hoist-export-local-direct",
+        "name": "c1"
+      },
+      {
+        "module": "hoist-export-class-direct",
+        "name": "Foo1"
+      },
+      {
+        "module": "hoist-export-class-direct",
+        "name": "Bar1"
+      },
+      {
+        "module": "hoist-export-function-direct",
+        "name": "foo1"
+      },
+      {
+        "module": "hoist-export-function-direct",
+        "name": "bar1"
+      },
+      {
+        "module": "hoist-export-default-class-name-unused",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-class-name-used",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-class-anonymous",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-function-name-unused",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-function-name-used",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-function-anonymous",
+        "name": "default"
+      },
+      {
+        "module": "hoist-export-default-expr",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

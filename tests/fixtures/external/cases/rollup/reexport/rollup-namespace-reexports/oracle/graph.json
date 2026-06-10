@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "hsl2hsv",
+      "path": "hsl2hsv.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "index",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "main",
+      "to": "hsl2hsv",
+      "kind": "import_named",
+      "name": "p"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "hsl2hsv",
+      "kind": "value"
+    },
+    {
+      "module": "hsl2hsv",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hsl2hsv",
+      "name": "p",
+      "kind": "value"
+    }
+  ]
+}

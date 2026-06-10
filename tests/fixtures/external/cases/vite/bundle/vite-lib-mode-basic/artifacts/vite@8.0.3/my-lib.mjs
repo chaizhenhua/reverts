@@ -1,0 +1,71 @@
+//#region ../../home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-mode-basic/input/src/message.js
+var e = "hello vite";
+//#endregion
+//#region \0@oxc-project+runtime@0.122.0/helpers/typeof.js
+function t(e) {
+	"@babel/helpers - typeof";
+	return t = typeof Symbol == "function" && typeof Symbol.iterator == "symbol" ? function(e) {
+		return typeof e;
+	} : function(e) {
+		return e && typeof Symbol == "function" && e.constructor === Symbol && e !== Symbol.prototype ? "symbol" : typeof e;
+	}, t(e);
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.122.0/helpers/toPrimitive.js
+function n(e, n) {
+	if (t(e) != "object" || !e) return e;
+	var r = e[Symbol.toPrimitive];
+	if (r !== void 0) {
+		var i = r.call(e, n || "default");
+		if (t(i) != "object") return i;
+		throw TypeError("@@toPrimitive must return a primitive value.");
+	}
+	return (n === "string" ? String : Number)(e);
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.122.0/helpers/toPropertyKey.js
+function r(e) {
+	var r = n(e, "string");
+	return t(r) == "symbol" ? r : r + "";
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.122.0/helpers/defineProperty.js
+function i(e, t, n) {
+	return (t = r(t)) in e ? Object.defineProperty(e, t, {
+		value: n,
+		enumerable: !0,
+		configurable: !0,
+		writable: !0
+	}) : e[t] = n, e;
+}
+//#endregion
+//#region \0@oxc-project+runtime@0.122.0/helpers/objectSpread2.js
+function a(e, t) {
+	var n = Object.keys(e);
+	if (Object.getOwnPropertySymbols) {
+		var r = Object.getOwnPropertySymbols(e);
+		t && (r = r.filter(function(t) {
+			return Object.getOwnPropertyDescriptor(e, t).enumerable;
+		})), n.push.apply(n, r);
+	}
+	return n;
+}
+function o(e) {
+	for (var t = 1; t < arguments.length; t++) {
+		var n = arguments[t] == null ? {} : arguments[t];
+		t % 2 ? a(Object(n), !0).forEach(function(t) {
+			i(e, t, n[t]);
+		}) : Object.getOwnPropertyDescriptors ? Object.defineProperties(e, Object.getOwnPropertyDescriptors(n)) : a(Object(n)).forEach(function(t) {
+			Object.defineProperty(e, t, Object.getOwnPropertyDescriptor(n, t));
+		});
+	}
+	return e;
+}
+//#endregion
+//#region ../../home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-mode-basic/input/src/main.js
+var s, c = Object.assign(function(t) {
+	return console.log(o({}, "foo")), console.log(e), t;
+});
+(s = void 0) == null || s.foo;
+//#endregion
+export { c as default };

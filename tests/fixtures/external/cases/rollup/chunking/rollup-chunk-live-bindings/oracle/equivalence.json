@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main1.js",
+      "decompiled_module": "main1"
+    },
+    {
+      "original": "input/main2.js",
+      "decompiled_module": "main2"
+    },
+    {
+      "original": "input/lib.js",
+      "decompiled_module": "lib"
+    },
+    {
+      "original": "input/dep1.js",
+      "decompiled_module": "dep1"
+    },
+    {
+      "original": "input/dep2.js",
+      "decompiled_module": "dep2"
+    }
+  ]
+}

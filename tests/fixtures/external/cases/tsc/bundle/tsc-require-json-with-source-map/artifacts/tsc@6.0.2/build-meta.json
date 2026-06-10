@@ -1,0 +1,14 @@
+{
+  "tool": "tsc",
+  "version": "6.0.2",
+  "source_ref": "tests/cases/compiler/requireOfJsonFileWithSourceMap.ts",
+  "compiler_options": {
+    "module": "commonjs",
+    "target": "es2015",
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "outDir": "dist"
+  },
+  "entry_source": "file1.ts"
+}

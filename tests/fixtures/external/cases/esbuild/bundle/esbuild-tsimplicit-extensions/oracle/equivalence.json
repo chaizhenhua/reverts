@@ -1,0 +1,101 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/pick-js.js",
+      "decompiled_module": "pick-js"
+    },
+    {
+      "original": "input/pick-js.ts",
+      "decompiled_module": "pick-js"
+    },
+    {
+      "original": "input/pick-ts.jsx",
+      "decompiled_module": "pick-ts"
+    },
+    {
+      "original": "input/pick-ts.ts",
+      "decompiled_module": "pick-ts"
+    },
+    {
+      "original": "input/pick-jsx.jsx",
+      "decompiled_module": "pick-jsx"
+    },
+    {
+      "original": "input/pick-jsx.tsx",
+      "decompiled_module": "pick-jsx"
+    },
+    {
+      "original": "input/pick-tsx.js",
+      "decompiled_module": "pick-tsx"
+    },
+    {
+      "original": "input/pick-tsx.tsx",
+      "decompiled_module": "pick-tsx"
+    },
+    {
+      "original": "input/order-js.ts",
+      "decompiled_module": "order-js"
+    },
+    {
+      "original": "input/order-js.tsx",
+      "decompiled_module": "order-js"
+    },
+    {
+      "original": "input/order-jsx.ts",
+      "decompiled_module": "order-jsx"
+    },
+    {
+      "original": "input/order-jsx.tsx",
+      "decompiled_module": "order-jsx"
+    },
+    {
+      "original": "input/node_modules/pkg/foo-js.ts",
+      "decompiled_module": "node_modules/pkg/foo-js"
+    },
+    {
+      "original": "input/node_modules/pkg/foo-jsx.tsx",
+      "decompiled_module": "node_modules/pkg/foo-jsx"
+    },
+    {
+      "original": "input/node_modules/pkg-exports/abc-js.ts",
+      "decompiled_module": "node_modules/pkg-exports/abc-js"
+    },
+    {
+      "original": "input/node_modules/pkg-exports/abc-jsx.tsx",
+      "decompiled_module": "node_modules/pkg-exports/abc-jsx"
+    },
+    {
+      "original": "input/node_modules/pkg-exports/lib/foo-js.ts",
+      "decompiled_module": "node_modules/pkg-exports/lib/foo-js"
+    },
+    {
+      "original": "input/node_modules/pkg-exports/lib/foo-jsx.tsx",
+      "decompiled_module": "node_modules/pkg-exports/lib/foo-jsx"
+    },
+    {
+      "original": "input/node_modules/pkg-imports/index.js",
+      "decompiled_module": "node_modules/pkg-imports/index"
+    },
+    {
+      "original": "input/node_modules/pkg-imports/abc-js.ts",
+      "decompiled_module": "node_modules/pkg-imports/abc-js"
+    },
+    {
+      "original": "input/node_modules/pkg-imports/abc-jsx.tsx",
+      "decompiled_module": "node_modules/pkg-imports/abc-jsx"
+    },
+    {
+      "original": "input/node_modules/pkg-imports/lib/foo-js.ts",
+      "decompiled_module": "node_modules/pkg-imports/lib/foo-js"
+    },
+    {
+      "original": "input/node_modules/pkg-imports/lib/foo-jsx.tsx",
+      "decompiled_module": "node_modules/pkg-imports/lib/foo-jsx"
+    }
+  ]
+}

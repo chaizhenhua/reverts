@@ -1,0 +1,204 @@
+{
+  "id": "esbuild-no-side-effects-comment",
+  "title": "esbuild TestNoSideEffectsComment",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestNoSideEffectsComment"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/expr-fn.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/expr-arrow.js",
+      "artifacts/esbuild@0.28.0/expr-fn.js",
+      "artifacts/esbuild@0.28.0/ns-export-fn.js",
+      "artifacts/esbuild@0.28.0/ns-export-local.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-async-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-async-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-async-gen-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-async-gen-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-gen-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-after-gen-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-async-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-async-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-async-gen-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-async-gen-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-gen-fn-anon.js",
+      "artifacts/esbuild@0.28.0/stmt-export-default-before-gen-fn-name.js",
+      "artifacts/esbuild@0.28.0/stmt-export-fn.js",
+      "artifacts/esbuild@0.28.0/stmt-export-local.js",
+      "artifacts/esbuild@0.28.0/stmt-fn.js",
+      "artifacts/esbuild@0.28.0/stmt-local.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "expr-fn",
+      "expr-arrow",
+      "stmt-fn",
+      "stmt-export-fn",
+      "stmt-local",
+      "stmt-export-local",
+      "ns-export-fn",
+      "ns-export-local",
+      "stmt-export-default-before-fn-anon",
+      "stmt-export-default-before-fn-name",
+      "stmt-export-default-before-gen-fn-anon",
+      "stmt-export-default-before-gen-fn-name",
+      "stmt-export-default-before-async-fn-anon",
+      "stmt-export-default-before-async-fn-name",
+      "stmt-export-default-before-async-gen-fn-anon",
+      "stmt-export-default-before-async-gen-fn-name",
+      "stmt-export-default-after-fn-anon",
+      "stmt-export-default-after-fn-name",
+      "stmt-export-default-after-gen-fn-anon",
+      "stmt-export-default-after-gen-fn-name",
+      "stmt-export-default-after-async-fn-anon",
+      "stmt-export-default-after-async-fn-name",
+      "stmt-export-default-after-async-gen-fn-anon",
+      "stmt-export-default-after-async-gen-fn-name"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "stmt-export-fn",
+        "name": "a"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "v0"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "l0"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "c0"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "v2"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "l2"
+      },
+      {
+        "module": "stmt-export-local",
+        "name": "c2"
+      },
+      {
+        "module": "ns-export-fn",
+        "name": "a"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "v0"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "l0"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "c0"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "v2"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "l2"
+      },
+      {
+        "module": "ns-export-local",
+        "name": "c2"
+      },
+      {
+        "module": "stmt-export-default-before-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-gen-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-gen-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-async-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-async-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-async-gen-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-before-async-gen-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-gen-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-gen-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-async-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-async-fn-name",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-async-gen-fn-anon",
+        "name": "default"
+      },
+      {
+        "module": "stmt-export-default-after-async-gen-fn-name",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

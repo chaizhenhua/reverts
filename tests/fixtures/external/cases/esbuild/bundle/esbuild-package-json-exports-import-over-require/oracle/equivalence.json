@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg/require.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg/require"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/pkg/import.js",
+      "decompiled_module": "Users/user/project/node_modules/pkg/import"
+    }
+  ]
+}

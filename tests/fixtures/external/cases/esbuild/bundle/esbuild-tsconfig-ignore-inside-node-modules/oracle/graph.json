@@ -1,0 +1,94 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/main",
+      "path": "Users/user/project/src/main.ts"
+    },
+    {
+      "name": "Users/user/project/shim",
+      "path": "Users/user/project/shim.ts"
+    },
+    {
+      "name": "Users/user/project/node_modules/js-pkg/index",
+      "path": "Users/user/project/node_modules/js-pkg/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/ts-pkg/index",
+      "path": "Users/user/project/node_modules/ts-pkg/index.ts"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/index",
+      "path": "Users/user/project/node_modules/pkg/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/main",
+      "to": "js-pkg",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "ts-pkg",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "foo as shimFoo"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "bar as shimBar"
+    },
+    {
+      "from": "Users/user/project/node_modules/js-pkg/index",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "foo as pkgFoo"
+    },
+    {
+      "from": "Users/user/project/node_modules/ts-pkg/index",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "bar as pkgBar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/shim",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/shim",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/js-pkg/index",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/ts-pkg/index",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/pkg/index",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/pkg/index",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

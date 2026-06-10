@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/var2.js",
+      "decompiled_module": "var2"
+    },
+    {
+      "original": "input/var3.js",
+      "decompiled_module": "var3"
+    },
+    {
+      "original": "input/function2.js",
+      "decompiled_module": "function2"
+    },
+    {
+      "original": "input/function3.js",
+      "decompiled_module": "function3"
+    }
+  ]
+}

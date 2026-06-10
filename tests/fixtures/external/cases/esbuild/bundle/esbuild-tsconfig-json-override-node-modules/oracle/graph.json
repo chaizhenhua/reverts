@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/app/entry",
+      "path": "Users/user/project/src/app/entry.ts"
+    },
+    {
+      "name": "Users/user/project/src/node_modules/foo/index",
+      "path": "Users/user/project/src/node_modules/foo/index.js"
+    },
+    {
+      "name": "Users/user/project/src/foo-bad",
+      "path": "Users/user/project/src/foo-bad.ts"
+    },
+    {
+      "name": "Users/user/project/other/foo-good",
+      "path": "Users/user/project/other/foo-good.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

@@ -1,0 +1,70 @@
+{
+  "id": "rspack-json-reexport",
+  "title": "rspack json reexport",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rspack",
+    "project_version": "1.7.11",
+    "project_commit": "b39f9080e6663818724c973df25782431530485e",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/rspack-test/normalCases/json/reexport"
+  },
+  "artifact": {
+    "tool": "rspack",
+    "version": "1.7.11",
+    "entry": "artifacts/rspack@1.7.11/index.js",
+    "outputs": [
+      "artifacts/rspack@1.7.11/index.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_require__.r",
+      "__webpack_require__.rv",
+      "__webpack_require__.ruid",
+      "__webpack_modules__",
+      "__webpack_exports__"
+    ],
+    "must_recover_modules": [
+      "index",
+      "reexport"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "reexport",
+        "name": "e"
+      },
+      {
+        "module": "reexport",
+        "name": "f"
+      },
+      {
+        "module": "reexport",
+        "name": "fNamed"
+      },
+      {
+        "module": "reexport",
+        "name": "fStar"
+      },
+      {
+        "module": "reexport",
+        "name": "fStarPartial"
+      },
+      {
+        "module": "reexport",
+        "name": "fStarPartial2"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

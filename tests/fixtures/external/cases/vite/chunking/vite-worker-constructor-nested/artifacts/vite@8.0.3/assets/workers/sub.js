@@ -1,0 +1,1 @@
+import(`./chunks/worker-extra.js`).then(e=>{self.postMessage(e.extraValue)});

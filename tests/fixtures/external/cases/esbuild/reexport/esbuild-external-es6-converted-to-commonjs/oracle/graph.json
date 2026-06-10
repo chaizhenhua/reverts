@@ -1,0 +1,78 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    },
+    {
+      "name": "d",
+      "path": "d.js"
+    },
+    {
+      "name": "e",
+      "path": "e.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "d",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "e",
+      "kind": "require"
+    },
+    {
+      "from": "a",
+      "to": "x",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "b",
+      "to": "x",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "c",
+      "to": "x",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "e",
+      "to": "x",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": []
+}

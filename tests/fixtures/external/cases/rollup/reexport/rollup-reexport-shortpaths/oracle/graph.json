@@ -1,0 +1,49 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "main3",
+      "path": "main3.js"
+    },
+    {
+      "name": "dep1",
+      "path": "dep1.js"
+    },
+    {
+      "name": "dep2",
+      "path": "dep2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main1",
+      "to": "dep1",
+      "kind": "import_default",
+      "name": "foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dep1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dep2",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

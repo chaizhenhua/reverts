@@ -1,0 +1,51 @@
+{
+  "id": "rollup-preserve-modules-namespace-reexport",
+  "title": "rollup preserve modules namespace reexport",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rollup",
+    "project_version": "4.60.1",
+    "project_commit": "ae871d762f6bbeb4320d28fe179211168f27a434",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/chunking-form/samples/preserve-modules-namespace-reexport-reexport"
+  },
+  "artifact": {
+    "tool": "rollup",
+    "version": "4.60.1",
+    "entry": "artifacts/rollup@4.60.1/main.js",
+    "outputs": [
+      "artifacts/rollup@4.60.1/dep.js",
+      "artifacts/rollup@4.60.1/main.js",
+      "artifacts/rollup@4.60.1/reexport.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "rollup",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "main",
+      "reexport",
+      "reexport2",
+      "dep"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "reexport",
+        "name": "value"
+      },
+      {
+        "module": "dep",
+        "name": "value"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

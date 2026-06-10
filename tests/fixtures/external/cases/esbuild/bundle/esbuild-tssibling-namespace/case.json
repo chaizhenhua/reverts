@@ -1,0 +1,78 @@
+{
+  "id": "esbuild-tssibling-namespace",
+  "title": "esbuild TestTSSiblingNamespace",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_ts_test.go::TestTSSiblingNamespace"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/let.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/class.js",
+      "artifacts/esbuild@0.28.0/enum.js",
+      "artifacts/esbuild@0.28.0/function.js",
+      "artifacts/esbuild@0.28.0/let.js",
+      "artifacts/esbuild@0.28.0/namespace.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "let",
+      "function",
+      "class",
+      "namespace",
+      "enum"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "let",
+        "name": "y"
+      },
+      {
+        "module": "let",
+        "name": "z"
+      },
+      {
+        "module": "function",
+        "name": "y"
+      },
+      {
+        "module": "function",
+        "name": "z"
+      },
+      {
+        "module": "class",
+        "name": "y"
+      },
+      {
+        "module": "class",
+        "name": "z"
+      },
+      {
+        "module": "namespace",
+        "name": "z"
+      },
+      {
+        "module": "enum",
+        "name": "z"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "node_modules/mydependency/package/index",
+      "path": "node_modules/mydependency/package/index.js"
+    },
+    {
+      "name": "node_modules/mydependency/package/utils/index",
+      "path": "node_modules/mydependency/package/utils/index.js"
+    },
+    {
+      "name": "node_modules/mydependency/package/utils/utils",
+      "path": "node_modules/mydependency/package/utils/utils.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "mydependency",
+      "kind": "import_named",
+      "name": "it"
+    },
+    {
+      "from": "node_modules/mydependency/package/utils/utils",
+      "to": "..",
+      "kind": "import_named",
+      "name": "works"
+    }
+  ],
+  "exports": [
+    {
+      "module": "node_modules/mydependency/package/index",
+      "name": "works",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/mydependency/package/utils/utils",
+      "name": "it",
+      "kind": "value"
+    }
+  ]
+}

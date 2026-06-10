@@ -1,0 +1,52 @@
+{
+  "project": "rspack",
+  "version": "1.7.11",
+  "commit": "b39f9080e6663818724c973df25782431530485e",
+  "generated_count": 7,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "rspack-interop-basic",
+      "category": "interop",
+      "test": "tests/rspack-test/normalCases/interop/basic",
+      "outputs": 1
+    },
+    {
+      "case_id": "rspack-json-import-with-default",
+      "category": "bundle",
+      "test": "tests/rspack-test/normalCases/json/import-with-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "rspack-json-import-by-name",
+      "category": "bundle",
+      "test": "tests/rspack-test/normalCases/json/import-by-name",
+      "outputs": 1
+    },
+    {
+      "case_id": "rspack-json-reexport",
+      "category": "reexport",
+      "test": "tests/rspack-test/normalCases/json/reexport",
+      "outputs": 1
+    },
+    {
+      "case_id": "rspack-json-import-lazy",
+      "category": "chunking",
+      "test": "tests/rspack-test/normalCases/json/import-lazy",
+      "outputs": 8
+    },
+    {
+      "case_id": "rspack-top-level-await",
+      "category": "async",
+      "test": "tests/rspack-test/exampleCases/top-level-await",
+      "outputs": 2
+    },
+    {
+      "case_id": "rspack-code-splitting-require-ensure",
+      "category": "chunking",
+      "test": "tests/rspack-test/exampleCases/code-splitting",
+      "outputs": 2
+    }
+  ],
+  "skipped": []
+}

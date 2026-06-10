@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "example",
+      "path": "example.js"
+    },
+    {
+      "name": "example",
+      "path": "example.mjs"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

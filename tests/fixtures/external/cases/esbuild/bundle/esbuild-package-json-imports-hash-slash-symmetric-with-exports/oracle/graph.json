@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/src/components/button",
+      "path": "Users/user/project/src/src/components/button.js"
+    },
+    {
+      "name": "Users/user/project/src/src/utils/format",
+      "path": "Users/user/project/src/src/utils/format.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

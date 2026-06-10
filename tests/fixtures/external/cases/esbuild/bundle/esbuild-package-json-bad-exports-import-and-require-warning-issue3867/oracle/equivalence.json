@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/foo/dist/node/index.js",
+      "decompiled_module": "node_modules/foo/dist/node/index"
+    },
+    {
+      "original": "input/node_modules/foo/dist/node/index.cjs",
+      "decompiled_module": "node_modules/foo/dist/node/index"
+    },
+    {
+      "original": "input/node_modules/foo/dist/browser/index.js",
+      "decompiled_module": "node_modules/foo/dist/browser/index"
+    },
+    {
+      "original": "input/node_modules/foo/dist/browser/index.cjs",
+      "decompiled_module": "node_modules/foo/dist/browser/index"
+    }
+  ]
+}

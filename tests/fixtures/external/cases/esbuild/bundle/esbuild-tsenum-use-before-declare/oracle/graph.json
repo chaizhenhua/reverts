@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "before",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "after",
+      "kind": "value"
+    }
+  ]
+}

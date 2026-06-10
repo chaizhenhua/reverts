@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.jsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

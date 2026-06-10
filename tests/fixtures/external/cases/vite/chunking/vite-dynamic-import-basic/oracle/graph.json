@@ -1,0 +1,56 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/shared",
+      "path": "src/shared.js"
+    },
+    {
+      "name": "src/views/foo",
+      "path": "src/views/foo.js"
+    },
+    {
+      "name": "src/views/bar",
+      "path": "src/views/bar.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "src/shared",
+      "kind": "import_named",
+      "name": "sharedValue"
+    },
+    {
+      "from": "src/main",
+      "to": "src/views/bar",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "src/views/foo",
+      "to": "src/shared",
+      "kind": "import_named",
+      "name": "sharedValue"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/shared",
+      "name": "sharedValue",
+      "kind": "value"
+    },
+    {
+      "module": "src/views/foo",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/views/bar",
+      "name": "msg",
+      "kind": "value"
+    }
+  ]
+}

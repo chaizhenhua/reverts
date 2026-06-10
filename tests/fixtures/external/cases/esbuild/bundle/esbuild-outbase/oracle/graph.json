@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "a/b/c",
+      "path": "a/b/c.js"
+    },
+    {
+      "name": "a/b/d",
+      "path": "a/b/d.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

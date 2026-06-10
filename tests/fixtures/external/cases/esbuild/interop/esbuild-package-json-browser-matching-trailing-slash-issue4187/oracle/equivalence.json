@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/axios/index.js",
+      "decompiled_module": "node_modules/axios/index"
+    },
+    {
+      "original": "input/node_modules/axios/node/index.js",
+      "decompiled_module": "node_modules/axios/node/index"
+    },
+    {
+      "original": "input/node_modules/axios/browser/index.js",
+      "decompiled_module": "node_modules/axios/browser/index"
+    }
+  ]
+}

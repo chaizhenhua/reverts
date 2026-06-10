@@ -1,0 +1,64 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "Component_one",
+      "path": "Component_one.js"
+    },
+    {
+      "name": "icons/index",
+      "path": "icons/index.js"
+    },
+    {
+      "name": "icons/one",
+      "path": "icons/one.js"
+    },
+    {
+      "name": "icons/two",
+      "path": "icons/two.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Component_one",
+      "to": "icons/index",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main",
+      "name": "Component_one",
+      "kind": "value"
+    },
+    {
+      "module": "Component_one",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "icons/index",
+      "name": "one",
+      "kind": "value"
+    },
+    {
+      "module": "icons/index",
+      "name": "two",
+      "kind": "value"
+    },
+    {
+      "module": "icons/one",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "icons/two",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

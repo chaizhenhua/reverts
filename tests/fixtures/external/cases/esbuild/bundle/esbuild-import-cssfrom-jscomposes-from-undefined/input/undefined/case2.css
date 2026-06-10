@@ -1,0 +1,6 @@
+
+				.foo {
+					composes: foo from "../file-1.css";
+					composes: foo from "../file-2.css";
+				}
+			

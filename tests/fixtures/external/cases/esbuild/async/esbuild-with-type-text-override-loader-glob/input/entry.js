@@ -1,0 +1,3 @@
+
+				import("./foo" + bar, { with: { type: 'text' } }).then(console.log)
+			

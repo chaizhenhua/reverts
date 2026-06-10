@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    },
+    {
+      "name": "Users/user/project/src/test",
+      "path": "Users/user/project/src/test.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "#/test",
+      "kind": "import_default",
+      "name": "test"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/test",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

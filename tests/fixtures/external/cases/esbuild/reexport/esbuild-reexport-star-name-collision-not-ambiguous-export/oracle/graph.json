@@ -1,0 +1,44 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "a",
+      "to": "c",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "c",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

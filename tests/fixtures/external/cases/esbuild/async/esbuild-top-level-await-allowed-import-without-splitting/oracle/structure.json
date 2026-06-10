@@ -1,0 +1,10 @@
+{
+  "bundler_family": "esbuild",
+  "wrapper_names": [
+    "__esm"
+  ],
+  "interop_helpers": [],
+  "runtime_helpers": [
+    "__esm"
+  ]
+}

@@ -1,0 +1,32 @@
+
+				@import "global.css";
+				.local0 {
+					composes: local1;
+					:global {
+						composes: GLOBAL1 GLOBAL2;
+					}
+				}
+				.local0 {
+					composes: GLOBAL2 GLOBAL3 from global;
+					composes: local1 local2;
+					background: green;
+				}
+				.local0 :global {
+					composes: GLOBAL4;
+				}
+				.local3 {
+					border: 1px solid black;
+					composes: local4;
+				}
+				.local4 {
+					opacity: 0.5;
+				}
+				.local1 {
+					color: red;
+					composes: local3;
+				}
+				.fromOtherFile {
+					composes: local0 from "other1.module.css";
+					composes: local0 from "other2.module.css";
+				}
+			

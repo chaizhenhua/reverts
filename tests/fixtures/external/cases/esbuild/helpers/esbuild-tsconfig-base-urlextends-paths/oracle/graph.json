@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    },
+    {
+      "name": "Users/user/project/lib/foo",
+      "path": "Users/user/project/lib/foo.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/lib/foo",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

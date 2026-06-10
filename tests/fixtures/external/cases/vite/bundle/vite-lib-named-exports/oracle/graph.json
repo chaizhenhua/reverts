@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "src/main-named",
+      "path": "src/main-named.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "src/main-named",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

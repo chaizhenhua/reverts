@@ -1,0 +1,40 @@
+{
+  "id": "babel-jsx-classic-spread-with-proto",
+  "title": "babel jsx classic spread with proto",
+  "category": "helpers",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "babel",
+    "project_version": "7.29.0",
+    "project_commit": "b0e3517dc566880e76b5f1f4dcf7fcecba58337d",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/babel-plugin-transform-react-jsx/test/fixtures/react/handle-spread-with-proto"
+  },
+  "artifact": {
+    "tool": "babel",
+    "version": "7.29.0",
+    "entry": "artifacts/babel@7.29.0/input.js",
+    "outputs": [
+      "artifacts/babel@7.29.0/input.js"
+    ],
+    "format": "bundle",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "babel",
+    "wrappers": [],
+    "helpers": [
+      "_extends",
+      "React.createElement"
+    ],
+    "must_recover_modules": [
+      "input"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

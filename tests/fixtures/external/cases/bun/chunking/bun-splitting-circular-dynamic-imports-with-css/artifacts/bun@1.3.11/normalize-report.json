@@ -1,0 +1,12 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable asset, entry, and chunk filenames were requested at build time so committed output paths do not depend on hashes.",
+    "Renamed chunk-1kwtw3cf.js to chunks/chunk-0.js to remove Bun chunk hashes.",
+    "Renamed chunk-4ha47e6n.js to chunks/chunk-1.js to remove Bun chunk hashes.",
+    "Renamed chunk-5gtx3pza.js to chunks/chunk-2.js to remove Bun chunk hashes.",
+    "Renamed chunk-h7w0qrx1.css to chunks/chunk-3.css to remove Bun chunk hashes.",
+    "Renamed chunk-k3wr7yg6.css to chunks/chunk-4.css to remove Bun chunk hashes.",
+    "Renamed chunk-w7q2fmg0.js to chunks/chunk-5.js to remove Bun chunk hashes."
+  ]
+}

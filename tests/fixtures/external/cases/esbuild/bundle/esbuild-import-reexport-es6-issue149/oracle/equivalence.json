@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/app.jsx",
+      "decompiled_module": "app"
+    },
+    {
+      "original": "input/in2.jsx",
+      "decompiled_module": "in2"
+    },
+    {
+      "original": "input/import.js",
+      "decompiled_module": "import"
+    }
+  ]
+}

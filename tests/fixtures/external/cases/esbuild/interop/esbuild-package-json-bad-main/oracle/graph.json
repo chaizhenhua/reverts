@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/index",
+      "path": "Users/user/project/node_modules/demo-pkg/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "demo-pkg",
+      "kind": "import_default",
+      "name": "fn"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

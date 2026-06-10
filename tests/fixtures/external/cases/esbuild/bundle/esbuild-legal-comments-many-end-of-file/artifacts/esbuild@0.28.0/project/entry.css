@@ -1,0 +1,20 @@
+a{zoom:2}b{zoom:2}c{zoom:2}.some-other-pkg{zoom:2}
+/*! Copyright notice 1 */
+/*! Duplicate comment */
+/*
+ * @license
+ * Copyright notice 2
+ */
+/* @preserve This is another comment */
+/*! Bundled license information:
+
+some-other-pkg/css/index.css:
+  (*! Duplicate third-party comment *)
+  (** @preserve
+   * (c) Evil Software Corp
+   *)
+
+some-pkg/css/index.css:
+  (*! (c) Good Software Corp *)
+  (*! Duplicate third-party comment *)
+*/

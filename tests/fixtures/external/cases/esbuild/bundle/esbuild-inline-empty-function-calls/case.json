@@ -1,0 +1,67 @@
+{
+  "id": "esbuild-inline-empty-function-calls",
+  "title": "esbuild TestInlineEmptyFunctionCalls",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestInlineEmptyFunctionCalls"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/empty.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/empty-async.js",
+      "artifacts/esbuild@0.28.0/empty-comma.js",
+      "artifacts/esbuild@0.28.0/empty-cross-module.js",
+      "artifacts/esbuild@0.28.0/empty-first.js",
+      "artifacts/esbuild@0.28.0/empty-generator.js",
+      "artifacts/esbuild@0.28.0/empty-if-else.js",
+      "artifacts/esbuild@0.28.0/empty-last.js",
+      "artifacts/esbuild@0.28.0/empty.js",
+      "artifacts/esbuild@0.28.0/reassign-array.js",
+      "artifacts/esbuild@0.28.0/reassign-div.js",
+      "artifacts/esbuild@0.28.0/reassign-inc.js",
+      "artifacts/esbuild@0.28.0/reassign-object.js",
+      "artifacts/esbuild@0.28.0/reassign.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "empty",
+      "empty-comma",
+      "empty-if-else",
+      "empty-last",
+      "empty-cross-module",
+      "empty-cross-module-def",
+      "empty-first",
+      "empty-generator",
+      "empty-async",
+      "reassign",
+      "reassign-inc",
+      "reassign-div",
+      "reassign-array",
+      "reassign-object"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "empty-cross-module-def",
+        "name": "DROP"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

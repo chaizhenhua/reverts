@@ -1,0 +1,66 @@
+{
+  "id": "esbuild-tsconfig-ignore-inside-node-modules",
+  "title": "esbuild TestTsconfigIgnoreInsideNodeModules",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_tsconfig_test.go::TestTsconfigIgnoreInsideNodeModules"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/Users/user/project/src/main.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/Users/user/project/src/main.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "Users/user/project/src/main",
+      "Users/user/project/shim",
+      "Users/user/project/node_modules/js-pkg/index",
+      "Users/user/project/node_modules/ts-pkg/index",
+      "Users/user/project/node_modules/pkg/index"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "Users/user/project/shim",
+        "name": "foo"
+      },
+      {
+        "module": "Users/user/project/shim",
+        "name": "bar"
+      },
+      {
+        "module": "Users/user/project/node_modules/js-pkg/index",
+        "name": "foo"
+      },
+      {
+        "module": "Users/user/project/node_modules/ts-pkg/index",
+        "name": "bar"
+      },
+      {
+        "module": "Users/user/project/node_modules/pkg/index",
+        "name": "foo"
+      },
+      {
+        "module": "Users/user/project/node_modules/pkg/index",
+        "name": "bar"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

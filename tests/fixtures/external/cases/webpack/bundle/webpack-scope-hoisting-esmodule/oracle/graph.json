@@ -1,0 +1,41 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    },
+    {
+      "name": "other",
+      "path": "other.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "module",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "module",
+      "to": "other",
+      "kind": "import_default",
+      "name": "other"
+    }
+  ],
+  "exports": [
+    {
+      "module": "module",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "other",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

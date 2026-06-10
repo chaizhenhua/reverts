@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/cjs.js",
+      "decompiled_module": "cjs"
+    },
+    {
+      "original": "input/shims.js",
+      "decompiled_module": "shims"
+    }
+  ]
+}

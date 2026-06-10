@@ -1,0 +1,43 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/dir/test",
+      "path": "src/dir/test.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "fs-dir/test.js",
+      "kind": "import_named",
+      "name": "msg as fileMsg"
+    },
+    {
+      "from": "src/main",
+      "to": "regex/test.js",
+      "kind": "import_named",
+      "name": "msg as regexMsg"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "fileMsg",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "regexMsg",
+      "kind": "value"
+    },
+    {
+      "module": "src/dir/test",
+      "name": "msg",
+      "kind": "value"
+    }
+  ]
+}

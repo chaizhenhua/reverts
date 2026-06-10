@@ -1,0 +1,9 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    }
+  ]
+}

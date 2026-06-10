@@ -1,0 +1,19 @@
+@media print {
+  @layer a;
+}
+
+/* at-layer/002/b.css */
+@layer b {
+  .box {
+    background-color: red;
+  }
+}
+
+/* at-layer/002/a.css */
+@layer a {
+  .box {
+    background-color: green;
+  }
+}
+
+/* at-layer/002/style.css */

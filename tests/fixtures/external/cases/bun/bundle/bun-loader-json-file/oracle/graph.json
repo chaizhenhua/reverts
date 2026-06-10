@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./hello.notjson",
+      "kind": "import_default",
+      "name": "hello"
+    }
+  ],
+  "exports": []
+}

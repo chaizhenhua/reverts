@@ -1,0 +1,41 @@
+{
+  "id": "esbuild-import-local-cssfrom-jsminify-identifiers-multiple-entry-points",
+  "title": "esbuild TestImportLocalCSSFromJSMinifyIdentifiersMultipleEntryPoints",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_css_test.go::TestImportLocalCSSFromJSMinifyIdentifiersMultipleEntryPoints"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/a.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/a.css",
+      "artifacts/esbuild@0.28.0/a.js",
+      "artifacts/esbuild@0.28.0/b.css",
+      "artifacts/esbuild@0.28.0/b.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

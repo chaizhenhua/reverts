@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "input",
+      "to": "side-effect",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "input",
+      "to": "awaited",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "project/entry",
+      "path": "project/entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "project/entry",
+      "to": "./xyz.copy",
+      "kind": "import_default",
+      "name": "xyz"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,12 @@
+/* at-supports/002/b.css */
+@supports (display: block) {
+  @supports (width: 10px) {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* at-supports/002/a.css */
+
+/* at-supports/002/style.css */

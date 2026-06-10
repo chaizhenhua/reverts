@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "foo"
+    }
+  ],
+  "exports": []
+}

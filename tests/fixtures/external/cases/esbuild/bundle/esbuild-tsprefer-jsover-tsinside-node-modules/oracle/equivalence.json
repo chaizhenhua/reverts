@@ -1,0 +1,41 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/main.ts",
+      "decompiled_module": "Users/user/project/src/main"
+    },
+    {
+      "original": "input/Users/user/project/src/relative/path.ts",
+      "decompiled_module": "Users/user/project/src/relative/path"
+    },
+    {
+      "original": "input/Users/user/project/src/relative/path.js",
+      "decompiled_module": "Users/user/project/src/relative/path"
+    },
+    {
+      "original": "input/Users/user/project/src/relative2/path.ts",
+      "decompiled_module": "Users/user/project/src/relative2/path"
+    },
+    {
+      "original": "input/Users/user/project/src/relative2/path.js",
+      "decompiled_module": "Users/user/project/src/relative2/path"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/package/path.ts",
+      "decompiled_module": "Users/user/project/node_modules/package/path"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/package/path.js",
+      "decompiled_module": "Users/user/project/node_modules/package/path"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/package2/path.ts",
+      "decompiled_module": "Users/user/project/node_modules/package2/path"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/package2/path.js",
+      "decompiled_module": "Users/user/project/node_modules/package2/path"
+    }
+  ]
+}

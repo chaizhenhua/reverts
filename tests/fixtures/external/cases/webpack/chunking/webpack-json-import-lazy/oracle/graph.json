@@ -1,0 +1,54 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.json"
+    },
+    {
+      "name": "e",
+      "path": "e.json"
+    },
+    {
+      "name": "f",
+      "path": "f.json"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "a",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "e",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "f",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "f",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "id": "esbuild-inline-identity-function-calls",
+  "title": "esbuild TestInlineIdentityFunctionCalls",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestInlineIdentityFunctionCalls"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/identity.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/identity-async.js",
+      "artifacts/esbuild@0.28.0/identity-cross-module.js",
+      "artifacts/esbuild@0.28.0/identity-first.js",
+      "artifacts/esbuild@0.28.0/identity-generator.js",
+      "artifacts/esbuild@0.28.0/identity-last.js",
+      "artifacts/esbuild@0.28.0/identity-no-args.js",
+      "artifacts/esbuild@0.28.0/identity-simplify-unused-issue-4287.js",
+      "artifacts/esbuild@0.28.0/identity-two-args.js",
+      "artifacts/esbuild@0.28.0/identity.js",
+      "artifacts/esbuild@0.28.0/not-identity-array.js",
+      "artifacts/esbuild@0.28.0/not-identity-default.js",
+      "artifacts/esbuild@0.28.0/not-identity-object.js",
+      "artifacts/esbuild@0.28.0/not-identity-rest.js",
+      "artifacts/esbuild@0.28.0/not-identity-return.js",
+      "artifacts/esbuild@0.28.0/not-identity-two-args.js",
+      "artifacts/esbuild@0.28.0/reassign-array.js",
+      "artifacts/esbuild@0.28.0/reassign-div.js",
+      "artifacts/esbuild@0.28.0/reassign-inc.js",
+      "artifacts/esbuild@0.28.0/reassign-object.js",
+      "artifacts/esbuild@0.28.0/reassign.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "identity",
+      "identity-last",
+      "identity-cross-module",
+      "identity-cross-module-def",
+      "identity-no-args",
+      "identity-two-args",
+      "identity-first",
+      "identity-generator",
+      "identity-async",
+      "reassign",
+      "reassign-inc",
+      "reassign-div",
+      "reassign-array",
+      "reassign-object",
+      "not-identity-two-args",
+      "not-identity-default",
+      "not-identity-array",
+      "not-identity-object",
+      "not-identity-rest",
+      "not-identity-return",
+      "identity-simplify-unused-issue-4287"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "identity-cross-module-def",
+        "name": "DROP"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry-esm.js",
+      "decompiled_module": "entry-esm"
+    },
+    {
+      "original": "input/entry-cjs.js",
+      "decompiled_module": "entry-cjs"
+    },
+    {
+      "original": "input/esm.js",
+      "decompiled_module": "esm"
+    },
+    {
+      "original": "input/cjs.js",
+      "decompiled_module": "cjs"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "c",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "import_namespace",
+      "name": "c"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

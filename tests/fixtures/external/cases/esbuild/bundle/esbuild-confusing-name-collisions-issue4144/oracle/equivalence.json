@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/mydependency/package/index.js",
+      "decompiled_module": "node_modules/mydependency/package/index"
+    },
+    {
+      "original": "input/node_modules/mydependency/package/utils/index.js",
+      "decompiled_module": "node_modules/mydependency/package/utils/index"
+    },
+    {
+      "original": "input/node_modules/mydependency/package/utils/utils.js",
+      "decompiled_module": "node_modules/mydependency/package/utils/utils"
+    }
+  ]
+}

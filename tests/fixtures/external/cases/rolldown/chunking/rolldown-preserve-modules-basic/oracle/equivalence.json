@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/lib.js",
+      "decompiled_module": "lib"
+    },
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    },
+    {
+      "original": "input/src/index.js",
+      "decompiled_module": "src/index"
+    }
+  ]
+}

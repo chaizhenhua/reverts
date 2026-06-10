@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": ".",
+      "kind": "import_named",
+      "name": "x"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

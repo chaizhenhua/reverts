@@ -1,0 +1,47 @@
+{
+  "id": "esbuild-call-import-namespace-warning",
+  "title": "esbuild TestCallImportNamespaceWarning",
+  "category": "interop",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestCallImportNamespaceWarning"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/js.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/js.js",
+      "artifacts/esbuild@0.28.0/jsx-a.js",
+      "artifacts/esbuild@0.28.0/jsx-b.js",
+      "artifacts/esbuild@0.28.0/jsx-c.js",
+      "artifacts/esbuild@0.28.0/jsx-components.js",
+      "artifacts/esbuild@0.28.0/ts.js"
+    ],
+    "format": "convert-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "js",
+      "ts",
+      "jsx-components",
+      "jsx-a",
+      "jsx-b",
+      "jsx-c"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "enums",
+      "path": "enums.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_named",
+      "name": "a"
+    }
+  ],
+  "exports": []
+}

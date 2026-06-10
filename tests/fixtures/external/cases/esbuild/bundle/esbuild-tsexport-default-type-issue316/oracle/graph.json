@@ -1,0 +1,208 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "keep/declare-class",
+      "path": "keep/declare-class.ts"
+    },
+    {
+      "name": "keep/declare-let",
+      "path": "keep/declare-let.ts"
+    },
+    {
+      "name": "keep/interface-merged",
+      "path": "keep/interface-merged.ts"
+    },
+    {
+      "name": "keep/interface-nested",
+      "path": "keep/interface-nested.ts"
+    },
+    {
+      "name": "keep/type-nested",
+      "path": "keep/type-nested.ts"
+    },
+    {
+      "name": "keep/value-namespace",
+      "path": "keep/value-namespace.ts"
+    },
+    {
+      "name": "keep/value-namespace-merged",
+      "path": "keep/value-namespace-merged.ts"
+    },
+    {
+      "name": "remove/interface",
+      "path": "remove/interface.ts"
+    },
+    {
+      "name": "remove/interface-exported",
+      "path": "remove/interface-exported.ts"
+    },
+    {
+      "name": "remove/type",
+      "path": "remove/type.ts"
+    },
+    {
+      "name": "remove/type-exported",
+      "path": "remove/type-exported.ts"
+    },
+    {
+      "name": "remove/type-only-namespace",
+      "path": "remove/type-only-namespace.ts"
+    },
+    {
+      "name": "remove/type-only-namespace-exported",
+      "path": "remove/type-only-namespace-exported.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/declare-class",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/declare-class",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/declare-let",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/declare-let",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/interface-merged",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/interface-merged",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/interface-nested",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/interface-nested",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/type-nested",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/type-nested",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace",
+      "name": "num",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace-merged",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace-merged",
+      "name": "num",
+      "kind": "value"
+    },
+    {
+      "module": "keep/value-namespace-merged",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/interface",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/interface",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/interface-exported",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/interface-exported",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-exported",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-exported",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-only-namespace",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-only-namespace",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-only-namespace-exported",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "remove/type-only-namespace-exported",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

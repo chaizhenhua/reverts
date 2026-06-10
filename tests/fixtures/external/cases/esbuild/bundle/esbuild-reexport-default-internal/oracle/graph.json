@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    },
+    {
+      "name": "bar",
+      "path": "bar.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "bar",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

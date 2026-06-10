@@ -1,0 +1,10 @@
+/* input/entry.css */
+a {
+  background: url("./foo-AKINYSFH.copy");
+  background: url("./foo-AKINYSFH.file");
+}
+b {
+  background: url("./foo 2-AKINYSFH.copy");
+  background: url("./foo 2-AKINYSFH.file");
+}
+/*! The URLs for "foo 2" files must have quotes in the final CSS */

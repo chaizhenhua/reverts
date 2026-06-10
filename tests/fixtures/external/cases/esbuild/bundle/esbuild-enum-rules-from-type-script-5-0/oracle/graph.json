@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "supported",
+      "path": "supported.ts"
+    },
+    {
+      "name": "not-supported",
+      "path": "not-supported.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

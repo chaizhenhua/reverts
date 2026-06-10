@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/a",
+      "path": "Users/user/project/node_modules/demo-pkg/a.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/b",
+      "path": "Users/user/project/node_modules/demo-pkg/b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "demo-pkg",
+      "kind": "import_default",
+      "name": "value"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/b",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

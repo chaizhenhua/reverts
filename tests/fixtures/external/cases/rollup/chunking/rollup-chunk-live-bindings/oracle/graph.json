@@ -1,0 +1,105 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.js"
+    },
+    {
+      "name": "dep1",
+      "path": "dep1.js"
+    },
+    {
+      "name": "dep2",
+      "path": "dep2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main1",
+      "to": "dep1",
+      "kind": "import_named",
+      "name": "fn"
+    },
+    {
+      "from": "main1",
+      "to": "dep1",
+      "kind": "import_named",
+      "name": "text"
+    },
+    {
+      "from": "main2",
+      "to": "dep2",
+      "kind": "import_named",
+      "name": "fn"
+    },
+    {
+      "from": "main2",
+      "to": "dep2",
+      "kind": "import_named",
+      "name": "text"
+    },
+    {
+      "from": "dep1",
+      "to": "dep2",
+      "kind": "import_named",
+      "name": "text as t"
+    },
+    {
+      "from": "dep2",
+      "to": "dep1",
+      "kind": "import_named",
+      "name": "text as t"
+    },
+    {
+      "from": "dep2",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "fn as libfn"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "main2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "dep1",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "dep1",
+      "name": "text",
+      "kind": "value"
+    },
+    {
+      "module": "dep2",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "dep2",
+      "name": "text",
+      "kind": "value"
+    }
+  ]
+}

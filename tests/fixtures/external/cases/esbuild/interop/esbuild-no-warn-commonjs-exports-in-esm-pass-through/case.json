@@ -1,0 +1,58 @@
+{
+  "id": "esbuild-no-warn-commonjs-exports-in-esm-pass-through",
+  "title": "esbuild TestNoWarnCommonJSExportsInESMPassThrough",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestNoWarnCommonJSExportsInESMPassThrough"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/cjs-in-esm.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/cjs-in-esm.js",
+      "artifacts/esbuild@0.28.0/import-in-cjs.js",
+      "artifacts/esbuild@0.28.0/no-warnings-here.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "cjs-in-esm",
+      "import-in-cjs",
+      "no-warnings-here"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "cjs-in-esm",
+        "name": "default"
+      },
+      {
+        "module": "cjs-in-esm",
+        "name": "foo"
+      },
+      {
+        "module": "import-in-cjs",
+        "name": "default"
+      },
+      {
+        "module": "import-in-cjs",
+        "name": "foo"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

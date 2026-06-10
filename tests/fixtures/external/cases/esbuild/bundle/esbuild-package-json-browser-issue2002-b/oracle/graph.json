@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/node_modules/pkg/sub/foo",
+      "path": "Users/user/project/src/node_modules/pkg/sub/foo.js"
+    },
+    {
+      "name": "Users/user/project/src/node_modules/pkg/sub/bar",
+      "path": "Users/user/project/src/node_modules/pkg/sub/bar.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "pkg/sub",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/src/node_modules/pkg/sub/foo",
+      "to": "sub",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

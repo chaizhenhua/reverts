@@ -1,0 +1,7 @@
+(() => {
+  // input/percents.txt
+  var percents_default = "data:text/plain;charset=utf-8,%0A%, %3, %2533, %25333%0A%, %e, %25ee, %25eee%0A%, %E, %25EE, %25EEE%0A";
+
+  // input/entry.js
+  console.log(percents_default);
+})();

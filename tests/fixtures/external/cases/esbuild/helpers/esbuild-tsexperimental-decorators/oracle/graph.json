@@ -1,0 +1,217 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "all",
+      "path": "all.ts"
+    },
+    {
+      "name": "all_computed",
+      "path": "all_computed.ts"
+    },
+    {
+      "name": "a",
+      "path": "a.ts"
+    },
+    {
+      "name": "b",
+      "path": "b.ts"
+    },
+    {
+      "name": "c",
+      "path": "c.ts"
+    },
+    {
+      "name": "d",
+      "path": "d.ts"
+    },
+    {
+      "name": "e",
+      "path": "e.ts"
+    },
+    {
+      "name": "f",
+      "path": "f.ts"
+    },
+    {
+      "name": "g",
+      "path": "g.ts"
+    },
+    {
+      "name": "h",
+      "path": "h.ts"
+    },
+    {
+      "name": "i",
+      "path": "i.ts"
+    },
+    {
+      "name": "j",
+      "path": "j.ts"
+    },
+    {
+      "name": "k",
+      "path": "k.ts"
+    },
+    {
+      "name": "arguments",
+      "path": "arguments.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "all",
+      "kind": "import_default",
+      "name": "all"
+    },
+    {
+      "from": "entry",
+      "to": "all_computed",
+      "kind": "import_default",
+      "name": "all_computed"
+    },
+    {
+      "from": "entry",
+      "to": "e",
+      "kind": "import_default",
+      "name": "e"
+    },
+    {
+      "from": "entry",
+      "to": "f",
+      "kind": "import_default",
+      "name": "f"
+    },
+    {
+      "from": "entry",
+      "to": "g",
+      "kind": "import_default",
+      "name": "g"
+    },
+    {
+      "from": "entry",
+      "to": "h",
+      "kind": "import_default",
+      "name": "h"
+    },
+    {
+      "from": "entry",
+      "to": "k",
+      "kind": "import_default",
+      "name": "k"
+    },
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "import_named",
+      "name": "c"
+    },
+    {
+      "from": "entry",
+      "to": "d",
+      "kind": "import_named",
+      "name": "d"
+    },
+    {
+      "from": "entry",
+      "to": "i",
+      "kind": "import_named",
+      "name": "i"
+    },
+    {
+      "from": "entry",
+      "to": "j",
+      "kind": "import_named",
+      "name": "j"
+    },
+    {
+      "from": "entry",
+      "to": "arguments",
+      "kind": "import_named",
+      "name": "fn"
+    }
+  ],
+  "exports": [
+    {
+      "module": "all",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "all_computed",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "f",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "g",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "h",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "i",
+      "name": "i",
+      "kind": "value"
+    },
+    {
+      "module": "j",
+      "name": "j",
+      "kind": "value"
+    },
+    {
+      "module": "k",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "arguments",
+      "name": "fn",
+      "kind": "value"
+    }
+  ]
+}

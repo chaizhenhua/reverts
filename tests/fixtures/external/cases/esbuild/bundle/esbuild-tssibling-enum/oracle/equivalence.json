@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/number.ts",
+      "decompiled_module": "number"
+    },
+    {
+      "original": "input/string.ts",
+      "decompiled_module": "string"
+    },
+    {
+      "original": "input/propagation.ts",
+      "decompiled_module": "propagation"
+    },
+    {
+      "original": "input/nested-number.ts",
+      "decompiled_module": "nested-number"
+    },
+    {
+      "original": "input/nested-string.ts",
+      "decompiled_module": "nested-string"
+    },
+    {
+      "original": "input/nested-propagation.ts",
+      "decompiled_module": "nested-propagation"
+    }
+  ]
+}

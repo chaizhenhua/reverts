@@ -1,0 +1,6 @@
+/* nested-@media.css */
+@media screen {
+  a {
+    color: red;
+  }
+}

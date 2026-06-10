@@ -1,0 +1,38 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-dep-that-requires/index",
+      "path": "node_modules/@vitejs/test-dep-that-requires/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-dep-that-requires",
+      "kind": "import_named",
+      "name": "requiredVersion"
+    },
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-dep-that-requires",
+      "kind": "import_named",
+      "name": "requiredSlash3"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "requiredVersion",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "requiredSlash3",
+      "kind": "value"
+    }
+  ]
+}

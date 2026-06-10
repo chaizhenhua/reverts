@@ -1,0 +1,1 @@
+const e=`module-and-worker`;export{e as moduleValue};

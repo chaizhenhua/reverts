@@ -1,0 +1,58 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/test",
+      "path": "src/test.json"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "./test.json?raw",
+      "kind": "import_default",
+      "name": "raw"
+    },
+    {
+      "from": "src/main",
+      "to": "./test.json?url",
+      "kind": "import_default",
+      "name": "url"
+    },
+    {
+      "from": "src/main",
+      "to": "src/test",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "json",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "hello",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "raw",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "url",
+      "kind": "value"
+    },
+    {
+      "module": "src/test",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

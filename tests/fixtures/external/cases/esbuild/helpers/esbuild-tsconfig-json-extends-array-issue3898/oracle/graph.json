@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/index",
+      "path": "Users/user/project/index.tsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/index",
+      "to": "MUST_KEEP",
+      "kind": "import_named",
+      "name": "type SomeType"
+    }
+  ],
+  "exports": []
+}

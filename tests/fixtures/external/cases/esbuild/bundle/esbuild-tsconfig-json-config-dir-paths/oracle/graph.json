@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/lib/foo/bar",
+      "path": "Users/user/project/lib/foo/bar"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

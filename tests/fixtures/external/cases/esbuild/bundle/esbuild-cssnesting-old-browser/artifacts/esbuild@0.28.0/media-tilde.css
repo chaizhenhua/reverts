@@ -1,0 +1,6 @@
+/* media-tilde.css */
+@media screen {
+  ~ b {
+    color: red;
+  }
+}

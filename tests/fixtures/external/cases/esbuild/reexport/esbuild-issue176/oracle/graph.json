@@ -1,0 +1,40 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "folders/index",
+      "path": "folders/index.js"
+    },
+    {
+      "name": "folders/child/index",
+      "path": "folders/child/index.js"
+    },
+    {
+      "name": "folders/child/foo",
+      "path": "folders/child/foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./folders",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "folders/index",
+      "to": "./child",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "folders/child/foo",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

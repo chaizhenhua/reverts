@@ -1,0 +1,23 @@
+@layer first;
+
+/* input/case6-foo.css */
+@layer last {
+  @layer {
+    @layer two, three.four;
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/case6-foo.css */
+@layer first {
+  @layer {
+    @layer two, three.four;
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/case6.css */

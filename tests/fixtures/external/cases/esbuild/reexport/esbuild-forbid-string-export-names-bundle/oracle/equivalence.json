@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/internal.js",
+      "decompiled_module": "internal"
+    },
+    {
+      "original": "input/nested.js",
+      "decompiled_module": "nested"
+    },
+    {
+      "original": "input/very-nested.js",
+      "decompiled_module": "very-nested"
+    }
+  ]
+}

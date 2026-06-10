@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "js-define",
+      "path": "js-define.js"
+    },
+    {
+      "name": "ts-define/ts-define",
+      "path": "ts-define/ts-define.ts"
+    },
+    {
+      "name": "ts-assign/ts-assign",
+      "path": "ts-assign/ts-assign.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

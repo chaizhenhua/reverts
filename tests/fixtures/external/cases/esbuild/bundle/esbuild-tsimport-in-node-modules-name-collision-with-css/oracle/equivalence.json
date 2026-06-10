@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/pkg/index.ts",
+      "decompiled_module": "node_modules/pkg/index"
+    },
+    {
+      "original": "input/node_modules/pkg/js_ts_css.js",
+      "decompiled_module": "node_modules/pkg/js_ts_css"
+    },
+    {
+      "original": "input/node_modules/pkg/js_ts_css.ts",
+      "decompiled_module": "node_modules/pkg/js_ts_css"
+    },
+    {
+      "original": "input/node_modules/pkg/ts_css.ts",
+      "decompiled_module": "node_modules/pkg/ts_css"
+    },
+    {
+      "original": "input/node_modules/pkg/js_ts.js",
+      "decompiled_module": "node_modules/pkg/js_ts"
+    },
+    {
+      "original": "input/node_modules/pkg/js_ts.ts",
+      "decompiled_module": "node_modules/pkg/js_ts"
+    }
+  ]
+}

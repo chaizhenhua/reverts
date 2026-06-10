@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.mjs"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

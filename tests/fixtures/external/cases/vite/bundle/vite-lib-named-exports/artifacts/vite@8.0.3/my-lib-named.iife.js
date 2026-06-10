@@ -1,0 +1,1 @@
+var MyLibNamed=(function(e){Object.defineProperty(e,Symbol.toStringTag,{value:`Module`});var t=`foo`;return console.log({...`foo`}),e.foo=t,e})({});

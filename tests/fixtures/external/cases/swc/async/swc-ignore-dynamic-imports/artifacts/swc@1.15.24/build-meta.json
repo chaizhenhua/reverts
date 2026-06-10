@@ -1,0 +1,20 @@
+{
+  "tool": "swc",
+  "version": "1.15.24",
+  "source_ref": "crates/swc_ecma_transforms_module/tests/fixture/common/ignore-dynamic/1",
+  "swc_options": {
+    "module": {
+      "type": "commonjs",
+      "ignoreDynamic": true
+    },
+    "jsc": {
+      "target": "es2022",
+      "parser": {
+        "syntax": "ecmascript",
+        "tsx": false,
+        "dynamicImport": true,
+        "importMeta": true
+      }
+    }
+  }
+}

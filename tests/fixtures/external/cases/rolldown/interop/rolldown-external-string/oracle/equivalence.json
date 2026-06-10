@@ -1,0 +1,9 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    }
+  ]
+}

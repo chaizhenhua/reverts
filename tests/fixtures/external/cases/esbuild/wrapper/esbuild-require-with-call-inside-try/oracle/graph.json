@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "supports-color",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "colors",
+      "kind": "value"
+    }
+  ]
+}

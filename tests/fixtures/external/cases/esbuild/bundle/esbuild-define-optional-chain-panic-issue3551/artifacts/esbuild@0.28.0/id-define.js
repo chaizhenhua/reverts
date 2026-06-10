@@ -1,0 +1,17 @@
+(() => {
+  // id-define.js
+  x?.y.z;
+  (x?.y).z;
+  x?.y["z"];
+  (x?.y)["z"];
+  x?.y();
+  (x?.y)();
+  x?.y.z();
+  (x?.y).z();
+  x?.y["z"]();
+  (x?.y)["z"]();
+  delete x?.y.z;
+  delete (x?.y).z;
+  delete x?.y["z"];
+  delete (x?.y)["z"];
+})();

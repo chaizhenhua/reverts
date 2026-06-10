@@ -1,0 +1,15 @@
+/* input/case3-bar.css */
+@layer only.one {
+  body {
+    color: green;
+  }
+}
+
+/* input/case3-foo.css */
+@layer {
+  body {
+    color: red;
+  }
+}
+
+/* input/case3.css */

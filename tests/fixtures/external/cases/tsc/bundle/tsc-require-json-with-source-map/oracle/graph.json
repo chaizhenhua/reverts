@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "b",
+      "path": "b.json"
+    },
+    {
+      "name": "file1",
+      "path": "file1.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "file1",
+      "to": "b",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "b",
+      "kind": "value"
+    }
+  ]
+}

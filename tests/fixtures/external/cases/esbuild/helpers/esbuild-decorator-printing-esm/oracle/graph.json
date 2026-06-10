@@ -1,0 +1,43 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "constants",
+      "path": "constants.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "constants",
+      "kind": "import_named",
+      "name": "constant"
+    },
+    {
+      "from": "entry",
+      "to": "somewhere",
+      "kind": "import_named",
+      "name": "imported"
+    },
+    {
+      "from": "entry",
+      "to": "empty",
+      "kind": "import_named",
+      "name": "undef"
+    }
+  ],
+  "exports": [
+    {
+      "module": "constants",
+      "name": "constant",
+      "kind": "value"
+    }
+  ]
+}

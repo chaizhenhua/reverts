@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/entry.ts",
+      "decompiled_module": "Users/user/project/entry"
+    },
+    {
+      "original": "input/Users/user/project/factory/index.tsx",
+      "decompiled_module": "Users/user/project/factory/index"
+    },
+    {
+      "original": "input/Users/user/project/fragment/index.tsx",
+      "decompiled_module": "Users/user/project/fragment/index"
+    },
+    {
+      "original": "input/Users/user/project/both/index.tsx",
+      "decompiled_module": "Users/user/project/both/index"
+    }
+  ]
+}

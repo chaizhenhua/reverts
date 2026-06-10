@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/require-demo-pkg",
+      "path": "Users/user/project/src/require-demo-pkg.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/index-main",
+      "path": "Users/user/project/node_modules/demo-pkg/index-main.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/index-module",
+      "path": "Users/user/project/node_modules/demo-pkg/index-module.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "demo-pkg",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "Users/user/project/src/require-demo-pkg",
+      "to": "demo-pkg",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/index-main",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/demo-pkg/index-module",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

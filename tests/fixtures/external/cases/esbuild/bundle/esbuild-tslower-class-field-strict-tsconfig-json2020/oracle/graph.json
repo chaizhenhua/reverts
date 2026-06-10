@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "loose/index",
+      "path": "loose/index.ts"
+    },
+    {
+      "name": "strict/index",
+      "path": "strict/index.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./loose",
+      "kind": "import_default",
+      "name": "loose"
+    },
+    {
+      "from": "entry",
+      "to": "./strict",
+      "kind": "import_default",
+      "name": "strict"
+    }
+  ],
+  "exports": [
+    {
+      "module": "loose/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "strict/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "re-export",
+      "path": "re-export.ts"
+    },
+    {
+      "name": "types1",
+      "path": "types1.ts"
+    },
+    {
+      "name": "types2",
+      "path": "types2.ts"
+    },
+    {
+      "name": "types3",
+      "path": "types3.ts"
+    },
+    {
+      "name": "values",
+      "path": "values.ts"
+    },
+    {
+      "name": "type",
+      "path": "type.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "re-export",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "re-export",
+      "to": "types1",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "re-export",
+      "to": "types2",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "re-export",
+      "to": "types3",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "re-export",
+      "to": "values",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "types2",
+      "to": "type",
+      "kind": "import_named",
+      "name": "Foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "values",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

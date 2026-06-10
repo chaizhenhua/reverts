@@ -1,0 +1,7 @@
+/* media-ampersand-second.css */
+@media screen {
+  a,
+  :scope {
+    color: red;
+  }
+}

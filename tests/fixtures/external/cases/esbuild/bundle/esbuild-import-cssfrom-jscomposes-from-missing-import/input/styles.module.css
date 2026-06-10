@@ -1,0 +1,8 @@
+
+				.foo {
+					composes: x from "file.module.css";
+					composes: y from "file.module.css";
+					composes: z from "file.module.css";
+					composes: x from "file.css";
+				}
+			

@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/src/imports/top-level.js",
+      "decompiled_module": "src/imports/top-level"
+    },
+    {
+      "original": "input/src/imports/same-level.js",
+      "decompiled_module": "src/imports/same-level"
+    },
+    {
+      "original": "input/src/imports/nested-path.js",
+      "decompiled_module": "src/imports/nested-path"
+    },
+    {
+      "original": "input/src/imports/.dot-prefixed/index.js",
+      "decompiled_module": "src/imports/.dot-prefixed/index"
+    },
+    {
+      "original": "input/src/imports/query.json",
+      "decompiled_module": "src/imports/query"
+    }
+  ]
+}

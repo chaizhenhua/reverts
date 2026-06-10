@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/level1.js",
+      "decompiled_module": "level1"
+    },
+    {
+      "original": "input/level2.js",
+      "decompiled_module": "level2"
+    }
+  ]
+}

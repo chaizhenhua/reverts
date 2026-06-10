@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "node_modules/foo/dist/index",
+      "path": "node_modules/foo/dist/index.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

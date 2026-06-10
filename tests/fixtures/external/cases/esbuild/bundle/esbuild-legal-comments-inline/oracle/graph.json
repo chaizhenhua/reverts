@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "empty",
+      "path": "empty.js"
+    },
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

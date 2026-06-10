@@ -1,0 +1,3 @@
+
+				export {nope} from './bar'
+			

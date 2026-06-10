@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    },
+    {
+      "name": "Users/user/project/src/web/foo",
+      "path": "Users/user/project/src/web/foo.ts"
+    },
+    {
+      "name": "Users/user/project/src/web/bar/foo/foo",
+      "path": "Users/user/project/src/web/bar/foo/foo.ts"
+    },
+    {
+      "name": "Users/user/project/src/web/bar/foo/index",
+      "path": "Users/user/project/src/web/bar/foo/index.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "Users/user/project/src/web/foo",
+      "to": "bar/foo",
+      "kind": "import_named",
+      "name": "foo as barFoo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/web/foo",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/web/bar/foo/foo",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

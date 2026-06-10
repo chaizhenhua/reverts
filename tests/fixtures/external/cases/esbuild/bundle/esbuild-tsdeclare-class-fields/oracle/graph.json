@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "define-false/index",
+      "path": "define-false/index.ts"
+    },
+    {
+      "name": "define-true/index",
+      "path": "define-true/index.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

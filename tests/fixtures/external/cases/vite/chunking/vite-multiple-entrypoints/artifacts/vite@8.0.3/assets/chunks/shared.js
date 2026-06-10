@@ -1,0 +1,1 @@
+var e=`shared`;export{e as t};

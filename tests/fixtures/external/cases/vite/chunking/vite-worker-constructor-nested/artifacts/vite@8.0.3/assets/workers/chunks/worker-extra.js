@@ -1,0 +1,1 @@
+const e={nested:!0};export{e as extraValue};

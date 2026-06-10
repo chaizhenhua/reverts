@@ -1,0 +1,64 @@
+{
+  "id": "webpack-cjs-reexport-property-exports",
+  "title": "webpack cjs-tree-shaking reexport property exports",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "webpack",
+    "project_version": "5.105.4",
+    "project_commit": "27c13b44c861908793f160f9f7413b32543c0522",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/cases/cjs-tree-shaking/reexports"
+  },
+  "artifact": {
+    "tool": "webpack",
+    "version": "5.105.4",
+    "entry": "artifacts/webpack@5.105.4/bundle.js",
+    "outputs": [
+      "artifacts/webpack@5.105.4/bundle.js"
+    ],
+    "format": "bundle",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_modules__",
+      "__webpack_exports__"
+    ],
+    "must_recover_modules": [
+      "index",
+      "module",
+      "reexport-property-exports"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "index",
+        "name": "default"
+      },
+      {
+        "module": "module",
+        "name": "abc"
+      },
+      {
+        "module": "module",
+        "name": "def"
+      },
+      {
+        "module": "reexport-property-exports",
+        "name": "property1"
+      },
+      {
+        "module": "reexport-property-exports",
+        "name": "property2"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

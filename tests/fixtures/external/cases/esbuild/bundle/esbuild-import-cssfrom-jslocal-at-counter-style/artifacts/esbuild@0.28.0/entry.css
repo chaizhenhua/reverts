@@ -1,0 +1,123 @@
+/* list_style_type.css */
+@counter-style list_style_type_local {
+  symbols: A B C;
+}
+div {
+  list-style-type: GLOBAL;
+}
+div {
+  list-style-type: list_style_type_local;
+}
+div {
+  list-style-type: none;
+}
+div {
+  list-style-type: INITIAL;
+}
+div {
+  list-style-type: decimal;
+}
+div {
+  list-style-type: disc;
+}
+div {
+  list-style-type: SQUARE;
+}
+div {
+  list-style-type: circle;
+}
+div {
+  list-style-type: disclosure-OPEN;
+}
+div {
+  list-style-type: DISCLOSURE-closed;
+}
+div {
+  list-style-type: LAO;
+}
+div {
+  list-style-type: "\1f44d";
+}
+
+/* list_style.css */
+@counter-style list_style_local {
+  symbols: A B C;
+}
+div {
+  list-style: GLOBAL;
+}
+div {
+  list-style: list_style_local;
+}
+div {
+  list-style: list_style_local none;
+}
+div {
+  list-style: list_style_local url(http://);
+}
+div {
+  list-style: list_style_local linear-gradient(red, green);
+}
+div {
+  list-style: list_style_local inside;
+}
+div {
+  list-style: list_style_local outside;
+}
+div {
+  list-style: none list_style_local;
+}
+div {
+  list-style: url(http://) list_style_local;
+}
+div {
+  list-style: linear-gradient(red, green) list_style_local;
+}
+div {
+  list-style: list_style_local inside;
+}
+div {
+  list-style: list_style_local outside;
+}
+div {
+  list-style: inside list_style_inside;
+}
+div {
+  list-style: inside list_style_outside;
+}
+div {
+  list-style: outside list_style_inside;
+}
+div {
+  list-style: outside list_style_outside;
+}
+div {
+  list-style: url(http://) none invalid;
+}
+div {
+  list-style: linear-gradient(red, green) none invalid;
+}
+div {
+  list-style: INITIAL;
+}
+div {
+  list-style: decimal;
+}
+div {
+  list-style: disc;
+}
+div {
+  list-style: SQUARE;
+}
+div {
+  list-style: circle;
+}
+div {
+  list-style: disclosure-OPEN;
+}
+div {
+  list-style: DISCLOSURE-closed;
+}
+div {
+  list-style: LAO;
+}

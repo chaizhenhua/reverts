@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "shared",
+      "path": "shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "shared",
+      "kind": "require"
+    },
+    {
+      "from": "b",
+      "to": "shared",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "shared",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

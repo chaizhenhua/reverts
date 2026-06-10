@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "TypeScript compiler outputs were copied from the configured outDir without further rewriting."
+  ]
+}

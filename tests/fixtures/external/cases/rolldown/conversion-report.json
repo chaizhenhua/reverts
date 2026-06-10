@@ -1,0 +1,70 @@
+{
+  "project": "rolldown",
+  "version": "1.0.0-rc.13",
+  "commit": "a48ca341e83a2f909774b09925c390ea27d4b848",
+  "generated_count": 10,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "rolldown-json-named-exports",
+      "category": "bundle",
+      "test": "packages/rolldown/tests/fixtures/builtin-plugin/json/named-exports",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-jsx-default-automatic",
+      "category": "bundle",
+      "test": "packages/rolldown/tests/fixtures/jsx/default-automatic",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-resolve-alias",
+      "category": "bundle",
+      "test": "packages/rolldown/tests/fixtures/resolve/alias",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-external-string",
+      "category": "interop",
+      "test": "packages/rolldown/tests/fixtures/external/string",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-lazy-barrel-basic",
+      "category": "reexport",
+      "test": "packages/rolldown/tests/fixtures/lazy-barrel/basic",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-lazy-barrel-circular-star-exports",
+      "category": "reexport",
+      "test": "packages/rolldown/tests/fixtures/lazy-barrel/circular-star-exports",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-lazy-barrel-dynamic-import-entry",
+      "category": "async",
+      "test": "packages/rolldown/tests/fixtures/lazy-barrel/dynamic-import-entry",
+      "outputs": 1
+    },
+    {
+      "case_id": "rolldown-preserve-modules-basic",
+      "category": "chunking",
+      "test": "packages/rolldown/tests/fixtures/topics/preserve-modules/basic",
+      "outputs": 3
+    },
+    {
+      "case_id": "rolldown-preserve-modules-cjs-interop",
+      "category": "interop",
+      "test": "packages/rolldown/tests/fixtures/topics/preserve-modules/cjs-inter-op",
+      "outputs": 4
+    },
+    {
+      "case_id": "rolldown-advanced-chunks-test-fn",
+      "category": "chunking",
+      "test": "packages/rolldown/tests/fixtures/function/advanced-chunks/test-fn",
+      "outputs": 3
+    }
+  ],
+  "skipped": []
+}

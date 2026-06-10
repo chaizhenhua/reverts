@@ -1,0 +1,10 @@
+{
+  "bundler_family": "swc",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "_export_star"
+  ],
+  "runtime_helpers": [
+    "_export_star"
+  ]
+}

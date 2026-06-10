@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/top-level-no-eval.js",
+      "decompiled_module": "top-level-no-eval"
+    },
+    {
+      "original": "input/top-level-eval.js",
+      "decompiled_module": "top-level-eval"
+    },
+    {
+      "original": "input/nested-no-eval.js",
+      "decompiled_module": "nested-no-eval"
+    },
+    {
+      "original": "input/nested-eval.js",
+      "decompiled_module": "nested-eval"
+    },
+    {
+      "original": "input/ts-namespace-no-eval.ts",
+      "decompiled_module": "ts-namespace-no-eval"
+    },
+    {
+      "original": "input/ts-namespace-eval.ts",
+      "decompiled_module": "ts-namespace-eval"
+    },
+    {
+      "original": "input/issue-4055.ts",
+      "decompiled_module": "issue-4055"
+    }
+  ]
+}

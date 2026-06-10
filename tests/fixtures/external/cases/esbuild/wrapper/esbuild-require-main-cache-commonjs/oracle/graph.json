@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "is-main",
+      "path": "is-main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "is-main",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "is-main",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

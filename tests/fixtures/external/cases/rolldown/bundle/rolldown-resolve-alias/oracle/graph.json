@@ -1,0 +1,43 @@
+{
+  "modules": [
+    {
+      "name": "foo",
+      "path": "foo.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "main",
+      "to": "ignore-me",
+      "kind": "import_default",
+      "name": "ignored"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "main",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "main",
+      "name": "ignored",
+      "kind": "value"
+    }
+  ]
+}

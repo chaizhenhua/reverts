@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/main.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/main"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/main-browser.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/main-browser"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/lib/util.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/lib/util"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/lib/util-browser.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/lib/util-browser"
+    }
+  ]
+}

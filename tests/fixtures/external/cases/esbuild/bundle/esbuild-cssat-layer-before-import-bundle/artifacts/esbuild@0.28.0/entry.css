@@ -1,0 +1,18 @@
+@layer layer1, layer2.layer3;
+
+/* input/a.css */
+@layer layer4 {
+  a {
+    color: red;
+  }
+}
+
+/* input/b.css */
+@layer layer5 {
+  b {
+    color: red;
+  }
+}
+
+/* input/entry.css */
+@layer layer6.layer7, layer8;

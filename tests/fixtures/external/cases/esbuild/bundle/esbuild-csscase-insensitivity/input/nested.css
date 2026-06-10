@@ -1,0 +1,18 @@
+
+				/* "from" should be recognized and optimized to "0%" */
+				@KeyFrames Foo {
+					froM { OPAcity: 0 }
+					tO { opaCITY: 1 }
+				}
+
+				body {
+					/* "#FF0000" should be optimized to "red" because "BACKGROUND-color" should be recognized */
+					BACKGROUND-color: #FF0000;
+
+					/* This should be optimized to 50px */
+					width: CaLc(20Px + 30pX);
+
+					/* This URL token should be recognized and bundled */
+					background-IMAGE: Url(image.png);
+				}
+			

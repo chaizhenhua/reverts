@@ -1,0 +1,17 @@
+/* at-media/005/c.css */
+.box {
+  background-color: green;
+}
+
+/* at-media/005/b.css */
+@media (max-width: 1px) {
+  @media (max-width: 1px) {
+    .box {
+      background-color: red;
+    }
+  }
+}
+
+/* at-media/005/a.css */
+
+/* at-media/005/style.css */

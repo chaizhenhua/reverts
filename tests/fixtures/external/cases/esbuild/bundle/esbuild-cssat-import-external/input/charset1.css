@@ -1,0 +1,10 @@
+
+				@charset "UTF-8";
+				@import "./external3.css";
+				@import "./external4.css";
+				@import "./external5.css";
+				@import "https://www.example.com/style1.css";
+				@import "https://www.example.com/style2.css";
+				@import "https://www.example.com/style3.css" print;
+				.middle { color: green }
+			

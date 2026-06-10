@@ -1,0 +1,4 @@
+/* nested-colon.css */
+a :hover {
+  color: red;
+}

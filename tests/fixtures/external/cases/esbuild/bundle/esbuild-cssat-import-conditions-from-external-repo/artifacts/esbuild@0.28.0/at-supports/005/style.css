@@ -1,0 +1,47 @@
+/* at-supports/005/green.css */
+@supports (display: block) {
+  @layer alpha {
+    @supports (foo: bar) {
+      @layer alpha {
+        .box {
+          background-color: green;
+        }
+      }
+    }
+  }
+}
+
+/* at-supports/005/a.css */
+@supports (display: block) {
+  @layer alpha;
+}
+
+/* at-supports/005/red.css */
+@supports (display: block) {
+  @layer beta {
+    @supports (foo: bar) {
+      @layer beta {
+        .box {
+          background-color: red;
+        }
+      }
+    }
+  }
+}
+
+/* at-supports/005/b.css */
+@supports (display: block) {
+  @layer beta;
+}
+
+/* at-supports/005/style.css */
+@layer beta {
+  .box {
+    background-color: green;
+  }
+}
+@layer alpha {
+  .box {
+    background-color: red;
+  }
+}

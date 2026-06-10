@@ -1,0 +1,45 @@
+/* input/global.css */
+.GLOBAL1 {
+  color: black;
+}
+
+/* input/other1.module.css */
+.other1_local0 {
+  color: blue;
+}
+
+/* input/base.module.css */
+.base_base1 {
+  cursor: pointer;
+}
+.base_base2 {
+  display: inline;
+}
+.base_base3 {
+  float: left;
+}
+
+/* input/other2.module.css */
+.other2_local0 {
+  background: purple;
+}
+
+/* input/styles.module.css */
+.styles_local0 {
+}
+.styles_local0 {
+  background: green;
+}
+.styles_local0 {
+}
+.styles_local3 {
+  border: 1px solid black;
+}
+.styles_local4 {
+  opacity: 0.5;
+}
+.styles_local1 {
+  color: red;
+}
+.styles_fromOtherFile {
+}

@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.jsx"
+    },
+    {
+      "name": "node_modules/bun-test-helpers/index",
+      "path": "node_modules/bun-test-helpers/index.js"
+    },
+    {
+      "name": "node_modules/custom-classic/index",
+      "path": "node_modules/custom-classic/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "node_modules/custom-classic/index",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "node_modules/bun-test-helpers/index",
+      "kind": "import_named",
+      "name": "print"
+    }
+  ],
+  "exports": [
+    {
+      "module": "node_modules/bun-test-helpers/index",
+      "name": "print",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/custom-classic/index",
+      "name": "createElement",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/custom-classic/index",
+      "name": "Fragment",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/custom-classic/index",
+      "name": "something",
+      "kind": "value"
+    }
+  ]
+}

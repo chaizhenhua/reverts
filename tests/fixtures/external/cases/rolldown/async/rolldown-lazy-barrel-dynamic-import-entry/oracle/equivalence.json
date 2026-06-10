@@ -1,0 +1,29 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/barrel/a.js",
+      "decompiled_module": "barrel/a"
+    },
+    {
+      "original": "input/barrel/b-impl.js",
+      "decompiled_module": "barrel/b-impl"
+    },
+    {
+      "original": "input/barrel/b.js",
+      "decompiled_module": "barrel/b"
+    },
+    {
+      "original": "input/barrel/c.js",
+      "decompiled_module": "barrel/c"
+    },
+    {
+      "original": "input/barrel/index.js",
+      "decompiled_module": "barrel/index"
+    },
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    }
+  ]
+}

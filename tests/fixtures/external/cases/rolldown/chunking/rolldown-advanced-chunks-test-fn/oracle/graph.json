@@ -1,0 +1,72 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    },
+    {
+      "name": "d",
+      "path": "d.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "a",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "main",
+      "to": "b",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "main",
+      "to": "c",
+      "kind": "import_named",
+      "name": "c"
+    },
+    {
+      "from": "main",
+      "to": "d",
+      "kind": "import_named",
+      "name": "d"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "d",
+      "name": "d",
+      "kind": "value"
+    }
+  ]
+}

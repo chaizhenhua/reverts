@@ -1,0 +1,6 @@
+/* nested-@layer.css */
+@layer base {
+  a {
+    color: red;
+  }
+}

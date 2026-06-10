@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "./foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "./foo",
+      "kind": "import_default",
+      "name": "z"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "./foo",
+      "kind": "import_named",
+      "name": "x"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "./foo",
+      "kind": "import_named",
+      "name": "y"
+    }
+  ],
+  "exports": []
+}

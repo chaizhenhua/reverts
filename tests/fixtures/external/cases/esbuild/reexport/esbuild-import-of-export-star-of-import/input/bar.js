@@ -1,0 +1,3 @@
+
+				export {value as bar} from './baz'
+			

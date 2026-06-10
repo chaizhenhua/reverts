@@ -1,0 +1,29 @@
+/* at-layer/005/b.css */
+@media (min-width: 1px) {
+  @layer a {
+    @media (width: 1px) {
+      @layer b {
+        .box {
+          background-color: red;
+        }
+      }
+    }
+  }
+}
+
+/* at-layer/005/a.css */
+@media (min-width: 1px) {
+  @layer a;
+}
+
+/* at-layer/005/style.css */
+@layer a.c {
+  .box {
+    background-color: red;
+  }
+}
+@layer a.b {
+  .box {
+    background-color: green;
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/D:/project/entry.jsx",
+      "decompiled_module": "D:/project/entry"
+    },
+    {
+      "original": "input/C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/index.js",
+      "decompiled_module": "C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/index"
+    }
+  ]
+}

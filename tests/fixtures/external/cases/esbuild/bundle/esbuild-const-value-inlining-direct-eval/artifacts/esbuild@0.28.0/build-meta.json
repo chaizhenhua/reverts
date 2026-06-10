@@ -1,0 +1,61 @@
+{
+  "tool": "esbuild",
+  "version": "0.28.0",
+  "command": [
+    "npx",
+    "--yes",
+    "esbuild@0.28.0",
+    "input/top-level-no-eval.js",
+    "input/top-level-eval.js",
+    "input/nested-no-eval.js",
+    "input/nested-eval.js",
+    "input/ts-namespace-no-eval.ts",
+    "input/ts-namespace-eval.ts",
+    "input/issue-4055.ts",
+    "--minify-syntax",
+    "--outdir=artifacts/esbuild@0.28.0",
+    "--outbase=input",
+    "--entry-names=[dir]/[name]"
+  ],
+  "entry_points": [
+    "input/top-level-no-eval.js",
+    "input/top-level-eval.js",
+    "input/nested-no-eval.js",
+    "input/nested-eval.js",
+    "input/ts-namespace-no-eval.ts",
+    "input/ts-namespace-eval.ts",
+    "input/issue-4055.ts"
+  ],
+  "options": {
+    "mode": "passthrough",
+    "bundle": false,
+    "format": null,
+    "platform": null,
+    "target": null,
+    "supported": null,
+    "code_splitting": false,
+    "external": [],
+    "loader": {},
+    "abs_output_base": null,
+    "public_path": null,
+    "entry_names": null,
+    "chunk_names": null,
+    "asset_names": null,
+    "jsx": {
+      "factory": null,
+      "fragment": null,
+      "parse": false,
+      "preserve": false,
+      "automatic": false,
+      "importSource": null,
+      "development": false,
+      "sideEffects": false,
+      "mode": null
+    },
+    "minify_syntax": true,
+    "minify_identifiers": false,
+    "minify_whitespace": false,
+    "stable_entry_names": true,
+    "stable_chunk_names": false
+  }
+}

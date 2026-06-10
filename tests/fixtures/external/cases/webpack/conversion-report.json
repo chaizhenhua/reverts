@@ -1,0 +1,184 @@
+{
+  "project": "webpack",
+  "version": "5.105.4",
+  "commit": "27c13b44c861908793f160f9f7413b32543c0522",
+  "generated_count": 29,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "webpack-async-double-import",
+      "category": "async",
+      "test": "test/cases/async-modules/double-import",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-async-module-issue-19803",
+      "category": "async",
+      "test": "test/configCases/async-module/issue-19803",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-async-reexport-unknown",
+      "category": "async",
+      "test": "test/cases/async-modules/reexport-unknown",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-cjs-namespace-flags",
+      "category": "interop",
+      "test": "test/cases/cjs-tree-shaking/namespace",
+      "outputs": 5
+    },
+    {
+      "case_id": "webpack-cjs-reexport-property-exports",
+      "category": "reexport",
+      "test": "test/cases/cjs-tree-shaking/reexports",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-cjs-reexport-reexport-exports",
+      "category": "reexport",
+      "test": "test/cases/cjs-tree-shaking/reexports",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-cjs-reexport-whole-exports",
+      "category": "reexport",
+      "test": "test/cases/cjs-tree-shaking/reexports",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-cjs-require-importing",
+      "category": "interop",
+      "test": "test/cases/cjs-tree-shaking/importing",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-cjs-to-esm-basic",
+      "category": "interop",
+      "test": "test/cases/cjs-tree-shaking/cjs-to-esm",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-conditional-reexport-splitchunk",
+      "category": "chunking",
+      "test": "test/configCases/graph/conditional-reexport",
+      "outputs": 3
+    },
+    {
+      "case_id": "webpack-dynamic-import-basic",
+      "category": "chunking",
+      "test": "test/cases/chunks/import",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-esm-to-cjs-basic",
+      "category": "interop",
+      "test": "test/cases/cjs-tree-shaking/esm-to-cjs",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-import-circle-dynamic",
+      "category": "chunking",
+      "test": "test/cases/chunks/import-circle",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-json-import-by-name",
+      "category": "bundle",
+      "test": "test/cases/json/import-by-name",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-json-import-lazy",
+      "category": "chunking",
+      "test": "test/cases/json/import-lazy",
+      "outputs": 4
+    },
+    {
+      "case_id": "webpack-json-import-named-with-type",
+      "category": "bundle",
+      "test": "test/cases/json/import-named-with-type-json",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-json-import-with-default",
+      "category": "bundle",
+      "test": "test/cases/json/import-with-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-json-import-with-type",
+      "category": "bundle",
+      "test": "test/cases/json/import-with-type-json",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-json-reexport",
+      "category": "reexport",
+      "test": "test/cases/json/reexport",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-mjs-cjs-import-default",
+      "category": "interop",
+      "test": "test/cases/mjs/cjs-import-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-mjs-namespace-object-lazy",
+      "category": "interop",
+      "test": "test/cases/mjs/namespace-object-lazy",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-reexport-namespace-chain",
+      "category": "reexport",
+      "test": "test/configCases/code-generation/re-export-namespace",
+      "outputs": 1
+    },
+    {
+      "case_id": "webpack-runtime-chunk-shared",
+      "category": "chunking",
+      "test": "test/configCases/split-chunks/runtime-chunk",
+      "outputs": 4
+    },
+    {
+      "case_id": "webpack-scope-hoisting-esmodule",
+      "category": "bundle",
+      "test": "test/configCases/scope-hoisting/esModule",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-static-dynamic-import-destructuring",
+      "category": "chunking",
+      "test": "test/cases/chunks/statical-dynamic-import-destructuring",
+      "outputs": 3
+    },
+    {
+      "case_id": "webpack-static-dynamic-import-then",
+      "category": "chunking",
+      "test": "test/cases/chunks/statical-dynamic-import-then",
+      "outputs": 4
+    },
+    {
+      "case_id": "webpack-static-dynamic-import-used-exports",
+      "category": "chunking",
+      "test": "test/cases/chunks/statical-dynamic-import",
+      "outputs": 3
+    },
+    {
+      "case_id": "webpack-top-level-await-reexport",
+      "category": "async",
+      "test": "test/cases/async-modules/top-level-await",
+      "outputs": 2
+    },
+    {
+      "case_id": "webpack-top-level-await-without-export",
+      "category": "async",
+      "test": "test/cases/async-modules/top-level-await-without-export",
+      "outputs": 1
+    }
+  ],
+  "skipped": []
+}

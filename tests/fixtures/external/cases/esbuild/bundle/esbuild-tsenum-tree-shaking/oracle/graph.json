@@ -1,0 +1,38 @@
+{
+  "modules": [
+    {
+      "name": "simple-member",
+      "path": "simple-member.ts"
+    },
+    {
+      "name": "simple-enum",
+      "path": "simple-enum.ts"
+    },
+    {
+      "name": "sibling-member",
+      "path": "sibling-member.ts"
+    },
+    {
+      "name": "sibling-enum-before",
+      "path": "sibling-enum-before.ts"
+    },
+    {
+      "name": "sibling-enum-middle",
+      "path": "sibling-enum-middle.ts"
+    },
+    {
+      "name": "sibling-enum-after",
+      "path": "sibling-enum-after.ts"
+    },
+    {
+      "name": "namespace-before",
+      "path": "namespace-before.ts"
+    },
+    {
+      "name": "namespace-after",
+      "path": "namespace-after.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

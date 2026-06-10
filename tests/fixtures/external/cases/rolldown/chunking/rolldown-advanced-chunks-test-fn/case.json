@@ -1,0 +1,60 @@
+{
+  "id": "rolldown-advanced-chunks-test-fn",
+  "title": "rolldown advanced chunks test function",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rolldown",
+    "project_version": "1.0.0-rc.13",
+    "project_commit": "a48ca341e83a2f909774b09925c390ea27d4b848",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/rolldown/tests/fixtures/function/advanced-chunks/test-fn"
+  },
+  "artifact": {
+    "tool": "rolldown",
+    "version": "1.0.0-rc.13",
+    "entry": "artifacts/rolldown@1.0.0-rc.13/main.js",
+    "outputs": [
+      "artifacts/rolldown@1.0.0-rc.13/chunks/ab.js",
+      "artifacts/rolldown@1.0.0-rc.13/chunks/cd.js",
+      "artifacts/rolldown@1.0.0-rc.13/main.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "rolldown",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "main"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "a",
+        "name": "a"
+      },
+      {
+        "module": "b",
+        "name": "b"
+      },
+      {
+        "module": "c",
+        "name": "c"
+      },
+      {
+        "module": "d",
+        "name": "d"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

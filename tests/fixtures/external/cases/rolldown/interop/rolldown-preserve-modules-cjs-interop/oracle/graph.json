@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "lib",
+      "path": "lib.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "src/index",
+      "path": "src/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "lib",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "main",
+      "to": "src/index",
+      "kind": "import_named",
+      "name": "a"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/index",
+      "name": "a",
+      "kind": "value"
+    }
+  ]
+}

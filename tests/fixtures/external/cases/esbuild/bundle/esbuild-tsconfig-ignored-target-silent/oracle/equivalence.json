@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.ts",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/a/index.ts",
+      "decompiled_module": "Users/user/project/src/a/index"
+    },
+    {
+      "original": "input/Users/user/project/src/node_modules/b/index.ts",
+      "decompiled_module": "Users/user/project/src/node_modules/b/index"
+    }
+  ]
+}

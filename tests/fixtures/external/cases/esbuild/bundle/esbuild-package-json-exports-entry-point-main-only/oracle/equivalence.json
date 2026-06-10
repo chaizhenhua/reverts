@@ -1,0 +1,9 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/node_modules/pkg/main.js",
+      "decompiled_module": "node_modules/pkg/main"
+    }
+  ]
+}

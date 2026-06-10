@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "external",
+      "kind": "import_default",
+      "name": "external"
+    }
+  ],
+  "exports": []
+}

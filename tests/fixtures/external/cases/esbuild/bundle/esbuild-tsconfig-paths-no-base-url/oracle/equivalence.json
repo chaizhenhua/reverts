@@ -1,0 +1,81 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/entry.ts",
+      "decompiled_module": "Users/user/project/entry"
+    },
+    {
+      "original": "input/Users/user/project/simple/index.ts",
+      "decompiled_module": "Users/user/project/simple/index"
+    },
+    {
+      "original": "input/Users/user/project/simple/test0-success.ts",
+      "decompiled_module": "Users/user/project/simple/test0-success"
+    },
+    {
+      "original": "input/Users/user/project/simple/test1-success.ts",
+      "decompiled_module": "Users/user/project/simple/test1-success"
+    },
+    {
+      "original": "input/Users/user/project/simple/test2-success/foo.ts",
+      "decompiled_module": "Users/user/project/simple/test2-success/foo"
+    },
+    {
+      "original": "input/Users/user/project/simple/test3-success.ts",
+      "decompiled_module": "Users/user/project/simple/test3-success"
+    },
+    {
+      "original": "input/Users/user/project/simple/test4-first/foo.ts",
+      "decompiled_module": "Users/user/project/simple/test4-first/foo"
+    },
+    {
+      "original": "input/Users/user/project/simple/test5-second/foo.ts",
+      "decompiled_module": "Users/user/project/simple/test5-second/foo"
+    },
+    {
+      "original": "input/Users/user/project/simple/absolute.ts",
+      "decompiled_module": "Users/user/project/simple/absolute"
+    },
+    {
+      "original": "input/Users/user/project/simple/actual/test.ts",
+      "decompiled_module": "Users/user/project/simple/actual/test"
+    },
+    {
+      "original": "input/Users/user/project/extended/index.ts",
+      "decompiled_module": "Users/user/project/extended/index"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test0-success.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test0-success"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test1-success.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test1-success"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test2-success/foo.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test2-success/foo"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test3-success.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test3-success"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test4-first/foo.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test4-first/foo"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/test5-second/foo.ts",
+      "decompiled_module": "Users/user/project/extended/nested/test5-second/foo"
+    },
+    {
+      "original": "input/Users/user/project/extended/absolute.ts",
+      "decompiled_module": "Users/user/project/extended/absolute"
+    },
+    {
+      "original": "input/Users/user/project/extended/nested/actual/test.ts",
+      "decompiled_module": "Users/user/project/extended/nested/actual/test"
+    }
+  ]
+}

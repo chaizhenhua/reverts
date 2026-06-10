@@ -1,0 +1,93 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/exported-entry.js",
+      "decompiled_module": "exported-entry"
+    },
+    {
+      "original": "input/re-exported-entry.js",
+      "decompiled_module": "re-exported-entry"
+    },
+    {
+      "original": "input/re-exported-constants.js",
+      "decompiled_module": "re-exported-constants"
+    },
+    {
+      "original": "input/re-exported-2-entry.js",
+      "decompiled_module": "re-exported-2-entry"
+    },
+    {
+      "original": "input/re-exported-2-constants.js",
+      "decompiled_module": "re-exported-2-constants"
+    },
+    {
+      "original": "input/re-exported-star-entry.js",
+      "decompiled_module": "re-exported-star-entry"
+    },
+    {
+      "original": "input/re-exported-star-constants.js",
+      "decompiled_module": "re-exported-star-constants"
+    },
+    {
+      "original": "input/cross-module-entry.js",
+      "decompiled_module": "cross-module-entry"
+    },
+    {
+      "original": "input/cross-module-constants.js",
+      "decompiled_module": "cross-module-constants"
+    },
+    {
+      "original": "input/print-shorthand-entry.js",
+      "decompiled_module": "print-shorthand-entry"
+    },
+    {
+      "original": "input/print-shorthand-constants.js",
+      "decompiled_module": "print-shorthand-constants"
+    },
+    {
+      "original": "input/circular-import-entry.js",
+      "decompiled_module": "circular-import-entry"
+    },
+    {
+      "original": "input/circular-import-constants.js",
+      "decompiled_module": "circular-import-constants"
+    },
+    {
+      "original": "input/circular-import-cycle.js",
+      "decompiled_module": "circular-import-cycle"
+    },
+    {
+      "original": "input/circular-re-export-entry.js",
+      "decompiled_module": "circular-re-export-entry"
+    },
+    {
+      "original": "input/circular-re-export-constants.js",
+      "decompiled_module": "circular-re-export-constants"
+    },
+    {
+      "original": "input/circular-re-export-cycle.js",
+      "decompiled_module": "circular-re-export-cycle"
+    },
+    {
+      "original": "input/circular-re-export-star-entry.js",
+      "decompiled_module": "circular-re-export-star-entry"
+    },
+    {
+      "original": "input/circular-re-export-star-constants.js",
+      "decompiled_module": "circular-re-export-star-constants"
+    },
+    {
+      "original": "input/circular-re-export-star-cycle.js",
+      "decompiled_module": "circular-re-export-star-cycle"
+    },
+    {
+      "original": "input/non-circular-export-entry.js",
+      "decompiled_module": "non-circular-export-entry"
+    },
+    {
+      "original": "input/non-circular-export-constants.js",
+      "decompiled_module": "non-circular-export-constants"
+    }
+  ]
+}

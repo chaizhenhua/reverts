@@ -1,0 +1,6 @@
+{
+				"extends": "./b-base.json",
+				"compilerOptions": {
+					"jsxFactory": "b",
+				},
+			}

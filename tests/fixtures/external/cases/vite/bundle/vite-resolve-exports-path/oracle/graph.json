@@ -1,0 +1,56 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-path/main",
+      "path": "node_modules/@vitejs/test-resolve-exports-path/main.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-path/deep",
+      "path": "node_modules/@vitejs/test-resolve-exports-path/deep.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-resolve-exports-path/cjs",
+      "path": "node_modules/@vitejs/test-resolve-exports-path/cjs.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-resolve-exports-path/deep.js",
+      "kind": "import_default",
+      "name": "deepMsg"
+    },
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-resolve-exports-path",
+      "kind": "import_named",
+      "name": "msg"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "deepMsg",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-resolve-exports-path/main",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-resolve-exports-path/deep",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

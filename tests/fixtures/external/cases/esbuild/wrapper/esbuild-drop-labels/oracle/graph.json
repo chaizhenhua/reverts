@@ -1,0 +1,37 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo1",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "bar1",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "foo2",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "bar2",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

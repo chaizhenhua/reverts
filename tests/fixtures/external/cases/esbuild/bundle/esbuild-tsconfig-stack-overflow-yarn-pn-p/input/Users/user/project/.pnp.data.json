@@ -1,0 +1,32 @@
+
+				{
+					"packageRegistryData": [
+						[null, [
+							[null, {
+								"packageLocation": "./",
+								"packageDependencies": [
+									["tsconfigs", "virtual:some-path"]
+								],
+								"linkType": "SOFT"
+							}]
+						]],
+						["tsconfigs", [
+							["virtual:some-path", {
+								"packageLocation": "./packages/tsconfigs/",
+								"packageDependencies": [
+									["tsconfigs", "virtual:some-path"]
+								],
+								"packagePeers": [],
+								"linkType": "SOFT"
+							}],
+							["workspace:packages/tsconfigs", {
+								"packageLocation": "./packages/tsconfigs/",
+								"packageDependencies": [
+									["tsconfigs", "workspace:packages/tsconfigs"]
+								],
+								"linkType": "SOFT"
+							}]
+						]]
+					]
+				}
+			

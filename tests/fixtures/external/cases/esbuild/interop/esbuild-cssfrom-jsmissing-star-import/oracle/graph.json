@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./a.css",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,6 @@
+{
+				"compilerOptions": {
+					"jsxFactory": "bBase",
+					"jsxFragmentFactory": "bBase",
+				},
+			}

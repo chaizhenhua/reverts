@@ -1,0 +1,37 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/1.js",
+      "decompiled_module": "1"
+    },
+    {
+      "original": "input/2.js",
+      "decompiled_module": "2"
+    },
+    {
+      "original": "input/3.js",
+      "decompiled_module": "3"
+    },
+    {
+      "original": "input/4.js",
+      "decompiled_module": "4"
+    },
+    {
+      "original": "input/5.js",
+      "decompiled_module": "5"
+    },
+    {
+      "original": "input/6.js",
+      "decompiled_module": "6"
+    },
+    {
+      "original": "input/7.js",
+      "decompiled_module": "7"
+    },
+    {
+      "original": "input/8.js",
+      "decompiled_module": "8"
+    }
+  ]
+}

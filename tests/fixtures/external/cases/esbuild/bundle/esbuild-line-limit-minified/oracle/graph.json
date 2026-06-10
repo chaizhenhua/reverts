@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "script",
+      "path": "script.jsx"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "script",
+      "name": "SignUpForm",
+      "kind": "value"
+    }
+  ]
+}

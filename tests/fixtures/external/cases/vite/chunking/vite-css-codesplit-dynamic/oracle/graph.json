@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/async-js",
+      "path": "src/async-js.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "src/async-js",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "src/main",
+      "to": "./mod.module.css",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/async-js",
+      "name": "asyncReady",
+      "kind": "value"
+    }
+  ]
+}

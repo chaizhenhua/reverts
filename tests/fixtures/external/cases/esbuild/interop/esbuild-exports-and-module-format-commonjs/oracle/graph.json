@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo/test",
+      "path": "foo/test.js"
+    },
+    {
+      "name": "bar/test",
+      "path": "bar/test.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo/test",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "bar/test",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo/test",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "bar/test",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

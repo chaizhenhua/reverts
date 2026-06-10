@@ -1,0 +1,5 @@
+{
+  "name": "vite-glob-import-eager-alias",
+  "private": true,
+  "type": "module"
+}

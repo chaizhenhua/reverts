@@ -1,0 +1,6 @@
+
+				.foo {
+					composes: foo from "../file-1.css";
+					zoom: 2;
+				}
+			

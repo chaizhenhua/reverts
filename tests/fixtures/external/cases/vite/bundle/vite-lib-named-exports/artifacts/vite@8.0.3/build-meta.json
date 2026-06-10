@@ -1,0 +1,24 @@
+{
+  "tool": "vite",
+  "version": "8.0.3",
+  "source_ref": "playground/lib/vite.named-exports.config.js",
+  "config_kind": "lib",
+  "build": {
+    "outDir": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-named-exports/artifacts/vite@8.0.3",
+    "emptyOutDir": true,
+    "lib": {
+      "entry": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/bundle/vite-lib-named-exports/input/src/main-named.js",
+      "name": "MyLibNamed",
+      "formats": [
+        "umd",
+        "iife"
+      ]
+    }
+  },
+  "command": [
+    "node",
+    "-e",
+    "vite.build(config)",
+    "# source=playground/lib/vite.named-exports.config.js"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/outside-node-modules/index.jsx",
+      "decompiled_module": "outside-node-modules/index"
+    },
+    {
+      "original": "input/node_modules/inside-node-modules/index.jsx",
+      "decompiled_module": "node_modules/inside-node-modules/index"
+    }
+  ]
+}

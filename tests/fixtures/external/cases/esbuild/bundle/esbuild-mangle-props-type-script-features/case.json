@@ -1,0 +1,62 @@
+{
+  "id": "esbuild-mangle-props-type-script-features",
+  "title": "esbuild TestManglePropsTypeScriptFeatures",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestManglePropsTypeScriptFeatures"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/enum-values.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/enum-values.js",
+      "artifacts/esbuild@0.28.0/namespace-exports.js",
+      "artifacts/esbuild@0.28.0/parameter-properties.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "parameter-properties",
+      "namespace-exports",
+      "enum-values"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "namespace-exports",
+        "name": "MANGLE_VAR_"
+      },
+      {
+        "module": "namespace-exports",
+        "name": "MANGLE_LET_"
+      },
+      {
+        "module": "namespace-exports",
+        "name": "MANGLE_CONST_"
+      },
+      {
+        "module": "namespace-exports",
+        "name": "MANGLE_FUNCTION_"
+      },
+      {
+        "module": "namespace-exports",
+        "name": "MANGLE_CLASS_"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

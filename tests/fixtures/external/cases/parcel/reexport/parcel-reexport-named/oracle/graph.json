@@ -1,0 +1,53 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_named",
+      "name": "baz"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "reexport_named",
+      "name": "foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "baz",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

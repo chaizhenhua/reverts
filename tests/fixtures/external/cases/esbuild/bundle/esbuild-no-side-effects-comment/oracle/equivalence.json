@@ -1,0 +1,101 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/expr-fn.js",
+      "decompiled_module": "expr-fn"
+    },
+    {
+      "original": "input/expr-arrow.js",
+      "decompiled_module": "expr-arrow"
+    },
+    {
+      "original": "input/stmt-fn.js",
+      "decompiled_module": "stmt-fn"
+    },
+    {
+      "original": "input/stmt-export-fn.js",
+      "decompiled_module": "stmt-export-fn"
+    },
+    {
+      "original": "input/stmt-local.js",
+      "decompiled_module": "stmt-local"
+    },
+    {
+      "original": "input/stmt-export-local.js",
+      "decompiled_module": "stmt-export-local"
+    },
+    {
+      "original": "input/ns-export-fn.ts",
+      "decompiled_module": "ns-export-fn"
+    },
+    {
+      "original": "input/ns-export-local.ts",
+      "decompiled_module": "ns-export-local"
+    },
+    {
+      "original": "input/stmt-export-default-before-fn-anon.js",
+      "decompiled_module": "stmt-export-default-before-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-before-fn-name.js",
+      "decompiled_module": "stmt-export-default-before-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-before-gen-fn-anon.js",
+      "decompiled_module": "stmt-export-default-before-gen-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-before-gen-fn-name.js",
+      "decompiled_module": "stmt-export-default-before-gen-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-before-async-fn-anon.js",
+      "decompiled_module": "stmt-export-default-before-async-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-before-async-fn-name.js",
+      "decompiled_module": "stmt-export-default-before-async-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-before-async-gen-fn-anon.js",
+      "decompiled_module": "stmt-export-default-before-async-gen-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-before-async-gen-fn-name.js",
+      "decompiled_module": "stmt-export-default-before-async-gen-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-after-fn-anon.js",
+      "decompiled_module": "stmt-export-default-after-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-after-fn-name.js",
+      "decompiled_module": "stmt-export-default-after-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-after-gen-fn-anon.js",
+      "decompiled_module": "stmt-export-default-after-gen-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-after-gen-fn-name.js",
+      "decompiled_module": "stmt-export-default-after-gen-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-after-async-fn-anon.js",
+      "decompiled_module": "stmt-export-default-after-async-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-after-async-fn-name.js",
+      "decompiled_module": "stmt-export-default-after-async-fn-name"
+    },
+    {
+      "original": "input/stmt-export-default-after-async-gen-fn-anon.js",
+      "decompiled_module": "stmt-export-default-after-async-gen-fn-anon"
+    },
+    {
+      "original": "input/stmt-export-default-after-async-gen-fn-name.js",
+      "decompiled_module": "stmt-export-default-after-async-gen-fn-name"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "notwrapped",
+      "path": "notwrapped.js"
+    },
+    {
+      "name": "wrapped",
+      "path": "wrapped.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "wrapped",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "a",
+      "to": "notwrapped",
+      "kind": "import_default",
+      "name": "bar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "notwrapped",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "wrapped",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "tool": "babel",
+  "version": "7.29.0",
+  "plugins": {
+    "@babel/core": "7.29.0",
+    "@babel/plugin-transform-modules-commonjs": "7.27.1",
+    "@babel/plugin-transform-react-jsx": "7.27.1"
+  },
+  "source_ref": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/imports-mixing",
+  "babel_options": {
+    "sourceType": "module",
+    "plugin": "@babel/plugin-transform-modules-commonjs",
+    "plugin_options": {
+      "loose": true
+    }
+  }
+}

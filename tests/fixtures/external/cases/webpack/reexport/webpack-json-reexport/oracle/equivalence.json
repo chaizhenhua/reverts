@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/data.json",
+      "decompiled_module": "data"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/other.json",
+      "decompiled_module": "other"
+    },
+    {
+      "original": "input/reexport.js",
+      "decompiled_module": "reexport"
+    }
+  ]
+}

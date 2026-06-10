@@ -1,0 +1,21 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/Actions.js",
+      "decompiled_module": "Actions"
+    },
+    {
+      "original": "input/UserApi.js",
+      "decompiled_module": "UserApi"
+    },
+    {
+      "original": "input/db-connection.js",
+      "decompiled_module": "db-connection"
+    },
+    {
+      "original": "input/example.js",
+      "decompiled_module": "example"
+    }
+  ]
+}

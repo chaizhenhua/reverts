@@ -1,0 +1,69 @@
+{
+  "modules": [
+    {
+      "name": "js-entry",
+      "path": "js-entry.js"
+    },
+    {
+      "name": "ts-entry",
+      "path": "ts-entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "js-entry",
+      "to": "./foo.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "js-entry",
+      "to": "./foo.json",
+      "kind": "import_default",
+      "name": "all"
+    },
+    {
+      "from": "js-entry",
+      "to": "./foo.copy",
+      "kind": "import_default",
+      "name": "copy"
+    },
+    {
+      "from": "js-entry",
+      "to": "./foo.json",
+      "kind": "import_named",
+      "name": "default as def"
+    },
+    {
+      "from": "ts-entry",
+      "to": "./foo.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "ts-entry",
+      "to": "./foo.json",
+      "kind": "import_default",
+      "name": "all"
+    },
+    {
+      "from": "ts-entry",
+      "to": "./foo.copy",
+      "kind": "import_default",
+      "name": "copy"
+    },
+    {
+      "from": "ts-entry",
+      "to": "./foo.json",
+      "kind": "import_named",
+      "name": "default as def"
+    },
+    {
+      "from": "ts-entry",
+      "to": "./foo.json",
+      "kind": "import_named",
+      "name": "unused"
+    }
+  ],
+  "exports": []
+}

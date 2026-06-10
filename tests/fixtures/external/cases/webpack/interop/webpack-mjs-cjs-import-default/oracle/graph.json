@@ -1,0 +1,304 @@
+{
+  "modules": [
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    },
+    {
+      "name": "dynamic",
+      "path": "dynamic.js"
+    },
+    {
+      "name": "dynamicFlagged",
+      "path": "dynamicFlagged.js"
+    },
+    {
+      "name": "flagged",
+      "path": "flagged.js"
+    },
+    {
+      "name": "index",
+      "path": "index.mjs"
+    },
+    {
+      "name": "package",
+      "path": "package.json"
+    },
+    {
+      "name": "reexport",
+      "path": "reexport.mjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "cjs",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "flagged",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "dynamic",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "dynamicFlagged",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "index",
+      "to": "cjs",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "index",
+      "to": "flagged",
+      "kind": "import_default",
+      "name": "flaggedDef"
+    },
+    {
+      "from": "index",
+      "to": "dynamic",
+      "kind": "import_default",
+      "name": "dynamicDef"
+    },
+    {
+      "from": "index",
+      "to": "dynamicFlagged",
+      "kind": "import_default",
+      "name": "dynamicFlaggedDef"
+    },
+    {
+      "from": "index",
+      "to": "cjs",
+      "kind": "import_named",
+      "name": "data"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "ns"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "default as def1"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "def as def2"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "data as data2"
+    },
+    {
+      "from": "index",
+      "to": "flagged",
+      "kind": "import_named",
+      "name": "data as flaggedData"
+    },
+    {
+      "from": "index",
+      "to": "dynamic",
+      "kind": "import_named",
+      "name": "data as dynamicData"
+    },
+    {
+      "from": "index",
+      "to": "dynamicFlagged",
+      "kind": "import_named",
+      "name": "data as dynamicFlaggedData"
+    },
+    {
+      "from": "reexport",
+      "to": "cjs",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "cjs",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dynamic",
+      "name": "__esModule",
+      "kind": "value"
+    },
+    {
+      "module": "dynamic",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "dynamic",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "dynamicFlagged",
+      "name": "__esModule",
+      "kind": "value"
+    },
+    {
+      "module": "dynamicFlagged",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "dynamicFlagged",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "flagged",
+      "name": "__esModule",
+      "kind": "value"
+    },
+    {
+      "module": "flagged",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "flagged",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "star",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "def",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "ns",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "def1",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "def2",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "data2",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "reexport",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "flaggedData",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "flaggedStar",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "flaggedDef",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicData",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicStar",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicDef",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicFlaggedData",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicFlaggedStar",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "dynamicFlaggedDef",
+      "kind": "value"
+    },
+    {
+      "module": "package",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "ns",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "def",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "data",
+      "kind": "value"
+    }
+  ]
+}

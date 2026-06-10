@@ -1,0 +1,169 @@
+@import "http://example.com/foo.css";
+@import "http://example.com/foo.css" layer;
+@import "http://example.com/foo.css" layer(layer-name);
+@import "http://example.com/foo.css" layer(layer-name) supports(supports-condition);
+@import "http://example.com/foo.css" layer(layer-name) list-of-media-queries;
+@import "http://example.com/foo.css" supports(supports-condition);
+@import "http://example.com/foo.css" list-of-media-queries;
+
+/* input/foo.css */
+body {
+  color: red;
+}
+
+/* input/foo.css */
+@layer {
+  body {
+    color: red;
+  }
+}
+
+/* input/foo.css */
+@layer layer-name {
+  body {
+    color: red;
+  }
+}
+
+/* input/foo.css */
+@supports (supports-condition) {
+  @layer layer-name {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/foo.css */
+@media list-of-media-queries {
+  @layer layer-name {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/foo.css */
+@supports (supports-condition) {
+  body {
+    color: red;
+  }
+}
+
+/* input/foo.css */
+@media list-of-media-queries {
+  body {
+    color: red;
+  }
+}
+
+/* input/empty-1.css */
+@layer empty-1;
+
+/* input/empty-2.css */
+
+/* input/empty-3.css */
+
+/* input/foo.css */
+@layer outer {
+  @layer inner {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-layer.css */
+@layer outer;
+
+/* input/foo.css */
+@supports (outer: true) {
+  @layer inner {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-layer.css */
+
+/* input/foo.css */
+@media (outer: true) {
+  @layer inner {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-layer.css */
+
+/* input/foo.css */
+@layer outer {
+  @supports (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-supports.css */
+@layer outer;
+
+/* input/foo.css */
+@supports (outer: true) {
+  @supports (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-supports.css */
+
+/* input/foo.css */
+@media (outer: true) {
+  @supports (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-supports.css */
+
+/* input/foo.css */
+@layer outer {
+  @media (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-media.css */
+@layer outer;
+
+/* input/foo.css */
+@supports (outer: true) {
+  @media (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-media.css */
+
+/* input/foo.css */
+@media (outer: true) {
+  @media (inner: true) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/nested-media.css */
+
+/* input/entry.css */

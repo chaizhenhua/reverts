@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "node_modules/pkg/module",
+      "path": "node_modules/pkg/module.js"
+    },
+    {
+      "name": "node_modules/pkg/main",
+      "path": "node_modules/pkg/main.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

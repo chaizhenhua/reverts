@@ -1,0 +1,21 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/layer1.mjs",
+      "decompiled_module": "layer1"
+    },
+    {
+      "original": "input/layer2.mjs",
+      "decompiled_module": "layer2"
+    },
+    {
+      "original": "input/lib.cjs",
+      "decompiled_module": "lib"
+    }
+  ]
+}

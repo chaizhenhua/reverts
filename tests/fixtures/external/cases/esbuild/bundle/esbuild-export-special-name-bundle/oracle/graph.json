@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.mjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "__proto__",
+      "kind": "value"
+    }
+  ]
+}

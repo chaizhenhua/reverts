@@ -1,0 +1,10 @@
+
+				a {
+					background: url(./js.js);
+					background: url("./jsx.jsx");
+					background: url(./ts.ts);
+					background: url('./tsx.tsx');
+					background: url(./json.json);
+					background: url(./css.css);
+				}
+			

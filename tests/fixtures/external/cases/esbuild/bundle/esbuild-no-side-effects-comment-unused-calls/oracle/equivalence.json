@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/stmt-fn.js",
+      "decompiled_module": "stmt-fn"
+    },
+    {
+      "original": "input/stmt-local.js",
+      "decompiled_module": "stmt-local"
+    },
+    {
+      "original": "input/expr-fn.js",
+      "decompiled_module": "expr-fn"
+    },
+    {
+      "original": "input/stmt-export-default-fn.js",
+      "decompiled_module": "stmt-export-default-fn"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/local-shorthand.js",
+      "decompiled_module": "local-shorthand"
+    },
+    {
+      "original": "input/local-normal.js",
+      "decompiled_module": "local-normal"
+    },
+    {
+      "original": "input/import-shorthand.js",
+      "decompiled_module": "import-shorthand"
+    },
+    {
+      "original": "input/import-normal.js",
+      "decompiled_module": "import-normal"
+    }
+  ]
+}

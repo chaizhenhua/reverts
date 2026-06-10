@@ -1,0 +1,70 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "v",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "l",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "Fn",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "Class",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "xyz",
+      "kind": "value"
+    }
+  ]
+}

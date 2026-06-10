@@ -1,0 +1,85 @@
+{
+  "modules": [
+    {
+      "name": "enum-constants",
+      "path": "enum-constants.ts"
+    },
+    {
+      "name": "enum-entry",
+      "path": "enum-entry.ts"
+    },
+    {
+      "name": "const-constants",
+      "path": "const-constants.js"
+    },
+    {
+      "name": "const-entry",
+      "path": "const-entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "enum-entry",
+      "to": "enum-constants",
+      "kind": "import_named",
+      "name": "x"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "proto"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "ptype"
+    },
+    {
+      "from": "const-entry",
+      "to": "const-constants",
+      "kind": "import_named",
+      "name": "ctor"
+    }
+  ],
+  "exports": [
+    {
+      "module": "const-constants",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "const-constants",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "const-constants",
+      "name": "proto",
+      "kind": "value"
+    },
+    {
+      "module": "const-constants",
+      "name": "ptype",
+      "kind": "value"
+    },
+    {
+      "module": "const-constants",
+      "name": "ctor",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,64 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "Test.web",
+      "path": "Test.web.tsx"
+    },
+    {
+      "name": "Test",
+      "path": "Test.tsx"
+    },
+    {
+      "name": "node_modules/expo-image/index",
+      "path": "node_modules/expo-image/index.js"
+    },
+    {
+      "name": "node_modules/expo-image/Image.web",
+      "path": "node_modules/expo-image/Image.web.tsx"
+    },
+    {
+      "name": "node_modules/expo-image/Image",
+      "path": "node_modules/expo-image/Image.tsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "Test",
+      "kind": "import_default",
+      "name": "test"
+    },
+    {
+      "from": "entry",
+      "to": "expo-image",
+      "kind": "import_default",
+      "name": "image"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Test.web",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Test",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/expo-image/Image.web",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/expo-image/Image",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "id": "tsc-dynamic-import-es6-cjs",
+  "title": "tsc dynamic import es6 commonjs",
+  "category": "async",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "typescript",
+    "project_version": "6.0.2",
+    "project_commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/cases/conformance/dynamicImport/importCallExpressionES6CJS.ts"
+  },
+  "artifact": {
+    "tool": "tsc",
+    "version": "6.0.2",
+    "entry": "artifacts/tsc@6.0.2/1.js",
+    "outputs": [
+      "artifacts/tsc@6.0.2/0.js",
+      "artifacts/tsc@6.0.2/1.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "tsc",
+    "wrappers": [],
+    "helpers": [
+      "__createBinding",
+      "__setModuleDefault",
+      "__importStar"
+    ],
+    "must_recover_modules": [
+      "0",
+      "1"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "0",
+        "name": "foo"
+      },
+      {
+        "module": "1",
+        "name": "p2"
+      },
+      {
+        "module": "1",
+        "name": "D"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

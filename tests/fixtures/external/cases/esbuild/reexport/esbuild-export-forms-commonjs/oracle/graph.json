@@ -1,0 +1,163 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "commonjs",
+      "path": "commonjs.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    },
+    {
+      "name": "d",
+      "path": "d.js"
+    },
+    {
+      "name": "e",
+      "path": "e.js"
+    },
+    {
+      "name": "f",
+      "path": "f.js"
+    },
+    {
+      "name": "g",
+      "path": "g.js"
+    },
+    {
+      "name": "h",
+      "path": "h.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "commonjs",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "d",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "e",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "f",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "g",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "h",
+      "kind": "require"
+    },
+    {
+      "from": "commonjs",
+      "to": "b",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "commonjs",
+      "to": "a",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "commonjs",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "commonjs",
+      "name": "v",
+      "kind": "value"
+    },
+    {
+      "module": "commonjs",
+      "name": "l",
+      "kind": "value"
+    },
+    {
+      "module": "commonjs",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "commonjs",
+      "name": "Fn",
+      "kind": "value"
+    },
+    {
+      "module": "commonjs",
+      "name": "Class",
+      "kind": "value"
+    },
+    {
+      "module": "a",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "xyz",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "d",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "f",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "g",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "h",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

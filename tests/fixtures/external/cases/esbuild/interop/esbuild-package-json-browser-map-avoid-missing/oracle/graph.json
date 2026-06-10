@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/component-classes/index",
+      "path": "Users/user/project/node_modules/component-classes/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/component-indexof/index",
+      "path": "Users/user/project/node_modules/component-indexof/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/node_modules/component-classes/index",
+      "to": "indexof",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/node_modules/component-classes/index",
+      "to": "component-indexof",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/component-indexof/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

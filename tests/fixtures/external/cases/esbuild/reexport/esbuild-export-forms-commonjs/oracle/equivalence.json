@@ -1,0 +1,45 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/commonjs.js",
+      "decompiled_module": "commonjs"
+    },
+    {
+      "original": "input/a.js",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/b.js",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/c.js",
+      "decompiled_module": "c"
+    },
+    {
+      "original": "input/d.js",
+      "decompiled_module": "d"
+    },
+    {
+      "original": "input/e.js",
+      "decompiled_module": "e"
+    },
+    {
+      "original": "input/f.js",
+      "decompiled_module": "f"
+    },
+    {
+      "original": "input/g.js",
+      "decompiled_module": "g"
+    },
+    {
+      "original": "input/h.js",
+      "decompiled_module": "h"
+    }
+  ]
+}

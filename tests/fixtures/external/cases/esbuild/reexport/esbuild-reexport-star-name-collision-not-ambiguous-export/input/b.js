@@ -1,0 +1,3 @@
+
+				export {x} from './c'
+			

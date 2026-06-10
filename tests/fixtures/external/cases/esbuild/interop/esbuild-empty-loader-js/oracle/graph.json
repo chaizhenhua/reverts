@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./b.empty",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "./c.empty",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "entry",
+      "to": "./d.empty",
+      "kind": "import_named",
+      "name": "named"
+    }
+  ],
+  "exports": []
+}

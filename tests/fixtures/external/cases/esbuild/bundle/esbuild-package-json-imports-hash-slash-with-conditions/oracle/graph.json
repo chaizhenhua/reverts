@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/esm/lib",
+      "path": "Users/user/project/src/esm/lib.js"
+    },
+    {
+      "name": "Users/user/project/src/cjs/lib",
+      "path": "Users/user/project/src/cjs/lib.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

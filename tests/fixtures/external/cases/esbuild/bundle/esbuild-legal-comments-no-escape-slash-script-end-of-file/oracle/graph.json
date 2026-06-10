@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "project/entry",
+      "path": "project/entry.js"
+    },
+    {
+      "name": "project/node_modules/js-pkg/index",
+      "path": "project/node_modules/js-pkg/index.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

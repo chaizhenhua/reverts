@@ -1,0 +1,83 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo1",
+      "path": "foo1.js"
+    },
+    {
+      "name": "foo2",
+      "path": "foo2.js"
+    },
+    {
+      "name": "foo3",
+      "path": "foo3.js"
+    },
+    {
+      "name": "foo4",
+      "path": "foo4.js"
+    },
+    {
+      "name": "foo5",
+      "path": "foo5.js"
+    },
+    {
+      "name": "foo6",
+      "path": "foo6.js"
+    },
+    {
+      "name": "foo7",
+      "path": "foo7.js"
+    },
+    {
+      "name": "foo8",
+      "path": "foo8.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "foo1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo3",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo4",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo5",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo6",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo7",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo8",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

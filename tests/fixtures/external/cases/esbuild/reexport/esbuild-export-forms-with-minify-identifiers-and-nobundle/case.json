@@ -1,0 +1,86 @@
+{
+  "id": "esbuild-export-forms-with-minify-identifiers-and-nobundle",
+  "title": "esbuild TestExportFormsWithMinifyIdentifiersAndNoBundle",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestExportFormsWithMinifyIdentifiersAndNoBundle"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/a.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/a.js",
+      "artifacts/esbuild@0.28.0/b.js",
+      "artifacts/esbuild@0.28.0/c.js",
+      "artifacts/esbuild@0.28.0/d.js",
+      "artifacts/esbuild@0.28.0/e.js"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "a",
+        "name": "default"
+      },
+      {
+        "module": "a",
+        "name": "varName"
+      },
+      {
+        "module": "a",
+        "name": "letName"
+      },
+      {
+        "module": "a",
+        "name": "constName"
+      },
+      {
+        "module": "a",
+        "name": "Func"
+      },
+      {
+        "module": "a",
+        "name": "Class"
+      },
+      {
+        "module": "b",
+        "name": "default"
+      },
+      {
+        "module": "c",
+        "name": "default"
+      },
+      {
+        "module": "d",
+        "name": "default"
+      },
+      {
+        "module": "e",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

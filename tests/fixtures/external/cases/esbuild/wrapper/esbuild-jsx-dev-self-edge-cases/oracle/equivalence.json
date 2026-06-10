@@ -1,0 +1,57 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/function-this.jsx",
+      "decompiled_module": "function-this"
+    },
+    {
+      "original": "input/class-this.jsx",
+      "decompiled_module": "class-this"
+    },
+    {
+      "original": "input/normal-constructor.jsx",
+      "decompiled_module": "normal-constructor"
+    },
+    {
+      "original": "input/derived-constructor.jsx",
+      "decompiled_module": "derived-constructor"
+    },
+    {
+      "original": "input/normal-constructor-arg.jsx",
+      "decompiled_module": "normal-constructor-arg"
+    },
+    {
+      "original": "input/derived-constructor-arg.jsx",
+      "decompiled_module": "derived-constructor-arg"
+    },
+    {
+      "original": "input/normal-constructor-field.tsx",
+      "decompiled_module": "normal-constructor-field"
+    },
+    {
+      "original": "input/derived-constructor-field.tsx",
+      "decompiled_module": "derived-constructor-field"
+    },
+    {
+      "original": "input/static-field.jsx",
+      "decompiled_module": "static-field"
+    },
+    {
+      "original": "input/top-level-this-esm.jsx",
+      "decompiled_module": "top-level-this-esm"
+    },
+    {
+      "original": "input/top-level-this-cjs.jsx",
+      "decompiled_module": "top-level-this-cjs"
+    },
+    {
+      "original": "input/typescript-namespace.tsx",
+      "decompiled_module": "typescript-namespace"
+    },
+    {
+      "original": "input/typescript-enum.tsx",
+      "decompiled_module": "typescript-enum"
+    }
+  ]
+}

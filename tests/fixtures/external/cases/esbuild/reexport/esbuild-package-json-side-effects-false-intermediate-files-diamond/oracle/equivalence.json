@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/a/index.js",
+      "decompiled_module": "Users/user/project/node_modules/a/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/b1/index.js",
+      "decompiled_module": "Users/user/project/node_modules/b1/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/b2/index.js",
+      "decompiled_module": "Users/user/project/node_modules/b2/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/c/index.js",
+      "decompiled_module": "Users/user/project/node_modules/c/index"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/d/index.js",
+      "decompiled_module": "Users/user/project/node_modules/d/index"
+    }
+  ]
+}

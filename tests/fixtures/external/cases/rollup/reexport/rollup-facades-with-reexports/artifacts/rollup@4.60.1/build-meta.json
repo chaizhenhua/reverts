@@ -1,0 +1,25 @@
+{
+  "tool": "rollup",
+  "version": "4.60.1",
+  "source_ref": "test/chunking-form/samples/facades-with-reexports",
+  "config_kind": "sample",
+  "input": [
+    "main.js",
+    "other.js"
+  ],
+  "external": [],
+  "output": {
+    "format": "es",
+    "preserve_modules": false,
+    "preserve_entry_signatures": null,
+    "exports": null,
+    "entry_file_names": "[name].js",
+    "chunk_file_names": "chunks/[name].js"
+  },
+  "command": [
+    "node",
+    "-e",
+    "rollup(input).write(output)",
+    "# source=test/chunking-form/samples/facades-with-reexports"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/src/file-a.js",
+      "decompiled_module": "src/file-a"
+    },
+    {
+      "original": "input/src/file-b.js",
+      "decompiled_module": "src/file-b"
+    },
+    {
+      "original": "input/src/nested/dir/file-a.js",
+      "decompiled_module": "src/nested/dir/file-a"
+    },
+    {
+      "original": "input/src/nested/dir/file-b.js",
+      "decompiled_module": "src/nested/dir/file-b"
+    }
+  ]
+}

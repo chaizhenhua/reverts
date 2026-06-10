@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./y.b64",
+      "kind": "import_default",
+      "name": "y_b64"
+    },
+    {
+      "from": "entry",
+      "to": "./x.b64",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

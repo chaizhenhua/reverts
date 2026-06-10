@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/cjs.js",
+      "decompiled_module": "cjs"
+    },
+    {
+      "original": "input/dynamic.js",
+      "decompiled_module": "dynamic"
+    },
+    {
+      "original": "input/dynamicFlagged.js",
+      "decompiled_module": "dynamicFlagged"
+    },
+    {
+      "original": "input/flagged.js",
+      "decompiled_module": "flagged"
+    },
+    {
+      "original": "input/index.mjs",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/package.json",
+      "decompiled_module": "package"
+    },
+    {
+      "original": "input/reexport.mjs",
+      "decompiled_module": "reexport"
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "data",
+      "path": "data.json"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "named",
+      "path": "named.json"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "data",
+      "kind": "import_default",
+      "name": "value"
+    },
+    {
+      "from": "index",
+      "to": "named",
+      "kind": "import_default",
+      "name": "named"
+    }
+  ],
+  "exports": [
+    {
+      "module": "data",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "value",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "named",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

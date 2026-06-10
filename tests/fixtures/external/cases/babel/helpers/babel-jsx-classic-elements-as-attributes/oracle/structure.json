@@ -1,0 +1,10 @@
+{
+  "bundler_family": "babel",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "React.createElement"
+  ],
+  "runtime_helpers": [
+    "React.createElement"
+  ]
+}

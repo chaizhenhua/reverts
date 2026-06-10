@@ -1,0 +1,12 @@
+
+				a {
+					background: url(foo.copy);
+					background: url(foo.file);
+				}
+
+				/*! The URLs for "foo 2" files must have quotes in the final CSS */
+				b {
+					background: url('foo 2.copy');
+					background: url('foo 2.file');
+				}
+			

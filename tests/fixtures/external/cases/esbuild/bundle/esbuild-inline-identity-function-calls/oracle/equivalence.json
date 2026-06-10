@@ -1,0 +1,89 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/identity.js",
+      "decompiled_module": "identity"
+    },
+    {
+      "original": "input/identity-last.js",
+      "decompiled_module": "identity-last"
+    },
+    {
+      "original": "input/identity-cross-module.js",
+      "decompiled_module": "identity-cross-module"
+    },
+    {
+      "original": "input/identity-cross-module-def.js",
+      "decompiled_module": "identity-cross-module-def"
+    },
+    {
+      "original": "input/identity-no-args.js",
+      "decompiled_module": "identity-no-args"
+    },
+    {
+      "original": "input/identity-two-args.js",
+      "decompiled_module": "identity-two-args"
+    },
+    {
+      "original": "input/identity-first.js",
+      "decompiled_module": "identity-first"
+    },
+    {
+      "original": "input/identity-generator.js",
+      "decompiled_module": "identity-generator"
+    },
+    {
+      "original": "input/identity-async.js",
+      "decompiled_module": "identity-async"
+    },
+    {
+      "original": "input/reassign.js",
+      "decompiled_module": "reassign"
+    },
+    {
+      "original": "input/reassign-inc.js",
+      "decompiled_module": "reassign-inc"
+    },
+    {
+      "original": "input/reassign-div.js",
+      "decompiled_module": "reassign-div"
+    },
+    {
+      "original": "input/reassign-array.js",
+      "decompiled_module": "reassign-array"
+    },
+    {
+      "original": "input/reassign-object.js",
+      "decompiled_module": "reassign-object"
+    },
+    {
+      "original": "input/not-identity-two-args.js",
+      "decompiled_module": "not-identity-two-args"
+    },
+    {
+      "original": "input/not-identity-default.js",
+      "decompiled_module": "not-identity-default"
+    },
+    {
+      "original": "input/not-identity-array.js",
+      "decompiled_module": "not-identity-array"
+    },
+    {
+      "original": "input/not-identity-object.js",
+      "decompiled_module": "not-identity-object"
+    },
+    {
+      "original": "input/not-identity-rest.js",
+      "decompiled_module": "not-identity-rest"
+    },
+    {
+      "original": "input/not-identity-return.js",
+      "decompiled_module": "not-identity-return"
+    },
+    {
+      "original": "input/identity-simplify-unused-issue-4287.js",
+      "decompiled_module": "identity-simplify-unused-issue-4287"
+    }
+  ]
+}

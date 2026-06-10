@@ -1,0 +1,5 @@
+{
+  "name": "vite-worker-constructor-nested",
+  "private": true,
+  "type": "module"
+}

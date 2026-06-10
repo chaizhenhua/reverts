@@ -1,0 +1,40 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/index",
+      "path": "Users/user/project/node_modules/pkg/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/foo",
+      "path": "Users/user/project/node_modules/pkg/foo.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/bar",
+      "path": "Users/user/project/node_modules/pkg/bar.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "pkg",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/pkg/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/pkg/bar",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+/* at-media/006/b.css */
+@media (min-height: 1px) {
+  @media (min-width: 1px) {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* at-media/006/a.css */
+
+/* at-media/006/style.css */

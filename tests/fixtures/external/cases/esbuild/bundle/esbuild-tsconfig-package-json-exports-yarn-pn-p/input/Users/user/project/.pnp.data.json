@@ -1,0 +1,37 @@
+
+				{
+					"packageRegistryData": [
+						[
+							"app",
+							[
+								[
+									"workspace:packages/app",
+									{
+										"packageLocation": "./packages/app/",
+										"packageDependencies": [
+											[
+												"tsconfigs",
+												"workspace:packages/tsconfigs"
+											]
+										],
+										"linkType": "SOFT"
+									}
+								]
+							]
+						],
+						[
+							"tsconfigs",
+							[
+								[
+									"workspace:packages/tsconfigs",
+									{
+										"packageLocation": "./packages/tsconfigs/",
+										"packageDependencies": [],
+										"linkType": "SOFT"
+									}
+								]
+							]
+						]
+					]
+				}
+			

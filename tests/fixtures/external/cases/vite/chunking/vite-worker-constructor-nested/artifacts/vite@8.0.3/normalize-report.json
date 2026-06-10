@@ -1,0 +1,9 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable asset, entry, and chunk filenames were requested at build time where possible.",
+    "worker-module.js -> worker.js",
+    "nested-worker.js -> nested.js",
+    "sub-worker.js -> sub.js"
+  ]
+}

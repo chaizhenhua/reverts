@@ -1,0 +1,44 @@
+{
+  "tool": "vite",
+  "version": "8.0.3",
+  "source_ref": "playground/external/dep-that-imports/index.js",
+  "config_kind": "app",
+  "build": {
+    "outDir": "/home/chaizhenhua/Codes/reverts/reverts/tests/fixtures/external/cases/vite/interop/vite-external-transitive-imports/artifacts/vite@8.0.3",
+    "emptyOutDir": true,
+    "sourcemap": false,
+    "rollupOptions": {
+      "output": {
+        "entryFileNames": "assets/[name].js",
+        "chunkFileNames": "assets/chunks/[name].js",
+        "assetFileNames": "assets/[name][extname]"
+      },
+      "external": [
+        "vue",
+        "slash3"
+      ]
+    },
+    "commonjsOptions": {
+      "esmExternals": [
+        "vue"
+      ]
+    },
+    "rolldownOptions": {
+      "output": {
+        "entryFileNames": "assets/[name].js",
+        "chunkFileNames": "assets/chunks/[name].js",
+        "assetFileNames": "assets/[name][extname]"
+      },
+      "external": [
+        "vue",
+        "slash3"
+      ]
+    }
+  },
+  "command": [
+    "node",
+    "-e",
+    "vite.build(config)",
+    "# source=playground/external/dep-that-imports/index.js"
+  ]
+}

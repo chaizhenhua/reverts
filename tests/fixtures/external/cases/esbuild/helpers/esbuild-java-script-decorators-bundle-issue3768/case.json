@@ -1,0 +1,59 @@
+{
+  "id": "esbuild-java-script-decorators-bundle-issue3768",
+  "title": "esbuild TestJavaScriptDecoratorsBundleIssue3768",
+  "category": "helpers",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_lower_test.go::TestJavaScriptDecoratorsBundleIssue3768"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/base-instance-accessor.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/base-instance-accessor.js",
+      "artifacts/esbuild@0.28.0/base-instance-field.js",
+      "artifacts/esbuild@0.28.0/base-instance-method.js",
+      "artifacts/esbuild@0.28.0/base-static-accessor.js",
+      "artifacts/esbuild@0.28.0/base-static-field.js",
+      "artifacts/esbuild@0.28.0/base-static-method.js",
+      "artifacts/esbuild@0.28.0/derived-instance-accessor.js",
+      "artifacts/esbuild@0.28.0/derived-instance-field.js",
+      "artifacts/esbuild@0.28.0/derived-instance-method.js",
+      "artifacts/esbuild@0.28.0/derived-static-accessor.js",
+      "artifacts/esbuild@0.28.0/derived-static-field.js",
+      "artifacts/esbuild@0.28.0/derived-static-method.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "base-instance-method",
+      "base-instance-field",
+      "base-instance-accessor",
+      "base-static-method",
+      "base-static-field",
+      "base-static-accessor",
+      "derived-instance-method",
+      "derived-instance-field",
+      "derived-instance-accessor",
+      "derived-static-method",
+      "derived-static-field",
+      "derived-static-accessor"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

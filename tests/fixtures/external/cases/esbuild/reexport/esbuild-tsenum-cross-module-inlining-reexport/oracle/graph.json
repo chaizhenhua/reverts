@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "re-export",
+      "path": "re-export.js"
+    },
+    {
+      "name": "re-export-star",
+      "path": "re-export-star.js"
+    },
+    {
+      "name": "enums",
+      "path": "enums.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "enums",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "re-export",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "re-export-star",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "re-export-star",
+      "to": "enums",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": []
+}

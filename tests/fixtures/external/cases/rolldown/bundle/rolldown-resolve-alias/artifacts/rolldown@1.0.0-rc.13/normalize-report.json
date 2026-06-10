@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable output naming was configured with explicit entryFileNames and chunkFileNames where code splitting applies."
+  ]
+}

@@ -1,0 +1,18 @@
+
+				.before { color: #000 }
+				:local { .button { color: #000 } }
+				.after { color: #000 }
+
+				.before { color: #001 }
+				:global { .button { color: #001 } }
+				.after { color: #001 }
+
+				div { :local { .button { color: #002 } } }
+				div { :global { .button { color: #003 } } }
+
+				:local(:global) { color: #004 }
+				:global(:local) { color: #005 }
+
+				:local(:global) { .button { color: #006 } }
+				:global(:local) { .button { color: #007 } }
+			

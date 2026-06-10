@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/entries/entry.js",
+      "decompiled_module": "src/entries/entry"
+    },
+    {
+      "original": "input/src/entries/other/entry.js",
+      "decompiled_module": "src/entries/other/entry"
+    },
+    {
+      "original": "input/src/shared/common.js",
+      "decompiled_module": "src/shared/common"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+
+				@import "http://example.com/external3.css";
+				@import "http://example.com/external4.css" layer(b2);
+			

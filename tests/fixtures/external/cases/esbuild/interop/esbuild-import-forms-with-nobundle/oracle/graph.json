@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "def2"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "b as c"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

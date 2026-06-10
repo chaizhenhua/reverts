@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry.js",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry.mjs",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-with-module-condition/require-entry.cjs",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/require-entry"
+    }
+  ]
+}

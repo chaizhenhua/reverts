@@ -1,0 +1,65 @@
+{
+  "id": "esbuild-top-level-function-inlining-with-spread",
+  "title": "esbuild TestTopLevelFunctionInliningWithSpread",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestTopLevelFunctionInliningWithSpread"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/entry.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/entry-outer.js",
+      "artifacts/esbuild@0.28.0/entry.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "entry",
+      "inner",
+      "entry-outer"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "inner",
+        "name": "empty1"
+      },
+      {
+        "module": "inner",
+        "name": "empty2"
+      },
+      {
+        "module": "inner",
+        "name": "empty3"
+      },
+      {
+        "module": "inner",
+        "name": "identity1"
+      },
+      {
+        "module": "inner",
+        "name": "identity2"
+      },
+      {
+        "module": "inner",
+        "name": "identity3"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

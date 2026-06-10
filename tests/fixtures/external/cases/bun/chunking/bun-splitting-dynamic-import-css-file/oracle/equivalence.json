@@ -1,0 +1,13 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/client.tsx",
+      "decompiled_module": "client"
+    },
+    {
+      "original": "input/test.ts",
+      "decompiled_module": "test"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "reexport_named",
+      "name": "foo"
+    },
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "reexport_named",
+      "name": "bar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

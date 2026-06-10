@@ -1,0 +1,5 @@
+{
+  "name": "vite-lib-named-exports",
+  "private": true,
+  "type": "module"
+}

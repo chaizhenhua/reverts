@@ -1,0 +1,5 @@
+/* toplevel-ampersand-twice.css */
+:scope,
+:scope {
+  color: red;
+}

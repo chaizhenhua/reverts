@@ -1,0 +1,5 @@
+{
+  "name": "vite-glob-import-basic",
+  "private": true,
+  "type": "module"
+}

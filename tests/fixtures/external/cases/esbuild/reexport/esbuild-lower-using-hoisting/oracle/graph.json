@@ -1,0 +1,159 @@
+{
+  "modules": [
+    {
+      "name": "hoist-use-strict",
+      "path": "hoist-use-strict.js"
+    },
+    {
+      "name": "hoist-directive",
+      "path": "hoist-directive.js"
+    },
+    {
+      "name": "hoist-import",
+      "path": "hoist-import.js"
+    },
+    {
+      "name": "hoist-export-star",
+      "path": "hoist-export-star.js"
+    },
+    {
+      "name": "hoist-export-from",
+      "path": "hoist-export-from.js"
+    },
+    {
+      "name": "hoist-export-clause",
+      "path": "hoist-export-clause.js"
+    },
+    {
+      "name": "hoist-export-local-direct",
+      "path": "hoist-export-local-direct.js"
+    },
+    {
+      "name": "hoist-export-local-indirect",
+      "path": "hoist-export-local-indirect.js"
+    },
+    {
+      "name": "hoist-export-class-direct",
+      "path": "hoist-export-class-direct.js"
+    },
+    {
+      "name": "hoist-export-class-indirect",
+      "path": "hoist-export-class-indirect.js"
+    },
+    {
+      "name": "hoist-export-function-direct",
+      "path": "hoist-export-function-direct.js"
+    },
+    {
+      "name": "hoist-export-function-indirect",
+      "path": "hoist-export-function-indirect.js"
+    },
+    {
+      "name": "hoist-export-default-class-name-unused",
+      "path": "hoist-export-default-class-name-unused.js"
+    },
+    {
+      "name": "hoist-export-default-class-name-used",
+      "path": "hoist-export-default-class-name-used.js"
+    },
+    {
+      "name": "hoist-export-default-class-anonymous",
+      "path": "hoist-export-default-class-anonymous.js"
+    },
+    {
+      "name": "hoist-export-default-function-name-unused",
+      "path": "hoist-export-default-function-name-unused.js"
+    },
+    {
+      "name": "hoist-export-default-function-name-used",
+      "path": "hoist-export-default-function-name-used.js"
+    },
+    {
+      "name": "hoist-export-default-function-anonymous",
+      "path": "hoist-export-default-function-anonymous.js"
+    },
+    {
+      "name": "hoist-export-default-expr",
+      "path": "hoist-export-default-expr.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "hoist-export-star",
+      "to": "./foo",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "hoist-export-local-direct",
+      "name": "ac1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-local-direct",
+      "name": "a1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-local-direct",
+      "name": "c1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-class-direct",
+      "name": "Foo1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-class-direct",
+      "name": "Bar1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-function-direct",
+      "name": "foo1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-function-direct",
+      "name": "bar1",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-class-name-unused",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-class-name-used",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-class-anonymous",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-function-name-unused",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-function-name-used",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-function-anonymous",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "hoist-export-default-expr",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

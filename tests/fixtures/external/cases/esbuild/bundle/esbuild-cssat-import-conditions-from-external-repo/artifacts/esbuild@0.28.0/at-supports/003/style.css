@@ -1,0 +1,12 @@
+/* at-supports/003/b.css */
+@supports ((display: block) or (display: inline)) {
+  @supports (width: 10px) {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* at-supports/003/a.css */
+
+/* at-supports/003/style.css */

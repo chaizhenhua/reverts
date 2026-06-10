@@ -1,0 +1,41 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "module",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "module",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "baz",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "qux",
+      "kind": "value"
+    }
+  ]
+}

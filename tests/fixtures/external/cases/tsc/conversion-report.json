@@ -1,0 +1,46 @@
+{
+  "project": "tsc",
+  "version": "6.0.2",
+  "commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+  "generated_count": 6,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "tsc-export-default-interface-and-function-overloads",
+      "category": "interop",
+      "test": "tests/cases/compiler/exportDefaultInterfaceAndFunctionOverloads.ts",
+      "outputs": 1
+    },
+    {
+      "case_id": "tsc-isolated-modules-reexport-star",
+      "category": "reexport",
+      "test": "tests/cases/compiler/isolatedModulesDontElideReExportStar.ts",
+      "outputs": 2
+    },
+    {
+      "case_id": "tsc-module-same-value-duplicate-exported-bindings",
+      "category": "reexport",
+      "test": "tests/cases/compiler/moduleSameValueDuplicateExportedBindings2.ts",
+      "outputs": 3
+    },
+    {
+      "case_id": "tsc-require-json-with-source-map",
+      "category": "bundle",
+      "test": "tests/cases/compiler/requireOfJsonFileWithSourceMap.ts",
+      "outputs": 3
+    },
+    {
+      "case_id": "tsc-dynamic-import-es6-cjs",
+      "category": "async",
+      "test": "tests/cases/conformance/dynamicImport/importCallExpressionES6CJS.ts",
+      "outputs": 2
+    },
+    {
+      "case_id": "tsc-import-attributes-with-dynamic-import",
+      "category": "async",
+      "test": "tests/cases/conformance/importAttributes/importAttributes7.ts",
+      "outputs": 2
+    }
+  ],
+  "skipped": []
+}

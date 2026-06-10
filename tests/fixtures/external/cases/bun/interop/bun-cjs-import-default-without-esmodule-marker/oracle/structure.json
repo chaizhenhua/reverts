@@ -1,0 +1,13 @@
+{
+  "bundler_family": "bun",
+  "wrapper_names": [
+    "__commonJS"
+  ],
+  "interop_helpers": [
+    "__toESM"
+  ],
+  "runtime_helpers": [
+    "__commonJS",
+    "__toESM"
+  ]
+}

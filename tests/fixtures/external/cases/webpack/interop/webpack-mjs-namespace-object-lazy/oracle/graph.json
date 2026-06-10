@@ -1,0 +1,73 @@
+{
+  "modules": [
+    {
+      "name": "cjs-dynamic",
+      "path": "cjs-dynamic.js"
+    },
+    {
+      "name": "cjs-esmodule",
+      "path": "cjs-esmodule.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    },
+    {
+      "name": "index",
+      "path": "index.mjs"
+    },
+    {
+      "name": "package",
+      "path": "package.json"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "cjs",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "cjs-esmodule",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "cjs-dynamic",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-esmodule",
+      "name": "__esModule",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-esmodule",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-esmodule",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "cjs",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "cjs",
+      "name": "named",
+      "kind": "value"
+    },
+    {
+      "module": "package",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

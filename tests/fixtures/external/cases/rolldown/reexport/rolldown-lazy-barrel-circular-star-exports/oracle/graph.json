@@ -1,0 +1,70 @@
+{
+  "modules": [
+    {
+      "name": "barrel-a/a",
+      "path": "barrel-a/a.js"
+    },
+    {
+      "name": "barrel-a/index",
+      "path": "barrel-a/index.js"
+    },
+    {
+      "name": "barrel-b/b",
+      "path": "barrel-b/b.js"
+    },
+    {
+      "name": "barrel-b/index",
+      "path": "barrel-b/index.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "barrel-a/index",
+      "to": "barrel-b/index",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "barrel-a/index",
+      "to": "barrel-a/a",
+      "kind": "reexport_named",
+      "name": "a"
+    },
+    {
+      "from": "barrel-b/index",
+      "to": "barrel-b/b",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "barrel-b/index",
+      "to": "barrel-a/index",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "main",
+      "to": "barrel-a/index",
+      "kind": "import_named",
+      "name": "b"
+    }
+  ],
+  "exports": [
+    {
+      "module": "barrel-a/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "barrel-a/index",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "barrel-b/b",
+      "name": "b",
+      "kind": "value"
+    }
+  ]
+}

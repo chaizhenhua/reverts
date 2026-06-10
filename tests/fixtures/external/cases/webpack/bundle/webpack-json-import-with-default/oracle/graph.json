@@ -1,0 +1,112 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.json"
+    },
+    {
+      "name": "b",
+      "path": "b.json"
+    },
+    {
+      "name": "c",
+      "path": "c.json"
+    },
+    {
+      "name": "e",
+      "path": "e.json"
+    },
+    {
+      "name": "f",
+      "path": "f.json"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "a",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "index",
+      "to": "b",
+      "kind": "import_default",
+      "name": "b"
+    },
+    {
+      "from": "index",
+      "to": "c",
+      "kind": "import_default",
+      "name": "c"
+    },
+    {
+      "from": "index",
+      "to": "e",
+      "kind": "import_default",
+      "name": "e"
+    },
+    {
+      "from": "index",
+      "to": "f",
+      "kind": "import_default",
+      "name": "f"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "e",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "f",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "e",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "f",
+      "kind": "value"
+    }
+  ]
+}

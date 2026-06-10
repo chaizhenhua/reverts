@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "./dir1/style.css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "b",
+      "to": "./dir2/style.css",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

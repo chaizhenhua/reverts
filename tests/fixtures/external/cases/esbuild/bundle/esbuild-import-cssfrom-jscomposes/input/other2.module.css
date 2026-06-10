@@ -1,0 +1,6 @@
+
+				.local0 {
+					composes: base1 base3 from "base.module.css";
+					background: purple;
+				}
+			

@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/read.js",
+      "decompiled_module": "read"
+    },
+    {
+      "original": "input/write.js",
+      "decompiled_module": "write"
+    }
+  ]
+}

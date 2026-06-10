@@ -1,0 +1,5 @@
+
+				@import url(case6-foo.css) layer(first);
+				@import url(case6-foo.css) layer(last);
+				@import url(case6-foo.css) layer(first);
+			

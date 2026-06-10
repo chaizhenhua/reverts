@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/test-main.js",
+      "decompiled_module": "Users/user/project/src/test-main"
+    },
+    {
+      "original": "input/Users/user/project/src/test-module.js",
+      "decompiled_module": "Users/user/project/src/test-module"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/main.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/main"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/module.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/module"
+    }
+  ]
+}

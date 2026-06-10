@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/node",
+      "path": "Users/user/project/node_modules/pkg/node.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/browser",
+      "path": "Users/user/project/node_modules/pkg/browser.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

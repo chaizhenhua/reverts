@@ -1,0 +1,9 @@
+{
+  "normalized": true,
+  "renamed_outputs": {
+    "async.7522f9e7.js": "async0.js"
+  },
+  "notes": [
+    "Parcel chunk filenames with hash suffixes were renamed to stable filenames and internal references were updated."
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./list_style_type.css",
+      "kind": "import_default",
+      "name": "list_style_type"
+    },
+    {
+      "from": "entry",
+      "to": "./list_style.css",
+      "kind": "import_default",
+      "name": "list_style"
+    }
+  ],
+  "exports": []
+}

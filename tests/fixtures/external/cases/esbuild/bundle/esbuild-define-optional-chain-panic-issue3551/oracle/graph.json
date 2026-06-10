@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "id-define",
+      "path": "id-define.js"
+    },
+    {
+      "name": "dot-define",
+      "path": "dot-define.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

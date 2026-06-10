@@ -1,0 +1,37 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/src/barrel/a.js",
+      "decompiled_module": "src/barrel/a"
+    },
+    {
+      "original": "input/src/barrel/b.js",
+      "decompiled_module": "src/barrel/b"
+    },
+    {
+      "original": "input/src/barrel/index.js",
+      "decompiled_module": "src/barrel/index"
+    },
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/src/non-barrel/c.js",
+      "decompiled_module": "src/non-barrel/c"
+    },
+    {
+      "original": "input/src/non-barrel/d.js",
+      "decompiled_module": "src/non-barrel/d"
+    },
+    {
+      "original": "input/src/non-barrel/index.js",
+      "decompiled_module": "src/non-barrel/index"
+    },
+    {
+      "original": "input/src/other.js",
+      "decompiled_module": "src/other"
+    }
+  ]
+}

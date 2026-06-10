@@ -1,0 +1,5 @@
+{
+  "name": "vite-dynamic-import-basic",
+  "private": true,
+  "type": "module"
+}

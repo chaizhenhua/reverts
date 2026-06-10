@@ -1,0 +1,66 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "geometry",
+      "path": "geometry.js"
+    },
+    {
+      "name": "volume",
+      "path": "volume.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main1",
+      "to": "index",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "main2",
+      "to": "geometry",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "main2",
+      "to": "volume",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "index",
+      "to": "volume",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "index",
+      "to": "geometry",
+      "kind": "reexport_namespace"
+    }
+  ],
+  "exports": [
+    {
+      "module": "geometry",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "volume",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

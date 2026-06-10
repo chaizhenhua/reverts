@@ -1,0 +1,13 @@
+{
+  "tool": "rolldown",
+  "version": "1.0.0-rc.13",
+  "source_ref": "packages/rolldown/tests/fixtures/topics/preserve-modules/basic",
+  "input_options": {
+    "input": "main.js"
+  },
+  "output_options": {
+    "format": "esm",
+    "preserveModules": true,
+    "entryFileNames": "[name].js"
+  }
+}

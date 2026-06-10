@@ -1,0 +1,8 @@
+
+				.foo {
+					composes: bar from "other.css";
+				}
+				.bar {
+					composes: bar from "styles.css";
+				}
+			

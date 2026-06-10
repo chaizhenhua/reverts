@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.ts"
+    },
+    {
+      "name": "b",
+      "path": "b.ts"
+    },
+    {
+      "name": "c",
+      "path": "c.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "a",
+      "to": "c",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "reexport_named",
+      "name": "Animals"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "Animals",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "Animals",
+      "kind": "value"
+    }
+  ]
+}

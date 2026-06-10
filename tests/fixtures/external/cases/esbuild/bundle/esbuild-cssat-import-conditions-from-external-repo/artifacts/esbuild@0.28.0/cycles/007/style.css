@@ -1,0 +1,39 @@
+/* cycles/007/green.css */
+.box {
+  background-color: green;
+}
+
+/* cycles/007/red.css */
+@media all {
+  .box {
+    background-color: red;
+  }
+}
+
+/* cycles/007/a.css */
+
+/* cycles/007/b.css */
+
+/* cycles/007/red.css */
+@media not print {
+  .box {
+    background-color: red;
+  }
+}
+
+/* cycles/007/green.css */
+@media not print {
+  @media screen {
+    .box {
+      background-color: green;
+    }
+  }
+}
+
+/* cycles/007/b.css */
+
+/* cycles/007/a.css */
+
+/* cycles/007/c.css */
+
+/* cycles/007/style.css */

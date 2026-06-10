@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./a/test.txt",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./b/test.txt",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./example.json",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "some-path",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

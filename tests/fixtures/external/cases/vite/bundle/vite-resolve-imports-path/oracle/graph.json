@@ -1,0 +1,112 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/imports/top-level",
+      "path": "src/imports/top-level.js"
+    },
+    {
+      "name": "src/imports/same-level",
+      "path": "src/imports/same-level.js"
+    },
+    {
+      "name": "src/imports/nested-path",
+      "path": "src/imports/nested-path.js"
+    },
+    {
+      "name": "src/imports/.dot-prefixed/index",
+      "path": "src/imports/.dot-prefixed/index.js"
+    },
+    {
+      "name": "src/imports/query",
+      "path": "src/imports/query.json"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "#query",
+      "kind": "import_default",
+      "name": "query"
+    },
+    {
+      "from": "src/main",
+      "to": "#top-level",
+      "kind": "import_named",
+      "name": "msg as topLevel"
+    },
+    {
+      "from": "src/main",
+      "to": "#same-level",
+      "kind": "import_named",
+      "name": "msg as sameLevel"
+    },
+    {
+      "from": "src/main",
+      "to": "#nested/path.js",
+      "kind": "import_named",
+      "name": "msg as nested"
+    },
+    {
+      "from": "src/main",
+      "to": "#dot-prefixed",
+      "kind": "import_named",
+      "name": "msg as dotPrefixed"
+    },
+    {
+      "from": "src/imports/same-level",
+      "to": "#top-level",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "topLevel",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "sameLevel",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "nested",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "dotPrefixed",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "query",
+      "kind": "value"
+    },
+    {
+      "module": "src/imports/top-level",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/imports/nested-path",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/imports/.dot-prefixed/index",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/imports/query",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

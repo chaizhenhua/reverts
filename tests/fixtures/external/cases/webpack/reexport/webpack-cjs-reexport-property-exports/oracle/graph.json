@@ -1,0 +1,55 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    },
+    {
+      "name": "reexport-property-exports",
+      "path": "reexport-property-exports.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport-property-exports",
+      "kind": "require"
+    },
+    {
+      "from": "reexport-property-exports",
+      "to": "module",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "def",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-property-exports",
+      "name": "property1",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-property-exports",
+      "name": "property2",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "id": "babel-reexport-loose-export-from",
+  "title": "babel commonjs loose reexport from",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "babel",
+    "project_version": "7.29.0",
+    "project_commit": "b0e3517dc566880e76b5f1f4dcf7fcecba58337d",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/export-from"
+  },
+  "artifact": {
+    "tool": "babel",
+    "version": "7.29.0",
+    "entry": "artifacts/babel@7.29.0/input.js",
+    "outputs": [
+      "artifacts/babel@7.29.0/input.js"
+    ],
+    "format": "bundle",
+    "module_kind": "commonjs"
+  },
+  "expectations": {
+    "bundler_family": "babel",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "input"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,320 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/index",
+      "path": "Users/user/project/baseurl_dot/index.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test0-success",
+      "path": "Users/user/project/baseurl_dot/test0-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test1-success",
+      "path": "Users/user/project/baseurl_dot/test1-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test2-success/foo",
+      "path": "Users/user/project/baseurl_dot/test2-success/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test3-success",
+      "path": "Users/user/project/baseurl_dot/test3-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test4-first/foo",
+      "path": "Users/user/project/baseurl_dot/test4-first/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/test5-second/foo",
+      "path": "Users/user/project/baseurl_dot/test5-second/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/absolute-in",
+      "path": "Users/user/project/baseurl_dot/absolute-in.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/absolute-in-star",
+      "path": "Users/user/project/baseurl_dot/absolute-in-star.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/absolute-out",
+      "path": "Users/user/project/baseurl_dot/absolute-out.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/absolute-out-star",
+      "path": "Users/user/project/baseurl_dot/absolute-out-star.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_dot/actual/test",
+      "path": "Users/user/project/baseurl_dot/actual/test.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/index",
+      "path": "Users/user/project/baseurl_nested/index.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test0-success",
+      "path": "Users/user/project/baseurl_nested/nested/test0-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test1-success",
+      "path": "Users/user/project/baseurl_nested/nested/test1-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test2-success/foo",
+      "path": "Users/user/project/baseurl_nested/nested/test2-success/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test3-success",
+      "path": "Users/user/project/baseurl_nested/nested/test3-success.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test4-first/foo",
+      "path": "Users/user/project/baseurl_nested/nested/test4-first/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/test5-second/foo",
+      "path": "Users/user/project/baseurl_nested/nested/test5-second/foo.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/absolute-in",
+      "path": "Users/user/project/baseurl_nested/absolute-in.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/absolute-in-star",
+      "path": "Users/user/project/baseurl_nested/absolute-in-star.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/absolute-out",
+      "path": "Users/user/project/baseurl_nested/absolute-out.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/absolute-out-star",
+      "path": "Users/user/project/baseurl_nested/absolute-out-star.ts"
+    },
+    {
+      "name": "Users/user/project/baseurl_nested/nested/actual/test",
+      "path": "Users/user/project/baseurl_nested/nested/actual/test.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "./baseurl_dot",
+      "kind": "import_default",
+      "name": "baseurl_dot"
+    },
+    {
+      "from": "Users/user/project/entry",
+      "to": "./baseurl_nested",
+      "kind": "import_default",
+      "name": "baseurl_nested"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test0",
+      "kind": "import_default",
+      "name": "test0"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test1/foo",
+      "kind": "import_default",
+      "name": "test1"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test2/foo",
+      "kind": "import_default",
+      "name": "test2"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test3/foo",
+      "kind": "import_default",
+      "name": "test3"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test4/foo",
+      "kind": "import_default",
+      "name": "test4"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "test5/foo",
+      "kind": "import_default",
+      "name": "test5"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "Users/user/project/baseurl_dot/absolute-in",
+      "kind": "import_default",
+      "name": "absoluteIn"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "Users/user/project/baseurl_dot/absolute-in-star",
+      "kind": "import_default",
+      "name": "absoluteInStar"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "Users/user/project/baseurl_dot/absolute-out",
+      "kind": "import_default",
+      "name": "absoluteOut"
+    },
+    {
+      "from": "Users/user/project/baseurl_dot/index",
+      "to": "Users/user/project/baseurl_dot/absolute-out-star",
+      "kind": "import_default",
+      "name": "absoluteOutStar"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test0",
+      "kind": "import_default",
+      "name": "test0"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test1/foo",
+      "kind": "import_default",
+      "name": "test1"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test2/foo",
+      "kind": "import_default",
+      "name": "test2"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test3/foo",
+      "kind": "import_default",
+      "name": "test3"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test4/foo",
+      "kind": "import_default",
+      "name": "test4"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "test5/foo",
+      "kind": "import_default",
+      "name": "test5"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "Users/user/project/baseurl_nested/absolute-in",
+      "kind": "import_default",
+      "name": "absoluteIn"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "Users/user/project/baseurl_nested/absolute-in-star",
+      "kind": "import_default",
+      "name": "absoluteInStar"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "Users/user/project/baseurl_nested/absolute-out",
+      "kind": "import_default",
+      "name": "absoluteOut"
+    },
+    {
+      "from": "Users/user/project/baseurl_nested/index",
+      "to": "Users/user/project/baseurl_nested/absolute-out-star",
+      "kind": "import_default",
+      "name": "absoluteOutStar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/baseurl_dot/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test0-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test1-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test2-success/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test3-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test4-first/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/test5-second/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_dot/actual/test",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test0-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test1-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test2-success/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test3-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test4-first/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/test5-second/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/baseurl_nested/nested/actual/test",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "modules": [
+    {
+      "name": "dynamic",
+      "path": "dynamic.js"
+    },
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "dynamic",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

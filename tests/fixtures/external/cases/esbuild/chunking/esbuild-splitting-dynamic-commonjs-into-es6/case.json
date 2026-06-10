@@ -1,0 +1,46 @@
+{
+  "id": "esbuild-splitting-dynamic-commonjs-into-es6",
+  "title": "esbuild TestSplittingDynamicCommonJSIntoES6",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_splitting_test.go::TestSplittingDynamicCommonJSIntoES6"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/entry.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/chunks/foo.js",
+      "artifacts/esbuild@0.28.0/entry.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__commonJS"
+    ],
+    "helpers": [],
+    "must_recover_modules": [
+      "entry",
+      "foo"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "foo",
+        "name": "bar"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    },
+    {
+      "name": "bar",
+      "path": "bar.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "foo",
+      "to": "bar",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "bar",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

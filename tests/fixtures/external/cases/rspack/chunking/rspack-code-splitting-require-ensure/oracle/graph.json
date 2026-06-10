@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "example",
+      "path": "example.js"
+    },
+    {
+      "name": "node_modules/a",
+      "path": "node_modules/a.js"
+    },
+    {
+      "name": "node_modules/b",
+      "path": "node_modules/b.js"
+    },
+    {
+      "name": "node_modules/c",
+      "path": "node_modules/c.js"
+    },
+    {
+      "name": "node_modules/d",
+      "path": "node_modules/d.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "example",
+      "to": "node_modules/a",
+      "kind": "require"
+    },
+    {
+      "from": "example",
+      "to": "node_modules/b",
+      "kind": "require"
+    },
+    {
+      "from": "example",
+      "to": "node_modules/d",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

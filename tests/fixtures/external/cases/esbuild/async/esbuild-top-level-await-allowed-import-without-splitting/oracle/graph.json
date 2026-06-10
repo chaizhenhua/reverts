@@ -1,0 +1,43 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "entry",
+      "to": "entry",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

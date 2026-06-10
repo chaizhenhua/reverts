@@ -1,0 +1,139 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.js"
+    },
+    {
+      "name": "empty.esm",
+      "path": "empty.esm.js"
+    },
+    {
+      "name": "node_modules/pkg/empty",
+      "path": "node_modules/pkg/empty.js"
+    },
+    {
+      "name": "node_modules/pkg/empty.esm",
+      "path": "node_modules/pkg/empty.esm.js"
+    },
+    {
+      "name": "node_modules/pkg/index",
+      "path": "node_modules/pkg/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "empty",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "empty.esm",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "./empty.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "./empty.css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "./empty.global-css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "./empty.local-css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.js",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.esm.js",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.global-css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/empty.local-css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "node_modules/pkg/empty",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "node_modules/pkg/empty.esm",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "./empty.json",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "./empty.css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "./empty.global-css",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "./empty.local-css",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

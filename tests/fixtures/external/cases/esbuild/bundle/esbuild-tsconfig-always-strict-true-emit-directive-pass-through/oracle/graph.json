@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/implicit",
+      "path": "Users/user/project/src/implicit.ts"
+    },
+    {
+      "name": "Users/user/project/src/explicit",
+      "path": "Users/user/project/src/explicit.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

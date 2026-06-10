@@ -1,0 +1,67 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/data",
+      "path": "src/data.json"
+    },
+    {
+      "name": "node_modules/@vitejs/test-import-assertion-dep/index",
+      "path": "node_modules/@vitejs/test-import-assertion-dep/index.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-import-assertion-dep/data",
+      "path": "node_modules/@vitejs/test-import-assertion-dep/data.json"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "src/data",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-import-assertion-dep",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "node_modules/@vitejs/test-import-assertion-dep/index",
+      "to": "node_modules/@vitejs/test-import-assertion-dep/data",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "data",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "depData",
+      "kind": "value"
+    },
+    {
+      "module": "src/data",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-import-assertion-dep/index",
+      "name": "hello",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-import-assertion-dep/data",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

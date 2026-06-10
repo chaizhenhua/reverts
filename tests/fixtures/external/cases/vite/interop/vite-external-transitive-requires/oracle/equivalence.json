@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-dep-that-requires/index.js",
+      "decompiled_module": "node_modules/@vitejs/test-dep-that-requires/index"
+    }
+  ]
+}

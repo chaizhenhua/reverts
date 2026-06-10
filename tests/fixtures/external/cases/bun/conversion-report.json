@@ -1,0 +1,148 @@
+{
+  "project": "bun",
+  "version": "1.3.11",
+  "commit": "a04817ce2b7f1a1e8b7cbf8af8f2c027ab072f1d",
+  "generated_count": 23,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "bun-cjs-import-default-with-esmodule-marker",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_import_syntax_with_esModule",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-import-default-without-esmodule-marker",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_import_syntax_without_esModule",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-import-named-and-default",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_import_syntax_named_and_default",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-import-namespace",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_import_syntax_namespace",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-mjs-reexport",
+      "category": "reexport",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_mjs_reexport",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-deep-reexport-chain",
+      "category": "reexport",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_deep_reexport_chain",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-reexport-with-rename",
+      "category": "reexport",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_reexport_with_rename",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-mixed-import-styles",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_mixed_import_styles",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-cjs-input-esm-output-cjs-wrapper",
+      "category": "interop",
+      "test": "test/bundler/bundler_cjs.test.ts::cjs/__toESM_input_esm_output_cjs_wrapper_print",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-loader-yaml-file",
+      "category": "bundle",
+      "test": "test/bundler/bundler_loader.test.ts::bun/loader-yaml-file",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-loader-json-file",
+      "category": "bundle",
+      "test": "test/bundler/bundler_loader.test.ts::bun/loader-json-file",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-loader-toml-file",
+      "category": "bundle",
+      "test": "test/bundler/bundler_loader.test.ts::bun/loader-toml-file",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-loader-text-file",
+      "category": "bundle",
+      "test": "test/bundler/bundler_loader.test.ts::bun/loader-text-file",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-typescript-basic",
+      "category": "bundle",
+      "test": "test/bundler/bundler_files.test.ts::in-memory file with TypeScript",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-jsx-classic-basic",
+      "category": "bundle",
+      "test": "test/bundler/bundler_jsx.test.ts::jsx/Classic",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-reexports-basic",
+      "category": "reexport",
+      "test": "test/bundler/bundler_files.test.ts::in-memory file with re-exports",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-default-export-basic",
+      "category": "interop",
+      "test": "test/bundler/bundler_files.test.ts::in-memory file with default export",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-chained-imports-basic",
+      "category": "bundle",
+      "test": "test/bundler/bundler_files.test.ts::in-memory file with chained imports",
+      "outputs": 1
+    },
+    {
+      "case_id": "bun-splitting-dynamic-import-css-file",
+      "category": "chunking",
+      "test": "test/bundler/bundler_splitting.test.ts::splitting/DynamicImportCSSFile",
+      "outputs": 3
+    },
+    {
+      "case_id": "bun-splitting-static-and-dynamic-css-imports",
+      "category": "chunking",
+      "test": "test/bundler/bundler_splitting.test.ts::splitting/StaticAndDynamicCSSImports",
+      "outputs": 4
+    },
+    {
+      "case_id": "bun-splitting-nested-dynamic-import-with-css",
+      "category": "chunking",
+      "test": "test/bundler/bundler_splitting.test.ts::splitting/NestedDynamicImportWithCSS",
+      "outputs": 6
+    },
+    {
+      "case_id": "bun-splitting-multiple-entrypoints-shared-css",
+      "category": "chunking",
+      "test": "test/bundler/bundler_splitting.test.ts::splitting/MultipleEntryPointsWithSharedCSS",
+      "outputs": 4
+    },
+    {
+      "case_id": "bun-splitting-circular-dynamic-imports-with-css",
+      "category": "chunking",
+      "test": "test/bundler/bundler_splitting.test.ts::splitting/CircularDynamicImportsWithCSS",
+      "outputs": 8
+    }
+  ],
+  "skipped": []
+}

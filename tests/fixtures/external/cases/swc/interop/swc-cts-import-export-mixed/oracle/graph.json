@@ -1,0 +1,28 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.cts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "require",
+      "name": "bar"
+    },
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

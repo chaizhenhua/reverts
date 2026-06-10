@@ -1,0 +1,58 @@
+{
+  "project": "swc",
+  "version": "1.15.24",
+  "commit": "87dee576923cc85687b281bc762b9e56c26ab7c6",
+  "generated_count": 8,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "swc-interop-imports-default",
+      "category": "interop",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/interop/imports-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-interop-imports-mixing",
+      "category": "interop",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/interop/imports-mixing",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-export-all-default",
+      "category": "reexport",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/interop/export-all",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-interop-node-imports-default",
+      "category": "interop",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/interop-node/imports-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-interop-node-export-all",
+      "category": "reexport",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/interop-node/export-all",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-import-meta-commonjs",
+      "category": "bundle",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/import-meta",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-ignore-dynamic-imports",
+      "category": "async",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/ignore-dynamic/1",
+      "outputs": 1
+    },
+    {
+      "case_id": "swc-cts-import-export-mixed",
+      "category": "interop",
+      "test": "crates/swc_ecma_transforms_module/tests/fixture/common/cts-import-export/mixed",
+      "outputs": 1
+    }
+  ],
+  "skipped": []
+}

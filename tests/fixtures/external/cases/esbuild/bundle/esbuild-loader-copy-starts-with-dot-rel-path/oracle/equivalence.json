@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/project/src/.htaccess",
+      "decompiled_module": "project/src/"
+    },
+    {
+      "original": "input/project/src/entry.js",
+      "decompiled_module": "project/src/entry"
+    },
+    {
+      "original": "input/project/src/.ts",
+      "decompiled_module": "project/src/"
+    }
+  ]
+}

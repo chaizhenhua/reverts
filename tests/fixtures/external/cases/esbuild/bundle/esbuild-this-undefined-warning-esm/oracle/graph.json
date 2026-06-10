@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "file1",
+      "path": "file1.js"
+    },
+    {
+      "name": "node_modules/pkg/file2",
+      "path": "node_modules/pkg/file2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "file1",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "entry",
+      "to": "pkg/file2.js",
+      "kind": "import_default",
+      "name": "y"
+    }
+  ],
+  "exports": [
+    {
+      "module": "file1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/pkg/file2",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

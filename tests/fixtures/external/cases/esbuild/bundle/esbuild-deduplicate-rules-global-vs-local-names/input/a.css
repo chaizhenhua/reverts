@@ -1,0 +1,13 @@
+
+				a { color: red } /* SHOULD BE REMOVED */
+				b { color: green }
+
+				:global(.foo) { color: red } /* SHOULD BE REMOVED */
+				:global(.bar) { color: green }
+
+				:local(.foo) { color: red }
+				:local(.bar) { color: green }
+
+				div :global { animation-name: anim_global } /* SHOULD BE REMOVED */
+				div :local { animation-name: anim_local }
+			

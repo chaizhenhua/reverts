@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/parameter-properties.ts",
+      "decompiled_module": "parameter-properties"
+    },
+    {
+      "original": "input/namespace-exports.ts",
+      "decompiled_module": "namespace-exports"
+    },
+    {
+      "original": "input/enum-values.ts",
+      "decompiled_module": "enum-values"
+    }
+  ]
+}

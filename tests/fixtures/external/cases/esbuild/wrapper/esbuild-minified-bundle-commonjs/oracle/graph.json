@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "a",
+      "path": "a.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "require"
+    },
+    {
+      "from": "entry",
+      "to": "./j.json",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.ts"
+    },
+    {
+      "name": "Users/user/project/node_modules/fib/index",
+      "path": "Users/user/project/node_modules/fib/index.js"
+    },
+    {
+      "name": "Users/user/project/fib-local.d",
+      "path": "Users/user/project/fib-local.d.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "fib",
+      "kind": "import_named",
+      "name": "fib"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/fib/index",
+      "name": "fib",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/fib-local.d",
+      "name": "fib",
+      "kind": "value"
+    }
+  ]
+}

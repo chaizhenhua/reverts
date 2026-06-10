@@ -1,0 +1,72 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/demo-pkg/no-ext",
+      "path": "Users/user/project/src/demo-pkg/no-ext.js"
+    },
+    {
+      "name": "Users/user/project/src/demo-pkg/no-ext-browser",
+      "path": "Users/user/project/src/demo-pkg/no-ext-browser.js"
+    },
+    {
+      "name": "Users/user/project/src/demo-pkg/ext",
+      "path": "Users/user/project/src/demo-pkg/ext.js"
+    },
+    {
+      "name": "Users/user/project/src/demo-pkg/ext-browser",
+      "path": "Users/user/project/src/demo-pkg/ext-browser.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "Users/user/project/src/demo-pkg/no-ext",
+      "kind": "import_named",
+      "name": "browser as a"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "Users/user/project/src/demo-pkg/no-ext",
+      "kind": "import_named",
+      "name": "node as b"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "Users/user/project/src/demo-pkg/ext",
+      "kind": "import_named",
+      "name": "browser as c"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "Users/user/project/src/demo-pkg/ext",
+      "kind": "import_named",
+      "name": "browser as d"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/demo-pkg/no-ext",
+      "name": "node",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/demo-pkg/no-ext-browser",
+      "name": "browser",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/demo-pkg/ext",
+      "name": "node",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/demo-pkg/ext-browser",
+      "name": "browser",
+      "kind": "value"
+    }
+  ]
+}

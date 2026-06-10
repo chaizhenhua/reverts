@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./shouldUsePercent_1.txt",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "./shouldUsePercent_2.txt",
+      "kind": "import_default",
+      "name": "b"
+    },
+    {
+      "from": "entry",
+      "to": "./shouldUseBase64_1.txt",
+      "kind": "import_default",
+      "name": "c"
+    },
+    {
+      "from": "entry",
+      "to": "./shouldUseBase64_2.txt",
+      "kind": "import_default",
+      "name": "d"
+    }
+  ],
+  "exports": []
+}

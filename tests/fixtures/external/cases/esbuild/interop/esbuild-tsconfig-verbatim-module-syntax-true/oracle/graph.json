@@ -1,0 +1,41 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/main",
+      "path": "Users/user/project/src/main.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/main",
+      "to": "./car",
+      "kind": "import_named",
+      "name": "type Car"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "bcd",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "bcd",
+      "kind": "import_named",
+      "name": "type c"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "bcd",
+      "kind": "import_named",
+      "name": "type d"
+    },
+    {
+      "from": "Users/user/project/src/main",
+      "to": "xyz",
+      "kind": "import_named",
+      "name": "type xyz"
+    }
+  ],
+  "exports": []
+}

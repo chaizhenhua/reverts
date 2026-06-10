@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "src/entry",
+      "path": "src/entry.js"
+    },
+    {
+      "name": "usr/lib/pkg/pkg1/foo",
+      "path": "usr/lib/pkg/pkg1/foo.js"
+    },
+    {
+      "name": "lib/pkg/pkg2/bar",
+      "path": "lib/pkg/pkg2/bar.js"
+    },
+    {
+      "name": "var/lib/pkg/@scope/pkg3/baz-browser",
+      "path": "var/lib/pkg/@scope/pkg3/baz-browser.js"
+    },
+    {
+      "name": "tmp/pkg/@scope/pkg4/bat",
+      "path": "tmp/pkg/@scope/pkg4/bat.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

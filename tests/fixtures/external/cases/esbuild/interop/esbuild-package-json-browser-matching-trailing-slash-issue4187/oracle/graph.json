@@ -1,0 +1,50 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "node_modules/axios/index",
+      "path": "node_modules/axios/index.js"
+    },
+    {
+      "name": "node_modules/axios/node/index",
+      "path": "node_modules/axios/node/index.js"
+    },
+    {
+      "name": "node_modules/axios/browser/index",
+      "path": "node_modules/axios/browser/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "axios",
+      "kind": "import_default",
+      "name": "axios"
+    },
+    {
+      "from": "node_modules/axios/index",
+      "to": "./node/",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "node_modules/axios/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/axios/node/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/axios/browser/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

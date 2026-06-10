@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "ns",
+      "path": "ns.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "ns",
+      "kind": "import_named",
+      "name": "ns"
+    }
+  ],
+  "exports": []
+}

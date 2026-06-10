@@ -1,0 +1,4 @@
+/* nested-attribute.css */
+a [href] {
+  color: red;
+}

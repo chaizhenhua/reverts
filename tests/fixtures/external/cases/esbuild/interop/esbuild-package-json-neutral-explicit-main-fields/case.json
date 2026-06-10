@@ -1,0 +1,47 @@
+{
+  "id": "esbuild-package-json-neutral-explicit-main-fields",
+  "title": "esbuild TestPackageJsonNeutralExplicitMainFields",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_packagejson_test.go::TestPackageJsonNeutralExplicitMainFields"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/Users/user/project/out.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/Users/user/project/out.js"
+    ],
+    "format": "bundle",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__commonJS"
+    ],
+    "helpers": [
+      "__toESM"
+    ],
+    "must_recover_modules": [
+      "Users/user/project/src/entry",
+      "Users/user/project/node_modules/demo-pkg/main"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "Users/user/project/node_modules/demo-pkg/main",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

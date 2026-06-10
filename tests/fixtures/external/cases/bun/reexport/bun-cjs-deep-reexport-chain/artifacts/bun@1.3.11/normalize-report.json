@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Curated fixture uses explicit Bun build options so committed output paths stay deterministic."
+  ]
+}

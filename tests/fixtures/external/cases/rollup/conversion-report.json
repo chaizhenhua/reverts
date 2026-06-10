@@ -1,0 +1,172 @@
+{
+  "project": "rollup",
+  "version": "4.60.1",
+  "commit": "ae871d762f6bbeb4320d28fe179211168f27a434",
+  "generated_count": 27,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "rollup-basic-chunking",
+      "category": "chunking",
+      "test": "test/chunking-form/samples/basic-chunking",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-chunk-live-bindings",
+      "category": "chunking",
+      "test": "test/chunking-form/samples/chunk-live-bindings",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-chunking-reexport-external",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/chunking-reexport",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-combined-namespace-reexport",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/combined-namespace-reexport",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-default-reexport-namespace",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/default-reexport-namespace",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-dynamic-import-chained",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-chained",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-dynamic-import-object-tree-shaking-await",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-object-property-tree-shaking-await",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-dynamic-import-object-tree-shaking-then",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-object-property-tree-shaking-then",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-dynamic-import-only-default",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-only-default",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-dynamic-import-only-reexports",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-only-reexports",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-dynamic-import-shared",
+      "category": "chunking",
+      "test": "test/chunking-form/samples/dynamic-import",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-dynamic-import-with-namespace",
+      "category": "async",
+      "test": "test/chunking-form/samples/dynamic-import-with-namespace",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-external-reexports",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/external-reexports",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-facades-with-external-reexports",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/facades-with-external-reexports",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-facades-with-reexports",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/facades-with-reexports",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-multiple-entry-points",
+      "category": "chunking",
+      "test": "test/chunking-form/samples/multiple-entry-points",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-namespace-imports-from-chunks",
+      "category": "interop",
+      "test": "test/chunking-form/samples/namespace-imports-from-chunks",
+      "outputs": 2
+    },
+    {
+      "case_id": "rollup-namespace-object-import",
+      "category": "interop",
+      "test": "test/chunking-form/samples/namespace-object-import",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-namespace-reexports",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/namespace-reexports",
+      "outputs": 4
+    },
+    {
+      "case_id": "rollup-preserve-modules-basic",
+      "category": "chunking",
+      "test": "test/chunking-form/samples/preserve-modules",
+      "outputs": 7
+    },
+    {
+      "case_id": "rollup-preserve-modules-namespace-reexport",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/preserve-modules-namespace-reexport-reexport",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-reexport-shortpaths",
+      "category": "reexport",
+      "test": "test/chunking-form/samples/reexport-shortpaths",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-top-level-await-call-expression-import",
+      "category": "async",
+      "test": "test/chunking-form/samples/top-level-await-import-within-a-top-level-await-call-expression",
+      "outputs": 4
+    },
+    {
+      "case_id": "rollup-top-level-await-import",
+      "category": "async",
+      "test": "test/chunking-form/samples/top-level-await-import",
+      "outputs": 4
+    },
+    {
+      "case_id": "rollup-top-level-await-import-2",
+      "category": "async",
+      "test": "test/chunking-form/samples/top-level-await-import-2",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-top-level-await-import-3",
+      "category": "async",
+      "test": "test/chunking-form/samples/top-level-await-import-3",
+      "outputs": 3
+    },
+    {
+      "case_id": "rollup-top-level-await-import-mixed",
+      "category": "async",
+      "test": "test/chunking-form/samples/top-level-await-import-mixed",
+      "outputs": 4
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,53 @@
+{
+  "id": "rollup-chunking-reexport-external",
+  "title": "rollup chunking reexport external",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rollup",
+    "project_version": "4.60.1",
+    "project_commit": "ae871d762f6bbeb4320d28fe179211168f27a434",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/chunking-form/samples/chunking-reexport"
+  },
+  "artifact": {
+    "tool": "rollup",
+    "version": "4.60.1",
+    "entry": "artifacts/rollup@4.60.1/main1.js",
+    "outputs": [
+      "artifacts/rollup@4.60.1/main1.js",
+      "artifacts/rollup@4.60.1/main2.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "rollup",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "main1",
+      "main2",
+      "dep"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "main1",
+        "name": "dep"
+      },
+      {
+        "module": "main2",
+        "name": "dep"
+      },
+      {
+        "module": "dep",
+        "name": "dep"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

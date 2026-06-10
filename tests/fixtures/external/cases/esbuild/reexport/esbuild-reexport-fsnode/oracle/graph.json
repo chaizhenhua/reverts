@@ -1,0 +1,20 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "foo",
+      "to": "fs",
+      "kind": "reexport_namespace"
+    }
+  ],
+  "exports": []
+}

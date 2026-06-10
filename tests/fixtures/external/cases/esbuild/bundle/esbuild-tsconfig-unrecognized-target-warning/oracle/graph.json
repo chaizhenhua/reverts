@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    },
+    {
+      "name": "Users/user/project/src/a/index",
+      "path": "Users/user/project/src/a/index.ts"
+    },
+    {
+      "name": "Users/user/project/src/node_modules/b/index",
+      "path": "Users/user/project/src/node_modules/b/index.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

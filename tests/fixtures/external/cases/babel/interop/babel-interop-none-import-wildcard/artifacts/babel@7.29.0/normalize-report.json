@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Babel transform output was written to a stable artifact filename without additional rewriting."
+  ]
+}

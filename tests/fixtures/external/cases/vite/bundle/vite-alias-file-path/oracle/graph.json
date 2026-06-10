@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "src/alias-test",
+      "path": "src/alias-test.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "fs",
+      "kind": "import_named",
+      "name": "msg"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "msg",
+      "kind": "value"
+    },
+    {
+      "module": "src/alias-test",
+      "name": "msg",
+      "kind": "value"
+    }
+  ]
+}

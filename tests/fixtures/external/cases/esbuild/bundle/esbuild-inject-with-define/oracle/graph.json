@@ -1,0 +1,30 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inject",
+      "path": "inject.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "inject",
+      "name": "both",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "first",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "second",
+      "kind": "value"
+    }
+  ]
+}

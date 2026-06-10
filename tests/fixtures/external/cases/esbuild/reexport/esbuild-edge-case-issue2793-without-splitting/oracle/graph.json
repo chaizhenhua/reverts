@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "src/a",
+      "path": "src/a.js"
+    },
+    {
+      "name": "src/b",
+      "path": "src/b.js"
+    },
+    {
+      "name": "src/index",
+      "path": "src/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/b",
+      "to": ".",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "src/index",
+      "to": "src/a",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "src/index",
+      "to": "src/b",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/a",
+      "name": "A",
+      "kind": "value"
+    },
+    {
+      "module": "src/b",
+      "name": "B",
+      "kind": "value"
+    }
+  ]
+}

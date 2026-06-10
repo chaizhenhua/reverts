@@ -1,0 +1,11 @@
+/* duplicates/001/b.css */
+.box {
+  background-color: red;
+}
+
+/* duplicates/001/a.css */
+.box {
+  background-color: green;
+}
+
+/* duplicates/001/style.css */

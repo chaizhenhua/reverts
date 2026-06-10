@@ -1,0 +1,20 @@
+@import "http://example.com/external1.css" layer(a) not print;
+@import 'data:text/css,@import "http://example.com/external3.css" layer(b) not tv;' layer(a) not print;
+@import "data:text/css,@import 'data:text/css,@import \"http://example.com/external4.css\" layer(b2);' layer(b) not tv;" layer(a) not print;
+@import 'data:text/css,@import "http://example.com/external2.css" layer(a2);' layer(a) not print;
+
+/* input/b.css */
+@media not print {
+  @layer a {
+    @media not tv {
+      @layer b;
+    }
+  }
+}
+
+/* input/a.css */
+@media not print {
+  @layer a;
+}
+
+/* input/entry.css */

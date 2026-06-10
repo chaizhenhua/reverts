@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "shouldBeWrapped",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "shouldNotBeWrapped",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "shouldNotBeDoubleWrapped",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "id": "tsc-import-attributes-with-dynamic-import",
+  "title": "tsc import attributes with dynamic import",
+  "category": "async",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "typescript",
+    "project_version": "6.0.2",
+    "project_commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/cases/conformance/importAttributes/importAttributes7.ts"
+  },
+  "artifact": {
+    "tool": "tsc",
+    "version": "6.0.2",
+    "entry": "artifacts/tsc@6.0.2/b.js",
+    "outputs": [
+      "artifacts/tsc@6.0.2/a.js",
+      "artifacts/tsc@6.0.2/b.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "tsc",
+    "wrappers": [],
+    "helpers": [
+      "__awaiter"
+    ],
+    "must_recover_modules": [
+      "a",
+      "b"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "a",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

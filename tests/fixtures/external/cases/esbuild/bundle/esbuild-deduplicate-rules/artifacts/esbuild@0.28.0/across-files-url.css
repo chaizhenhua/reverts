@@ -1,0 +1,15 @@
+@import "http://example.com/some.css";
+
+/* input/across-files-url-0.css */
+
+/* input/across-files-url-1.css */
+@font-face {
+  src: url(http://example.com/some.other.font);
+}
+
+/* input/across-files-url-2.css */
+@font-face {
+  src: url(http://example.com/some.font);
+}
+
+/* input/across-files-url.css */

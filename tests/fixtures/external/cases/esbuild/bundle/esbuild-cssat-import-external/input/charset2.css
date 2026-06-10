@@ -1,0 +1,8 @@
+
+				@charset "UTF-8";
+				@import "./external3.css";
+				@import "./external5.css" screen;
+				@import "https://www.example.com/style1.css";
+				@import "https://www.example.com/style3.css";
+				.after { color: blue }
+			

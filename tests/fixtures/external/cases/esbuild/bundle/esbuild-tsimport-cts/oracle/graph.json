@@ -1,0 +1,20 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "required",
+      "path": "required.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "required",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

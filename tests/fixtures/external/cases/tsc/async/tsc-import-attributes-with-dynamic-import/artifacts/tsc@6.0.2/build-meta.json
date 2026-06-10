@@ -1,0 +1,14 @@
+{
+  "tool": "tsc",
+  "version": "6.0.2",
+  "source_ref": "tests/cases/conformance/importAttributes/importAttributes7.ts",
+  "compiler_options": {
+    "module": "esnext",
+    "target": "es2015",
+    "lib": [
+      "es2015"
+    ],
+    "outDir": "dist"
+  },
+  "entry_source": "b.ts"
+}

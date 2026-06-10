@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/src/node_modules/pkg/sub/foo.js",
+      "decompiled_module": "Users/user/project/src/node_modules/pkg/sub/foo"
+    },
+    {
+      "original": "input/Users/user/project/src/node_modules/pkg/sub/bar.js",
+      "decompiled_module": "Users/user/project/src/node_modules/pkg/sub/bar"
+    }
+  ]
+}

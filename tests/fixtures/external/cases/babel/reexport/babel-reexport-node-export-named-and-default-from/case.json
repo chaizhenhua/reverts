@@ -1,0 +1,48 @@
+{
+  "id": "babel-reexport-node-export-named-and-default-from",
+  "title": "babel commonjs node interop export named and default from",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "babel",
+    "project_version": "7.29.0",
+    "project_commit": "b0e3517dc566880e76b5f1f4dcf7fcecba58337d",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-node/export-named-and-default-from"
+  },
+  "artifact": {
+    "tool": "babel",
+    "version": "7.29.0",
+    "entry": "artifacts/babel@7.29.0/input.js",
+    "outputs": [
+      "artifacts/babel@7.29.0/input.js"
+    ],
+    "format": "bundle",
+    "module_kind": "commonjs"
+  },
+  "expectations": {
+    "bundler_family": "babel",
+    "wrappers": [],
+    "helpers": [
+      "_interopRequireWildcard"
+    ],
+    "must_recover_modules": [
+      "input"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "input",
+        "name": "default"
+      },
+      {
+        "module": "input",
+        "name": "name"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

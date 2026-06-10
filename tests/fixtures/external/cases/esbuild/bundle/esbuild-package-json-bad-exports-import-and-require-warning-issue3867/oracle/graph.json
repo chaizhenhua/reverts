@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "node_modules/foo/dist/node/index",
+      "path": "node_modules/foo/dist/node/index.js"
+    },
+    {
+      "name": "node_modules/foo/dist/node/index",
+      "path": "node_modules/foo/dist/node/index.cjs"
+    },
+    {
+      "name": "node_modules/foo/dist/browser/index",
+      "path": "node_modules/foo/dist/browser/index.js"
+    },
+    {
+      "name": "node_modules/foo/dist/browser/index",
+      "path": "node_modules/foo/dist/browser/index.cjs"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

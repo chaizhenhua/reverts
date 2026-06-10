@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/src/nested-worker.js",
+      "decompiled_module": "src/nested-worker"
+    },
+    {
+      "original": "input/src/sub-worker.js",
+      "decompiled_module": "src/sub-worker"
+    },
+    {
+      "original": "input/src/worker-module.js",
+      "decompiled_module": "src/worker-module"
+    },
+    {
+      "original": "input/src/worker-extra.js",
+      "decompiled_module": "src/worker-extra"
+    }
+  ]
+}

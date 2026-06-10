@@ -1,0 +1,5 @@
+{
+  "name": "vite-external-transitive-requires",
+  "private": true,
+  "type": "module"
+}

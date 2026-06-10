@@ -1,0 +1,417 @@
+{
+  "modules": [
+    {
+      "name": "shared",
+      "path": "shared.js"
+    },
+    {
+      "name": "e00",
+      "path": "e00.js"
+    },
+    {
+      "name": "e01",
+      "path": "e01.js"
+    },
+    {
+      "name": "e02",
+      "path": "e02.js"
+    },
+    {
+      "name": "e03",
+      "path": "e03.js"
+    },
+    {
+      "name": "e04",
+      "path": "e04.js"
+    },
+    {
+      "name": "e05",
+      "path": "e05.js"
+    },
+    {
+      "name": "e06",
+      "path": "e06.js"
+    },
+    {
+      "name": "e07",
+      "path": "e07.js"
+    },
+    {
+      "name": "e08",
+      "path": "e08.js"
+    },
+    {
+      "name": "e09",
+      "path": "e09.js"
+    },
+    {
+      "name": "e10",
+      "path": "e10.js"
+    },
+    {
+      "name": "e11",
+      "path": "e11.js"
+    },
+    {
+      "name": "e12",
+      "path": "e12.js"
+    },
+    {
+      "name": "e13",
+      "path": "e13.js"
+    },
+    {
+      "name": "e14",
+      "path": "e14.js"
+    },
+    {
+      "name": "e15",
+      "path": "e15.js"
+    },
+    {
+      "name": "e16",
+      "path": "e16.js"
+    },
+    {
+      "name": "e17",
+      "path": "e17.js"
+    },
+    {
+      "name": "e18",
+      "path": "e18.js"
+    },
+    {
+      "name": "e19",
+      "path": "e19.js"
+    },
+    {
+      "name": "e20",
+      "path": "e20.js"
+    },
+    {
+      "name": "e21",
+      "path": "e21.js"
+    },
+    {
+      "name": "e22",
+      "path": "e22.js"
+    },
+    {
+      "name": "e23",
+      "path": "e23.js"
+    },
+    {
+      "name": "e24",
+      "path": "e24.js"
+    },
+    {
+      "name": "e25",
+      "path": "e25.js"
+    },
+    {
+      "name": "e26",
+      "path": "e26.js"
+    },
+    {
+      "name": "e27",
+      "path": "e27.js"
+    },
+    {
+      "name": "e28",
+      "path": "e28.js"
+    },
+    {
+      "name": "e29",
+      "path": "e29.js"
+    },
+    {
+      "name": "e30",
+      "path": "e30.js"
+    },
+    {
+      "name": "e31",
+      "path": "e31.js"
+    },
+    {
+      "name": "e32",
+      "path": "e32.js"
+    },
+    {
+      "name": "e33",
+      "path": "e33.js"
+    },
+    {
+      "name": "e34",
+      "path": "e34.js"
+    },
+    {
+      "name": "e35",
+      "path": "e35.js"
+    },
+    {
+      "name": "e36",
+      "path": "e36.js"
+    },
+    {
+      "name": "e37",
+      "path": "e37.js"
+    },
+    {
+      "name": "e38",
+      "path": "e38.js"
+    },
+    {
+      "name": "e39",
+      "path": "e39.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "e00",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e01",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e02",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e03",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e04",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e05",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e06",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e07",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e08",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e09",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e10",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e11",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e12",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e13",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e14",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e15",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e16",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e17",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e18",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e19",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e20",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e21",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e22",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e23",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e24",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e25",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e26",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e27",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e28",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e29",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e30",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e31",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e32",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e33",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e34",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e35",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e36",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e37",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e38",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "e39",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    }
+  ],
+  "exports": [
+    {
+      "module": "shared",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

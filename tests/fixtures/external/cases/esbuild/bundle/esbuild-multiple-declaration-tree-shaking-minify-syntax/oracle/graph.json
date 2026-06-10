@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "var2",
+      "path": "var2.js"
+    },
+    {
+      "name": "var3",
+      "path": "var3.js"
+    },
+    {
+      "name": "function2",
+      "path": "function2.js"
+    },
+    {
+      "name": "function3",
+      "path": "function3.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

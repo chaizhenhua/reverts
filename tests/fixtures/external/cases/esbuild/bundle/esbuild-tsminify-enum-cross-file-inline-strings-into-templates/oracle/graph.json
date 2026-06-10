@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "cross-file",
+      "path": "cross-file.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "cross-file",
+      "kind": "import_named",
+      "name": "CrossFile"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "outside-node-modules/index",
+      "path": "outside-node-modules/index.jsx"
+    },
+    {
+      "name": "node_modules/inside-node-modules/index",
+      "path": "node_modules/inside-node-modules/index.jsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

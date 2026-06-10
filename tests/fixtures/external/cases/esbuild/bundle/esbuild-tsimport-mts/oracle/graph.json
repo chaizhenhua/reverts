@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "imported",
+      "path": "imported.mts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

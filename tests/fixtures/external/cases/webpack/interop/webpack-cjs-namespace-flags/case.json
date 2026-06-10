@@ -1,0 +1,79 @@
+{
+  "id": "webpack-cjs-namespace-flags",
+  "title": "webpack cjs namespace flags",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "webpack",
+    "project_version": "5.105.4",
+    "project_commit": "27c13b44c861908793f160f9f7413b32543c0522",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/cases/cjs-tree-shaking/namespace"
+  },
+  "artifact": {
+    "tool": "webpack",
+    "version": "5.105.4",
+    "entry": "artifacts/webpack@5.105.4/bundle.js",
+    "outputs": [
+      "artifacts/webpack@5.105.4/bundle.js",
+      "artifacts/webpack@5.105.4/chunks/0.js",
+      "artifacts/webpack@5.105.4/chunks/1.js",
+      "artifacts/webpack@5.105.4/chunks/2.js",
+      "artifacts/webpack@5.105.4/chunks/3.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_require__.d",
+      "__webpack_require__.r",
+      "__webpack_require__.e",
+      "__webpack_require__.u",
+      "__webpack_require__.t",
+      "__webpack_modules__",
+      "__webpack_exports__"
+    ],
+    "must_recover_modules": [
+      "index",
+      "namespace-via-define-properties",
+      "namespace-via-define-property",
+      "namespace-via-exports",
+      "namespace-via-literal"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "namespace-via-define-property",
+        "name": "abc"
+      },
+      {
+        "module": "namespace-via-define-property",
+        "name": "default"
+      },
+      {
+        "module": "namespace-via-exports",
+        "name": "__esModule"
+      },
+      {
+        "module": "namespace-via-exports",
+        "name": "abc"
+      },
+      {
+        "module": "namespace-via-exports",
+        "name": "default"
+      },
+      {
+        "module": "namespace-via-literal",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

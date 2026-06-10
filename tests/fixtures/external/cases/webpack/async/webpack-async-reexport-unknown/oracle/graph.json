@@ -1,0 +1,113 @@
+{
+  "modules": [
+    {
+      "name": "async-unknown",
+      "path": "async-unknown.js"
+    },
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "reexport-async-unknown",
+      "path": "reexport-async-unknown.js"
+    },
+    {
+      "name": "test",
+      "path": "test.js"
+    },
+    {
+      "name": "unknown",
+      "path": "unknown.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "async-unknown",
+      "to": "unknown",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "index",
+      "to": "test",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "reexport-async-unknown",
+      "to": "async-unknown",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "test",
+      "to": "reexport-async-unknown",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "test",
+      "to": "reexport-async-unknown",
+      "kind": "import_default",
+      "name": "value"
+    },
+    {
+      "from": "test",
+      "to": "reexport-async-unknown",
+      "kind": "import_named",
+      "name": "a"
+    },
+    {
+      "from": "test",
+      "to": "reexport-async-unknown",
+      "kind": "import_named",
+      "name": "b"
+    },
+    {
+      "from": "test",
+      "to": "reexport-async-unknown",
+      "kind": "import_named",
+      "name": "c"
+    }
+  ],
+  "exports": [
+    {
+      "module": "reexport-async-unknown",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "reexport-async-unknown",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "test",
+      "name": "ns",
+      "kind": "value"
+    },
+    {
+      "module": "test",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "test",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "test",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "test",
+      "name": "value",
+      "kind": "value"
+    },
+    {
+      "module": "unknown",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

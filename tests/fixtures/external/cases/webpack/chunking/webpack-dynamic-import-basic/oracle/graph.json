@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "two",
+      "path": "two.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "two",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "two",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

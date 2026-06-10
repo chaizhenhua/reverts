@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/top-level.js",
+      "decompiled_module": "top-level"
+    },
+    {
+      "original": "input/nested.js",
+      "decompiled_module": "nested"
+    },
+    {
+      "original": "input/let.js",
+      "decompiled_module": "let"
+    },
+    {
+      "original": "input/function.js",
+      "decompiled_module": "function"
+    },
+    {
+      "original": "input/function-nested.js",
+      "decompiled_module": "function-nested"
+    }
+  ]
+}

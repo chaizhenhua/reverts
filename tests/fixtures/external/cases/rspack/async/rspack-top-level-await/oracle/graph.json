@@ -1,0 +1,66 @@
+{
+  "modules": [
+    {
+      "name": "Actions",
+      "path": "Actions.js"
+    },
+    {
+      "name": "UserApi",
+      "path": "UserApi.js"
+    },
+    {
+      "name": "db-connection",
+      "path": "db-connection.js"
+    },
+    {
+      "name": "example",
+      "path": "example.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Actions",
+      "to": "UserApi",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "UserApi",
+      "to": "db-connection",
+      "kind": "import_named",
+      "name": "dbCall"
+    },
+    {
+      "from": "example",
+      "to": "Actions",
+      "kind": "import_named",
+      "name": "CreateUserAction"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Actions",
+      "name": "CreateUserAction",
+      "kind": "value"
+    },
+    {
+      "module": "Actions",
+      "name": "AlternativeCreateUserAction",
+      "kind": "value"
+    },
+    {
+      "module": "UserApi",
+      "name": "createUser",
+      "kind": "value"
+    },
+    {
+      "module": "db-connection",
+      "name": "dbCall",
+      "kind": "value"
+    },
+    {
+      "module": "db-connection",
+      "name": "close",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_default",
+      "name": "lib"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

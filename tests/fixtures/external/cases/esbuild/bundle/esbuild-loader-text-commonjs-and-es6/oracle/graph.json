@@ -1,0 +1,22 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./y.txt",
+      "kind": "import_default",
+      "name": "y_txt"
+    },
+    {
+      "from": "entry",
+      "to": "./x.txt",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

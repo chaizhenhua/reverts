@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "foo",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

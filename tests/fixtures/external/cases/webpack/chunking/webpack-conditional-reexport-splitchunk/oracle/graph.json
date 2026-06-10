@@ -1,0 +1,98 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "lib/common/common",
+      "path": "lib/common/common.js"
+    },
+    {
+      "name": "lib/common/empty",
+      "path": "lib/common/empty.js"
+    },
+    {
+      "name": "lib/common/index",
+      "path": "lib/common/index.js"
+    },
+    {
+      "name": "lib/index",
+      "path": "lib/index.js"
+    },
+    {
+      "name": "lib/util-a",
+      "path": "lib/util-a.js"
+    },
+    {
+      "name": "lib/util-b",
+      "path": "lib/util-b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "./lib",
+      "kind": "import_named",
+      "name": "utilA"
+    },
+    {
+      "from": "b",
+      "to": "./lib",
+      "kind": "import_named",
+      "name": "utilB"
+    },
+    {
+      "from": "lib/common/index",
+      "to": "lib/common/common",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "lib/common/index",
+      "to": "lib/common/empty",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "lib/index",
+      "to": "lib/util-a",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "lib/index",
+      "to": "./common",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "lib/index",
+      "to": "lib/util-b",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "lib/util-b",
+      "to": "./common",
+      "kind": "import_named",
+      "name": "common"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib/common/common",
+      "name": "common",
+      "kind": "value"
+    },
+    {
+      "module": "lib/util-a",
+      "name": "utilA",
+      "kind": "value"
+    },
+    {
+      "module": "lib/util-b",
+      "name": "utilB",
+      "kind": "value"
+    }
+  ]
+}

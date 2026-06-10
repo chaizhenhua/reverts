@@ -1,0 +1,12 @@
+{
+  "bundler_family": "parcel",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "$parcel$interopDefault",
+    "$parcel$export"
+  ],
+  "runtime_helpers": [
+    "$parcel$interopDefault",
+    "$parcel$export"
+  ]
+}

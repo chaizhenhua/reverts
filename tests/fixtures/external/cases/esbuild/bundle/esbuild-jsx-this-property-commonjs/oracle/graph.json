@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "factory",
+      "path": "factory.jsx"
+    },
+    {
+      "name": "fragment",
+      "path": "fragment.jsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

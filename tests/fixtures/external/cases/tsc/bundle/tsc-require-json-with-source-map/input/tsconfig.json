@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "es2015",
+    "allowJs": true,
+    "resolveJsonModule": true,
+    "sourceMap": true,
+    "outDir": "dist"
+  }
+}

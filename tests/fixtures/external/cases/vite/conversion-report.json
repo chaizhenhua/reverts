@@ -1,0 +1,118 @@
+{
+  "project": "vite",
+  "version": "8.0.3",
+  "commit": "a248a410426a08916771ba82f37b3496375636b8",
+  "generated_count": 18,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "vite-alias-directory",
+      "category": "bundle",
+      "test": "playground/alias/dir/test.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-alias-file-path",
+      "category": "bundle",
+      "test": "playground/alias/test.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-css-codesplit-dynamic",
+      "category": "chunking",
+      "test": "playground/css-codesplit/main.js",
+      "outputs": 3
+    },
+    {
+      "case_id": "vite-dynamic-import-basic",
+      "category": "chunking",
+      "test": "playground/dynamic-import",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-external-transitive-imports",
+      "category": "interop",
+      "test": "playground/external/dep-that-imports/index.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-external-transitive-requires",
+      "category": "interop",
+      "test": "playground/external/dep-that-requires/index.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-glob-import-basic",
+      "category": "chunking",
+      "test": "playground/glob-import/transform-visibility.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-glob-import-eager-alias",
+      "category": "bundle",
+      "test": "playground/glob-import/dir/index.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-import-assertion-json",
+      "category": "bundle",
+      "test": "playground/import-assertion",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-json-imports",
+      "category": "bundle",
+      "test": "playground/json",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-lib-mode-basic",
+      "category": "bundle",
+      "test": "playground/lib",
+      "outputs": 3
+    },
+    {
+      "case_id": "vite-lib-named-exports",
+      "category": "bundle",
+      "test": "playground/lib/vite.named-exports.config.js",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-multiple-entrypoints",
+      "category": "chunking",
+      "test": "playground/multiple-entrypoints",
+      "outputs": 6
+    },
+    {
+      "case_id": "vite-resolve-exports-module-condition",
+      "category": "bundle",
+      "test": "playground/resolve/exports-with-module-condition",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-resolve-exports-path",
+      "category": "bundle",
+      "test": "playground/resolve/exports-path",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-resolve-imports-path",
+      "category": "bundle",
+      "test": "playground/resolve/imports-path",
+      "outputs": 2
+    },
+    {
+      "case_id": "vite-worker-constructor-nested",
+      "category": "chunking",
+      "test": "playground/worker/worker/main-format-es.js",
+      "outputs": 6
+    },
+    {
+      "case_id": "vite-worker-url-basic",
+      "category": "chunking",
+      "test": "playground/worker/worker/main-url.js",
+      "outputs": 3
+    }
+  ],
+  "skipped": []
+}

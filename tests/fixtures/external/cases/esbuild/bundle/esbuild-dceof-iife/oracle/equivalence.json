@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/remove-these.js",
+      "decompiled_module": "remove-these"
+    },
+    {
+      "original": "input/keep-these.js",
+      "decompiled_module": "keep-these"
+    }
+  ]
+}

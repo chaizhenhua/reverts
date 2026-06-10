@@ -1,0 +1,12 @@
+/* only-one-warning.css */
+.a > .a,
+.a > :is(.b .c),
+.a > .d,
+.b .c > .a,
+.b .c > :is(.b .c),
+.b .c > .d,
+.d > .a,
+.d > :is(.b .c),
+.d > .d {
+  color: red;
+}

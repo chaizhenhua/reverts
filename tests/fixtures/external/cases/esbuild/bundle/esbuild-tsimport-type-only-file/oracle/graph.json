@@ -1,0 +1,23 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./doesNotExist1.ts",
+      "kind": "import_named",
+      "name": "SomeType1"
+    },
+    {
+      "from": "entry",
+      "to": "./doesNotExist2.ts",
+      "kind": "import_named",
+      "name": "SomeType2"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.jsx",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/remove-me.js",
+      "decompiled_module": "remove-me"
+    },
+    {
+      "original": "input/keep-me/index.js",
+      "decompiled_module": "keep-me/index"
+    }
+  ]
+}

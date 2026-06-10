@@ -1,0 +1,47 @@
+{
+  "modules": [
+    {
+      "name": "local-computed",
+      "path": "local-computed.js"
+    },
+    {
+      "name": "local-normal",
+      "path": "local-normal.js"
+    },
+    {
+      "name": "import-computed",
+      "path": "import-computed.js"
+    },
+    {
+      "name": "import-normal",
+      "path": "import-normal.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "import-computed",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "__proto__"
+    },
+    {
+      "from": "import-computed",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "import-normal",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "__proto__"
+    },
+    {
+      "from": "import-normal",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "bar"
+    }
+  ],
+  "exports": []
+}

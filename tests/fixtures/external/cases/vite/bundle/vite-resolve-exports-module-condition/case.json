@@ -1,0 +1,54 @@
+{
+  "id": "vite-resolve-exports-module-condition",
+  "title": "vite resolve exports module condition",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "vite",
+    "project_version": "8.0.3",
+    "project_commit": "a248a410426a08916771ba82f37b3496375636b8",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "playground/resolve/exports-with-module-condition"
+  },
+  "artifact": {
+    "tool": "vite",
+    "version": "8.0.3",
+    "entry": "artifacts/vite@8.0.3/assets/index.js",
+    "outputs": [
+      "artifacts/vite@8.0.3/assets/index.js",
+      "artifacts/vite@8.0.3/index.html"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "vite",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "src/main",
+      "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry",
+      "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry",
+      "node_modules/@vitejs/test-resolve-exports-with-module-condition/require-entry"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/main",
+        "name": "msg"
+      },
+      {
+        "module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/module-entry",
+        "name": "msg"
+      },
+      {
+        "module": "node_modules/@vitejs/test-resolve-exports-with-module-condition/import-entry",
+        "name": "msg"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

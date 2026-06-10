@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable output.filename and chunkFilename templates were configured so committed artifact names stay deterministic."
+  ]
+}

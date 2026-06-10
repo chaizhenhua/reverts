@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.ts"
+    },
+    {
+      "name": "Users/user/project/factory/index",
+      "path": "Users/user/project/factory/index.tsx"
+    },
+    {
+      "name": "Users/user/project/fragment/index",
+      "path": "Users/user/project/fragment/index.tsx"
+    },
+    {
+      "name": "Users/user/project/both/index",
+      "path": "Users/user/project/both/index.tsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "./factory",
+      "kind": "import_default",
+      "name": "factory"
+    },
+    {
+      "from": "Users/user/project/entry",
+      "to": "./fragment",
+      "kind": "import_default",
+      "name": "fragment"
+    },
+    {
+      "from": "Users/user/project/entry",
+      "to": "./both",
+      "kind": "import_default",
+      "name": "both"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/factory/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/fragment/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/both/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

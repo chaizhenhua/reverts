@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/a.ts",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/b.ts",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/c.ts",
+      "decompiled_module": "c"
+    }
+  ]
+}

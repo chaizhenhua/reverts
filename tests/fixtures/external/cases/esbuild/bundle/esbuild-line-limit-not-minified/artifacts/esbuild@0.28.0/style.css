@@ -1,0 +1,32 @@
+/* style.css */
+body.light-mode.new-user-segment:not(.logged-in)
+.signup,
+body.light-mode.new-user-segment:not(.logged-in)
+.login {
+  font:
+    10px/12px "Font 1",
+    "Font 2",
+    "Font 3",
+    "Font 4",
+    sans-serif;
+  user-select: none;
+  color: var(--fg, rgba(11, 22, 33,
+    0.5));
+  background: url("data:image/sv\
+g+xml;base64,PHN2ZyB3aWR0aD0iMjA\
+wIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh\
+0dHA6Ly93d3cudzMub3JnLzIwMDAvc3Z\
+nIj4KICA8Y2lyY2xlIGN4PSIxMDAiIGN\
+5PSIxMDAiIHI9IjEwMCIgZmlsbD0iI0Z\
+GQ0YwMCIvPgogIDxwYXRoIGQ9Ik00Ny4\
+1IDUyLjVMOTUgMTAwbC00Ny41IDQ3LjV\
+tNjAtOTVMMTU1IDEwMGwtNDcuNSA0Ny4\
+1IiBmaWxsPSJub25lIiBzdHJva2U9IiM\
+xOTE5MTkiIHN0cm9rZS13aWR0aD0iMjQ\
+iLz4KPC9zdmc+Cg==");
+  cursor: url("./x-TZ25B4WH.file");
+  cursor: url("./x-UF3O47Y3.copy");
+  cursor: url("data:text/plain;c\
+harset=utf-8,...lots of long dat\
+a...lots of long data...");
+}

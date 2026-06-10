@@ -1,0 +1,10 @@
+{
+  "bundler_family": "babel",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "_interopRequireWildcard"
+  ],
+  "runtime_helpers": [
+    "_interopRequireWildcard"
+  ]
+}

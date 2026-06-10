@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/inject-1.js",
+      "decompiled_module": "inject-1"
+    },
+    {
+      "original": "input/inject-2.js",
+      "decompiled_module": "inject-2"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "bundler_family": "webpack",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__webpack_require__.d",
+    "__webpack_require__.e",
+    "__webpack_require__.u",
+    "__webpack_require__.n",
+    "__webpack_require__.O",
+    "__webpack_modules__",
+    "__webpack_exports__"
+  ],
+  "runtime_helpers": [
+    "__webpack_require__",
+    "__webpack_require__.d",
+    "__webpack_require__.e",
+    "__webpack_require__.u",
+    "__webpack_require__.n",
+    "__webpack_require__.O",
+    "__webpack_modules__",
+    "__webpack_exports__"
+  ]
+}

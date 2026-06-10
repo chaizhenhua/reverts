@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "import",
+      "path": "import.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "import",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "import",
+      "name": "value",
+      "kind": "value"
+    }
+  ]
+}

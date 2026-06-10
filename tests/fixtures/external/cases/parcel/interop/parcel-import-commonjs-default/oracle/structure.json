@@ -1,0 +1,16 @@
+{
+  "bundler_family": "parcel",
+  "wrapper_names": [
+    "parcelRequire"
+  ],
+  "interop_helpers": [
+    "$parcel$interopDefault",
+    "parcelRequire",
+    "parcelRegister"
+  ],
+  "runtime_helpers": [
+    "$parcel$interopDefault",
+    "parcelRequire",
+    "parcelRegister"
+  ]
+}

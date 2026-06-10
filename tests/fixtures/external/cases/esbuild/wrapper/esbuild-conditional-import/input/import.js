@@ -1,0 +1,3 @@
+
+				exports.foo = 213
+			

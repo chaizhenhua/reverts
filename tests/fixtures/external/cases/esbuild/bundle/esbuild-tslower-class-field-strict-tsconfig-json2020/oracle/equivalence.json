@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/loose/index.ts",
+      "decompiled_module": "loose/index"
+    },
+    {
+      "original": "input/strict/index.ts",
+      "decompiled_module": "strict/index"
+    }
+  ]
+}

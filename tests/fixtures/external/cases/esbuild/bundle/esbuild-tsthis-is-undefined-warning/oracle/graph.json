@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "warning1",
+      "path": "warning1.ts"
+    },
+    {
+      "name": "warning2",
+      "path": "warning2.ts"
+    },
+    {
+      "name": "warning3",
+      "path": "warning3.ts"
+    },
+    {
+      "name": "silent1",
+      "path": "silent1.ts"
+    },
+    {
+      "name": "silent2",
+      "path": "silent2.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "warning1",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "warning2",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "warning3",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "silent1",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "silent2",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

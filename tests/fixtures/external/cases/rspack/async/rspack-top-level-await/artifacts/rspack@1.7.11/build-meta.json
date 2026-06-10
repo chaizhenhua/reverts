@@ -1,0 +1,20 @@
+{
+  "tool": "rspack",
+  "version": "1.7.11",
+  "source_ref": "tests/rspack-test/exampleCases/top-level-await",
+  "command": [
+    "node",
+    "rspack",
+    "build",
+    "--entry",
+    "example.js"
+  ],
+  "entry_points": [
+    "example.js"
+  ],
+  "advanced_entry_points": null,
+  "options": {
+    "bundle": true,
+    "entry_names": "[name]"
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "input",
+      "to": "foo",
+      "kind": "import_named",
+      "name": "default as foo2"
+    }
+  ],
+  "exports": []
+}

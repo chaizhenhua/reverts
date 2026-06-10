@@ -1,0 +1,45 @@
+{
+  "id": "swc-export-all-default",
+  "title": "swc commonjs export all with default",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "swc",
+    "project_version": "1.15.24",
+    "project_commit": "87dee576923cc85687b281bc762b9e56c26ab7c6",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "crates/swc_ecma_transforms_module/tests/fixture/common/interop/export-all"
+  },
+  "artifact": {
+    "tool": "swc",
+    "version": "1.15.24",
+    "entry": "artifacts/swc@1.15.24/input.js",
+    "outputs": [
+      "artifacts/swc@1.15.24/input.js"
+    ],
+    "format": "bundle",
+    "module_kind": "commonjs"
+  },
+  "expectations": {
+    "bundler_family": "swc",
+    "wrappers": [],
+    "helpers": [
+      "_interop_require_default",
+      "_export_star"
+    ],
+    "must_recover_modules": [
+      "input"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "input",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

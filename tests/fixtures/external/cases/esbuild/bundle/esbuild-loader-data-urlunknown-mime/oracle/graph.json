@@ -1,0 +1,23 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "data:some/thing;what,someData%31%32%33",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "data:other/thing;stuff;base64,c29tZURhdGEyMzQ=",
+      "kind": "import_default",
+      "name": "b"
+    }
+  ],
+  "exports": []
+}

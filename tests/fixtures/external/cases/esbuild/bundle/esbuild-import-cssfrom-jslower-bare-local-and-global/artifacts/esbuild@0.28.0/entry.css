@@ -1,0 +1,37 @@
+/* styles.css */
+.styles_before {
+  color: #000;
+}
+:scope .styles_button {
+  color: #000;
+}
+.styles_after {
+  color: #000;
+}
+.styles_before {
+  color: #001;
+}
+:scope .button {
+  color: #001;
+}
+.styles_after {
+  color: #001;
+}
+div .styles_button {
+  color: #002;
+}
+div .button {
+  color: #003;
+}
+:scope {
+  color: #004;
+}
+:scope {
+  color: #005;
+}
+:scope .styles_button {
+  color: #006;
+}
+:scope .styles_button {
+  color: #007;
+}

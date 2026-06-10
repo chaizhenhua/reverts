@@ -1,0 +1,58 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_named",
+      "name": "x as x2"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "reexport_named",
+      "name": "default"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "x",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "y",
+      "kind": "value"
+    }
+  ]
+}

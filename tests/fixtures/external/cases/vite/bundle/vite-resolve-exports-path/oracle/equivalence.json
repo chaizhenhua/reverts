@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-path/main.js",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-path/main"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-path/deep.js",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-path/deep"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-resolve-exports-path/cjs.js",
+      "decompiled_module": "node_modules/@vitejs/test-resolve-exports-path/cjs"
+    }
+  ]
+}

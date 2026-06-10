@@ -1,0 +1,1 @@
+function e(e){return new Worker(`/assets/workers/sub.js`,{type:`module`,name:e?.name})}const t=new e;t.onmessage=e=>{self.postMessage({type:`sub-worker`,data:e.data})},import(`./chunks/worker.js`).then(e=>{self.postMessage({type:`module`,data:e.moduleValue})}),self.onmessage=()=>{t.postMessage(`nested`)};

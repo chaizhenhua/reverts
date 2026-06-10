@@ -1,0 +1,16 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "foo",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,3 @@
+
+				export {y} from './bar'
+			

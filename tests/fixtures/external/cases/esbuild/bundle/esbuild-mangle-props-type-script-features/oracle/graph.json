@@ -1,0 +1,44 @@
+{
+  "modules": [
+    {
+      "name": "parameter-properties",
+      "path": "parameter-properties.ts"
+    },
+    {
+      "name": "namespace-exports",
+      "path": "namespace-exports.ts"
+    },
+    {
+      "name": "enum-values",
+      "path": "enum-values.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "namespace-exports",
+      "name": "MANGLE_VAR_",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-exports",
+      "name": "MANGLE_LET_",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-exports",
+      "name": "MANGLE_CONST_",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-exports",
+      "name": "MANGLE_FUNCTION_",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-exports",
+      "name": "MANGLE_CLASS_",
+      "kind": "value"
+    }
+  ]
+}

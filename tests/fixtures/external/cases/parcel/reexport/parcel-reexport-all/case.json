@@ -1,0 +1,48 @@
+{
+  "id": "parcel-reexport-all",
+  "title": "parcel reexport all scope hoisting",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "parcel",
+    "project_version": "2.16.4",
+    "project_commit": "59484858a1a0bcbb71f74088956bb437a2db6505",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "integration/scope-hoisting/es6/re-export-all"
+  },
+  "artifact": {
+    "tool": "parcel",
+    "version": "2.16.4",
+    "entry": "artifacts/parcel@2.16.4/a.js",
+    "outputs": [
+      "artifacts/parcel@2.16.4/a.js"
+    ],
+    "format": "bundle",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "parcel",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "b",
+        "name": "baz"
+      },
+      {
+        "module": "c",
+        "name": "foo"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

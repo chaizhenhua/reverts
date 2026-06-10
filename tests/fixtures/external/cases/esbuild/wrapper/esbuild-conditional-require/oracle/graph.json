@@ -1,0 +1,20 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "b",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

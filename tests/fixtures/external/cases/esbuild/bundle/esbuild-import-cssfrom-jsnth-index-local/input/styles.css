@@ -1,0 +1,11 @@
+
+				:nth-child(2n of .local) { color: #000 }
+				:nth-child(2n of :local(#local), :global(.GLOBAL)) { color: #001 }
+				:nth-child(2n of .local1 :global .GLOBAL1, .GLOBAL2 :local .local2) { color: #002 }
+				.local1, :nth-child(2n of :global .GLOBAL), .local2 { color: #003 }
+
+				:nth-last-child(2n of .local) { color: #000 }
+				:nth-last-child(2n of :local(#local), :global(.GLOBAL)) { color: #001 }
+				:nth-last-child(2n of .local1 :global .GLOBAL1, .GLOBAL2 :local .local2) { color: #002 }
+				.local1, :nth-last-child(2n of :global .GLOBAL), .local2 { color: #003 }
+			

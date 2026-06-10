@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "WeakMap",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "WeakSet",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "id": "esbuild-line-limit-minified",
+  "title": "esbuild TestLineLimitMinified",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestLineLimitMinified"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/script.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/script.js",
+      "artifacts/esbuild@0.28.0/style.css"
+    ],
+    "format": "passthrough-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "script"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "script",
+        "name": "SignUpForm"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

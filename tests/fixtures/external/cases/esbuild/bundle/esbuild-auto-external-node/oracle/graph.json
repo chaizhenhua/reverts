@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "node:fs/promises",
+      "kind": "import_default",
+      "name": "fs"
+    }
+  ],
+  "exports": []
+}

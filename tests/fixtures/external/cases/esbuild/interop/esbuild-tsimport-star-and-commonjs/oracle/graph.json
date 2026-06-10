@@ -1,0 +1,32 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "foo",
+      "path": "foo.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "foo",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "foo",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

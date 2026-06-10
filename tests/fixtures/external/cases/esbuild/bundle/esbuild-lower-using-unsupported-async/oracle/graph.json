@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "loops",
+      "path": "loops.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

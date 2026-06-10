@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/dir1/a.js",
+      "decompiled_module": "dir1/a"
+    },
+    {
+      "original": "input/dir4/a.js",
+      "decompiled_module": "dir4/a"
+    },
+    {
+      "original": "input/dir4/lib/a.js",
+      "decompiled_module": "dir4/lib/a"
+    },
+    {
+      "original": "input/dir4/lib/b.js",
+      "decompiled_module": "dir4/lib/b"
+    },
+    {
+      "original": "input/dir4/lib/index.js",
+      "decompiled_module": "dir4/lib/index"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    }
+  ]
+}

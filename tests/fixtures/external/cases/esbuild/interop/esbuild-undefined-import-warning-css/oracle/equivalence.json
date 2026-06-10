@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/empty.js",
+      "decompiled_module": "empty"
+    },
+    {
+      "original": "input/empty.esm.js",
+      "decompiled_module": "empty.esm"
+    },
+    {
+      "original": "input/node_modules/pkg/empty.js",
+      "decompiled_module": "node_modules/pkg/empty"
+    },
+    {
+      "original": "input/node_modules/pkg/empty.esm.js",
+      "decompiled_module": "node_modules/pkg/empty.esm"
+    },
+    {
+      "original": "input/node_modules/pkg/index.js",
+      "decompiled_module": "node_modules/pkg/index"
+    }
+  ]
+}

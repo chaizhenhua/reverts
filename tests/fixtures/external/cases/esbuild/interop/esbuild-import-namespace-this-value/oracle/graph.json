@@ -1,0 +1,43 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "a",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "b",
+      "to": "external",
+      "kind": "import_default",
+      "name": "def"
+    },
+    {
+      "from": "b",
+      "to": "external",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": []
+}

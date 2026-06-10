@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/a.json",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/b.json",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/c.json",
+      "decompiled_module": "c"
+    },
+    {
+      "original": "input/e.json",
+      "decompiled_module": "e"
+    },
+    {
+      "original": "input/f.json",
+      "decompiled_module": "f"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    }
+  ]
+}

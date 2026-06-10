@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/fs/abc.js",
+      "decompiled_module": "node_modules/fs/abc"
+    },
+    {
+      "original": "input/node_modules/fs/index.js",
+      "decompiled_module": "node_modules/fs/index"
+    },
+    {
+      "original": "input/node_modules/fs/promises.js",
+      "decompiled_module": "node_modules/fs/promises"
+    }
+  ]
+}

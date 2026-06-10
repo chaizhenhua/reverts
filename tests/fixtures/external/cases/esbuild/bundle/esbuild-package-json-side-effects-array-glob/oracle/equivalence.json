@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/entry.js",
+      "decompiled_module": "Users/user/project/src/entry"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/keep/this/file.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/keep/this/file"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/demo-pkg/remove/this/file.js",
+      "decompiled_module": "Users/user/project/node_modules/demo-pkg/remove/this/file"
+    }
+  ]
+}

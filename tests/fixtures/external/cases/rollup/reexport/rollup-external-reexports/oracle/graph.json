@@ -1,0 +1,80 @@
+{
+  "modules": [
+    {
+      "name": "main-default",
+      "path": "main-default.js"
+    },
+    {
+      "name": "main-named",
+      "path": "main-named.js"
+    },
+    {
+      "name": "main-namespace",
+      "path": "main-namespace.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main-namespace",
+      "to": "external-all",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "main-namespace",
+      "to": "external-namespace",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "main-namespace",
+      "to": "external-default-namespace",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "main-namespace",
+      "to": "external-named-namespace",
+      "kind": "reexport_namespace"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main-default",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "main-default",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "main-default",
+      "name": "baz",
+      "kind": "value"
+    },
+    {
+      "module": "main-default",
+      "name": "quux",
+      "kind": "value"
+    },
+    {
+      "module": "main-named",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "main-named",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "main-named",
+      "name": "baz",
+      "kind": "value"
+    },
+    {
+      "module": "main-named",
+      "name": "quux",
+      "kind": "value"
+    }
+  ]
+}

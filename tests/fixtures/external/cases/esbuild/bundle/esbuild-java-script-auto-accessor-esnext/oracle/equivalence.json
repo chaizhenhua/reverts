@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/js-define.js",
+      "decompiled_module": "js-define"
+    },
+    {
+      "original": "input/ts-define/ts-define.ts",
+      "decompiled_module": "ts-define/ts-define"
+    },
+    {
+      "original": "input/ts-assign/ts-assign.ts",
+      "decompiled_module": "ts-assign/ts-assign"
+    }
+  ]
+}

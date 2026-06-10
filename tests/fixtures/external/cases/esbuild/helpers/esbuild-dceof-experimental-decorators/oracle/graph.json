@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "keep-these",
+      "path": "keep-these.ts"
+    },
+    {
+      "name": "decorator",
+      "path": "decorator.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "keep-these",
+      "to": "decorator",
+      "kind": "import_named",
+      "name": "fn"
+    }
+  ],
+  "exports": [
+    {
+      "module": "decorator",
+      "name": "fn",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "id": "esbuild-import-namespace-this-value",
+  "title": "esbuild TestImportNamespaceThisValue",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestImportNamespaceThisValue"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/a.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/a.js",
+      "artifacts/esbuild@0.28.0/b.js",
+      "artifacts/esbuild@0.28.0/c.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [
+      "__toESM"
+    ],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "bundler_family": "rolldown",
+  "wrapper_names": [],
+  "interop_helpers": [],
+  "runtime_helpers": [
+    "__exportAll"
+  ]
+}

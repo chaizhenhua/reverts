@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/main",
+      "path": "Users/user/project/main.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/wow/dist/first",
+      "path": "Users/user/project/node_modules/wow/dist/first.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/wow/dist/next",
+      "path": "Users/user/project/node_modules/wow/dist/next.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/wow/first",
+      "path": "Users/user/project/node_modules/wow/first.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/main",
+      "to": "wow/first",
+      "kind": "import_default",
+      "name": "first"
+    },
+    {
+      "from": "Users/user/project/main",
+      "to": "wow/next",
+      "kind": "import_default",
+      "name": "next"
+    },
+    {
+      "from": "Users/user/project/node_modules/wow/dist/next",
+      "to": "wow/first",
+      "kind": "import_default",
+      "name": "next"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/wow/dist/first",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/wow/dist/next",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/wow/first",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

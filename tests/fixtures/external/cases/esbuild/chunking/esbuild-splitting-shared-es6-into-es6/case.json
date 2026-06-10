@@ -1,0 +1,46 @@
+{
+  "id": "esbuild-splitting-shared-es6-into-es6",
+  "title": "esbuild TestSplittingSharedES6IntoES6",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_splitting_test.go::TestSplittingSharedES6IntoES6"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/a.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/a.js",
+      "artifacts/esbuild@0.28.0/b.js",
+      "artifacts/esbuild@0.28.0/chunks/chunk.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "shared"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "shared",
+        "name": "foo"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

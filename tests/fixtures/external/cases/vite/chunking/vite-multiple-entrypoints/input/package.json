@@ -1,0 +1,5 @@
+{
+  "name": "vite-multiple-entrypoints",
+  "private": true,
+  "type": "module"
+}

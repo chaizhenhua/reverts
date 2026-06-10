@@ -1,0 +1,85 @@
+{
+  "tool": "esbuild",
+  "version": "0.28.0",
+  "command": [
+    "npx",
+    "--yes",
+    "esbuild@0.28.0",
+    "input/entry.js",
+    "--bundle",
+    "--alias:pkg=alias/pkg",
+    "--alias:pkg/foo=alias/pkg_foo",
+    "--alias:pkg/foo/bar=alias/pkg_foo_bar",
+    "--external:alias/*",
+    "--outfile=artifacts/esbuild@0.28.0/out.js"
+  ],
+  "entry_points": [
+    "input/entry.js"
+  ],
+  "advanced_entry_points": null,
+  "options": {
+    "mode": "bundle",
+    "bundle": true,
+    "format": null,
+    "platform": null,
+    "target": null,
+    "conditions": [],
+    "abs_node_paths": [],
+    "supported": null,
+    "abs_working_dir": null,
+    "code_splitting": false,
+    "external": [
+      "alias/*"
+    ],
+    "external_packages": false,
+    "loader": {},
+    "resolve_extensions": null,
+    "out_extension_js": null,
+    "source_map": false,
+    "js_banner": null,
+    "tsconfig_path": null,
+    "original_target_env": null,
+    "abs_output_base": null,
+    "public_path": null,
+    "entry_names": null,
+    "chunk_names": null,
+    "asset_names": null,
+    "mangle_props": null,
+    "reserve_props": null,
+    "mangle_quoted": null,
+    "drop_labels": [],
+    "ignore_dce_annotations": false,
+    "keep_names": false,
+    "tree_shaking": null,
+    "global_name": null,
+    "main_fields": null,
+    "legal_comments": null,
+    "inject_paths": [],
+    "package_aliases": {
+      "pkg": "alias/pkg",
+      "pkg/foo": "alias/pkg_foo",
+      "pkg/foo/bar": "alias/pkg_foo_bar"
+    },
+    "line_limit": null,
+    "defines": null,
+    "ts": {
+      "useDefineForClassFields": null
+    },
+    "jsx": {
+      "factory": null,
+      "fragment": null,
+      "parse": false,
+      "preserve": false,
+      "automatic": false,
+      "importSource": null,
+      "development": false,
+      "sideEffects": false,
+      "mode": null
+    },
+    "minify_syntax": false,
+    "minify_identifiers": false,
+    "minify_whitespace": false,
+    "stable_entry_names": false,
+    "stable_chunk_names": false
+  }
+}

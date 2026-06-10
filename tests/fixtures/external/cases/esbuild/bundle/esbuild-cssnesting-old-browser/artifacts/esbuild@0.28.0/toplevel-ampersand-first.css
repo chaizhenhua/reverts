@@ -1,0 +1,5 @@
+/* toplevel-ampersand-first.css */
+:scope,
+a {
+  color: red;
+}

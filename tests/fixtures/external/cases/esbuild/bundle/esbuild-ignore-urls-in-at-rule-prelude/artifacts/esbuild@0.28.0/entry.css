@@ -1,0 +1,6 @@
+/* input/entry.css */
+@supports (background: url(ignored.png)) {
+  a {
+    color: red;
+  }
+}

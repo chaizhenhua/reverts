@@ -1,0 +1,11 @@
+{
+  "tool": "tsc",
+  "version": "6.0.2",
+  "source_ref": "tests/cases/conformance/dynamicImport/importCallExpressionES6CJS.ts",
+  "compiler_options": {
+    "module": "commonjs",
+    "target": "es6",
+    "outDir": "dist"
+  },
+  "entry_source": "1.ts"
+}

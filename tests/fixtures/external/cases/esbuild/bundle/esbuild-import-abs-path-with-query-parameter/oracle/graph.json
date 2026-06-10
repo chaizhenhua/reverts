@@ -1,0 +1,23 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "/Users/user/project/file.txt?foo",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "Users/user/project/entry",
+      "to": "/Users/user/project/file.txt#bar",
+      "kind": "import_default",
+      "name": "bar"
+    }
+  ],
+  "exports": []
+}

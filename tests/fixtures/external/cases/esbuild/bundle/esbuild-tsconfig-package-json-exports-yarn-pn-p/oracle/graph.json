@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/packages/app/index",
+      "path": "Users/user/project/packages/app/index.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

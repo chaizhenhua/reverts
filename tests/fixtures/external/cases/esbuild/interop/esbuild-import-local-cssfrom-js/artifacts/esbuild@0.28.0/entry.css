@@ -1,0 +1,15 @@
+/* input/dir1/style.css */
+.style_a {
+  color: red;
+}
+.style_button {
+  display: none;
+}
+
+/* input/dir2/style.css */
+.style_b {
+  color: blue;
+}
+.style_button2 {
+  display: none;
+}

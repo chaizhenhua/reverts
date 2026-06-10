@@ -1,0 +1,9 @@
+/* tests/fixtures/external/cases/bun/chunking/bun-splitting-multiple-entrypoints-shared-css/input/shared.css */
+.shared {
+  font-size: 16px;
+}
+
+/* tests/fixtures/external/cases/bun/chunking/bun-splitting-multiple-entrypoints-shared-css/input/entry2.css */
+.entry2 {
+  color: #00f;
+}

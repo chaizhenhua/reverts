@@ -1,0 +1,9 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/project/src/entry.js",
+      "decompiled_module": "project/src/entry"
+    }
+  ]
+}

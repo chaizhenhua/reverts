@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "c",
+      "path": "c.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "c",
+      "kind": "import_named",
+      "name": "compute"
+    },
+    {
+      "from": "a",
+      "to": "b",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "b",
+      "to": "c",
+      "kind": "import_named",
+      "name": "compute"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "c",
+      "name": "compute",
+      "kind": "value"
+    }
+  ]
+}

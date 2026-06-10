@@ -1,0 +1,11 @@
+/* input/no5.css */
+@media screen {
+  a:x {
+    color: red;
+  }
+}
+@media screen {
+  a:x(y) {
+    color: red;
+  }
+}

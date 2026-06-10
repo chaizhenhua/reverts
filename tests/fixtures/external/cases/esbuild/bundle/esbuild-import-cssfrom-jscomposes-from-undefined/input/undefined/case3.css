@@ -1,0 +1,5 @@
+
+				.foo { composes: nested1 nested2; }
+				.nested1 { zoom: 3; }
+				.nested2 { composes: foo from "../file-2.css"; }
+			

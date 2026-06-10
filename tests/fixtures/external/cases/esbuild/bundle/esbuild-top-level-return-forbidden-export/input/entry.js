@@ -1,0 +1,4 @@
+
+				return
+				export var foo
+			

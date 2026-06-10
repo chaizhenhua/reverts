@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "internal",
+      "path": "internal.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "fs",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "entry",
+      "to": "internal",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "entry",
+      "to": "./external",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "internal",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

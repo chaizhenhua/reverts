@@ -1,0 +1,39 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "other",
+      "path": "other.js"
+    },
+    {
+      "name": "third",
+      "path": "third.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "main",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "other",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "third",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "third",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

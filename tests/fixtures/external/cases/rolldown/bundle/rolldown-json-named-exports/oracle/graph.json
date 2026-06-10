@@ -1,0 +1,63 @@
+{
+  "modules": [
+    {
+      "name": "data",
+      "path": "data.json"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "data",
+      "kind": "import_default",
+      "name": "json"
+    },
+    {
+      "from": "main",
+      "to": "data",
+      "kind": "import_named",
+      "name": "name"
+    }
+  ],
+  "exports": [
+    {
+      "module": "data",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "data",
+      "name": "name",
+      "kind": "value"
+    },
+    {
+      "module": "data",
+      "name": "const",
+      "kind": "value"
+    },
+    {
+      "module": "data",
+      "name": "devDependencies",
+      "kind": "value"
+    },
+    {
+      "module": "data",
+      "name": "version",
+      "kind": "value"
+    },
+    {
+      "module": "main",
+      "name": "json",
+      "kind": "value"
+    },
+    {
+      "module": "main",
+      "name": "name",
+      "kind": "value"
+    }
+  ]
+}

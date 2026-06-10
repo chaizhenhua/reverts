@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "src/entries/entry",
+      "path": "src/entries/entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/entries/entry",
+      "to": "../images/image.png",
+      "kind": "import_default",
+      "name": "x"
+    }
+  ],
+  "exports": []
+}

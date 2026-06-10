@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "0",
+      "path": "0.ts"
+    },
+    {
+      "name": "1",
+      "path": "1.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "1",
+      "to": "0",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "0",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "1",
+      "name": "p2",
+      "kind": "value"
+    },
+    {
+      "module": "1",
+      "name": "D",
+      "kind": "value"
+    }
+  ]
+}

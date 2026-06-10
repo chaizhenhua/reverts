@@ -1,0 +1,8 @@
+
+				.x {
+					color: red;
+				}
+				:global(.y) {
+					color: blue;
+				}
+			

@@ -1,0 +1,260 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/entry",
+      "path": "Users/user/project/entry.ts"
+    },
+    {
+      "name": "Users/user/project/simple/index",
+      "path": "Users/user/project/simple/index.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test0-success",
+      "path": "Users/user/project/simple/test0-success.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test1-success",
+      "path": "Users/user/project/simple/test1-success.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test2-success/foo",
+      "path": "Users/user/project/simple/test2-success/foo.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test3-success",
+      "path": "Users/user/project/simple/test3-success.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test4-first/foo",
+      "path": "Users/user/project/simple/test4-first/foo.ts"
+    },
+    {
+      "name": "Users/user/project/simple/test5-second/foo",
+      "path": "Users/user/project/simple/test5-second/foo.ts"
+    },
+    {
+      "name": "Users/user/project/simple/absolute",
+      "path": "Users/user/project/simple/absolute.ts"
+    },
+    {
+      "name": "Users/user/project/simple/actual/test",
+      "path": "Users/user/project/simple/actual/test.ts"
+    },
+    {
+      "name": "Users/user/project/extended/index",
+      "path": "Users/user/project/extended/index.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test0-success",
+      "path": "Users/user/project/extended/nested/test0-success.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test1-success",
+      "path": "Users/user/project/extended/nested/test1-success.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test2-success/foo",
+      "path": "Users/user/project/extended/nested/test2-success/foo.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test3-success",
+      "path": "Users/user/project/extended/nested/test3-success.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test4-first/foo",
+      "path": "Users/user/project/extended/nested/test4-first/foo.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/test5-second/foo",
+      "path": "Users/user/project/extended/nested/test5-second/foo.ts"
+    },
+    {
+      "name": "Users/user/project/extended/absolute",
+      "path": "Users/user/project/extended/absolute.ts"
+    },
+    {
+      "name": "Users/user/project/extended/nested/actual/test",
+      "path": "Users/user/project/extended/nested/actual/test.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/entry",
+      "to": "./simple",
+      "kind": "import_default",
+      "name": "simple"
+    },
+    {
+      "from": "Users/user/project/entry",
+      "to": "./extended",
+      "kind": "import_default",
+      "name": "extended"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test0",
+      "kind": "import_default",
+      "name": "test0"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test1/foo",
+      "kind": "import_default",
+      "name": "test1"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test2/foo",
+      "kind": "import_default",
+      "name": "test2"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test3/foo",
+      "kind": "import_default",
+      "name": "test3"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test4/foo",
+      "kind": "import_default",
+      "name": "test4"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "test5/foo",
+      "kind": "import_default",
+      "name": "test5"
+    },
+    {
+      "from": "Users/user/project/simple/index",
+      "to": "Users/user/project/simple/absolute",
+      "kind": "import_default",
+      "name": "absolute"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test0",
+      "kind": "import_default",
+      "name": "test0"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test1/foo",
+      "kind": "import_default",
+      "name": "test1"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test2/foo",
+      "kind": "import_default",
+      "name": "test2"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test3/foo",
+      "kind": "import_default",
+      "name": "test3"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test4/foo",
+      "kind": "import_default",
+      "name": "test4"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "test5/foo",
+      "kind": "import_default",
+      "name": "test5"
+    },
+    {
+      "from": "Users/user/project/extended/index",
+      "to": "Users/user/project/extended/absolute",
+      "kind": "import_default",
+      "name": "absolute"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/simple/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test0-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test1-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test2-success/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test3-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test4-first/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/test5-second/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/simple/actual/test",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test0-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test1-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test2-success/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test3-success",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test4-first/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/test5-second/foo",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/extended/nested/actual/test",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

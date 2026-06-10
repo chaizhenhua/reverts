@@ -1,0 +1,10 @@
+{
+  "bundler_family": "vite",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__vite__mapDeps"
+  ],
+  "runtime_helpers": [
+    "__vite__mapDeps"
+  ]
+}

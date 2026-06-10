@@ -1,0 +1,144 @@
+{
+  "id": "esbuild-const-value-inlining-bundle",
+  "title": "esbuild TestConstValueInliningBundle",
+  "category": "reexport",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestConstValueInliningBundle"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/circular-import-entry.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/circular-import-entry.js",
+      "artifacts/esbuild@0.28.0/circular-re-export-entry.js",
+      "artifacts/esbuild@0.28.0/circular-re-export-star-entry.js",
+      "artifacts/esbuild@0.28.0/cross-module-entry.js",
+      "artifacts/esbuild@0.28.0/exported-entry.js",
+      "artifacts/esbuild@0.28.0/non-circular-export-entry.js",
+      "artifacts/esbuild@0.28.0/print-shorthand-entry.js",
+      "artifacts/esbuild@0.28.0/re-exported-2-entry.js",
+      "artifacts/esbuild@0.28.0/re-exported-entry.js",
+      "artifacts/esbuild@0.28.0/re-exported-star-entry.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "exported-entry",
+      "re-exported-entry",
+      "re-exported-constants",
+      "re-exported-2-entry",
+      "re-exported-2-constants",
+      "re-exported-star-entry",
+      "re-exported-star-constants",
+      "cross-module-entry",
+      "cross-module-constants",
+      "print-shorthand-entry",
+      "print-shorthand-constants",
+      "circular-import-entry",
+      "circular-import-constants",
+      "circular-import-cycle",
+      "circular-re-export-entry",
+      "circular-re-export-constants",
+      "circular-re-export-cycle",
+      "circular-re-export-star-entry",
+      "circular-re-export-star-constants",
+      "circular-re-export-star-cycle",
+      "non-circular-export-entry",
+      "non-circular-export-constants"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "exported-entry",
+        "name": "y_keep"
+      },
+      {
+        "module": "re-exported-constants",
+        "name": "x_REMOVE"
+      },
+      {
+        "module": "re-exported-constants",
+        "name": "y_keep"
+      },
+      {
+        "module": "re-exported-2-constants",
+        "name": "x_REMOVE"
+      },
+      {
+        "module": "re-exported-2-constants",
+        "name": "y_keep"
+      },
+      {
+        "module": "re-exported-star-constants",
+        "name": "x_keep"
+      },
+      {
+        "module": "re-exported-star-constants",
+        "name": "y_keep"
+      },
+      {
+        "module": "cross-module-constants",
+        "name": "x_REMOVE"
+      },
+      {
+        "module": "cross-module-constants",
+        "name": "y_keep"
+      },
+      {
+        "module": "cross-module-constants",
+        "name": "foo"
+      },
+      {
+        "module": "print-shorthand-constants",
+        "name": "foo"
+      },
+      {
+        "module": "print-shorthand-constants",
+        "name": "_bar"
+      },
+      {
+        "module": "circular-import-constants",
+        "name": "foo"
+      },
+      {
+        "module": "circular-import-constants",
+        "name": "bar"
+      },
+      {
+        "module": "circular-re-export-constants",
+        "name": "foo"
+      },
+      {
+        "module": "circular-re-export-constants",
+        "name": "bar"
+      },
+      {
+        "module": "circular-re-export-cycle",
+        "name": "baz"
+      },
+      {
+        "module": "circular-re-export-star-constants",
+        "name": "foo"
+      },
+      {
+        "module": "circular-re-export-star-constants",
+        "name": "bar"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

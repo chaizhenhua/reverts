@@ -1,0 +1,68 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "shared",
+      "path": "shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "b",
+      "to": "shared",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "main",
+      "to": "a",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "main",
+      "to": "b",
+      "kind": "import_default",
+      "name": "b"
+    }
+  ],
+  "exports": [
+    {
+      "module": "a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "main",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "shared",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

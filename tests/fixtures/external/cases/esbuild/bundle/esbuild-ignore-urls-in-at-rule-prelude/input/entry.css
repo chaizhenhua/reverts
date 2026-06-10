@@ -1,0 +1,6 @@
+
+				/* This should not generate a path resolution error */
+				@supports (background: url(ignored.png)) {
+					a { color: red }
+				}
+			

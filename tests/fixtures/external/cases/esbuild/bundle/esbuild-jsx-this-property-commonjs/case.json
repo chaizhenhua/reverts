@@ -1,0 +1,41 @@
+{
+  "id": "esbuild-jsx-this-property-commonjs",
+  "title": "esbuild TestJSXThisPropertyCommonJS",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestJSXThisPropertyCommonJS"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/factory.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/factory.js",
+      "artifacts/esbuild@0.28.0/fragment.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__commonJS"
+    ],
+    "helpers": [],
+    "must_recover_modules": [
+      "factory",
+      "fragment"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

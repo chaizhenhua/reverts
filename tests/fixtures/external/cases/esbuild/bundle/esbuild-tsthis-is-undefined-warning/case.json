@@ -1,0 +1,66 @@
+{
+  "id": "esbuild-tsthis-is-undefined-warning",
+  "title": "esbuild TestTSThisIsUndefinedWarning",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_ts_test.go::TestTSThisIsUndefinedWarning"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/silent1.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/silent1.js",
+      "artifacts/esbuild@0.28.0/silent2.js",
+      "artifacts/esbuild@0.28.0/warning1.js",
+      "artifacts/esbuild@0.28.0/warning2.js",
+      "artifacts/esbuild@0.28.0/warning3.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "warning1",
+      "warning2",
+      "warning3",
+      "silent1",
+      "silent2"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "warning1",
+        "name": "foo"
+      },
+      {
+        "module": "warning2",
+        "name": "foo"
+      },
+      {
+        "module": "warning3",
+        "name": "foo"
+      },
+      {
+        "module": "silent1",
+        "name": "foo"
+      },
+      {
+        "module": "silent2",
+        "name": "foo"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

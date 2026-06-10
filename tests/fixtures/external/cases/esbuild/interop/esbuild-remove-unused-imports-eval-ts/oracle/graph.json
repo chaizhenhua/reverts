@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "import_named",
+      "name": "c"
+    }
+  ],
+  "exports": []
+}

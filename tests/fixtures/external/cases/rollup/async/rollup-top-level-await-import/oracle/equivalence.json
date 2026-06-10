@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    },
+    {
+      "original": "input/lib.js",
+      "decompiled_module": "lib"
+    },
+    {
+      "original": "input/lib-used.js",
+      "decompiled_module": "lib-used"
+    },
+    {
+      "original": "input/lib-variant.js",
+      "decompiled_module": "lib-variant"
+    }
+  ]
+}

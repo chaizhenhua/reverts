@@ -1,0 +1,52 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    },
+    {
+      "name": "common",
+      "path": "common.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "common",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "b",
+      "to": "common",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "common",
+      "to": "empty",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "common",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "common",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

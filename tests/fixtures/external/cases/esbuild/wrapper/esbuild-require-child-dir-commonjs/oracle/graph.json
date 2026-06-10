@@ -1,0 +1,26 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/dir/index",
+      "path": "Users/user/project/src/dir/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "./dir",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/dir/index",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

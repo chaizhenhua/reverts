@@ -1,0 +1,4 @@
+/* nested-greaterthan.css */
+a > b {
+  color: red;
+}

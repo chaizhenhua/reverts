@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "nested",
+      "path": "nested.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

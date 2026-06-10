@@ -1,0 +1,47 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "src/file-a",
+      "path": "src/file-a.js"
+    },
+    {
+      "name": "src/file-b",
+      "path": "src/file-b.js"
+    },
+    {
+      "name": "src/nested/dir/file-a",
+      "path": "src/nested/dir/file-a.js"
+    },
+    {
+      "name": "src/nested/dir/file-b",
+      "path": "src/nested/dir/file-b.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "src/file-a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/file-b",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/nested/dir/file-a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/nested/dir/file-b",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

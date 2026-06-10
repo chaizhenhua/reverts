@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./binary.txt",
+      "kind": "import_default",
+      "name": "a"
+    }
+  ],
+  "exports": []
+}

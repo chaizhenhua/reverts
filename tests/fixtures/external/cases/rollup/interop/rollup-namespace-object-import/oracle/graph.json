@@ -1,0 +1,42 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "dep",
+      "path": "dep.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main1",
+      "to": "main2",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "dep",
+      "to": "main2",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main2",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "main2",
+      "name": "b",
+      "kind": "value"
+    }
+  ]
+}

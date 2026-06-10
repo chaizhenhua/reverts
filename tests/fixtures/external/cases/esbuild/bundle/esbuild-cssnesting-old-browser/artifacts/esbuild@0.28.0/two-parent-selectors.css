@@ -1,0 +1,4 @@
+/* two-parent-selectors.css */
+.c :is(a b) {
+  color: red;
+}

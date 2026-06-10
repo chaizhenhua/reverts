@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "keep1"
+    },
+    {
+      "from": "entry",
+      "to": "cjs",
+      "kind": "require"
+    },
+    {
+      "from": "cjs",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "keep2"
+    }
+  ],
+  "exports": [
+    {
+      "module": "cjs",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "keep1",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "keep2",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "REMOVE",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "read",
+      "path": "read.js"
+    },
+    {
+      "name": "write",
+      "path": "write.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

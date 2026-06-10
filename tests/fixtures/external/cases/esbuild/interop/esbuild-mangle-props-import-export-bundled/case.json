@@ -1,0 +1,64 @@
+{
+  "id": "esbuild-mangle-props-import-export-bundled",
+  "title": "esbuild TestManglePropsImportExportBundled",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_default_test.go::TestManglePropsImportExportBundled"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/entry-cjs.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/entry-cjs.js",
+      "artifacts/esbuild@0.28.0/entry-esm.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [
+      "__commonJS",
+      "__esm"
+    ],
+    "helpers": [
+      "__toESM",
+      "__toCommonJS"
+    ],
+    "must_recover_modules": [
+      "entry-esm",
+      "entry-cjs",
+      "esm",
+      "cjs"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "entry-esm",
+        "name": "bar_"
+      },
+      {
+        "module": "entry-cjs",
+        "name": "bar_"
+      },
+      {
+        "module": "esm",
+        "name": "esm_foo_"
+      },
+      {
+        "module": "cjs",
+        "name": "cjs_foo_"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

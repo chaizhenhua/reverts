@@ -1,0 +1,61 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/empty.js",
+      "decompiled_module": "empty"
+    },
+    {
+      "original": "input/empty-comma.js",
+      "decompiled_module": "empty-comma"
+    },
+    {
+      "original": "input/empty-if-else.js",
+      "decompiled_module": "empty-if-else"
+    },
+    {
+      "original": "input/empty-last.js",
+      "decompiled_module": "empty-last"
+    },
+    {
+      "original": "input/empty-cross-module.js",
+      "decompiled_module": "empty-cross-module"
+    },
+    {
+      "original": "input/empty-cross-module-def.js",
+      "decompiled_module": "empty-cross-module-def"
+    },
+    {
+      "original": "input/empty-first.js",
+      "decompiled_module": "empty-first"
+    },
+    {
+      "original": "input/empty-generator.js",
+      "decompiled_module": "empty-generator"
+    },
+    {
+      "original": "input/empty-async.js",
+      "decompiled_module": "empty-async"
+    },
+    {
+      "original": "input/reassign.js",
+      "decompiled_module": "reassign"
+    },
+    {
+      "original": "input/reassign-inc.js",
+      "decompiled_module": "reassign-inc"
+    },
+    {
+      "original": "input/reassign-div.js",
+      "decompiled_module": "reassign-div"
+    },
+    {
+      "original": "input/reassign-array.js",
+      "decompiled_module": "reassign-array"
+    },
+    {
+      "original": "input/reassign-object.js",
+      "decompiled_module": "reassign-object"
+    }
+  ]
+}

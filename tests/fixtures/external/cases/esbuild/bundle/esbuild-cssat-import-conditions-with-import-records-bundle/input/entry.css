@@ -1,0 +1,6 @@
+
+				@import url(foo.css) supports(background: url(a.png));
+				@import url(foo.css) supports(background: url(b.png)) list-of-media-queries;
+				@import url(foo.css) layer(layer-name) supports(background: url(a.png));
+				@import url(foo.css) layer(layer-name) supports(background: url(b.png)) list-of-media-queries;
+			

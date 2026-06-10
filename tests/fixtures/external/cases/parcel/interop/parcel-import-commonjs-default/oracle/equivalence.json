@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/a.js",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/notwrapped.js",
+      "decompiled_module": "notwrapped"
+    },
+    {
+      "original": "input/wrapped.js",
+      "decompiled_module": "wrapped"
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "reexport",
+      "path": "reexport.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "e"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "f"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "fNamed"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "fStar"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "fStarPartial"
+    },
+    {
+      "from": "index",
+      "to": "reexport",
+      "kind": "import_named",
+      "name": "fStarPartial2"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/f.json?namespace-object-exported",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/f.json?namespace-object-exported-but-only-default-named-used",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/f.json?namespace-object-exported-but-only-named-used",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/e.json",
+      "kind": "reexport_named",
+      "name": "e"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/f.json?default-exported",
+      "kind": "reexport_named",
+      "name": "f"
+    },
+    {
+      "from": "reexport",
+      "to": "./data/f.json?only-named-exported",
+      "kind": "reexport_named",
+      "name": "fNamed"
+    }
+  ],
+  "exports": [
+    {
+      "module": "reexport",
+      "name": "e",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "f",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "fNamed",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "fStar",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "fStarPartial",
+      "kind": "value"
+    },
+    {
+      "module": "reexport",
+      "name": "fStarPartial2",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/index.jsx",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/node_modules/bun-test-helpers/index.js",
+      "decompiled_module": "node_modules/bun-test-helpers/index"
+    },
+    {
+      "original": "input/node_modules/custom-classic/index.js",
+      "decompiled_module": "node_modules/custom-classic/index"
+    }
+  ]
+}

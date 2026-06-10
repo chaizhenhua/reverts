@@ -1,0 +1,14 @@
+{
+  "bundler_family": "babel",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "_jsx",
+    "_jsxs",
+    "_Fragment"
+  ],
+  "runtime_helpers": [
+    "_jsx",
+    "_jsxs",
+    "_Fragment"
+  ]
+}

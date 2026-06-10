@@ -1,0 +1,3 @@
+@import "https://example.com/foo.css" (foo: url(foo.png)) and (bar: url(bar.png));
+
+/* input/entry.css */

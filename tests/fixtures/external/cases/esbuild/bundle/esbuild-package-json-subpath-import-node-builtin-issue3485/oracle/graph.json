@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "empty",
+      "path": "empty.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "#fs",
+      "kind": "import_default",
+      "name": "fs"
+    },
+    {
+      "from": "entry",
+      "to": "#http",
+      "kind": "import_default",
+      "name": "http"
+    }
+  ],
+  "exports": []
+}

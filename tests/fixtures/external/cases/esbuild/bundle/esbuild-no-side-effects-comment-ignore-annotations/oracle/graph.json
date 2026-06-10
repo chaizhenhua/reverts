@@ -1,0 +1,253 @@
+{
+  "modules": [
+    {
+      "name": "expr-fn",
+      "path": "expr-fn.js"
+    },
+    {
+      "name": "expr-arrow",
+      "path": "expr-arrow.js"
+    },
+    {
+      "name": "stmt-fn",
+      "path": "stmt-fn.js"
+    },
+    {
+      "name": "stmt-export-fn",
+      "path": "stmt-export-fn.js"
+    },
+    {
+      "name": "stmt-local",
+      "path": "stmt-local.js"
+    },
+    {
+      "name": "stmt-export-local",
+      "path": "stmt-export-local.js"
+    },
+    {
+      "name": "ns-export-fn",
+      "path": "ns-export-fn.ts"
+    },
+    {
+      "name": "ns-export-local",
+      "path": "ns-export-local.ts"
+    },
+    {
+      "name": "stmt-export-default-before-fn-anon",
+      "path": "stmt-export-default-before-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-before-fn-name",
+      "path": "stmt-export-default-before-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-before-gen-fn-anon",
+      "path": "stmt-export-default-before-gen-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-before-gen-fn-name",
+      "path": "stmt-export-default-before-gen-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-before-async-fn-anon",
+      "path": "stmt-export-default-before-async-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-before-async-fn-name",
+      "path": "stmt-export-default-before-async-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-before-async-gen-fn-anon",
+      "path": "stmt-export-default-before-async-gen-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-before-async-gen-fn-name",
+      "path": "stmt-export-default-before-async-gen-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-after-fn-anon",
+      "path": "stmt-export-default-after-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-after-fn-name",
+      "path": "stmt-export-default-after-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-after-gen-fn-anon",
+      "path": "stmt-export-default-after-gen-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-after-gen-fn-name",
+      "path": "stmt-export-default-after-gen-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-after-async-fn-anon",
+      "path": "stmt-export-default-after-async-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-after-async-fn-name",
+      "path": "stmt-export-default-after-async-fn-name.js"
+    },
+    {
+      "name": "stmt-export-default-after-async-gen-fn-anon",
+      "path": "stmt-export-default-after-async-gen-fn-anon.js"
+    },
+    {
+      "name": "stmt-export-default-after-async-gen-fn-name",
+      "path": "stmt-export-default-after-async-gen-fn-name.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "stmt-export-fn",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "v0",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "l0",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "c0",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "v2",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "l2",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-local",
+      "name": "c2",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-fn",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "v0",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "l0",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "c0",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "v2",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "l2",
+      "kind": "value"
+    },
+    {
+      "module": "ns-export-local",
+      "name": "c2",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-gen-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-gen-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-async-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-async-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-async-gen-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-before-async-gen-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-gen-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-gen-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-async-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-async-fn-name",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-async-gen-fn-anon",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "stmt-export-default-after-async-gen-fn-name",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

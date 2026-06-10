@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "import",
+      "path": "import.js"
+    },
+    {
+      "name": "WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ",
+      "path": "WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ.js"
+    },
+    {
+      "name": "require",
+      "path": "require.js"
+    },
+    {
+      "name": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD",
+      "path": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "import",
+      "to": "WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ",
+      "kind": "import_default",
+      "name": "foo"
+    },
+    {
+      "from": "require",
+      "to": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

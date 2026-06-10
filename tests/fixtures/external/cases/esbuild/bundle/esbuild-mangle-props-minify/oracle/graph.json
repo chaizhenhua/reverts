@@ -1,0 +1,30 @@
+{
+  "modules": [
+    {
+      "name": "entry1",
+      "path": "entry1.js"
+    },
+    {
+      "name": "entry2",
+      "path": "entry2.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry1",
+      "name": "shouldMangle_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+      "kind": "value"
+    },
+    {
+      "module": "entry1",
+      "name": "shouldNotMangle_YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+      "kind": "value"
+    },
+    {
+      "module": "entry2",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

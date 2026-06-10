@@ -1,0 +1,34 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "dep1",
+      "path": "dep1.js"
+    },
+    {
+      "name": "dep2",
+      "path": "dep2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "dep2",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "main",
+      "to": "dep1",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "dep1",
+      "to": "dep2",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

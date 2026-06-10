@@ -1,0 +1,25 @@
+{
+  "modules": [
+    {
+      "name": "src/entries/entry",
+      "path": "src/entries/entry.js"
+    },
+    {
+      "name": "src/entries/other/entry",
+      "path": "src/entries/other/entry.js"
+    },
+    {
+      "name": "src/shared/common",
+      "path": "src/shared/common.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/shared/common",
+      "to": "./common.png",
+      "kind": "import_default",
+      "name": "x"
+    }
+  ],
+  "exports": []
+}

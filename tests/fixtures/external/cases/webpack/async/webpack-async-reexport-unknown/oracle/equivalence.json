@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/async-unknown.js",
+      "decompiled_module": "async-unknown"
+    },
+    {
+      "original": "input/index.js",
+      "decompiled_module": "index"
+    },
+    {
+      "original": "input/reexport-async-unknown.js",
+      "decompiled_module": "reexport-async-unknown"
+    },
+    {
+      "original": "input/test.js",
+      "decompiled_module": "test"
+    },
+    {
+      "original": "input/unknown.js",
+      "decompiled_module": "unknown"
+    }
+  ]
+}

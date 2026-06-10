@@ -1,0 +1,3 @@
+
+				export {bar} from './foo'
+			

@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/index",
+      "path": "Users/user/project/src/index.js"
+    },
+    {
+      "name": "Users/user/project/src/foo-import",
+      "path": "Users/user/project/src/foo-import.js"
+    },
+    {
+      "name": "Users/user/project/src/foo-require",
+      "path": "Users/user/project/src/foo-require.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/index",
+      "to": "@some-scope/xyz",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/src/index",
+      "to": "@some-scope/xyz/bar",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/foo-import",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/src/foo-require",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

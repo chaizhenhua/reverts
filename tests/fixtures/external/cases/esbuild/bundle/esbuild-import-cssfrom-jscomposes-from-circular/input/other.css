@@ -1,0 +1,5 @@
+
+				.bar {
+					composes: foo from "styles.css";
+				}
+			

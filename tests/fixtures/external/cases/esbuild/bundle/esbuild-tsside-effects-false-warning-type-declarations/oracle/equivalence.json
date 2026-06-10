@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/node_modules/some-js/foo.js",
+      "decompiled_module": "node_modules/some-js/foo"
+    },
+    {
+      "original": "input/node_modules/some-ts/foo.ts",
+      "decompiled_module": "node_modules/some-ts/foo"
+    },
+    {
+      "original": "input/node_modules/empty-js/foo.js",
+      "decompiled_module": "node_modules/empty-js/foo"
+    },
+    {
+      "original": "input/node_modules/empty-ts/foo.ts",
+      "decompiled_module": "node_modules/empty-ts/foo"
+    },
+    {
+      "original": "input/node_modules/empty-dts/foo.d.ts",
+      "decompiled_module": "node_modules/empty-dts/foo.d"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+/* at-layer/007/style.css */
+@layer foo {
+}
+@layer bar {
+}
+@layer bar {
+  .box {
+    background-color: green;
+  }
+}
+@layer foo {
+  .box {
+    background-color: red;
+  }
+}

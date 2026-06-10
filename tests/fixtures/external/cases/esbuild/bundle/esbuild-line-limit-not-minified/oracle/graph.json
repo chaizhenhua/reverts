@@ -1,0 +1,35 @@
+{
+  "modules": [
+    {
+      "name": "script",
+      "path": "script.jsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "script",
+      "to": "./x.file",
+      "kind": "import_default",
+      "name": "fileURL"
+    },
+    {
+      "from": "script",
+      "to": "./x.copy",
+      "kind": "import_default",
+      "name": "copyURL"
+    },
+    {
+      "from": "script",
+      "to": "./x.data",
+      "kind": "import_default",
+      "name": "dataURL"
+    }
+  ],
+  "exports": [
+    {
+      "module": "script",
+      "name": "SignUpForm",
+      "kind": "value"
+    }
+  ]
+}

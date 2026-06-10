@@ -1,0 +1,29 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "fs",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "fs",
+      "kind": "import_default",
+      "name": "defaultValue"
+    },
+    {
+      "from": "entry",
+      "to": "fs",
+      "kind": "import_named",
+      "name": "readFileSync"
+    }
+  ],
+  "exports": []
+}

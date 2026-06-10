@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.jsx",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/foo.js",
+      "decompiled_module": "foo"
+    }
+  ]
+}

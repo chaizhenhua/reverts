@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/warning1.ts",
+      "decompiled_module": "warning1"
+    },
+    {
+      "original": "input/warning2.ts",
+      "decompiled_module": "warning2"
+    },
+    {
+      "original": "input/warning3.ts",
+      "decompiled_module": "warning3"
+    },
+    {
+      "original": "input/silent1.ts",
+      "decompiled_module": "silent1"
+    },
+    {
+      "original": "input/silent2.ts",
+      "decompiled_module": "silent2"
+    }
+  ]
+}

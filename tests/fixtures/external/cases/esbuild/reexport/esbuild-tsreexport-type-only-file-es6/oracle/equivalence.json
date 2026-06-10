@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.ts",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/re-export.ts",
+      "decompiled_module": "re-export"
+    },
+    {
+      "original": "input/types1.ts",
+      "decompiled_module": "types1"
+    },
+    {
+      "original": "input/types2.ts",
+      "decompiled_module": "types2"
+    },
+    {
+      "original": "input/types3.ts",
+      "decompiled_module": "types3"
+    },
+    {
+      "original": "input/values.ts",
+      "decompiled_module": "values"
+    },
+    {
+      "original": "input/type.ts",
+      "decompiled_module": "type"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/cjs-in-esm.js",
+      "decompiled_module": "cjs-in-esm"
+    },
+    {
+      "original": "input/import-in-cjs.js",
+      "decompiled_module": "import-in-cjs"
+    },
+    {
+      "original": "input/no-warnings-here.js",
+      "decompiled_module": "no-warnings-here"
+    }
+  ]
+}

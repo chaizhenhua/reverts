@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "input",
+      "path": "input.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

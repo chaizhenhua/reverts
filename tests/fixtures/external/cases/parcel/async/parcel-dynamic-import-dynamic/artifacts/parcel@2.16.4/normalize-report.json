@@ -1,0 +1,10 @@
+{
+  "normalized": true,
+  "renamed_outputs": {
+    "b.19f3a0b2.js": "b0.js",
+    "c.fab0b925.js": "c1.js"
+  },
+  "notes": [
+    "Parcel chunk filenames with hash suffixes were renamed to stable filenames and internal references were updated."
+  ]
+}

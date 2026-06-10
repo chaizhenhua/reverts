@@ -1,0 +1,33 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/inject.js",
+      "decompiled_module": "inject"
+    },
+    {
+      "original": "input/node_modules/unused/index.js",
+      "decompiled_module": "node_modules/unused/index"
+    },
+    {
+      "original": "input/node_modules/sideEffects-false/index.js",
+      "decompiled_module": "node_modules/sideEffects-false/index"
+    },
+    {
+      "original": "input/replacement.js",
+      "decompiled_module": "replacement"
+    },
+    {
+      "original": "input/collision.js",
+      "decompiled_module": "collision"
+    },
+    {
+      "original": "input/re-export.js",
+      "decompiled_module": "re-export"
+    }
+  ]
+}

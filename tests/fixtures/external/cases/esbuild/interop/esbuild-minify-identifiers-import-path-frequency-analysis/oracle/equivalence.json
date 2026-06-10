@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/import.js",
+      "decompiled_module": "import"
+    },
+    {
+      "original": "input/WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ.js",
+      "decompiled_module": "WWWWWWWWWWXXXXXXXXXXYYYYYYYYYYZZZZZZZZZZ"
+    },
+    {
+      "original": "input/require.js",
+      "decompiled_module": "require"
+    },
+    {
+      "original": "input/AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD.js",
+      "decompiled_module": "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD"
+    }
+  ]
+}

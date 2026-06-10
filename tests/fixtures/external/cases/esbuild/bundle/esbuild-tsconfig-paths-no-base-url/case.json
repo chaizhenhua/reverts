@@ -1,0 +1,120 @@
+{
+  "id": "esbuild-tsconfig-paths-no-base-url",
+  "title": "esbuild TestTsconfigPathsNoBaseURL",
+  "category": "bundle",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_tsconfig_test.go::TestTsconfigPathsNoBaseURL"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/Users/user/project/out.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/Users/user/project/out.js"
+    ],
+    "format": "bundle",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "Users/user/project/entry",
+      "Users/user/project/simple/index",
+      "Users/user/project/simple/test0-success",
+      "Users/user/project/simple/test1-success",
+      "Users/user/project/simple/test2-success/foo",
+      "Users/user/project/simple/test3-success",
+      "Users/user/project/simple/test4-first/foo",
+      "Users/user/project/simple/test5-second/foo",
+      "Users/user/project/simple/absolute",
+      "Users/user/project/simple/actual/test",
+      "Users/user/project/extended/index",
+      "Users/user/project/extended/nested/test0-success",
+      "Users/user/project/extended/nested/test1-success",
+      "Users/user/project/extended/nested/test2-success/foo",
+      "Users/user/project/extended/nested/test3-success",
+      "Users/user/project/extended/nested/test4-first/foo",
+      "Users/user/project/extended/nested/test5-second/foo",
+      "Users/user/project/extended/absolute",
+      "Users/user/project/extended/nested/actual/test"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "Users/user/project/simple/index",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test0-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test1-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test2-success/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test3-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test4-first/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/test5-second/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/simple/actual/test",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/index",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test0-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test1-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test2-success/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test3-success",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test4-first/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/test5-second/foo",
+        "name": "default"
+      },
+      {
+        "module": "Users/user/project/extended/nested/actual/test",
+        "name": "default"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

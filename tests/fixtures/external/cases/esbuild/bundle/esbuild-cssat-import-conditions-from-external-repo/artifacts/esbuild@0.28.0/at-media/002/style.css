@@ -1,0 +1,15 @@
+/* at-media/002/a.css */
+@media screen {
+  .box {
+    background-color: green;
+  }
+}
+
+/* at-media/002/b.css */
+@media print {
+  .box {
+    background-color: red;
+  }
+}
+
+/* at-media/002/style.css */

@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/main",
+      "path": "Users/user/project/src/main.tsx"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

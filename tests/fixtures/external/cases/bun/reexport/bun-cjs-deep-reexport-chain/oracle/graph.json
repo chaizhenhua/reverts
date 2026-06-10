@@ -1,0 +1,57 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "layer1",
+      "path": "layer1.mjs"
+    },
+    {
+      "name": "layer2",
+      "path": "layer2.mjs"
+    },
+    {
+      "name": "lib",
+      "path": "lib.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "layer1",
+      "kind": "import_default",
+      "name": "lib"
+    },
+    {
+      "from": "layer1",
+      "to": "layer2",
+      "kind": "reexport_named",
+      "name": "default"
+    },
+    {
+      "from": "layer2",
+      "to": "lib",
+      "kind": "reexport_named",
+      "name": "default"
+    }
+  ],
+  "exports": [
+    {
+      "module": "layer1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "layer2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "deep",
+      "kind": "value"
+    }
+  ]
+}

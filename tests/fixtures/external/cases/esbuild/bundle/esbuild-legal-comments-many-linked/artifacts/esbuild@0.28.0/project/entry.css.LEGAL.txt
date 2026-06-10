@@ -1,0 +1,16 @@
+/*! Copyright notice 1 */
+/*
+ * @license
+ * Copyright notice 2
+ */
+/* @preserve This is another comment */
+
+Bundled license information:
+
+some-other-pkg/css/index.css:
+  /** @preserve
+   * (c) Evil Software Corp
+   */
+
+some-pkg/css/index.css:
+  /*! (c) Good Software Corp */

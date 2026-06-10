@@ -1,0 +1,69 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "node_modules/pkg/index",
+      "path": "node_modules/pkg/index.ts"
+    },
+    {
+      "name": "node_modules/pkg/js_ts_css",
+      "path": "node_modules/pkg/js_ts_css.js"
+    },
+    {
+      "name": "node_modules/pkg/js_ts_css",
+      "path": "node_modules/pkg/js_ts_css.ts"
+    },
+    {
+      "name": "node_modules/pkg/ts_css",
+      "path": "node_modules/pkg/ts_css.ts"
+    },
+    {
+      "name": "node_modules/pkg/js_ts",
+      "path": "node_modules/pkg/js_ts.js"
+    },
+    {
+      "name": "node_modules/pkg/js_ts",
+      "path": "node_modules/pkg/js_ts.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "node_modules/pkg/index",
+      "to": "node_modules/pkg/js_ts_css",
+      "kind": "import_default",
+      "name": "js_ts_css"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "node_modules/pkg/ts_css",
+      "kind": "import_default",
+      "name": "ts_css"
+    },
+    {
+      "from": "node_modules/pkg/index",
+      "to": "node_modules/pkg/js_ts",
+      "kind": "import_default",
+      "name": "js_ts"
+    }
+  ],
+  "exports": [
+    {
+      "module": "node_modules/pkg/js_ts_css",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/pkg/ts_css",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/pkg/js_ts",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

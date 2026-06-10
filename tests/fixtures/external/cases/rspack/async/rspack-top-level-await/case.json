@@ -1,0 +1,71 @@
+{
+  "id": "rspack-top-level-await",
+  "title": "rspack top level await",
+  "category": "async",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rspack",
+    "project_version": "1.7.11",
+    "project_commit": "b39f9080e6663818724c973df25782431530485e",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/rspack-test/exampleCases/top-level-await"
+  },
+  "artifact": {
+    "tool": "rspack",
+    "version": "1.7.11",
+    "entry": "artifacts/rspack@1.7.11/example.js",
+    "outputs": [
+      "artifacts/rspack@1.7.11/chunks/513.js",
+      "artifacts/rspack@1.7.11/example.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_require__.r",
+      "__webpack_require__.e",
+      "__webpack_require__.u",
+      "__webpack_require__.rv",
+      "__webpack_require__.ruid",
+      "__webpack_modules__",
+      "__webpack_exports__"
+    ],
+    "must_recover_modules": [
+      "Actions",
+      "UserApi",
+      "db-connection",
+      "example"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "Actions",
+        "name": "CreateUserAction"
+      },
+      {
+        "module": "Actions",
+        "name": "AlternativeCreateUserAction"
+      },
+      {
+        "module": "UserApi",
+        "name": "createUser"
+      },
+      {
+        "module": "db-connection",
+        "name": "dbCall"
+      },
+      {
+        "module": "db-connection",
+        "name": "close"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

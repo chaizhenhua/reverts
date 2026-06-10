@@ -1,0 +1,13 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/data.json",
+      "decompiled_module": "data"
+    },
+    {
+      "original": "input/main.js",
+      "decompiled_module": "main"
+    }
+  ]
+}

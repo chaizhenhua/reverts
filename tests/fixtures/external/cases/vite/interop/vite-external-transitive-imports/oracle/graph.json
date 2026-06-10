@@ -1,0 +1,60 @@
+{
+  "modules": [
+    {
+      "name": "src/main",
+      "path": "src/main.js"
+    },
+    {
+      "name": "node_modules/@vitejs/test-dep-that-imports/index",
+      "path": "node_modules/@vitejs/test-dep-that-imports/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-dep-that-imports",
+      "kind": "import_named",
+      "name": "importedVersion"
+    },
+    {
+      "from": "src/main",
+      "to": "@vitejs/test-dep-that-imports",
+      "kind": "import_named",
+      "name": "importedSlash3"
+    },
+    {
+      "from": "node_modules/@vitejs/test-dep-that-imports/index",
+      "to": "slash3",
+      "kind": "import_default",
+      "name": "slash3"
+    },
+    {
+      "from": "node_modules/@vitejs/test-dep-that-imports/index",
+      "to": "vue",
+      "kind": "import_named",
+      "name": "version"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/main",
+      "name": "importedVersion",
+      "kind": "value"
+    },
+    {
+      "module": "src/main",
+      "name": "importedSlash3",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-dep-that-imports/index",
+      "name": "importedVersion",
+      "kind": "value"
+    },
+    {
+      "module": "node_modules/@vitejs/test-dep-that-imports/index",
+      "name": "importedSlash3",
+      "kind": "value"
+    }
+  ]
+}

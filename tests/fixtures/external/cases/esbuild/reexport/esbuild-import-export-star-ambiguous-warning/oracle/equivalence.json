@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/common.js",
+      "decompiled_module": "common"
+    },
+    {
+      "original": "input/foo.js",
+      "decompiled_module": "foo"
+    },
+    {
+      "original": "input/bar.js",
+      "decompiled_module": "bar"
+    }
+  ]
+}

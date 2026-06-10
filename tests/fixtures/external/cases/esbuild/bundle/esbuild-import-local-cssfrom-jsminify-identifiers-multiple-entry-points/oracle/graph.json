@@ -1,0 +1,39 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b",
+      "path": "b.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "./a.module.css",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "a",
+      "to": "./a.module.css",
+      "kind": "import_named",
+      "name": "bar"
+    },
+    {
+      "from": "b",
+      "to": "./b.module.css",
+      "kind": "import_named",
+      "name": "foo"
+    },
+    {
+      "from": "b",
+      "to": "./b.module.css",
+      "kind": "import_named",
+      "name": "bar"
+    }
+  ],
+  "exports": []
+}

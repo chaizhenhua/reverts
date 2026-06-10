@@ -1,0 +1,25 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.jsx"
+    },
+    {
+      "name": "inject",
+      "path": "inject.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "inject",
+      "name": "el",
+      "kind": "value"
+    },
+    {
+      "module": "inject",
+      "name": "frag",
+      "kind": "value"
+    }
+  ]
+}

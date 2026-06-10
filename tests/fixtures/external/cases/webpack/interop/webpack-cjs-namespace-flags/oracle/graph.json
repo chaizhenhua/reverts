@@ -1,0 +1,78 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "namespace-via-define-properties",
+      "path": "namespace-via-define-properties.js"
+    },
+    {
+      "name": "namespace-via-define-property",
+      "path": "namespace-via-define-property.js"
+    },
+    {
+      "name": "namespace-via-exports",
+      "path": "namespace-via-exports.js"
+    },
+    {
+      "name": "namespace-via-literal",
+      "path": "namespace-via-literal.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "namespace-via-exports",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "namespace-via-literal",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "namespace-via-define-property",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "namespace-via-define-properties",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "namespace-via-define-property",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-via-define-property",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-via-exports",
+      "name": "__esModule",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-via-exports",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-via-exports",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "namespace-via-literal",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

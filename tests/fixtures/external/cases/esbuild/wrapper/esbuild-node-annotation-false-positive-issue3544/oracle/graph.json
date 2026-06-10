@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.mjs"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "entry",
+      "name": "confuseNode",
+      "kind": "value"
+    },
+    {
+      "module": "entry",
+      "name": "notAnExport",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.ts"
+    },
+    {
+      "name": "Users/user/project/src/entrywithdec",
+      "path": "Users/user/project/src/entrywithdec.ts"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

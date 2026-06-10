@@ -1,0 +1,136 @@
+{
+  "project": "babel",
+  "version": "7.29.0",
+  "commit": "b0e3517dc566880e76b5f1f4dcf7fcecba58337d",
+  "generated_count": 21,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "babel-interop-loose-imports-default",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/imports-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-loose-imports-mixing",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/imports-mixing",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-reexport-loose-export-from",
+      "category": "reexport",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/export-from",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-node-import-default",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-node/import-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-node-import-wildcard",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-node/import-wildcard",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-reexport-node-export-named-and-default-from",
+      "category": "reexport",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-node/export-named-and-default-from",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-reexport-node-export-default-from",
+      "category": "reexport",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-node/export-default-from",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-none-import-wildcard",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-none/import-wildcard",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-none-import-default-only",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-none/import-default-only",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-reexport-none-export-default-from",
+      "category": "reexport",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/importInterop-none/export-from",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-interop-loose-imports-glob",
+      "category": "interop",
+      "test": "packages/babel-plugin-transform-modules-commonjs/test/fixtures/interop-loose/imports-glob",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-automatic-simple-tags",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react-automatic/should-convert-simple-tags",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-automatic-fragments",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react-automatic/handle-fragments",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-automatic-static-children",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react-automatic/handle-static-children",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-automatic-fragments-with-key",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react-automatic/handle-fragments-with-key",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-import-source",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/autoImport/import-source",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-auto-import-react-source-type-module",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/autoImport/auto-import-react-source-type-module",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-classic-simple-tags",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react/should-convert-simple-tags",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-classic-spread-with-proto",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react/handle-spread-with-proto",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-classic-elements-as-attributes",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react/should-allow-elements-as-attributes",
+      "outputs": 1
+    },
+    {
+      "case_id": "babel-jsx-classic-nested-fragments",
+      "category": "helpers",
+      "test": "packages/babel-plugin-transform-react-jsx/test/fixtures/react/should-allow-nested-fragments",
+      "outputs": 1
+    }
+  ],
+  "skipped": []
+}

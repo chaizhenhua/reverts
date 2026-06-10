@@ -1,0 +1,9 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/packages/app/index.tsx",
+      "decompiled_module": "Users/user/project/packages/app/index"
+    }
+  ]
+}

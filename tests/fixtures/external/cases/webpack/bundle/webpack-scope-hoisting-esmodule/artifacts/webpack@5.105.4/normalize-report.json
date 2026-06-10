@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "Curated fixture uses stable output.path and chunk filename templates so committed artifact names stay deterministic."
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/project/entry.js",
+      "decompiled_module": "project/entry"
+    },
+    {
+      "original": "input/project/output-path/should-contain/this-text/file.js",
+      "decompiled_module": "project/output-path/should-contain/this-text/file"
+    }
+  ]
+}

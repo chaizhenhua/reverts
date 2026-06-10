@@ -1,0 +1,41 @@
+{
+  "modules": [
+    {
+      "name": "a",
+      "path": "a.js"
+    },
+    {
+      "name": "b1",
+      "path": "b1.js"
+    },
+    {
+      "name": "b2",
+      "path": "b2.js"
+    },
+    {
+      "name": "b3",
+      "path": "b3.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "a",
+      "to": "b1",
+      "kind": "import_default",
+      "name": "x"
+    },
+    {
+      "from": "a",
+      "to": "b2",
+      "kind": "import_default",
+      "name": "y"
+    },
+    {
+      "from": "a",
+      "to": "b3",
+      "kind": "import_default",
+      "name": "z"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/index",
+      "path": "Users/user/project/index.js"
+    },
+    {
+      "name": "Users/user/project/nested/index",
+      "path": "Users/user/project/nested/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/pkg/index",
+      "path": "Users/user/project/node_modules/pkg/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/index",
+      "to": ".",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/index",
+      "to": "pkg",
+      "kind": "require"
+    },
+    {
+      "from": "Users/user/project/index",
+      "to": "./nested",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/nested/index",
+      "name": "nested",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/pkg/index",
+      "name": "pkg",
+      "kind": "value"
+    }
+  ]
+}

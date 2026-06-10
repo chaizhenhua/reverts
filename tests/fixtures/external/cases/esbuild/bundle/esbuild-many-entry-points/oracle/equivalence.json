@@ -1,0 +1,169 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/shared.js",
+      "decompiled_module": "shared"
+    },
+    {
+      "original": "input/e00.js",
+      "decompiled_module": "e00"
+    },
+    {
+      "original": "input/e01.js",
+      "decompiled_module": "e01"
+    },
+    {
+      "original": "input/e02.js",
+      "decompiled_module": "e02"
+    },
+    {
+      "original": "input/e03.js",
+      "decompiled_module": "e03"
+    },
+    {
+      "original": "input/e04.js",
+      "decompiled_module": "e04"
+    },
+    {
+      "original": "input/e05.js",
+      "decompiled_module": "e05"
+    },
+    {
+      "original": "input/e06.js",
+      "decompiled_module": "e06"
+    },
+    {
+      "original": "input/e07.js",
+      "decompiled_module": "e07"
+    },
+    {
+      "original": "input/e08.js",
+      "decompiled_module": "e08"
+    },
+    {
+      "original": "input/e09.js",
+      "decompiled_module": "e09"
+    },
+    {
+      "original": "input/e10.js",
+      "decompiled_module": "e10"
+    },
+    {
+      "original": "input/e11.js",
+      "decompiled_module": "e11"
+    },
+    {
+      "original": "input/e12.js",
+      "decompiled_module": "e12"
+    },
+    {
+      "original": "input/e13.js",
+      "decompiled_module": "e13"
+    },
+    {
+      "original": "input/e14.js",
+      "decompiled_module": "e14"
+    },
+    {
+      "original": "input/e15.js",
+      "decompiled_module": "e15"
+    },
+    {
+      "original": "input/e16.js",
+      "decompiled_module": "e16"
+    },
+    {
+      "original": "input/e17.js",
+      "decompiled_module": "e17"
+    },
+    {
+      "original": "input/e18.js",
+      "decompiled_module": "e18"
+    },
+    {
+      "original": "input/e19.js",
+      "decompiled_module": "e19"
+    },
+    {
+      "original": "input/e20.js",
+      "decompiled_module": "e20"
+    },
+    {
+      "original": "input/e21.js",
+      "decompiled_module": "e21"
+    },
+    {
+      "original": "input/e22.js",
+      "decompiled_module": "e22"
+    },
+    {
+      "original": "input/e23.js",
+      "decompiled_module": "e23"
+    },
+    {
+      "original": "input/e24.js",
+      "decompiled_module": "e24"
+    },
+    {
+      "original": "input/e25.js",
+      "decompiled_module": "e25"
+    },
+    {
+      "original": "input/e26.js",
+      "decompiled_module": "e26"
+    },
+    {
+      "original": "input/e27.js",
+      "decompiled_module": "e27"
+    },
+    {
+      "original": "input/e28.js",
+      "decompiled_module": "e28"
+    },
+    {
+      "original": "input/e29.js",
+      "decompiled_module": "e29"
+    },
+    {
+      "original": "input/e30.js",
+      "decompiled_module": "e30"
+    },
+    {
+      "original": "input/e31.js",
+      "decompiled_module": "e31"
+    },
+    {
+      "original": "input/e32.js",
+      "decompiled_module": "e32"
+    },
+    {
+      "original": "input/e33.js",
+      "decompiled_module": "e33"
+    },
+    {
+      "original": "input/e34.js",
+      "decompiled_module": "e34"
+    },
+    {
+      "original": "input/e35.js",
+      "decompiled_module": "e35"
+    },
+    {
+      "original": "input/e36.js",
+      "decompiled_module": "e36"
+    },
+    {
+      "original": "input/e37.js",
+      "decompiled_module": "e37"
+    },
+    {
+      "original": "input/e38.js",
+      "decompiled_module": "e38"
+    },
+    {
+      "original": "input/e39.js",
+      "decompiled_module": "e39"
+    }
+  ]
+}

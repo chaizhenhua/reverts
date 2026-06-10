@@ -1,0 +1,7 @@
+{
+  "normalized": true,
+  "notes": [
+    "Stable asset, entry, and chunk filenames were requested at build time where possible.",
+    "url-worker.js -> url.js"
+  ]
+}

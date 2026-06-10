@@ -1,0 +1,19 @@
+/* input/a.css */
+.a {
+  color: green;
+}
+
+/* input/shared.css */
+.shared {
+  color: black;
+}
+
+/* input/b.css */
+.b {
+  color: blue;
+}
+
+/* input/entry.css */
+.entry {
+  color: red;
+}

@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    },
+    {
+      "name": "shims",
+      "path": "shims.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "cjs",
+      "kind": "require"
+    },
+    {
+      "from": "shims",
+      "to": "process",
+      "kind": "import_default",
+      "name": "process"
+    }
+  ],
+  "exports": [
+    {
+      "module": "cjs",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

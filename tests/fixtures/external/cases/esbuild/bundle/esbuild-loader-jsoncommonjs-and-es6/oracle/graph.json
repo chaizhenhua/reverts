@@ -1,0 +1,34 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "./y.json",
+      "kind": "import_default",
+      "name": "y_json"
+    },
+    {
+      "from": "entry",
+      "to": "./z.json",
+      "kind": "import_named",
+      "name": "small"
+    },
+    {
+      "from": "entry",
+      "to": "./z.json",
+      "kind": "import_named",
+      "name": "if as fi"
+    },
+    {
+      "from": "entry",
+      "to": "./x.json",
+      "kind": "require"
+    }
+  ],
+  "exports": []
+}

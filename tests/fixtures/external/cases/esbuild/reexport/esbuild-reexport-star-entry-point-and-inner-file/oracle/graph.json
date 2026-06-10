@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inner",
+      "path": "inner.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "inner",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "inner",
+      "to": "b",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": []
+}

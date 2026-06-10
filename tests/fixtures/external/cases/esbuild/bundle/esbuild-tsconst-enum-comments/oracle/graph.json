@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "bar",
+      "path": "bar.ts"
+    },
+    {
+      "name": "foo",
+      "path": "foo.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "foo",
+      "to": "bar",
+      "kind": "import_named",
+      "name": "Foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "bar",
+      "name": "enum",
+      "kind": "value"
+    }
+  ]
+}

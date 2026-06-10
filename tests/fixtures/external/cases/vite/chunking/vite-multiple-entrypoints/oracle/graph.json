@@ -1,0 +1,81 @@
+{
+  "modules": [
+    {
+      "name": "src/index",
+      "path": "src/index.js"
+    },
+    {
+      "name": "src/dynamic-a",
+      "path": "src/dynamic-a.js"
+    },
+    {
+      "name": "src/shared",
+      "path": "src/shared.js"
+    },
+    {
+      "name": "entrypoints/a0",
+      "path": "entrypoints/a0.js"
+    },
+    {
+      "name": "entrypoints/b0",
+      "path": "entrypoints/b0.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "src/index",
+      "to": "src/dynamic-a",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "src/dynamic-a",
+      "to": "src/shared",
+      "kind": "import_named",
+      "name": "shared"
+    },
+    {
+      "from": "entrypoints/a0",
+      "to": "src/shared",
+      "kind": "import_named",
+      "name": "shared"
+    },
+    {
+      "from": "entrypoints/b0",
+      "to": "src/shared",
+      "kind": "import_named",
+      "name": "shared"
+    }
+  ],
+  "exports": [
+    {
+      "module": "src/dynamic-a",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "src/shared",
+      "name": "shared",
+      "kind": "value"
+    },
+    {
+      "module": "entrypoints/a0",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "entrypoints/a0",
+      "name": "other",
+      "kind": "value"
+    },
+    {
+      "module": "entrypoints/b0",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "entrypoints/b0",
+      "name": "another",
+      "kind": "value"
+    }
+  ]
+}

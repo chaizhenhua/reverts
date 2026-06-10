@@ -1,0 +1,47 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.cjs"
+    },
+    {
+      "name": "wrapper",
+      "path": "wrapper.mjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "wrapper",
+      "kind": "import_default",
+      "name": "lib"
+    },
+    {
+      "from": "wrapper",
+      "to": "lib",
+      "kind": "reexport_named",
+      "name": "default"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "wrapper",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

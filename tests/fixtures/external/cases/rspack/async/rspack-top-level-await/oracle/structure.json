@@ -1,0 +1,22 @@
+{
+  "bundler_family": "webpack",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__webpack_require__",
+    "__webpack_require__.r",
+    "__webpack_require__.e",
+    "__webpack_require__.u",
+    "__webpack_require__.rv",
+    "__webpack_require__.ruid"
+  ],
+  "runtime_helpers": [
+    "__webpack_require__",
+    "__webpack_require__.r",
+    "__webpack_require__.e",
+    "__webpack_require__.u",
+    "__webpack_require__.rv",
+    "__webpack_require__.ruid",
+    "__webpack_modules__",
+    "__webpack_exports__"
+  ]
+}

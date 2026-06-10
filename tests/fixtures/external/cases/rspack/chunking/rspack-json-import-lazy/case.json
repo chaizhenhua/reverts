@@ -1,0 +1,52 @@
+{
+  "id": "rspack-json-import-lazy",
+  "title": "rspack json import lazy",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rspack",
+    "project_version": "1.7.11",
+    "project_commit": "b39f9080e6663818724c973df25782431530485e",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/rspack-test/normalCases/json/import-lazy"
+  },
+  "artifact": {
+    "tool": "rspack",
+    "version": "1.7.11",
+    "entry": "artifacts/rspack@1.7.11/index.js",
+    "outputs": [
+      "artifacts/rspack@1.7.11/chunks/data_a_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_b_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_c_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_d_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_e_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_f_json.js",
+      "artifacts/rspack@1.7.11/chunks/data_g_json.js",
+      "artifacts/rspack@1.7.11/index.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "webpack",
+    "wrappers": [],
+    "helpers": [
+      "__webpack_require__",
+      "__webpack_require__.r",
+      "__webpack_require__.e",
+      "__webpack_require__.u",
+      "__webpack_require__.rv",
+      "__webpack_require__.ruid",
+      "__webpack_modules__"
+    ],
+    "must_recover_modules": [
+      "index"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "modules": [
+    {
+      "name": "top-level",
+      "path": "top-level.js"
+    },
+    {
+      "name": "nested-block",
+      "path": "nested-block.js"
+    },
+    {
+      "name": "nested-function",
+      "path": "nested-function.js"
+    },
+    {
+      "name": "namespace-export",
+      "path": "namespace-export.ts"
+    },
+    {
+      "name": "comment-before",
+      "path": "comment-before.js"
+    },
+    {
+      "name": "directive-before",
+      "path": "directive-before.js"
+    },
+    {
+      "name": "semicolon-before",
+      "path": "semicolon-before.js"
+    },
+    {
+      "name": "debugger-before",
+      "path": "debugger-before.js"
+    },
+    {
+      "name": "type-before",
+      "path": "type-before.ts"
+    },
+    {
+      "name": "exprs-before",
+      "path": "exprs-before.js"
+    },
+    {
+      "name": "disabled-tdz",
+      "path": "disabled-tdz.js"
+    },
+    {
+      "name": "backwards-reference-top-level",
+      "path": "backwards-reference-top-level.js"
+    },
+    {
+      "name": "backwards-reference-nested-function",
+      "path": "backwards-reference-nested-function.js"
+    },
+    {
+      "name": "issue-3125",
+      "path": "issue-3125.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "namespace-export",
+      "name": "y_keep",
+      "kind": "value"
+    }
+  ]
+}

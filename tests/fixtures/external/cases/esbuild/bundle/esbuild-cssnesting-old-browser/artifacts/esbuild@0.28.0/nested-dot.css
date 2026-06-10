@@ -1,0 +1,4 @@
+/* nested-dot.css */
+a .cls {
+  color: red;
+}

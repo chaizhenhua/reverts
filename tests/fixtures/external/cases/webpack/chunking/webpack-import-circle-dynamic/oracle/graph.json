@@ -1,0 +1,87 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "leftHelix",
+      "path": "leftHelix.js"
+    },
+    {
+      "name": "leftHelixPrime",
+      "path": "leftHelixPrime.js"
+    },
+    {
+      "name": "rightHelix",
+      "path": "rightHelix.js"
+    },
+    {
+      "name": "rightHelixPrime",
+      "path": "rightHelixPrime.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "leftHelix",
+      "kind": "import_default",
+      "name": "leftHelix"
+    },
+    {
+      "from": "index",
+      "to": "rightHelix",
+      "kind": "import_default",
+      "name": "rightHelix"
+    },
+    {
+      "from": "leftHelixPrime",
+      "to": "rightHelixPrime",
+      "kind": "import_default",
+      "name": "rightHelixPrime"
+    },
+    {
+      "from": "rightHelixPrime",
+      "to": "leftHelixPrime",
+      "kind": "import_default",
+      "name": "leftHelixPrime"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "leftHelix",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "leftHelixPrime",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "leftHelixPrime",
+      "name": "run",
+      "kind": "value"
+    },
+    {
+      "module": "rightHelix",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "rightHelixPrime",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "rightHelixPrime",
+      "name": "run",
+      "kind": "value"
+    }
+  ]
+}

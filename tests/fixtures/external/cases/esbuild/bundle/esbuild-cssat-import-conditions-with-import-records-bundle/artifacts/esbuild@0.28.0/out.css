@@ -1,0 +1,37 @@
+/* input/foo.css */
+@supports (background: url(a.png)) {
+  body {
+    color: red;
+  }
+}
+
+/* input/foo.css */
+@media list-of-media-queries {
+  @supports (background: url(b.png)) {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/foo.css */
+@supports (background: url(a.png)) {
+  @layer layer-name {
+    body {
+      color: red;
+    }
+  }
+}
+
+/* input/foo.css */
+@media list-of-media-queries {
+  @supports (background: url(b.png)) {
+    @layer layer-name {
+      body {
+        color: red;
+      }
+    }
+  }
+}
+
+/* input/entry.css */

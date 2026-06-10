@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "dep",
+      "path": "dep.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "dep",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "dep",
+      "name": "obj",
+      "kind": "value"
+    },
+    {
+      "module": "dep",
+      "name": "unused",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/js.js",
+      "decompiled_module": "js"
+    },
+    {
+      "original": "input/ts.ts",
+      "decompiled_module": "ts"
+    },
+    {
+      "original": "input/jsx-components.jsx",
+      "decompiled_module": "jsx-components"
+    },
+    {
+      "original": "input/jsx-a.jsx",
+      "decompiled_module": "jsx-a"
+    },
+    {
+      "original": "input/jsx-b.jsx",
+      "decompiled_module": "jsx-b"
+    },
+    {
+      "original": "input/jsx-c.jsx",
+      "decompiled_module": "jsx-c"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "id": "tsc-isolated-modules-reexport-star",
+  "title": "tsc isolated modules reexport star",
+  "category": "reexport",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "typescript",
+    "project_version": "6.0.2",
+    "project_commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/cases/compiler/isolatedModulesDontElideReExportStar.ts"
+  },
+  "artifact": {
+    "tool": "tsc",
+    "version": "6.0.2",
+    "entry": "artifacts/tsc@6.0.2/b.js",
+    "outputs": [
+      "artifacts/tsc@6.0.2/a.js",
+      "artifacts/tsc@6.0.2/b.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "tsc",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "a",
+      "b"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

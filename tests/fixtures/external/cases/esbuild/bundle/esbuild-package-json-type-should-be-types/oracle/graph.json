@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/index",
+      "path": "Users/user/project/src/index.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

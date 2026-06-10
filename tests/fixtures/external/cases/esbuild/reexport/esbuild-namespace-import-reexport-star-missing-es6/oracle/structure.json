@@ -1,0 +1,8 @@
+{
+  "bundler_family": "esbuild",
+  "wrapper_names": [],
+  "interop_helpers": [],
+  "runtime_helpers": [
+    "__export"
+  ]
+}

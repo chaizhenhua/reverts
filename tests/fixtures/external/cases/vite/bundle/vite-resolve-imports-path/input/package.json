@@ -1,0 +1,12 @@
+{
+  "name": "vite-resolve-imports-path",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#top-level": "./src/imports/top-level.js",
+    "#same-level": "./src/imports/same-level.js",
+    "#nested/path.js": "./src/imports/nested-path.js",
+    "#dot-prefixed": "./src/imports/.dot-prefixed/index.js",
+    "#query": "./src/imports/query.json"
+  }
+}

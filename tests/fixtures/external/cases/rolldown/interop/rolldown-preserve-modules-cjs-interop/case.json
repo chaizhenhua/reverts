@@ -1,0 +1,55 @@
+{
+  "id": "rolldown-preserve-modules-cjs-interop",
+  "title": "rolldown preserve modules commonjs interop",
+  "category": "interop",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "rolldown",
+    "project_version": "1.0.0-rc.13",
+    "project_commit": "a48ca341e83a2f909774b09925c390ea27d4b848",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "packages/rolldown/tests/fixtures/topics/preserve-modules/cjs-inter-op"
+  },
+  "artifact": {
+    "tool": "rolldown",
+    "version": "1.0.0-rc.13",
+    "entry": "artifacts/rolldown@1.0.0-rc.13/main.js",
+    "outputs": [
+      "artifacts/rolldown@1.0.0-rc.13/_virtual/_rolldown/runtime.js",
+      "artifacts/rolldown@1.0.0-rc.13/lib.js",
+      "artifacts/rolldown@1.0.0-rc.13/main.js",
+      "artifacts/rolldown@1.0.0-rc.13/src/index.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "rolldown",
+    "wrappers": [],
+    "helpers": [
+      "__commonJSMin",
+      "__commonJS",
+      "__toESM"
+    ],
+    "must_recover_modules": [
+      "lib",
+      "main",
+      "src/index"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "lib",
+        "name": "default"
+      },
+      {
+        "module": "src/index",
+        "name": "a"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "inject",
+      "path": "inject.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "inject",
+      "to": "inject",
+      "kind": "import_named",
+      "name": "\"console.info\" as info"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,12 @@
+{
+  "tool": "tsc",
+  "version": "6.0.2",
+  "source_ref": "tests/cases/compiler/isolatedModulesDontElideReExportStar.ts",
+  "compiler_options": {
+    "module": "es6",
+    "target": "es6",
+    "isolatedModules": true,
+    "outDir": "dist"
+  },
+  "entry_source": "b.ts"
+}

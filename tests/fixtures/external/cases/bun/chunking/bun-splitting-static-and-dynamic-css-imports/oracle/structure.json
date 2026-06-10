@@ -1,0 +1,10 @@
+{
+  "bundler_family": "bun",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__require"
+  ],
+  "runtime_helpers": [
+    "__require"
+  ]
+}

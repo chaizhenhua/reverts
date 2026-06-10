@@ -1,0 +1,3 @@
+
+				(require => require('/test.txt'))()
+			

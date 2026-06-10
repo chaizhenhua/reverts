@@ -1,0 +1,141 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry.js",
+      "decompiled_module": "entry"
+    },
+    {
+      "original": "input/dummy.js",
+      "decompiled_module": "dummy"
+    },
+    {
+      "original": "input/cjs.js",
+      "decompiled_module": "cjs"
+    },
+    {
+      "original": "input/es6-import-stmt.js",
+      "decompiled_module": "es6-import-stmt"
+    },
+    {
+      "original": "input/es6-import-assign.ts",
+      "decompiled_module": "es6-import-assign"
+    },
+    {
+      "original": "input/es6-import-dynamic.js",
+      "decompiled_module": "es6-import-dynamic"
+    },
+    {
+      "original": "input/es6-import-meta.js",
+      "decompiled_module": "es6-import-meta"
+    },
+    {
+      "original": "input/es6-expr-import-dynamic.js",
+      "decompiled_module": "es6-expr-import-dynamic"
+    },
+    {
+      "original": "input/es6-expr-import-meta.js",
+      "decompiled_module": "es6-expr-import-meta"
+    },
+    {
+      "original": "input/es6-export-variable.js",
+      "decompiled_module": "es6-export-variable"
+    },
+    {
+      "original": "input/es6-export-function.js",
+      "decompiled_module": "es6-export-function"
+    },
+    {
+      "original": "input/es6-export-async-function.js",
+      "decompiled_module": "es6-export-async-function"
+    },
+    {
+      "original": "input/es6-export-enum.ts",
+      "decompiled_module": "es6-export-enum"
+    },
+    {
+      "original": "input/es6-export-const-enum.ts",
+      "decompiled_module": "es6-export-const-enum"
+    },
+    {
+      "original": "input/es6-export-module.ts",
+      "decompiled_module": "es6-export-module"
+    },
+    {
+      "original": "input/es6-export-namespace.ts",
+      "decompiled_module": "es6-export-namespace"
+    },
+    {
+      "original": "input/es6-export-class.js",
+      "decompiled_module": "es6-export-class"
+    },
+    {
+      "original": "input/es6-export-abstract-class.ts",
+      "decompiled_module": "es6-export-abstract-class"
+    },
+    {
+      "original": "input/es6-export-default.js",
+      "decompiled_module": "es6-export-default"
+    },
+    {
+      "original": "input/es6-export-clause.js",
+      "decompiled_module": "es6-export-clause"
+    },
+    {
+      "original": "input/es6-export-clause-from.js",
+      "decompiled_module": "es6-export-clause-from"
+    },
+    {
+      "original": "input/es6-export-star.js",
+      "decompiled_module": "es6-export-star"
+    },
+    {
+      "original": "input/es6-export-star-as.js",
+      "decompiled_module": "es6-export-star-as"
+    },
+    {
+      "original": "input/es6-export-assign.ts",
+      "decompiled_module": "es6-export-assign"
+    },
+    {
+      "original": "input/es6-export-import-assign.ts",
+      "decompiled_module": "es6-export-import-assign"
+    },
+    {
+      "original": "input/es6-ns-export-variable.ts",
+      "decompiled_module": "es6-ns-export-variable"
+    },
+    {
+      "original": "input/es6-ns-export-function.ts",
+      "decompiled_module": "es6-ns-export-function"
+    },
+    {
+      "original": "input/es6-ns-export-async-function.ts",
+      "decompiled_module": "es6-ns-export-async-function"
+    },
+    {
+      "original": "input/es6-ns-export-enum.ts",
+      "decompiled_module": "es6-ns-export-enum"
+    },
+    {
+      "original": "input/es6-ns-export-const-enum.ts",
+      "decompiled_module": "es6-ns-export-const-enum"
+    },
+    {
+      "original": "input/es6-ns-export-module.ts",
+      "decompiled_module": "es6-ns-export-module"
+    },
+    {
+      "original": "input/es6-ns-export-namespace.ts",
+      "decompiled_module": "es6-ns-export-namespace"
+    },
+    {
+      "original": "input/es6-ns-export-class.ts",
+      "decompiled_module": "es6-ns-export-class"
+    },
+    {
+      "original": "input/es6-ns-export-abstract-class.ts",
+      "decompiled_module": "es6-ns-export-abstract-class"
+    }
+  ]
+}

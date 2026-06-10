@@ -1,0 +1,43 @@
+{
+  "id": "bun-splitting-static-and-dynamic-css-imports",
+  "title": "bun splitting static and dynamic css imports",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "bun",
+    "project_version": "1.3.11",
+    "project_commit": "a04817ce2b7f1a1e8b7cbf8af8f2c027ab072f1d",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "test/bundler/bundler_splitting.test.ts::splitting/StaticAndDynamicCSSImports"
+  },
+  "artifact": {
+    "tool": "bun",
+    "version": "1.3.11",
+    "entry": "artifacts/bun@1.3.11/entry.js",
+    "outputs": [
+      "artifacts/bun@1.3.11/chunks/chunk-0.css",
+      "artifacts/bun@1.3.11/chunks/chunk-1.js",
+      "artifacts/bun@1.3.11/entry.css",
+      "artifacts/bun@1.3.11/entry.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "bun",
+    "wrappers": [],
+    "helpers": [
+      "__require"
+    ],
+    "must_recover_modules": [
+      "dynamic",
+      "entry"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

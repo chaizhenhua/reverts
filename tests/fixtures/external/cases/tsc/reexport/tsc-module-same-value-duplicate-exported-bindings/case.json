@@ -1,0 +1,53 @@
+{
+  "id": "tsc-module-same-value-duplicate-exported-bindings",
+  "title": "tsc module same value duplicate exported bindings",
+  "category": "reexport",
+  "source_language": "typescript",
+  "upstream": {
+    "project": "typescript",
+    "project_version": "6.0.2",
+    "project_commit": "7b8cb3bdf82f400642b73173f941335775d6f730",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "tests/cases/compiler/moduleSameValueDuplicateExportedBindings2.ts"
+  },
+  "artifact": {
+    "tool": "tsc",
+    "version": "6.0.2",
+    "entry": "artifacts/tsc@6.0.2/a.js",
+    "outputs": [
+      "artifacts/tsc@6.0.2/a.js",
+      "artifacts/tsc@6.0.2/b.js",
+      "artifacts/tsc@6.0.2/c.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "tsc",
+    "wrappers": [],
+    "helpers": [
+      "__createBinding",
+      "__exportStar"
+    ],
+    "must_recover_modules": [
+      "a",
+      "b",
+      "c"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "b",
+        "name": "Animals"
+      },
+      {
+        "module": "c",
+        "name": "Animals"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

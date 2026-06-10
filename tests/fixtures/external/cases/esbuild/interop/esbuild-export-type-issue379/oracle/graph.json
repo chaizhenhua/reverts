@@ -1,0 +1,73 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.ts"
+    },
+    {
+      "name": "a",
+      "path": "a.ts"
+    },
+    {
+      "name": "b",
+      "path": "b.ts"
+    },
+    {
+      "name": "c",
+      "path": "c.ts"
+    },
+    {
+      "name": "d",
+      "path": "d.ts"
+    },
+    {
+      "name": "test",
+      "path": "test.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "a",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "b",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "c",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "d",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "c",
+      "to": "test",
+      "kind": "import_named",
+      "name": "Test"
+    },
+    {
+      "from": "d",
+      "to": "test",
+      "kind": "import_named",
+      "name": "Test"
+    }
+  ],
+  "exports": [
+    {
+      "module": "b",
+      "name": "foo",
+      "kind": "value"
+    }
+  ]
+}

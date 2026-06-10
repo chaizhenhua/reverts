@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/a.js",
+      "decompiled_module": "src/a"
+    },
+    {
+      "original": "input/src/b.js",
+      "decompiled_module": "src/b"
+    },
+    {
+      "original": "input/src/index.js",
+      "decompiled_module": "src/index"
+    }
+  ]
+}

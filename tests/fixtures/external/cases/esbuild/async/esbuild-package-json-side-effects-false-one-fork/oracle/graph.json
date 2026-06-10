@@ -1,0 +1,48 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/a/index",
+      "path": "Users/user/project/node_modules/a/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/b/index",
+      "path": "Users/user/project/node_modules/b/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/c/index",
+      "path": "Users/user/project/node_modules/c/index.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/d/index",
+      "path": "Users/user/project/node_modules/d/index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "a",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/node_modules/c/index",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/c/index",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "Users/user/project/node_modules/d/index",
+      "name": "baz",
+      "kind": "value"
+    }
+  ]
+}

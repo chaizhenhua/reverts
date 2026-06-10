@@ -1,0 +1,44 @@
+{
+  "modules": [
+    {
+      "name": "project/entry",
+      "path": "project/entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "project/entry",
+      "to": "pkg",
+      "kind": "import_default",
+      "name": "a"
+    },
+    {
+      "from": "project/entry",
+      "to": "./file",
+      "kind": "import_default",
+      "name": "b"
+    },
+    {
+      "from": "project/entry",
+      "to": "pkg2",
+      "kind": "require"
+    },
+    {
+      "from": "project/entry",
+      "to": "./file2",
+      "kind": "require"
+    },
+    {
+      "from": "project/entry",
+      "to": "./dynamic",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "project/entry",
+      "name": "exported",
+      "kind": "value"
+    }
+  ]
+}

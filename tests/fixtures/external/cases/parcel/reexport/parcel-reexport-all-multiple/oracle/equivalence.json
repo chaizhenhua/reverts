@@ -1,0 +1,21 @@
+{
+  "level": "equivalence",
+  "module_pairs": [
+    {
+      "original": "input/a.js",
+      "decompiled_module": "a"
+    },
+    {
+      "original": "input/b.js",
+      "decompiled_module": "b"
+    },
+    {
+      "original": "input/c.js",
+      "decompiled_module": "c"
+    },
+    {
+      "original": "input/d.js",
+      "decompiled_module": "d"
+    }
+  ]
+}

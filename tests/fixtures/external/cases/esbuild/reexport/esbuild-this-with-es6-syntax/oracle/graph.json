@@ -1,0 +1,224 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "dummy",
+      "path": "dummy.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    },
+    {
+      "name": "es6-import-stmt",
+      "path": "es6-import-stmt.js"
+    },
+    {
+      "name": "es6-import-assign",
+      "path": "es6-import-assign.ts"
+    },
+    {
+      "name": "es6-import-dynamic",
+      "path": "es6-import-dynamic.js"
+    },
+    {
+      "name": "es6-import-meta",
+      "path": "es6-import-meta.js"
+    },
+    {
+      "name": "es6-expr-import-dynamic",
+      "path": "es6-expr-import-dynamic.js"
+    },
+    {
+      "name": "es6-expr-import-meta",
+      "path": "es6-expr-import-meta.js"
+    },
+    {
+      "name": "es6-export-variable",
+      "path": "es6-export-variable.js"
+    },
+    {
+      "name": "es6-export-function",
+      "path": "es6-export-function.js"
+    },
+    {
+      "name": "es6-export-async-function",
+      "path": "es6-export-async-function.js"
+    },
+    {
+      "name": "es6-export-enum",
+      "path": "es6-export-enum.ts"
+    },
+    {
+      "name": "es6-export-const-enum",
+      "path": "es6-export-const-enum.ts"
+    },
+    {
+      "name": "es6-export-module",
+      "path": "es6-export-module.ts"
+    },
+    {
+      "name": "es6-export-namespace",
+      "path": "es6-export-namespace.ts"
+    },
+    {
+      "name": "es6-export-class",
+      "path": "es6-export-class.js"
+    },
+    {
+      "name": "es6-export-abstract-class",
+      "path": "es6-export-abstract-class.ts"
+    },
+    {
+      "name": "es6-export-default",
+      "path": "es6-export-default.js"
+    },
+    {
+      "name": "es6-export-clause",
+      "path": "es6-export-clause.js"
+    },
+    {
+      "name": "es6-export-clause-from",
+      "path": "es6-export-clause-from.js"
+    },
+    {
+      "name": "es6-export-star",
+      "path": "es6-export-star.js"
+    },
+    {
+      "name": "es6-export-star-as",
+      "path": "es6-export-star-as.js"
+    },
+    {
+      "name": "es6-export-assign",
+      "path": "es6-export-assign.ts"
+    },
+    {
+      "name": "es6-export-import-assign",
+      "path": "es6-export-import-assign.ts"
+    },
+    {
+      "name": "es6-ns-export-variable",
+      "path": "es6-ns-export-variable.ts"
+    },
+    {
+      "name": "es6-ns-export-function",
+      "path": "es6-ns-export-function.ts"
+    },
+    {
+      "name": "es6-ns-export-async-function",
+      "path": "es6-ns-export-async-function.ts"
+    },
+    {
+      "name": "es6-ns-export-enum",
+      "path": "es6-ns-export-enum.ts"
+    },
+    {
+      "name": "es6-ns-export-const-enum",
+      "path": "es6-ns-export-const-enum.ts"
+    },
+    {
+      "name": "es6-ns-export-module",
+      "path": "es6-ns-export-module.ts"
+    },
+    {
+      "name": "es6-ns-export-namespace",
+      "path": "es6-ns-export-namespace.ts"
+    },
+    {
+      "name": "es6-ns-export-class",
+      "path": "es6-ns-export-class.ts"
+    },
+    {
+      "name": "es6-ns-export-abstract-class",
+      "path": "es6-ns-export-abstract-class.ts"
+    }
+  ],
+  "edges": [
+    {
+      "from": "es6-import-assign",
+      "to": "dummy",
+      "kind": "require"
+    },
+    {
+      "from": "es6-import-dynamic",
+      "to": "dummy",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "es6-expr-import-dynamic",
+      "to": "dummy",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "es6-export-star",
+      "to": "dummy",
+      "kind": "reexport_star"
+    },
+    {
+      "from": "es6-export-star-as",
+      "to": "dummy",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "es6-export-import-assign",
+      "to": "dummy",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "dummy",
+      "name": "dummy",
+      "kind": "value"
+    },
+    {
+      "module": "es6-export-variable",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "es6-export-function",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "es6-export-const-enum",
+      "name": "enum",
+      "kind": "value"
+    },
+    {
+      "module": "es6-export-class",
+      "name": "Foo",
+      "kind": "value"
+    },
+    {
+      "module": "es6-export-default",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "es6-ns-export-variable",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "es6-ns-export-function",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "es6-ns-export-const-enum",
+      "name": "enum",
+      "kind": "value"
+    },
+    {
+      "module": "es6-ns-export-class",
+      "name": "Foo",
+      "kind": "value"
+    }
+  ]
+}

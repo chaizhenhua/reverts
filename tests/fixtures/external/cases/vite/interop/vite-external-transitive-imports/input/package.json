@@ -1,0 +1,5 @@
+{
+  "name": "vite-external-transitive-imports",
+  "private": true,
+  "type": "module"
+}

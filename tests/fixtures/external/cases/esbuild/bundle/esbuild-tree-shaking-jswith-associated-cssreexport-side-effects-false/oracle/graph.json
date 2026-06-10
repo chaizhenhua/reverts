@@ -1,0 +1,36 @@
+{
+  "modules": [
+    {
+      "name": "project/test",
+      "path": "project/test.jsx"
+    },
+    {
+      "name": "project/node_modules/pkg/entry",
+      "path": "project/node_modules/pkg/entry.js"
+    },
+    {
+      "name": "project/node_modules/pkg/components",
+      "path": "project/node_modules/pkg/components.jsx"
+    }
+  ],
+  "edges": [
+    {
+      "from": "project/test",
+      "to": "pkg",
+      "kind": "import_named",
+      "name": "Button"
+    },
+    {
+      "from": "project/node_modules/pkg/components",
+      "to": "./button.css",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "project/node_modules/pkg/components",
+      "name": "Button",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/foo",
+      "path": "Users/user/project/node_modules/demo-pkg/foo.js"
+    },
+    {
+      "name": "Users/user/project/node_modules/demo-pkg/bar/index",
+      "path": "Users/user/project/node_modules/demo-pkg/bar/index.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

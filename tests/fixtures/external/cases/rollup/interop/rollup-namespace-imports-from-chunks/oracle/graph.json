@@ -1,0 +1,27 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main2",
+      "to": "main1",
+      "kind": "import_namespace",
+      "name": "*"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main1",
+      "name": "p",
+      "kind": "value"
+    }
+  ]
+}

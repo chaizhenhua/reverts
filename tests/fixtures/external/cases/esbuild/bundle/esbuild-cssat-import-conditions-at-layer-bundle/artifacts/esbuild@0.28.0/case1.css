@@ -1,0 +1,17 @@
+@layer first.one;
+
+/* input/case1-foo.css */
+@layer last.one {
+  body {
+    color: red;
+  }
+}
+
+/* input/case1-foo.css */
+@layer first.one {
+  body {
+    color: red;
+  }
+}
+
+/* input/case1.css */

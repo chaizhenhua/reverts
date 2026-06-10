@@ -1,0 +1,4 @@
+/* two-type-selectors.css */
+.c a:is(b) {
+  color: red;
+}

@@ -1,0 +1,43 @@
+{
+  "id": "esbuild-multiple-declaration-tree-shaking",
+  "title": "esbuild TestMultipleDeclarationTreeShaking",
+  "category": "bundle",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "esbuild",
+    "project_version": "0.28.0",
+    "project_commit": "6a794dff68e6a43539f6da671e3080efdf11ca70",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "internal/bundler_tests/bundler_dce_test.go::TestMultipleDeclarationTreeShaking"
+  },
+  "artifact": {
+    "tool": "esbuild",
+    "version": "0.28.0",
+    "entry": "artifacts/esbuild@0.28.0/var2.js",
+    "outputs": [
+      "artifacts/esbuild@0.28.0/function2.js",
+      "artifacts/esbuild@0.28.0/function3.js",
+      "artifacts/esbuild@0.28.0/var2.js",
+      "artifacts/esbuild@0.28.0/var3.js"
+    ],
+    "format": "bundle-set",
+    "module_kind": "esm"
+  },
+  "expectations": {
+    "bundler_family": "esbuild",
+    "wrappers": [],
+    "helpers": [],
+    "must_recover_modules": [
+      "var2",
+      "var3",
+      "function2",
+      "function3"
+    ],
+    "must_recover_exports": [],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

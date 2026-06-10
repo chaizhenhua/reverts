@@ -1,0 +1,5 @@
+/* nested-ampersand-first.css */
+a,
+a b {
+  color: red;
+}

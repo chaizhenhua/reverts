@@ -1,0 +1,10 @@
+{
+  "bundler_family": "tsc",
+  "wrapper_names": [],
+  "interop_helpers": [
+    "__awaiter"
+  ],
+  "runtime_helpers": [
+    "__awaiter"
+  ]
+}

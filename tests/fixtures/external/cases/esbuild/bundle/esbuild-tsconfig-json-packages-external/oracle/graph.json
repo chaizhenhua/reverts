@@ -1,0 +1,33 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    },
+    {
+      "name": "Users/user/project/src/stuff/pkg2",
+      "path": "Users/user/project/src/stuff/pkg2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "pkg1",
+      "kind": "import_default",
+      "name": "truePkg"
+    },
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "internal/pkg2",
+      "kind": "import_default",
+      "name": "falsePkg"
+    }
+  ],
+  "exports": [
+    {
+      "module": "Users/user/project/src/stuff/pkg2",
+      "name": "default",
+      "kind": "value"
+    }
+  ]
+}

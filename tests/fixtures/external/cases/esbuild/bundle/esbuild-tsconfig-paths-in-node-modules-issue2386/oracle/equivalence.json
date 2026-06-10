@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/main.js",
+      "decompiled_module": "Users/user/project/main"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/wow/dist/first.js",
+      "decompiled_module": "Users/user/project/node_modules/wow/dist/first"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/wow/dist/next.js",
+      "decompiled_module": "Users/user/project/node_modules/wow/dist/next"
+    },
+    {
+      "original": "input/Users/user/project/node_modules/wow/first.ts",
+      "decompiled_module": "Users/user/project/node_modules/wow/first"
+    }
+  ]
+}

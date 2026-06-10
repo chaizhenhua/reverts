@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/main.js",
+      "decompiled_module": "src/main"
+    },
+    {
+      "original": "input/src/data.json",
+      "decompiled_module": "src/data"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-import-assertion-dep/index.js",
+      "decompiled_module": "node_modules/@vitejs/test-import-assertion-dep/index"
+    },
+    {
+      "original": "input/node_modules/@vitejs/test-import-assertion-dep/data.json",
+      "decompiled_module": "node_modules/@vitejs/test-import-assertion-dep/data"
+    }
+  ]
+}

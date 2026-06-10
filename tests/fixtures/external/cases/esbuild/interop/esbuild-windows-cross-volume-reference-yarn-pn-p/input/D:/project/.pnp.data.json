@@ -1,0 +1,35 @@
+
+				{
+					"packageRegistryData": [
+						[null, [
+							[null, {
+								"packageLocation": "./",
+								"packageDependencies": [
+									["react", "npm:19.1.1"],
+									["project", "workspace:."]
+								],
+								"linkType": "SOFT"
+							}]
+						]],
+						["react", [
+							["npm:19.1.1", {
+								"packageLocation": "../../C:/Users/user/AppData/Local/Yarn/Berry/cache/react.zip/node_modules/react/",
+								"packageDependencies": [
+									["react", "npm:19.1.1"]
+								],
+								"linkType": "HARD"
+							}]
+						]],
+						["project", [
+							["workspace:.", {
+								"packageLocation": "./",
+								"packageDependencies": [
+									["react", "npm:19.1.1"],
+									["project", "workspace:."]
+								],
+								"linkType": "SOFT"
+							}]
+						]]
+					]
+				}
+			

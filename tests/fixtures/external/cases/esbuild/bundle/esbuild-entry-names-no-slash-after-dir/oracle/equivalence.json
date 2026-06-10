@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/src/app1/main.ts",
+      "decompiled_module": "src/app1/main"
+    },
+    {
+      "original": "input/src/app2/main.ts",
+      "decompiled_module": "src/app2/main"
+    },
+    {
+      "original": "input/src/app3/main.ts",
+      "decompiled_module": "src/app3/main"
+    }
+  ]
+}

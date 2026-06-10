@@ -1,0 +1,102 @@
+{
+  "modules": [
+    {
+      "name": "barrel/a",
+      "path": "barrel/a.js"
+    },
+    {
+      "name": "barrel/b-impl",
+      "path": "barrel/b-impl.js"
+    },
+    {
+      "name": "barrel/b",
+      "path": "barrel/b.js"
+    },
+    {
+      "name": "barrel/c",
+      "path": "barrel/c.js"
+    },
+    {
+      "name": "barrel/index",
+      "path": "barrel/index.js"
+    },
+    {
+      "name": "main",
+      "path": "main.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "barrel/a",
+      "to": "barrel/index",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "barrel/b",
+      "to": "barrel/b-impl",
+      "kind": "reexport_named",
+      "name": "b"
+    },
+    {
+      "from": "barrel/b",
+      "to": "barrel/c",
+      "kind": "reexport_named",
+      "name": "c"
+    },
+    {
+      "from": "barrel/index",
+      "to": "barrel/a",
+      "kind": "reexport_named",
+      "name": "a"
+    },
+    {
+      "from": "barrel/index",
+      "to": "barrel/b",
+      "kind": "reexport_named",
+      "name": "b"
+    },
+    {
+      "from": "main",
+      "to": "barrel/index",
+      "kind": "import_named",
+      "name": "a"
+    }
+  ],
+  "exports": [
+    {
+      "module": "barrel/a",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/b-impl",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/b",
+      "name": "b",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/b",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/c",
+      "name": "c",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/index",
+      "name": "a",
+      "kind": "value"
+    },
+    {
+      "module": "barrel/index",
+      "name": "b",
+      "kind": "value"
+    }
+  ]
+}

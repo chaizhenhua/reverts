@@ -1,0 +1,31 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "nested",
+      "path": "nested.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "nested",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "path1",
+      "kind": "reexport_namespace"
+    },
+    {
+      "from": "nested",
+      "to": "path2",
+      "kind": "reexport_namespace"
+    }
+  ],
+  "exports": []
+}

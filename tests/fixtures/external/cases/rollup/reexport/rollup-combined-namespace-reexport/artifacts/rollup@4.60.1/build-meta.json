@@ -1,0 +1,25 @@
+{
+  "tool": "rollup",
+  "version": "4.60.1",
+  "source_ref": "test/chunking-form/samples/combined-namespace-reexport",
+  "config_kind": "sample",
+  "input": [
+    "main1.js",
+    "main2.js"
+  ],
+  "external": [],
+  "output": {
+    "format": "es",
+    "preserve_modules": false,
+    "preserve_entry_signatures": null,
+    "exports": null,
+    "entry_file_names": "[name].js",
+    "chunk_file_names": "chunks/[name].js"
+  },
+  "command": [
+    "node",
+    "-e",
+    "rollup(input).write(output)",
+    "# source=test/chunking-form/samples/combined-namespace-reexport"
+  ]
+}

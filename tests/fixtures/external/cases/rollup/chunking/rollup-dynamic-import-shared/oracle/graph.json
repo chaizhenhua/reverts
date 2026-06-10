@@ -1,0 +1,51 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "other",
+      "path": "other.js"
+    },
+    {
+      "name": "shared",
+      "path": "shared.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "shared",
+      "kind": "import_named",
+      "name": "sharedValue"
+    },
+    {
+      "from": "main",
+      "to": "other",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main",
+      "name": "promise",
+      "kind": "value"
+    },
+    {
+      "module": "other",
+      "name": "extra",
+      "kind": "value"
+    },
+    {
+      "module": "other",
+      "name": "value",
+      "kind": "value"
+    },
+    {
+      "module": "shared",
+      "name": "sharedValue",
+      "kind": "value"
+    }
+  ]
+}

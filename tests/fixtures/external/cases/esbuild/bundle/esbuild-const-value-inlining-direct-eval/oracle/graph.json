@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "top-level-no-eval",
+      "path": "top-level-no-eval.js"
+    },
+    {
+      "name": "top-level-eval",
+      "path": "top-level-eval.js"
+    },
+    {
+      "name": "nested-no-eval",
+      "path": "nested-no-eval.js"
+    },
+    {
+      "name": "nested-eval",
+      "path": "nested-eval.js"
+    },
+    {
+      "name": "ts-namespace-no-eval",
+      "path": "ts-namespace-no-eval.ts"
+    },
+    {
+      "name": "ts-namespace-eval",
+      "path": "ts-namespace-eval.ts"
+    },
+    {
+      "name": "issue-4055",
+      "path": "issue-4055.ts"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "ts-namespace-no-eval",
+      "name": "x",
+      "kind": "value"
+    },
+    {
+      "module": "ts-namespace-eval",
+      "name": "x",
+      "kind": "value"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "id": "vite-multiple-entrypoints",
+  "title": "vite multiple entrypoints",
+  "category": "chunking",
+  "source_language": "javascript",
+  "upstream": {
+    "project": "vite",
+    "project_version": "8.0.3",
+    "project_commit": "a248a410426a08916771ba82f37b3496375636b8",
+    "origin": "curated-from-upstream-test",
+    "source_ref": "playground/multiple-entrypoints"
+  },
+  "artifact": {
+    "tool": "vite",
+    "version": "8.0.3",
+    "entry": "artifacts/vite@8.0.3/assets/a0-wB0hvbYI.js",
+    "outputs": [
+      "artifacts/vite@8.0.3/assets/a0-wB0hvbYI.js",
+      "artifacts/vite@8.0.3/assets/b0-DXC7pi4l.js",
+      "artifacts/vite@8.0.3/assets/dynamic-a-BBq_n506.js",
+      "artifacts/vite@8.0.3/assets/index-BnQi-MfE.js",
+      "artifacts/vite@8.0.3/assets/shared-B38bvX4y.js",
+      "artifacts/vite@8.0.3/index.html"
+    ],
+    "format": "bundle-set",
+    "module_kind": "mixed"
+  },
+  "expectations": {
+    "bundler_family": "vite",
+    "wrappers": [],
+    "helpers": [
+      "__vite__mapDeps"
+    ],
+    "must_recover_modules": [
+      "src/index",
+      "src/dynamic-a",
+      "src/shared",
+      "entrypoints/a0",
+      "entrypoints/b0"
+    ],
+    "must_recover_exports": [
+      {
+        "module": "src/dynamic-a",
+        "name": "default"
+      },
+      {
+        "module": "src/shared",
+        "name": "shared"
+      },
+      {
+        "module": "entrypoints/a0",
+        "name": "default"
+      },
+      {
+        "module": "entrypoints/a0",
+        "name": "other"
+      },
+      {
+        "module": "entrypoints/b0",
+        "name": "default"
+      },
+      {
+        "module": "entrypoints/b0",
+        "name": "another"
+      }
+    ],
+    "verification_levels": [
+      "structure",
+      "graph",
+      "equivalence"
+    ]
+  }
+}

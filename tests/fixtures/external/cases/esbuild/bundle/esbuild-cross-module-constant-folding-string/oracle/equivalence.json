@@ -1,0 +1,29 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/enum-constants.ts",
+      "decompiled_module": "enum-constants"
+    },
+    {
+      "original": "input/enum-entry.ts",
+      "decompiled_module": "enum-entry"
+    },
+    {
+      "original": "input/const-constants.js",
+      "decompiled_module": "const-constants"
+    },
+    {
+      "original": "input/const-entry.js",
+      "decompiled_module": "const-entry"
+    },
+    {
+      "original": "input/nested-constants.ts",
+      "decompiled_module": "nested-constants"
+    },
+    {
+      "original": "input/nested-entry.ts",
+      "decompiled_module": "nested-entry"
+    }
+  ]
+}

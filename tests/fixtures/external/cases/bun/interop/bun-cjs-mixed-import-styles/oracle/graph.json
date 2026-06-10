@@ -1,0 +1,44 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "lib",
+      "path": "lib.cjs"
+    }
+  ],
+  "edges": [
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_namespace",
+      "name": "*"
+    },
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_default",
+      "name": "defaultExport"
+    },
+    {
+      "from": "entry",
+      "to": "lib",
+      "kind": "import_named",
+      "name": "foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "lib",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "lib",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

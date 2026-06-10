@@ -1,0 +1,34 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "@scope/foo",
+      "kind": "import_named",
+      "name": "Foo"
+    },
+    {
+      "from": "index",
+      "to": "@scope/foo/bar",
+      "kind": "import_named",
+      "name": "Bar"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}

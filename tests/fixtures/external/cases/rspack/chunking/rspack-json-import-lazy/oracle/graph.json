@@ -1,0 +1,46 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "./data/a.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/b.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/c.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/d.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/e.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/f.json",
+      "kind": "import_dynamic"
+    },
+    {
+      "from": "index",
+      "to": "./data/g.json",
+      "kind": "import_dynamic"
+    }
+  ],
+  "exports": []
+}

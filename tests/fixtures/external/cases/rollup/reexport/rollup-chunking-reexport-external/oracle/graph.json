@@ -1,0 +1,34 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "dep",
+      "path": "dep.js"
+    }
+  ],
+  "edges": [],
+  "exports": [
+    {
+      "module": "main1",
+      "name": "dep",
+      "kind": "value"
+    },
+    {
+      "module": "main2",
+      "name": "dep",
+      "kind": "value"
+    },
+    {
+      "module": "dep",
+      "name": "dep",
+      "kind": "value"
+    }
+  ]
+}

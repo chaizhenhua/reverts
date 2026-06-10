@@ -1,0 +1,48 @@
+{
+  "modules": [
+    {
+      "name": "index",
+      "path": "index.js"
+    },
+    {
+      "name": "module",
+      "path": "module.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "index",
+      "to": "module",
+      "kind": "import_default",
+      "name": "m1"
+    },
+    {
+      "from": "index",
+      "to": "module",
+      "kind": "import_named",
+      "name": "abc"
+    }
+  ],
+  "exports": [
+    {
+      "module": "index",
+      "name": "m1",
+      "kind": "value"
+    },
+    {
+      "module": "index",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "abc",
+      "kind": "value"
+    },
+    {
+      "module": "module",
+      "name": "def",
+      "kind": "value"
+    }
+  ]
+}

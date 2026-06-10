@@ -1,0 +1,25 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/entry-nope.js",
+      "decompiled_module": "entry-nope"
+    },
+    {
+      "original": "input/entry-default.js",
+      "decompiled_module": "entry-default"
+    },
+    {
+      "original": "input/empty.js",
+      "decompiled_module": "empty"
+    },
+    {
+      "original": "input/empty.mjs",
+      "decompiled_module": "empty"
+    },
+    {
+      "original": "input/empty.cjs",
+      "decompiled_module": "empty"
+    }
+  ]
+}

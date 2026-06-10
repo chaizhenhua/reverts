@@ -1,0 +1,13 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/keep-these.ts",
+      "decompiled_module": "keep-these"
+    },
+    {
+      "original": "input/decorator.ts",
+      "decompiled_module": "decorator"
+    }
+  ]
+}

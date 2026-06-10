@@ -1,0 +1,82 @@
+{
+  "project": "parcel",
+  "version": "2.16.4",
+  "commit": "59484858a1a0bcbb71f74088956bb437a2db6505",
+  "generated_count": 12,
+  "skipped_count": 0,
+  "generated": [
+    {
+      "case_id": "parcel-import-commonjs-default",
+      "category": "interop",
+      "test": "integration/scope-hoisting/es6/import-commonjs-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-import-namespace-commonjs",
+      "category": "interop",
+      "test": "integration/scope-hoisting/es6/import-namespace-commonjs",
+      "outputs": 2
+    },
+    {
+      "case_id": "parcel-reexport-all",
+      "category": "reexport",
+      "test": "integration/scope-hoisting/es6/re-export-all",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-reexport-all-multiple",
+      "category": "reexport",
+      "test": "integration/scope-hoisting/es6/re-export-all-multiple",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-reexport-named",
+      "category": "reexport",
+      "test": "integration/scope-hoisting/es6/re-export-named",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-reexport-renamed-namespace",
+      "category": "reexport",
+      "test": "integration/scope-hoisting/es6/re-export-renamed-namespace",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-reexport-bundle-boundary",
+      "category": "reexport",
+      "test": "integration/scope-hoisting/es6/re-export-bundle-boundary",
+      "outputs": 2
+    },
+    {
+      "case_id": "parcel-import-commonjs-export-object-default",
+      "category": "interop",
+      "test": "integration/scope-hoisting/es6/import-commonjs-export-object-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-import-commonjs-export-individual-default",
+      "category": "interop",
+      "test": "integration/scope-hoisting/es6/import-commonjs-export-individual-default",
+      "outputs": 1
+    },
+    {
+      "case_id": "parcel-dynamic-import-basic",
+      "category": "chunking",
+      "test": "integration/scope-hoisting/es6/dynamic-import",
+      "outputs": 2
+    },
+    {
+      "case_id": "parcel-dynamic-default-interop",
+      "category": "chunking",
+      "test": "integration/scope-hoisting/es6/dynamic-default-interop",
+      "outputs": 2
+    },
+    {
+      "case_id": "parcel-dynamic-import-dynamic",
+      "category": "async",
+      "test": "integration/scope-hoisting/es6/dynamic-import-dynamic",
+      "outputs": 3
+    }
+  ],
+  "skipped": []
+}

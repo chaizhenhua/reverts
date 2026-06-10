@@ -1,0 +1,3 @@
+
+				var x = () => console.log(import.meta.z)
+			

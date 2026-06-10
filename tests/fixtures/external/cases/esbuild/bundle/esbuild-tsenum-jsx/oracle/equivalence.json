@@ -1,0 +1,21 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/element.tsx",
+      "decompiled_module": "element"
+    },
+    {
+      "original": "input/fragment.tsx",
+      "decompiled_module": "fragment"
+    },
+    {
+      "original": "input/nested-element.tsx",
+      "decompiled_module": "nested-element"
+    },
+    {
+      "original": "input/nested-fragment.tsx",
+      "decompiled_module": "nested-fragment"
+    }
+  ]
+}

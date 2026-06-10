@@ -1,0 +1,62 @@
+{
+  "modules": [
+    {
+      "name": "entry",
+      "path": "entry.js"
+    },
+    {
+      "name": "nested3/index",
+      "path": "nested3/index.js"
+    },
+    {
+      "name": "nested3/node_modules/alias3/index",
+      "path": "nested3/node_modules/alias3/index.js"
+    },
+    {
+      "name": "node_modules/alias1/index",
+      "path": "node_modules/alias1/index.js"
+    },
+    {
+      "name": "node_modules/alias2/foo",
+      "path": "node_modules/alias2/foo.js"
+    },
+    {
+      "name": "node_modules/alias3/index",
+      "path": "node_modules/alias3/index.js"
+    },
+    {
+      "name": "node_modules/alias4/index",
+      "path": "node_modules/alias4/index.js"
+    },
+    {
+      "name": "node_modules/alias5/foo",
+      "path": "node_modules/alias5/foo.js"
+    },
+    {
+      "name": "alias6/dir/index",
+      "path": "alias6/dir/index.js"
+    },
+    {
+      "name": "alias7/dir/foo/index",
+      "path": "alias7/dir/foo/index.js"
+    },
+    {
+      "name": "alias8/dir/pkg8/index",
+      "path": "alias8/dir/pkg8/index.js"
+    },
+    {
+      "name": "alias9/some/file",
+      "path": "alias9/some/file.js"
+    },
+    {
+      "name": "node_modules/prefix-foo/index",
+      "path": "node_modules/prefix-foo/index.js"
+    },
+    {
+      "name": "node_modules/@scope/prefix-foo/index",
+      "path": "node_modules/@scope/prefix-foo/index.js"
+    }
+  ],
+  "edges": [],
+  "exports": []
+}

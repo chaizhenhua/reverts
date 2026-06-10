@@ -1,0 +1,6 @@
+{
+				"compilerOptions": {
+					"importsNotUsedAsValues": "preserve",
+					"preserveValueImports": true
+				}
+			}

@@ -1,0 +1,17 @@
+{
+  "modules": [
+    {
+      "name": "Users/user/project/src/entry",
+      "path": "Users/user/project/src/entry.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "Users/user/project/src/entry",
+      "to": "../assets/some.file",
+      "kind": "import_default",
+      "name": "x"
+    }
+  ],
+  "exports": []
+}

@@ -1,0 +1,45 @@
+{
+  "modules": [
+    {
+      "name": "main",
+      "path": "main.js"
+    },
+    {
+      "name": "reexport",
+      "path": "reexport.js"
+    },
+    {
+      "name": "reexport2",
+      "path": "reexport2.js"
+    },
+    {
+      "name": "dep",
+      "path": "dep.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main",
+      "to": "reexport2",
+      "kind": "import_named",
+      "name": "value"
+    },
+    {
+      "from": "reexport2",
+      "to": "reexport",
+      "kind": "reexport_star"
+    }
+  ],
+  "exports": [
+    {
+      "module": "reexport",
+      "name": "value",
+      "kind": "value"
+    },
+    {
+      "module": "dep",
+      "name": "value",
+      "kind": "value"
+    }
+  ]
+}

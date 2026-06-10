@@ -1,0 +1,37 @@
+{
+  "modules": [
+    {
+      "name": "esm",
+      "path": "esm.js"
+    },
+    {
+      "name": "cjs",
+      "path": "cjs.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "esm",
+      "to": "xyz",
+      "kind": "import_named",
+      "name": "bar_"
+    },
+    {
+      "from": "cjs",
+      "to": "xyz",
+      "kind": "require"
+    }
+  ],
+  "exports": [
+    {
+      "module": "esm",
+      "name": "foo_",
+      "kind": "value"
+    },
+    {
+      "module": "cjs",
+      "name": "foo_",
+      "kind": "value"
+    }
+  ]
+}

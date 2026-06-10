@@ -1,0 +1,6 @@
+{
+  "normalized": true,
+  "notes": [
+    "SWC transform output was written directly to a stable artifact filename without additional rewriting."
+  ]
+}

@@ -1,0 +1,129 @@
+{
+  "modules": [
+    {
+      "name": "main1",
+      "path": "main1.js"
+    },
+    {
+      "name": "main2",
+      "path": "main2.js"
+    },
+    {
+      "name": "deps/dep1",
+      "path": "deps/dep1.js"
+    },
+    {
+      "name": "deps/dep2",
+      "path": "deps/dep2.js"
+    },
+    {
+      "name": "deps/dep3",
+      "path": "deps/dep3.js"
+    },
+    {
+      "name": "lib/lib1",
+      "path": "lib/lib1.js"
+    },
+    {
+      "name": "lib/lib2",
+      "path": "lib/lib2.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "main1",
+      "to": "deps/dep1",
+      "kind": "import_named",
+      "name": "fn"
+    },
+    {
+      "from": "main1",
+      "to": "deps/dep2",
+      "kind": "import_named",
+      "name": "fn as fn2"
+    },
+    {
+      "from": "main2",
+      "to": "deps/dep2",
+      "kind": "import_named",
+      "name": "fn"
+    },
+    {
+      "from": "main2",
+      "to": "deps/dep3",
+      "kind": "import_named",
+      "name": "fn as fn2"
+    },
+    {
+      "from": "main2",
+      "to": "deps/dep3",
+      "kind": "import_named",
+      "name": "default as treeshaked"
+    },
+    {
+      "from": "deps/dep2",
+      "to": "lib/lib2",
+      "kind": "import_named",
+      "name": "fn as libfn"
+    },
+    {
+      "from": "deps/dep3",
+      "to": "lib/lib1",
+      "kind": "import_named",
+      "name": "fn as libfn"
+    },
+    {
+      "from": "deps/dep3",
+      "to": "lib/lib1",
+      "kind": "import_named",
+      "name": "treeshaked"
+    }
+  ],
+  "exports": [
+    {
+      "module": "main1",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "main2",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "deps/dep1",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "deps/dep2",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "deps/dep3",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "deps/dep3",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "lib/lib1",
+      "name": "fn",
+      "kind": "value"
+    },
+    {
+      "module": "lib/lib1",
+      "name": "treeshaked",
+      "kind": "value"
+    },
+    {
+      "module": "lib/lib2",
+      "name": "fn",
+      "kind": "value"
+    }
+  ]
+}

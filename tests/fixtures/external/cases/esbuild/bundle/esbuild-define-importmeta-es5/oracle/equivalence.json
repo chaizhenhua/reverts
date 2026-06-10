@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/replaced.js",
+      "decompiled_module": "replaced"
+    },
+    {
+      "original": "input/kept.js",
+      "decompiled_module": "kept"
+    },
+    {
+      "original": "input/dead-code.js",
+      "decompiled_module": "dead-code"
+    }
+  ]
+}

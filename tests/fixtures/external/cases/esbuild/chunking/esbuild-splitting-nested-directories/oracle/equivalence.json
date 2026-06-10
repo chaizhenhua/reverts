@@ -1,0 +1,17 @@
+{
+  "level": "relaxed",
+  "module_pairs": [
+    {
+      "original": "input/Users/user/project/src/pages/pageA/page.js",
+      "decompiled_module": "Users/user/project/src/pages/pageA/page"
+    },
+    {
+      "original": "input/Users/user/project/src/pages/pageB/page.js",
+      "decompiled_module": "Users/user/project/src/pages/pageB/page"
+    },
+    {
+      "original": "input/Users/user/project/src/pages/shared.js",
+      "decompiled_module": "Users/user/project/src/pages/shared"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+
+				.z1 { composes: z2; zoom: 1; }
+				.z2 { zoom: 2; }
+
+				.z4 { zoom: 4; }
+				.z3 { composes: z4; zoom: 3; }
+
+				.z5 { composes: foo bar from "file-1.css"; }
+			

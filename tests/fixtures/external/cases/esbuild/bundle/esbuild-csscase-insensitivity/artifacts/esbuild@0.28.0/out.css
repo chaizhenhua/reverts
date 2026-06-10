@@ -1,0 +1,22 @@
+/* input/nested.css */
+@media list-of-media-queries {
+  @supports (supports-condition) {
+    @layer layer-name {
+      @KeyFrames Foo {
+        0% {
+          OPAcity: 0;
+        }
+        tO {
+          opaCITY: 1;
+        }
+      }
+      body {
+        BACKGROUND-color: red;
+        width: 50Px;
+        background-IMAGE: url("./image-AKINYSFH.png");
+      }
+    }
+  }
+}
+
+/* input/entry.css */

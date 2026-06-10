@@ -1,0 +1,4 @@
+
+				a { background: url(foo/bar.png?baz) }
+				b { background: url(foo/bar.png#baz) }
+			

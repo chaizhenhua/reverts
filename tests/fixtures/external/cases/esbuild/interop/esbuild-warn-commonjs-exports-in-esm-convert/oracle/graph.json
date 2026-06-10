@@ -1,0 +1,65 @@
+{
+  "modules": [
+    {
+      "name": "cjs-in-esm",
+      "path": "cjs-in-esm.js"
+    },
+    {
+      "name": "cjs-in-esm2",
+      "path": "cjs-in-esm2.js"
+    },
+    {
+      "name": "import-in-cjs",
+      "path": "import-in-cjs.js"
+    },
+    {
+      "name": "no-warnings-here",
+      "path": "no-warnings-here.js"
+    }
+  ],
+  "edges": [
+    {
+      "from": "import-in-cjs",
+      "to": "bar",
+      "kind": "import_named",
+      "name": "foo"
+    }
+  ],
+  "exports": [
+    {
+      "module": "cjs-in-esm",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-in-esm",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-in-esm2",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "cjs-in-esm2",
+      "name": "bar",
+      "kind": "value"
+    },
+    {
+      "module": "import-in-cjs",
+      "name": "default",
+      "kind": "value"
+    },
+    {
+      "module": "import-in-cjs",
+      "name": "foo",
+      "kind": "value"
+    },
+    {
+      "module": "import-in-cjs",
+      "name": "bar",
+      "kind": "value"
+    }
+  ]
+}
