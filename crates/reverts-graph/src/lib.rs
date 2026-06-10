@@ -1545,8 +1545,25 @@ impl<'a> Visit<'a> for AstFactVisitor {
         if self.function_depth == 0
             && let Some(kind) = iife_kind(&it.callee)
         {
-            self.facts
-                .push(AstFact::wrapper_region(self.module_id, kind));
+            let augmented_binding = it.arguments.first().and_then(enum_initializer_binding);
+            match augmented_binding {
+                Some(binding) if iife_body_has_enum_init_pattern(&it.callee, binding) => {
+                    self.constraint(binding, BindingConstraintKind::EnumInitializer);
+                    self.facts.push(AstFact {
+                        module_id: self.module_id,
+                        binding: Some(BindingName::new(binding)),
+                        kind: AstFactKind::WrapperRegion(AstWrapperKind::EnumIife),
+                    });
+                }
+                Some(_) => {
+                    // TypeScript namespace augmentation: `(function(X){...})(X || (X = {}))`
+                    // with a non-enum body. Not a bundler IIFE — emit no wrapper region.
+                }
+                None => {
+                    self.facts
+                        .push(AstFact::wrapper_region(self.module_id, kind));
+                }
+            }
         }
         match &it.callee {
             Expression::StaticMemberExpression(member) => {
@@ -1560,18 +1577,6 @@ impl<'a> Visit<'a> for AstFactVisitor {
                 }
             }
             _ => {}
-        }
-
-        if self.function_depth == 0
-            && let Some(binding) = it.arguments.first().and_then(enum_initializer_binding)
-            && iife_body_has_enum_init_pattern(&it.callee, binding)
-        {
-            self.constraint(binding, BindingConstraintKind::EnumInitializer);
-            self.facts.push(AstFact {
-                module_id: self.module_id,
-                binding: Some(BindingName::new(binding)),
-                kind: AstFactKind::WrapperRegion(AstWrapperKind::EnumIife),
-            });
         }
 
         walk_call_expression(self, it);
@@ -2270,6 +2275,13 @@ mod tests {
                     && fact.kind == AstFactKind::WrapperRegion(AstWrapperKind::EnumIife)
             }),
             "namespace augmentation IIFE must not produce an EnumIife wrapper region",
+        );
+        assert!(
+            !graph.ast_facts().iter().any(|fact| matches!(
+                fact.kind,
+                AstFactKind::WrapperRegion(AstWrapperKind::FunctionIife)
+            )),
+            "namespace augmentation IIFE must not be tagged as a generic bundler IIFE wrapper",
         );
     }
 
