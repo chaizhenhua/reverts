@@ -2,7 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use reverts_graph::{RevertsGraph, RuntimePreludeBindingKind, RuntimePreludeImport};
+use reverts_graph::{
+    RevertsGraph, RuntimeEntrypoint, RuntimePrelude, RuntimePreludeBindingKind,
+    RuntimePreludeImport,
+};
+use reverts_input::{ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{ParseGoal, format_source_pretty, parse_error_message};
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
@@ -214,10 +218,21 @@ impl ImportExportPlanner {
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
         let mut used_runtime_preludes = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        let runtime_module_wiring = runtime_entrypoint_module_wiring(program);
+        let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        let accepted_externalized_packages = externalized_package_modules(program);
+        let source_required_packages =
+            source_required_package_modules(program, &accepted_externalized_packages);
+        let externalized_packages = accepted_externalized_packages
+            .difference(&source_required_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let runtime_module_wiring =
+            runtime_entrypoint_module_wiring(program, &externalized_packages);
+        let source_module_wiring = source_module_wiring(program, &externalized_packages);
 
         for module in program.model().modules() {
-            if module.kind == ModuleKind::Package {
+            if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
                 continue;
             }
 
@@ -239,25 +254,128 @@ impl ImportExportPlanner {
                 });
             }
 
+            if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
+                for (target_module_id, bindings) in module_imports {
+                    let Some(target_path) = module_output_path(program, *target_module_id) else {
+                        continue;
+                    };
+                    let specifier = relative_import_specifier(path, target_path.as_str());
+                    file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+                    for binding in bindings {
+                        planned_bindings.insert(binding.clone());
+                        file.add_binding(PlannedBinding::new(
+                            binding.clone(),
+                            binding.clone(),
+                            BindingShape::Unknown,
+                            true,
+                        ));
+                    }
+                }
+            }
+
             let runtime_imports = program.model().graph().runtime_imports_for(module.id);
             let source = program.model().input().module_source_slice(module.id);
-            let (lowered_source, lowered_helpers) = source.map_or_else(
-                || (None, BTreeSet::new()),
+            let forced_runtime_helpers = runtime_module_wiring
+                .exports_by_module
+                .get(&module.id)
+                .cloned()
+                .unwrap_or_default();
+            let (lowered_source, lowered_helpers, remaining_runtime_helpers) = source.map_or_else(
+                || (None, BTreeSet::new(), BTreeSet::new()),
                 |source| {
-                    let helper_kinds =
+                    let mut helper_kinds =
                         runtime_helper_kinds(program.model().graph(), &runtime_imports);
+                    helper_kinds.extend(runtime_helper_kinds_for_source(
+                        program.model().graph(),
+                        source.source_file_id,
+                        source.source,
+                    ));
                     let lowering = lower_runtime_helpers(source.source, &helper_kinds);
+                    let mut remaining_helpers = lowering.remaining_helpers;
+                    if let Some(prelude) = program
+                        .model()
+                        .graph()
+                        .runtime_prelude(source.source_file_id)
+                    {
+                        remaining_helpers.extend(
+                            forced_runtime_helpers
+                                .iter()
+                                .filter(|binding| prelude.defines(binding))
+                                .cloned(),
+                        );
+                    }
                     (
-                        Some((source.source_file_path, lowering.source)),
+                        Some((
+                            source.source_file_id,
+                            source.source_file_path,
+                            lowering.source,
+                        )),
                         lowering.lowered_helpers,
+                        remaining_helpers,
                     )
                 },
             );
+            let local_source_definitions = lowered_source
+                .as_ref()
+                .map(|(_, _, source)| top_level_definitions_in_source(source.as_str()))
+                .unwrap_or_default();
+            let local_source_writes = lowered_source
+                .as_ref()
+                .map(|(_, _, source)| implicit_global_writes_in_source(source.as_str()))
+                .unwrap_or_default();
+            let remaining_runtime_helpers = remaining_runtime_helpers
+                .into_iter()
+                .filter(|binding| !planned_bindings.contains(binding))
+                .filter(|binding| !local_source_definitions.contains(binding))
+                .collect::<BTreeSet<_>>();
+            let written_runtime_helpers = remaining_runtime_helpers
+                .intersection(&local_source_writes)
+                .cloned()
+                .collect::<BTreeSet<_>>();
 
-            for (source_file_id, bindings) in group_runtime_imports(runtime_imports) {
+            let runtime_import_groups = group_runtime_imports(runtime_imports);
+            if let Some((source_file_id, _, _)) = &lowered_source
+                && !remaining_runtime_helpers.is_empty()
+            {
+                used_runtime_helper_files
+                    .entry(*source_file_id)
+                    .or_default()
+                    .extend(remaining_runtime_helpers.iter().cloned());
+                if !written_runtime_helpers.is_empty() {
+                    used_runtime_helper_setters
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(written_runtime_helpers.iter().cloned());
+                }
+                let specifier =
+                    relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
+                file.push_source(runtime_helper_import_statement(
+                    &remaining_runtime_helpers,
+                    &written_runtime_helpers,
+                    specifier.as_str(),
+                ));
+                for binding in &remaining_runtime_helpers {
+                    if planned_bindings.contains(binding) {
+                        continue;
+                    }
+                    planned_bindings.insert(binding.clone());
+                    file.add_binding(PlannedBinding::new(
+                        binding.clone(),
+                        binding.clone(),
+                        BindingShape::Unknown,
+                        true,
+                    ));
+                }
+            }
+
+            for (source_file_id, bindings) in runtime_import_groups {
                 let bindings = bindings
                     .into_iter()
                     .filter(|binding| !lowered_helpers.contains(binding))
+                    .filter(|binding| !remaining_runtime_helpers.contains(binding))
+                    .filter(|binding| !planned_bindings.contains(binding))
+                    .filter(|binding| !local_source_definitions.contains(binding))
+                    .filter(|binding| !local_source_writes.contains(binding))
                     .collect::<BTreeSet<_>>();
                 if bindings.is_empty() {
                     continue;
@@ -301,19 +419,38 @@ impl ImportExportPlanner {
                 file.add_binding(PlannedBinding::new(original, emitted, shape, source_backed));
             }
 
-            for original in source_imports {
-                if planned_bindings.contains(&original) {
+            for original in &source_imports {
+                if planned_bindings.contains(original) {
                     continue;
                 }
                 file.add_binding(PlannedBinding::new(
                     original.clone(),
-                    original,
+                    original.clone(),
                     BindingShape::Unknown,
                     true,
                 ));
             }
 
-            if let Some((source_file_path, source)) = lowered_source {
+            if let Some((_source_file_id, source_file_path, mut source)) = lowered_source {
+                if !written_runtime_helpers.is_empty() {
+                    source =
+                        rewrite_runtime_helper_writes(source.as_str(), &written_runtime_helpers);
+                }
+                if contains_call_to_identifier(source.as_str(), "require")
+                    && !local_source_definitions.contains(&BindingName::new("require"))
+                {
+                    file.push_source(node_require_prelude_statement());
+                    planned_bindings.insert(BindingName::new("require"));
+                }
+                let implicit_globals = implicit_global_declarations_for_module(
+                    source.as_str(),
+                    &source_definitions,
+                    &source_imports,
+                    &planned_bindings,
+                );
+                if !implicit_globals.is_empty() {
+                    file.push_source(variable_declaration_statement(implicit_globals.iter()));
+                }
                 let normalized = normalize_source_for_emit(
                     module.id,
                     source_file_path,
@@ -331,7 +468,15 @@ impl ImportExportPlanner {
             {
                 file.add_export_with_source_backed(export, true);
             }
-            if let Some(extra_exports) = runtime_module_wiring.exports_by_module.get(&module.id) {
+            let extra_exports = extra_exports_for_module(
+                program,
+                module.id,
+                [
+                    runtime_module_wiring.exports_by_module.get(&module.id),
+                    source_module_wiring.exports_by_module.get(&module.id),
+                ],
+            );
+            if !extra_exports.is_empty() {
                 let existing_exports = program
                     .model()
                     .graph()
@@ -340,9 +485,8 @@ impl ImportExportPlanner {
                     .into_iter()
                     .collect::<BTreeSet<_>>();
                 let extra_exports = extra_exports
-                    .iter()
-                    .filter(|binding| !existing_exports.contains(*binding))
-                    .cloned()
+                    .into_iter()
+                    .filter(|binding| !existing_exports.contains(binding))
                     .collect::<BTreeSet<_>>();
                 if !extra_exports.is_empty() {
                     file.push_source(named_export_statement(extra_exports.iter()));
@@ -355,34 +499,39 @@ impl ImportExportPlanner {
             plan.push_file(file);
         }
 
-        for prelude in program.model().graph().runtime_preludes().values() {
-            if let Some(entrypoint) = &prelude.entrypoint {
-                used_runtime_preludes
-                    .entry(entrypoint.source_file_id)
-                    .or_default()
-                    .insert(entrypoint.callee.clone());
-            }
-        }
-
         for (source_file_id, exported_bindings) in &used_runtime_preludes {
             let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
                 continue;
             };
             let mut file = PlannedFile::new(runtime_prelude_path(*source_file_id));
-            if let Some(module_imports) =
-                runtime_module_wiring.imports_by_prelude.get(source_file_id)
-            {
-                let prelude_path = runtime_prelude_path(*source_file_id);
-                for (module_id, bindings) in module_imports {
-                    let Some(module_path) = module_output_path(program, *module_id) else {
-                        continue;
-                    };
-                    let specifier =
-                        relative_import_specifier(prelude_path.as_str(), module_path.as_str());
-                    file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-                }
+            let mut source_bindings = prelude.required_bindings_for(exported_bindings.iter());
+            let namespace_exports =
+                runtime_namespace_exports_for_helpers(prelude.source.as_str(), &source_bindings);
+            for namespace_export in &namespace_exports {
+                source_bindings.extend(namespace_export.exports.values().cloned());
             }
-            file.push_source(prelude.source_for_bindings(exported_bindings.iter()));
+            source_bindings = prelude.required_bindings_for(source_bindings.iter());
+            let prelude_source = prelude.source_for_bindings(source_bindings.iter());
+            let prelude_imports = runtime_source_module_imports(
+                program,
+                prelude,
+                prelude_source.as_str(),
+                &externalized_packages,
+            );
+            let prelude_path = runtime_prelude_path(*source_file_id);
+            for (module_id, bindings) in &prelude_imports {
+                ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
+                let Some(module_path) = module_output_path(program, *module_id) else {
+                    continue;
+                };
+                let specifier =
+                    relative_import_specifier(prelude_path.as_str(), module_path.as_str());
+                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+            }
+            file.push_source(prelude_source);
+            for namespace_export in &namespace_exports {
+                file.push_source(runtime_namespace_export_statement(namespace_export));
+            }
             for binding in exported_bindings {
                 file.add_binding(PlannedBinding::new(
                     binding.clone(),
@@ -398,24 +547,103 @@ impl ImportExportPlanner {
             plan.push_file(file);
         }
 
-        if let Some(entrypoint) = program
-            .model()
-            .graph()
-            .runtime_preludes()
-            .values()
-            .filter_map(|prelude| prelude.entrypoint.as_ref())
-            .next()
-        {
-            let mut file = PlannedFile::new("cli.ts");
-            let specifier = relative_import_specifier(
-                "cli.ts",
-                runtime_prelude_path(entrypoint.source_file_id).as_str(),
+        for (source_file_id, helper_bindings) in &used_runtime_helper_files {
+            let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
+                continue;
+            };
+            let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
+            let mut source_bindings = prelude.required_bindings_for(helper_bindings.iter());
+            let namespace_exports =
+                runtime_namespace_exports_for_helpers(prelude.source.as_str(), &source_bindings);
+            for namespace_export in &namespace_exports {
+                source_bindings.extend(namespace_export.exports.values().cloned());
+            }
+            source_bindings = prelude.required_bindings_for(source_bindings.iter());
+            let helper_source = prelude.source_for_bindings(source_bindings.iter());
+            let helper_imports = runtime_source_module_imports(
+                program,
+                prelude,
+                helper_source.as_str(),
+                &externalized_packages,
             );
-            file.push_source(format!(
-                "#!/usr/bin/env node\nimport {{ {} }} from '{specifier}';\nawait {}();",
-                entrypoint.callee.as_str(),
-                entrypoint.callee.as_str()
-            ));
+            let helper_path = runtime_helpers_path(*source_file_id);
+            for (module_id, bindings) in &helper_imports {
+                ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
+                let Some(module_path) = module_output_path(program, *module_id) else {
+                    continue;
+                };
+                let specifier =
+                    relative_import_specifier(helper_path.as_str(), module_path.as_str());
+                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+            }
+            file.push_source(helper_source);
+            for namespace_export in &namespace_exports {
+                file.push_source(runtime_namespace_export_statement(namespace_export));
+            }
+            let setter_bindings = used_runtime_helper_setters
+                .get(source_file_id)
+                .cloned()
+                .unwrap_or_default();
+            for binding in &setter_bindings {
+                file.push_source(runtime_helper_setter_declaration(binding));
+            }
+            let mut exported_bindings = helper_bindings.clone();
+            exported_bindings.extend(
+                setter_bindings
+                    .iter()
+                    .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
+            );
+            file.push_source(named_export_statement(exported_bindings.iter()));
+            for binding in helper_bindings.iter().cloned() {
+                file.add_binding(PlannedBinding::new(
+                    binding.clone(),
+                    binding.clone(),
+                    BindingShape::Unknown,
+                    true,
+                ));
+                file.add_export_with_source_backed(binding, true);
+            }
+            for setter in setter_bindings
+                .iter()
+                .map(|binding| BindingName::new(runtime_helper_setter_name(binding)))
+            {
+                file.add_binding(PlannedBinding::new(
+                    setter.clone(),
+                    setter.clone(),
+                    BindingShape::Callable,
+                    true,
+                ));
+                file.add_export_with_source_backed(setter, true);
+            }
+            plan.push_file(file);
+        }
+
+        if let Some((prelude, entrypoint)) = runtime_entrypoint(program) {
+            let mut file = PlannedFile::new("cli.ts");
+            file.push_source("#!/usr/bin/env node");
+            if let Some(module_imports) = runtime_module_wiring
+                .imports_by_prelude
+                .get(&entrypoint.source_file_id)
+            {
+                for (module_id, bindings) in module_imports {
+                    ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
+                    let Some(module_path) = module_output_path(program, *module_id) else {
+                        continue;
+                    };
+                    let specifier = relative_import_specifier("cli.ts", module_path.as_str());
+                    file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+                }
+            }
+            file.push_source(runtime_entrypoint_source(prelude, entrypoint));
+            if let Some(namespace_exports) = runtime_module_wiring
+                .namespace_exports_by_prelude
+                .get(&entrypoint.source_file_id)
+            {
+                for namespace_export in namespace_exports {
+                    file.push_source(runtime_namespace_export_statement(namespace_export));
+                }
+            }
+            file.push_source(format!("await {}();", entrypoint.callee.as_str()));
             plan.push_file(file);
         }
 
@@ -472,18 +700,35 @@ fn group_runtime_imports(
 struct RuntimeModuleWiring {
     imports_by_prelude: BTreeMap<u32, BTreeMap<ModuleId, BTreeSet<BindingName>>>,
     exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    namespace_exports_by_prelude: BTreeMap<u32, Vec<RuntimeNamespaceExport>>,
 }
 
-fn runtime_entrypoint_module_wiring(program: &EnrichedProgram) -> RuntimeModuleWiring {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeNamespaceExport {
+    namespace: BindingName,
+    exports: BTreeMap<String, BindingName>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SourceModuleWiring {
+    imports_by_module: BTreeMap<ModuleId, BTreeMap<ModuleId, BTreeSet<BindingName>>>,
+    exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+}
+
+fn runtime_entrypoint_module_wiring(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> RuntimeModuleWiring {
     let mut wiring = RuntimeModuleWiring::default();
-    let definition_modules = unique_source_definition_modules(program);
+    let definition_modules = unique_source_definition_modules(program, externalized_packages);
 
     for prelude in program.model().graph().runtime_preludes().values() {
         let Some(entrypoint) = &prelude.entrypoint else {
             continue;
         };
-        let prelude_source = prelude.source_for_bindings(std::iter::once(&entrypoint.callee));
-        for identifier in identifiers_in_source(prelude_source.as_str()) {
+        let prelude_source = runtime_entrypoint_source(prelude, entrypoint);
+        let namespace_exports = runtime_namespace_exports(prelude.source.as_str());
+        for identifier in runtime_import_identifiers_in_source(prelude_source.as_str()) {
             let binding = BindingName::new(identifier);
             if prelude.defines(&binding) {
                 continue;
@@ -504,20 +749,950 @@ fn runtime_entrypoint_module_wiring(program: &EnrichedProgram) -> RuntimeModuleW
                 .or_default()
                 .insert(binding);
         }
+        for (namespace, exports) in namespace_exports {
+            if !contains_identifier_reference(prelude_source.as_str(), namespace.as_str()) {
+                continue;
+            }
+            let Some(init_binding) =
+                find_namespace_initializer(prelude.source.as_str(), namespace.as_str())
+            else {
+                continue;
+            };
+            let Some(Some(module_id)) = definition_modules.get(&init_binding) else {
+                continue;
+            };
+            wiring
+                .imports_by_prelude
+                .entry(prelude.source_file_id)
+                .or_default()
+                .entry(*module_id)
+                .or_default()
+                .extend(exports.values().cloned());
+            wiring
+                .exports_by_module
+                .entry(*module_id)
+                .or_default()
+                .extend(exports.values().cloned());
+            wiring
+                .namespace_exports_by_prelude
+                .entry(prelude.source_file_id)
+                .or_default()
+                .push(RuntimeNamespaceExport { namespace, exports });
+        }
     }
 
     wiring
 }
 
+fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &RuntimeEntrypoint)> {
+    program
+        .model()
+        .graph()
+        .runtime_preludes()
+        .values()
+        .find_map(|prelude| {
+            prelude
+                .entrypoint
+                .as_ref()
+                .map(|entrypoint| (prelude, entrypoint))
+        })
+}
+
+fn runtime_entrypoint_source(prelude: &RuntimePrelude, entrypoint: &RuntimeEntrypoint) -> String {
+    let mut parts = Vec::new();
+    let side_effects = runtime_entrypoint_side_effects(prelude, entrypoint);
+    let mut source_bindings = BTreeSet::from([entrypoint.callee.clone()]);
+    for side_effect in &side_effects {
+        for identifier in identifiers_in_source(side_effect.source.as_str()) {
+            let binding = BindingName::new(identifier);
+            if prelude.defines(&binding) {
+                source_bindings.insert(binding);
+            }
+        }
+    }
+    let callee_source = prelude.source_for_bindings(source_bindings.iter());
+    if !callee_source.trim().is_empty() {
+        parts.push(callee_source);
+    }
+    parts.extend(
+        side_effects
+            .into_iter()
+            .map(|side_effect| side_effect.source),
+    );
+    parts.join("\n")
+}
+
+fn runtime_entrypoint_side_effects(
+    prelude: &RuntimePrelude,
+    entrypoint: &RuntimeEntrypoint,
+) -> Vec<reverts_graph::RuntimePreludeSideEffect> {
+    let mut side_effects = entrypoint
+        .side_effects
+        .iter()
+        .filter(|side_effect| !is_noop_runtime_side_effect(prelude, side_effect.source.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    side_effects.sort_by_key(|side_effect| side_effect.byte_start);
+    side_effects
+}
+
+fn is_noop_runtime_side_effect(prelude: &RuntimePrelude, source: &str) -> bool {
+    let Some(binding) = simple_call_statement_binding(source) else {
+        return false;
+    };
+    let Some(snippet) = prelude.snippets.get(&binding) else {
+        return false;
+    };
+    runtime_prelude_snippet_is_noop(binding.as_str(), snippet.source.as_str())
+}
+
+fn simple_call_statement_binding(source: &str) -> Option<BindingName> {
+    let source = source.trim().trim_end_matches(';').trim();
+    let (identifier, after_identifier) = parse_identifier(source, 0)?;
+    let open = skip_ws(source.as_bytes(), after_identifier);
+    if source.as_bytes().get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = find_matching_paren(source, open)?;
+    if !source[open + 1..close].trim().is_empty() {
+        return None;
+    }
+    (skip_ws(source.as_bytes(), close + 1) == source.len()).then(|| BindingName::new(identifier))
+}
+
+fn runtime_prelude_snippet_is_noop(binding: &str, source: &str) -> bool {
+    let compact = compact_js_source(source);
+    let candidates = [
+        format!("var{binding}=()=>{{}};"),
+        format!("let{binding}=()=>{{}};"),
+        format!("const{binding}=()=>{{}};"),
+        format!("function{binding}(){{}}"),
+    ];
+    candidates.contains(&compact)
+}
+
+fn compact_js_source(source: &str) -> String {
+    source
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn runtime_source_module_imports(
+    program: &EnrichedProgram,
+    prelude: &reverts_graph::RuntimePrelude,
+    source: &str,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let definition_modules = unique_source_definition_modules(program, externalized_packages);
+    let mut imports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for identifier in runtime_import_identifiers_in_source(source) {
+        let binding = BindingName::new(identifier);
+        if prelude.defines(&binding) {
+            continue;
+        }
+        let Some(Some(module_id)) = definition_modules.get(&binding) else {
+            continue;
+        };
+        imports
+            .entry(*module_id)
+            .or_default()
+            .insert(binding.clone());
+    }
+    imports
+}
+
+fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
+    let local_bindings = local_bindings_in_source(source);
+    identifiers_in_source(source)
+        .into_iter()
+        .filter(|identifier| !is_runtime_global_identifier(identifier))
+        .filter(|identifier| !local_bindings.contains(identifier))
+        .filter(|identifier| contains_value_identifier_reference(source, identifier))
+        .collect()
+}
+
+fn contains_value_identifier_reference(source: &str, identifier: &str) -> bool {
+    let mut cursor = 0usize;
+    while let Some(start) = find_identifier_occurrence(source, identifier, cursor) {
+        cursor = start + identifier.len();
+        if identifier_occurrence_is_value_reference(source, start, cursor) {
+            return true;
+        }
+    }
+    false
+}
+
+fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usize) -> bool {
+    let bytes = source.as_bytes();
+    if previous_non_ws(bytes, start)
+        .and_then(|index| bytes.get(index))
+        .is_some_and(|byte| matches!(*byte, b'.' | b'#'))
+    {
+        return false;
+    }
+
+    let after = skip_ws(bytes, end);
+    let before = previous_non_ws(bytes, start).and_then(|index| bytes.get(index));
+    if bytes.get(after) == Some(&b':')
+        && previous_non_ws(bytes, start)
+            .and_then(|index| bytes.get(index))
+            .is_some_and(|byte| matches!(*byte, b'{' | b',' | b'('))
+    {
+        return false;
+    }
+
+    if bytes.get(after) == Some(&b'=')
+        && before.is_none_or(|byte| matches!(*byte, b'{' | b'}' | b';' | b',' | b'('))
+    {
+        return false;
+    }
+
+    if bytes.get(after) == Some(&b'(')
+        && let Some(close) = find_matching_paren(source, after)
+        && bytes.get(skip_ws(bytes, close + 1)) == Some(&b'{')
+        && before.is_none_or(|byte| !matches!(*byte, b'.' | b')' | b']'))
+    {
+        return false;
+    }
+
+    true
+}
+
+fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            _ if keyword_at(source, cursor, "function") => {
+                if let Some((binding, next)) =
+                    parse_identifier_after_keyword(source, cursor, "function")
+                {
+                    bindings.insert(binding.to_string());
+                    cursor = next;
+                } else {
+                    cursor += "function".len();
+                }
+            }
+            _ if keyword_at(source, cursor, "class") => {
+                if let Some((binding, next)) =
+                    parse_identifier_after_keyword(source, cursor, "class")
+                {
+                    bindings.insert(binding.to_string());
+                    cursor = next;
+                } else {
+                    cursor += "class".len();
+                }
+            }
+            _ if keyword_at(source, cursor, "var") => {
+                cursor =
+                    collect_local_variable_bindings(source, cursor + "var".len(), &mut bindings);
+            }
+            _ if keyword_at(source, cursor, "let") => {
+                cursor =
+                    collect_local_variable_bindings(source, cursor + "let".len(), &mut bindings);
+            }
+            _ if keyword_at(source, cursor, "const") => {
+                cursor =
+                    collect_local_variable_bindings(source, cursor + "const".len(), &mut bindings);
+            }
+            _ => cursor += 1,
+        }
+    }
+    bindings
+}
+
+fn collect_local_variable_bindings(
+    source: &str,
+    mut cursor: usize,
+    bindings: &mut BTreeSet<String>,
+) -> usize {
+    let bytes = source.as_bytes();
+    loop {
+        cursor = skip_ws(bytes, cursor);
+        if let Some((binding, next)) = parse_identifier(source, cursor) {
+            bindings.insert(binding.to_string());
+            cursor = next;
+        } else if bytes.get(cursor) == Some(&b'{') {
+            let Some(end) = find_matching_brace(source, cursor) else {
+                return bytes.len();
+            };
+            collect_binding_pattern_identifiers(&source[cursor + 1..end], bindings);
+            cursor = end + 1;
+        } else if bytes.get(cursor) == Some(&b'[') {
+            let Some(end) = find_matching_bracket(source, cursor) else {
+                return bytes.len();
+            };
+            collect_binding_pattern_identifiers(&source[cursor + 1..end], bindings);
+            cursor = end + 1;
+        }
+
+        let mut nested = 0usize;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+                b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                    cursor = skip_line_comment(bytes, cursor + 2);
+                }
+                b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                    cursor = skip_block_comment(bytes, cursor + 2);
+                }
+                b'/' if looks_like_regex_literal(bytes, cursor) => {
+                    cursor = skip_regex_literal(bytes, cursor);
+                }
+                b'(' | b'[' | b'{' => {
+                    nested += 1;
+                    cursor += 1;
+                }
+                b')' | b']' | b'}' => {
+                    if nested == 0 {
+                        return cursor;
+                    }
+                    nested -= 1;
+                    cursor += 1;
+                }
+                b',' if nested == 0 => {
+                    cursor += 1;
+                    break;
+                }
+                b';' if nested == 0 => return cursor + 1,
+                _ => cursor += 1,
+            }
+        }
+        if cursor >= bytes.len() {
+            return cursor;
+        }
+    }
+}
+
+fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let identifier = &source[start..cursor];
+                if !is_js_keyword(identifier) && bytes.get(skip_ws(bytes, cursor)) != Some(&b':') {
+                    bindings.insert(identifier.to_string());
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+}
+
+fn is_runtime_global_identifier(identifier: &str) -> bool {
+    matches!(
+        identifier,
+        "AbortController"
+            | "AbortSignal"
+            | "Array"
+            | "ArrayBuffer"
+            | "BigInt"
+            | "Boolean"
+            | "Buffer"
+            | "DataView"
+            | "Date"
+            | "Error"
+            | "EvalError"
+            | "Float32Array"
+            | "Float64Array"
+            | "Function"
+            | "Infinity"
+            | "Int16Array"
+            | "Int32Array"
+            | "Int8Array"
+            | "Intl"
+            | "JSON"
+            | "Map"
+            | "Math"
+            | "NaN"
+            | "Number"
+            | "Object"
+            | "Promise"
+            | "Proxy"
+            | "RangeError"
+            | "ReferenceError"
+            | "Reflect"
+            | "RegExp"
+            | "Set"
+            | "String"
+            | "Symbol"
+            | "SyntaxError"
+            | "TextDecoder"
+            | "TextEncoder"
+            | "TypeError"
+            | "URIError"
+            | "URL"
+            | "URLSearchParams"
+            | "Uint16Array"
+            | "Uint32Array"
+            | "Uint8Array"
+            | "Uint8ClampedArray"
+            | "WeakMap"
+            | "WeakSet"
+            | "__dirname"
+            | "__filename"
+            | "clearImmediate"
+            | "clearInterval"
+            | "clearTimeout"
+            | "console"
+            | "decodeURI"
+            | "decodeURIComponent"
+            | "encodeURI"
+            | "encodeURIComponent"
+            | "exports"
+            | "global"
+            | "globalThis"
+            | "isFinite"
+            | "isNaN"
+            | "module"
+            | "parseFloat"
+            | "parseInt"
+            | "process"
+            | "queueMicrotask"
+            | "require"
+            | "setImmediate"
+            | "setInterval"
+            | "setTimeout"
+            | "undefined"
+    )
+}
+
+fn ensure_planned_module_exports(
+    plan: &mut EmitPlan,
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    bindings: &BTreeSet<BindingName>,
+) {
+    let Some(path) = module_output_path(program, module_id) else {
+        return;
+    };
+    let Some(file) = plan.files.iter_mut().find(|file| file.path == path) else {
+        return;
+    };
+    let existing = file
+        .exports
+        .iter()
+        .map(|export| export.binding.clone())
+        .collect::<BTreeSet<_>>();
+    let missing = bindings
+        .iter()
+        .filter(|binding| !existing.contains(*binding))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if missing.is_empty() {
+        return;
+    }
+    file.push_source(named_export_statement(missing.iter()));
+    for binding in missing {
+        file.add_export_with_source_backed(binding, true);
+    }
+}
+
+fn runtime_namespace_exports(source: &str) -> BTreeMap<BindingName, BTreeMap<String, BindingName>> {
+    let namespaces = empty_object_namespace_bindings(source);
+    let mut exports_by_namespace = BTreeMap::new();
+    for namespace in namespaces {
+        let mut cursor = 0usize;
+        while let Some(start) = find_identifier_occurrence(source, namespace.as_str(), cursor) {
+            cursor = start + namespace.as_str().len();
+            let Some(before) = previous_non_ws(source.as_bytes(), start) else {
+                continue;
+            };
+            if source.as_bytes().get(before) != Some(&b'(') {
+                continue;
+            }
+            let comma = skip_ws(source.as_bytes(), cursor);
+            if source.as_bytes().get(comma) != Some(&b',') {
+                continue;
+            }
+            let object_start = skip_ws(source.as_bytes(), comma + 1);
+            if source.as_bytes().get(object_start) != Some(&b'{') {
+                continue;
+            }
+            let Some(object_end) = find_matching_brace(source, object_start) else {
+                continue;
+            };
+            let exports = parse_namespace_export_object(&source[object_start + 1..object_end]);
+            if !exports.is_empty() {
+                exports_by_namespace
+                    .entry(namespace.clone())
+                    .or_insert_with(BTreeMap::new)
+                    .extend(exports);
+            }
+        }
+    }
+    exports_by_namespace
+}
+
+fn runtime_namespace_exports_for_helpers(
+    prelude_source: &str,
+    helper_bindings: &BTreeSet<BindingName>,
+) -> Vec<RuntimeNamespaceExport> {
+    runtime_namespace_exports(prelude_source)
+        .into_iter()
+        .filter(|(namespace, _exports)| helper_bindings.contains(namespace))
+        .map(|(namespace, exports)| RuntimeNamespaceExport { namespace, exports })
+        .collect()
+}
+
+fn empty_object_namespace_bindings(source: &str) -> BTreeSet<BindingName> {
+    let mut bindings = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "var") => {
+                cursor = collect_empty_object_namespace_declarations(
+                    source,
+                    cursor + "var".len(),
+                    &mut bindings,
+                );
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "let") => {
+                cursor = collect_empty_object_namespace_declarations(
+                    source,
+                    cursor + "let".len(),
+                    &mut bindings,
+                );
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "const") => {
+                cursor = collect_empty_object_namespace_declarations(
+                    source,
+                    cursor + "const".len(),
+                    &mut bindings,
+                );
+            }
+            _ => cursor += 1,
+        }
+    }
+    bindings
+}
+
+fn collect_empty_object_namespace_declarations(
+    source: &str,
+    mut cursor: usize,
+    bindings: &mut BTreeSet<BindingName>,
+) -> usize {
+    let bytes = source.as_bytes();
+    loop {
+        cursor = skip_ws(bytes, cursor);
+        let Some((binding, after_binding)) = parse_identifier(source, cursor) else {
+            return cursor + 1;
+        };
+        cursor = skip_ws(bytes, after_binding);
+        if bytes.get(cursor) == Some(&b'=') {
+            let object_start = skip_ws(bytes, cursor + 1);
+            if bytes.get(object_start) == Some(&b'{')
+                && bytes.get(skip_ws(bytes, object_start + 1)) == Some(&b'}')
+            {
+                bindings.insert(BindingName::new(binding));
+            }
+        }
+
+        let mut nested = 0usize;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+                b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                    cursor = skip_line_comment(bytes, cursor + 2);
+                }
+                b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                    cursor = skip_block_comment(bytes, cursor + 2);
+                }
+                b'/' if looks_like_regex_literal(bytes, cursor) => {
+                    cursor = skip_regex_literal(bytes, cursor);
+                }
+                b'(' | b'[' | b'{' => {
+                    nested += 1;
+                    cursor += 1;
+                }
+                b')' | b']' | b'}' => {
+                    if nested == 0 {
+                        return cursor;
+                    }
+                    nested -= 1;
+                    cursor += 1;
+                }
+                b',' if nested == 0 => {
+                    cursor += 1;
+                    break;
+                }
+                b';' if nested == 0 => return cursor + 1,
+                _ => cursor += 1,
+            }
+        }
+        if cursor >= bytes.len() {
+            return cursor;
+        }
+    }
+}
+
+fn parse_namespace_export_object(source: &str) -> BTreeMap<String, BindingName> {
+    split_top_level_properties(source)
+        .into_iter()
+        .filter_map(|property| {
+            let colon = property.find(':')?;
+            let export_name = property[..colon].trim().trim_matches(['"', '\'']);
+            let target = property[colon + 1..].split("=>").nth(1)?.trim();
+            let (binding, _) = parse_identifier(target, 0)?;
+            Some((export_name.to_string(), BindingName::new(binding)))
+        })
+        .collect()
+}
+
+fn split_top_level_properties(source: &str) -> Vec<&str> {
+    let mut properties = Vec::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if depth == 0 => {
+                let property = source[start..cursor].trim();
+                if !property.is_empty() {
+                    properties.push(property);
+                }
+                cursor += 1;
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    let property = source[start..].trim();
+    if !property.is_empty() {
+        properties.push(property);
+    }
+    properties
+}
+
+fn find_namespace_initializer(source: &str, namespace: &str) -> Option<BindingName> {
+    let mut cursor = 0usize;
+    while let Some(start) = find_identifier_occurrence(source, namespace, cursor) {
+        cursor = start + namespace.len();
+        let comma = previous_non_ws(source.as_bytes(), start)?;
+        if source.as_bytes().get(comma) != Some(&b',') {
+            continue;
+        }
+        let close = previous_non_ws(source.as_bytes(), comma)?;
+        if source.as_bytes().get(close) != Some(&b')') {
+            continue;
+        }
+        let open = find_matching_paren_backward(source.as_bytes(), close)?;
+        let ident_end = previous_non_ws(source.as_bytes(), open)?;
+        let (identifier, _) = parse_identifier_backward(source, ident_end + 1)?;
+        return Some(BindingName::new(identifier));
+    }
+    None
+}
+
+fn find_identifier_occurrence(source: &str, identifier: &str, from: usize) -> Option<usize> {
+    let mut cursor = from;
+    while let Some(relative) = source[cursor..].find(identifier) {
+        let start = cursor + relative;
+        let end = start + identifier.len();
+        let before = start
+            .checked_sub(1)
+            .and_then(|index| source.as_bytes().get(index))
+            .copied();
+        let after = source.as_bytes().get(end).copied();
+        if before.is_none_or(|byte| !is_identifier_continue(byte))
+            && after.is_none_or(|byte| !is_identifier_continue(byte))
+        {
+            return Some(start);
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
+    let mut cursor = before.checked_sub(1)?;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor = cursor.checked_sub(1)?;
+    }
+    Some(cursor)
+}
+
+fn find_matching_paren_backward(bytes: &[u8], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut cursor = close;
+    loop {
+        match bytes[cursor] {
+            b')' => depth += 1,
+            b'(' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => {}
+        }
+        cursor = cursor.checked_sub(1)?;
+    }
+}
+
+fn parse_identifier_backward(source: &str, end: usize) -> Option<(&str, usize)> {
+    let bytes = source.as_bytes();
+    let mut start = end.checked_sub(1)?;
+    if !is_identifier_continue(*bytes.get(start)?) {
+        return None;
+    }
+    while start > 0 && is_identifier_continue(bytes[start - 1]) {
+        start -= 1;
+    }
+    parse_identifier(source, start)
+}
+
+fn externalized_package_modules(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
+    program
+        .model()
+        .input()
+        .package_attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| attribution.module_id)
+        .collect()
+}
+
+fn source_required_package_modules(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeSet<ModuleId> {
+    let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut required = BTreeSet::new();
+
+    loop {
+        let mut changed = false;
+        for dependency in &program.model().input().dependencies {
+            let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+                continue;
+            };
+            if !externalized_packages.contains(&target_module_id)
+                || required.contains(&target_module_id)
+            {
+                continue;
+            }
+            let Some(from_module) = modules_by_id.get(&dependency.from_module_id) else {
+                continue;
+            };
+            if from_module.kind == ModuleKind::Package
+                && externalized_packages.contains(&from_module.id)
+                && !required.contains(&from_module.id)
+            {
+                continue;
+            }
+            let Some(candidate_reads) = candidate_reads_by_module.get(&dependency.from_module_id)
+            else {
+                continue;
+            };
+            let target_bindings = source_exportable_bindings(program, target_module_id);
+            if candidate_reads.is_disjoint(&target_bindings) {
+                continue;
+            }
+            required.insert(target_module_id);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    required
+}
+
+fn source_module_wiring(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> SourceModuleWiring {
+    let mut wiring = SourceModuleWiring::default();
+    let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+
+    for dependency in &program.model().input().dependencies {
+        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+            continue;
+        };
+        let Some(from_module) = modules_by_id.get(&dependency.from_module_id) else {
+            continue;
+        };
+        let Some(target_module) = modules_by_id.get(&target_module_id) else {
+            continue;
+        };
+        if (from_module.kind == ModuleKind::Package
+            && externalized_packages.contains(&from_module.id))
+            || (target_module.kind == ModuleKind::Package
+                && externalized_packages.contains(&target_module.id))
+        {
+            continue;
+        }
+        let Some(candidate_reads) = candidate_reads_by_module.get(&dependency.from_module_id)
+        else {
+            continue;
+        };
+        let target_bindings = source_exportable_bindings(program, target_module_id);
+        let imported_bindings = candidate_reads
+            .intersection(&target_bindings)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if imported_bindings.is_empty() {
+            continue;
+        }
+        wiring
+            .imports_by_module
+            .entry(dependency.from_module_id)
+            .or_default()
+            .entry(target_module_id)
+            .or_default()
+            .extend(imported_bindings.iter().cloned());
+        wiring
+            .exports_by_module
+            .entry(target_module_id)
+            .or_default()
+            .extend(imported_bindings);
+    }
+
+    wiring
+}
+
+fn candidate_source_reads_by_module(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut reads = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for (module_id, binding) in program.model().graph().def_use().unresolved_reads() {
+        reads.entry(module_id).or_default().insert(binding);
+    }
+    for module in program.model().modules() {
+        let Some(source) = program.model().input().module_source_slice(module.id) else {
+            continue;
+        };
+        let local_bindings = source_exportable_bindings(program, module.id);
+        reads.entry(module.id).or_default().extend(
+            identifiers_in_source(source.source)
+                .into_iter()
+                .map(BindingName::new)
+                .filter(|binding| !local_bindings.contains(binding)),
+        );
+    }
+    reads
+}
+
+fn source_exportable_bindings(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> BTreeSet<BindingName> {
+    let mut bindings = source_definition_bindings(program, module_id);
+    bindings.extend(program.model().graph().ast_imports_for(module_id));
+    bindings
+}
+
+fn source_definition_bindings(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> BTreeSet<BindingName> {
+    let mut bindings = program.model().graph().ast_definitions_for(module_id);
+    if let Some(source) = program.model().input().module_source_slice(module_id) {
+        bindings.extend(top_level_definitions_in_source(source.source));
+        bindings.extend(implicit_global_writes_in_source(source.source));
+    }
+    bindings
+}
+
+fn extra_exports_for_module<'a>(
+    _program: &EnrichedProgram,
+    _module_id: ModuleId,
+    sources: impl IntoIterator<Item = Option<&'a BTreeSet<BindingName>>>,
+) -> BTreeSet<BindingName> {
+    let mut exports = BTreeSet::new();
+    for source in sources.into_iter().flatten() {
+        exports.extend(source.iter().cloned());
+    }
+    exports
+}
+
 fn unique_source_definition_modules(
     program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
     let mut definitions = BTreeMap::<BindingName, Option<ModuleId>>::new();
     for module in program.model().modules() {
-        if module.kind == ModuleKind::Package {
+        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
             continue;
         }
-        let source_definitions = program.model().graph().ast_definitions_for(module.id);
+        let source_definitions = source_definition_bindings(program, module.id);
         for binding in source_definitions {
             definitions
                 .entry(binding)
@@ -560,10 +1735,33 @@ fn runtime_helper_kinds(
     helpers
 }
 
+fn runtime_helper_kinds_for_source(
+    graph: &RevertsGraph,
+    source_file_id: u32,
+    source: &str,
+) -> BTreeMap<BindingName, RuntimePreludeBindingKind> {
+    let source_identifiers = identifiers_in_source(source)
+        .into_iter()
+        .map(BindingName::new)
+        .collect::<BTreeSet<_>>();
+    graph
+        .runtime_prelude(source_file_id)
+        .map(|prelude| {
+            prelude
+                .bindings
+                .iter()
+                .filter(|(binding, _kind)| source_identifiers.contains(*binding))
+                .map(|(binding, kind)| (binding.clone(), *kind))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeHelperLowering {
     source: String,
     lowered_helpers: BTreeSet<BindingName>,
+    remaining_helpers: BTreeSet<BindingName>,
 }
 
 fn lower_runtime_helpers(
@@ -593,9 +1791,24 @@ fn lower_runtime_helpers(
             }
         }
     }
+    let remaining_helpers = helper_kinds
+        .iter()
+        .filter(|(helper, kind)| match kind {
+            RuntimePreludeBindingKind::CommonJsWrapper
+            | RuntimePreludeBindingKind::LazyInitializer => {
+                contains_call_to_identifier(lowered.as_str(), helper.as_str())
+            }
+            RuntimePreludeBindingKind::SourceBacked => {
+                contains_identifier_reference(lowered.as_str(), helper.as_str())
+            }
+        })
+        .map(|(helper, _kind)| helper)
+        .cloned()
+        .collect();
     RuntimeHelperLowering {
         source: lowered,
         lowered_helpers,
+        remaining_helpers,
     }
 }
 
@@ -868,13 +2081,80 @@ fn find_matching_brace(source: &str, open: usize) -> Option<usize> {
     None
 }
 
+fn find_matching_bracket(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = open;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'[' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn find_matching_paren(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = open;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
 fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     let mut identifiers = BTreeSet::new();
     let bytes = source.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
         match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'`' => cursor = collect_template_identifiers(source, cursor, &mut identifiers),
             b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
                 cursor = skip_line_comment(bytes, cursor + 2);
             }
@@ -901,7 +2181,123 @@ fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     identifiers
 }
 
-fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
+fn collect_template_identifiers(
+    source: &str,
+    start: usize,
+    identifiers: &mut BTreeSet<String>,
+) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor += 2,
+            b'`' => return cursor + 1,
+            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
+                let open = cursor + 1;
+                let Some(close) = find_matching_brace(source, open) else {
+                    return skip_quoted(bytes, start, b'`');
+                };
+                identifiers.extend(identifiers_in_source(&source[open + 1..close]));
+                cursor = close + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
+    let mut definitions = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "function") => {
+                if let Some((binding, next)) =
+                    parse_identifier_after_keyword(source, cursor, "function")
+                {
+                    definitions.insert(BindingName::new(binding));
+                    cursor = next;
+                } else {
+                    cursor += "function".len();
+                }
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "class") => {
+                if let Some((binding, next)) =
+                    parse_identifier_after_keyword(source, cursor, "class")
+                {
+                    definitions.insert(BindingName::new(binding));
+                    cursor = next;
+                } else {
+                    cursor += "class".len();
+                }
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "var") => {
+                cursor = collect_variable_declaration_definitions(
+                    source,
+                    cursor + "var".len(),
+                    &mut definitions,
+                );
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "let") => {
+                cursor = collect_variable_declaration_definitions(
+                    source,
+                    cursor + "let".len(),
+                    &mut definitions,
+                );
+            }
+            _ if depth == 0 && keyword_at(source, cursor, "const") => {
+                cursor = collect_variable_declaration_definitions(
+                    source,
+                    cursor + "const".len(),
+                    &mut definitions,
+                );
+            }
+            _ => cursor += 1,
+        }
+    }
+    definitions
+}
+
+fn implicit_global_declarations_for_module(
+    source: &str,
+    source_definitions: &BTreeSet<BindingName>,
+    source_imports: &BTreeSet<BindingName>,
+    planned_bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    let top_level_definitions = top_level_definitions_in_source(source);
+    implicit_global_writes_in_source(source)
+        .into_iter()
+        .filter(|binding| !top_level_definitions.contains(binding))
+        .filter(|binding| !source_definitions.contains(binding))
+        .filter(|binding| !source_imports.contains(binding))
+        .filter(|binding| !planned_bindings.contains(binding))
+        .filter(|binding| !binding.as_str().starts_with("__reverts_"))
+        .collect()
+}
+
+fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
+    let mut writes = BTreeSet::new();
+    let declaration_bindings = variable_declaration_binding_starts(source);
     let bytes = source.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -912,6 +2308,718 @@ fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
             }
             b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
                 cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'+' | b'-' if update_operator_at(bytes, cursor).is_some() => {
+                let target_start = skip_ws(bytes, cursor + 2);
+                if let Some((identifier, target_end)) = parse_identifier(source, target_start)
+                    && is_simple_update_target(source, target_start, target_end)
+                {
+                    writes.insert(BindingName::new(identifier));
+                }
+                cursor += 1;
+            }
+            b'{' => {
+                if let Some((end, bindings)) =
+                    object_destructuring_assignment_writes(source, cursor)
+                {
+                    writes.extend(bindings);
+                    cursor = end;
+                } else {
+                    cursor += 1;
+                }
+            }
+            b'[' => {
+                if let Some((end, bindings)) = array_destructuring_assignment_writes(source, cursor)
+                {
+                    writes.extend(bindings);
+                    cursor = end;
+                } else {
+                    cursor += 1;
+                }
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                if declaration_bindings.contains(&start) {
+                    continue;
+                }
+                let identifier = &source[start..cursor];
+                if !is_js_keyword(identifier)
+                    && start
+                        .checked_sub(1)
+                        .and_then(|index| bytes.get(index))
+                        .is_none_or(|byte| !matches!(*byte, b'.' | b'#'))
+                {
+                    let after = skip_ws(bytes, cursor);
+                    if (bytes.get(after) == Some(&b'=')
+                        && bytes.get(after + 1) != Some(&b'=')
+                        && bytes.get(after + 1) != Some(&b'>'))
+                        || update_operator_at(bytes, after).is_some()
+                    {
+                        writes.insert(BindingName::new(identifier));
+                    }
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    writes
+}
+
+fn parse_identifier_after_keyword<'a>(
+    source: &'a str,
+    cursor: usize,
+    keyword: &str,
+) -> Option<(&'a str, usize)> {
+    parse_identifier(source, skip_ws(source.as_bytes(), cursor + keyword.len()))
+}
+
+fn keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
+    source
+        .get(cursor..)
+        .is_some_and(|tail| tail.starts_with(keyword))
+        && cursor
+            .checked_sub(1)
+            .and_then(|index| source.as_bytes().get(index))
+            .is_none_or(|byte| !is_identifier_continue(*byte))
+        && source
+            .as_bytes()
+            .get(cursor + keyword.len())
+            .is_none_or(|byte| !is_identifier_continue(*byte))
+}
+
+fn collect_variable_declaration_definitions(
+    source: &str,
+    mut cursor: usize,
+    definitions: &mut BTreeSet<BindingName>,
+) -> usize {
+    let bytes = source.as_bytes();
+    cursor = skip_ws(bytes, cursor);
+    if let Some((binding, next)) = parse_identifier(source, cursor) {
+        definitions.insert(BindingName::new(binding));
+        cursor = next;
+    }
+
+    let mut nested = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' | b'[' | b'{' => {
+                nested += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                nested = nested.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if nested == 0 => {
+                cursor = skip_ws(bytes, cursor + 1);
+                if let Some((binding, next)) = parse_identifier(source, cursor) {
+                    definitions.insert(BindingName::new(binding));
+                    cursor = next;
+                }
+            }
+            b';' if nested == 0 => return cursor + 1,
+            _ => cursor += 1,
+        }
+    }
+    cursor
+}
+
+fn variable_declaration_binding_starts(source: &str) -> BTreeSet<usize> {
+    let mut starts = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            _ if keyword_at(source, cursor, "var") => {
+                cursor = collect_variable_declaration_binding_starts(
+                    source,
+                    cursor + "var".len(),
+                    &mut starts,
+                );
+            }
+            _ if keyword_at(source, cursor, "let") => {
+                cursor = collect_variable_declaration_binding_starts(
+                    source,
+                    cursor + "let".len(),
+                    &mut starts,
+                );
+            }
+            _ if keyword_at(source, cursor, "const") => {
+                cursor = collect_variable_declaration_binding_starts(
+                    source,
+                    cursor + "const".len(),
+                    &mut starts,
+                );
+            }
+            _ => cursor += 1,
+        }
+    }
+    starts
+}
+
+fn collect_variable_declaration_binding_starts(
+    source: &str,
+    mut cursor: usize,
+    starts: &mut BTreeSet<usize>,
+) -> usize {
+    let bytes = source.as_bytes();
+    cursor = skip_ws(bytes, cursor);
+    if parse_identifier(source, cursor).is_some() {
+        starts.insert(cursor);
+    }
+
+    let mut nested = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' | b'[' | b'{' => {
+                nested += 1;
+                cursor += 1;
+            }
+            b')' if nested == 0 => return cursor + 1,
+            b')' | b']' | b'}' => {
+                nested = nested.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if nested == 0 => {
+                cursor = skip_ws(bytes, cursor + 1);
+                if parse_identifier(source, cursor).is_some() {
+                    starts.insert(cursor);
+                }
+            }
+            b';' if nested == 0 => return cursor + 1,
+            _ => cursor += 1,
+        }
+    }
+    cursor
+}
+
+fn object_destructuring_assignment_writes(
+    source: &str,
+    object_start: usize,
+) -> Option<(usize, Vec<BindingName>)> {
+    let object_end = find_matching_brace(source, object_start)?;
+    let equals = skip_ws(source.as_bytes(), object_end + 1);
+    if source.as_bytes().get(equals) != Some(&b'=') {
+        return None;
+    }
+    let rhs_start = skip_ws(source.as_bytes(), equals + 1);
+    let rhs_end = find_assignment_rhs_end(source, rhs_start);
+    let bindings = parse_object_pattern_bindings(&source[object_start + 1..object_end])
+        .into_iter()
+        .map(|(_, binding)| binding)
+        .collect::<Vec<_>>();
+    (!bindings.is_empty()).then_some((rhs_end, bindings))
+}
+
+fn array_destructuring_assignment_writes(
+    source: &str,
+    array_start: usize,
+) -> Option<(usize, Vec<BindingName>)> {
+    if bracket_starts_member_access(source, array_start) {
+        return None;
+    }
+    let array_end = find_matching_bracket(source, array_start)?;
+    let equals = skip_ws(source.as_bytes(), array_end + 1);
+    if source.as_bytes().get(equals) != Some(&b'=')
+        || source.as_bytes().get(equals + 1) == Some(&b'=')
+        || source.as_bytes().get(equals + 1) == Some(&b'>')
+    {
+        return None;
+    }
+    let rhs_start = skip_ws(source.as_bytes(), equals + 1);
+    let rhs_end = find_assignment_rhs_end(source, rhs_start);
+    let bindings = parse_array_pattern_bindings(&source[array_start + 1..array_end])
+        .into_iter()
+        .map(|(_, binding)| binding)
+        .collect::<Vec<_>>();
+    (!bindings.is_empty()).then_some((rhs_end, bindings))
+}
+
+fn rewrite_object_destructuring_helper_writes(
+    source: &str,
+    object_start: usize,
+    helpers: &BTreeSet<BindingName>,
+) -> Option<(usize, String)> {
+    let object_end = find_matching_brace(source, object_start)?;
+    let equals = skip_ws(source.as_bytes(), object_end + 1);
+    if source.as_bytes().get(equals) != Some(&b'=') {
+        return None;
+    }
+    let rhs_start = skip_ws(source.as_bytes(), equals + 1);
+    let rhs_end = find_assignment_rhs_end(source, rhs_start);
+    let setters = parse_object_pattern_bindings(&source[object_start + 1..object_end])
+        .into_iter()
+        .filter(|(_, binding)| helpers.contains(binding))
+        .collect::<Vec<_>>();
+    if setters.is_empty() {
+        return None;
+    }
+    let rhs = &source[rhs_start..rhs_end];
+    let assignments = setters
+        .into_iter()
+        .map(|(key, binding)| {
+            format!(
+                "{}(__reverts_destructure{})",
+                runtime_helper_setter_name(&binding),
+                property_access_source(key.as_str())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some((
+        rhs_end,
+        format!(
+            "(() => {{ const __reverts_destructure = {rhs}; {assignments}; return __reverts_destructure; }})()"
+        ),
+    ))
+}
+
+fn rewrite_array_destructuring_helper_writes(
+    source: &str,
+    array_start: usize,
+    helpers: &BTreeSet<BindingName>,
+) -> Option<(usize, String)> {
+    if bracket_starts_member_access(source, array_start) {
+        return None;
+    }
+    let array_end = find_matching_bracket(source, array_start)?;
+    let equals = skip_ws(source.as_bytes(), array_end + 1);
+    if source.as_bytes().get(equals) != Some(&b'=')
+        || source.as_bytes().get(equals + 1) == Some(&b'=')
+        || source.as_bytes().get(equals + 1) == Some(&b'>')
+    {
+        return None;
+    }
+    let rhs_start = skip_ws(source.as_bytes(), equals + 1);
+    let rhs_end = find_assignment_rhs_end(source, rhs_start);
+    let setters = parse_array_pattern_bindings(&source[array_start + 1..array_end])
+        .into_iter()
+        .filter(|(_, binding)| helpers.contains(binding))
+        .collect::<Vec<_>>();
+    if setters.is_empty() {
+        return None;
+    }
+    let rhs = &source[rhs_start..rhs_end];
+    let assignments = setters
+        .into_iter()
+        .map(|(index, binding)| {
+            format!(
+                "{}(__reverts_destructure[{index}])",
+                runtime_helper_setter_name(&binding)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some((
+        rhs_end,
+        format!(
+            "(() => {{ const __reverts_destructure = {rhs}; {assignments}; return __reverts_destructure; }})()"
+        ),
+    ))
+}
+
+fn bracket_starts_member_access(source: &str, bracket_start: usize) -> bool {
+    source
+        .as_bytes()
+        .get(..bracket_start)
+        .and_then(|prefix| {
+            prefix
+                .iter()
+                .rposition(|byte| !byte.is_ascii_whitespace())
+                .map(|position| prefix[position])
+        })
+        .is_some_and(|previous| {
+            is_identifier_continue(previous) || matches!(previous, b')' | b']' | b'}' | b'.')
+        })
+}
+
+fn parse_object_pattern_bindings(source: &str) -> Vec<(String, BindingName)> {
+    split_top_level_properties(source)
+        .into_iter()
+        .filter_map(|property| {
+            let property = property.trim();
+            let (key, binding) = if let Some(colon) = property.find(':') {
+                let key = property[..colon].trim().trim_matches(['"', '\'']);
+                let binding = parse_pattern_binding_identifier(property[colon + 1..].trim())?;
+                (key.to_string(), binding)
+            } else {
+                let binding = parse_pattern_binding_identifier(property)?;
+                (binding.as_str().to_string(), binding)
+            };
+            Some((key, binding))
+        })
+        .collect()
+}
+
+fn parse_array_pattern_bindings(source: &str) -> Vec<(usize, BindingName)> {
+    split_top_level_properties(source)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, element)| {
+            let binding = parse_pattern_binding_identifier(element)?;
+            Some((index, binding))
+        })
+        .collect()
+}
+
+fn parse_pattern_binding_identifier(source: &str) -> Option<BindingName> {
+    let trimmed = source.trim();
+    let target = trimmed
+        .strip_prefix("...")
+        .unwrap_or(trimmed)
+        .split('=')
+        .next()?
+        .trim();
+    let (binding, next) = parse_identifier(target, 0)?;
+    if is_js_keyword(binding) || skip_ws(target.as_bytes(), next) != target.len() {
+        return None;
+    }
+    Some(BindingName::new(binding))
+}
+
+fn property_access_source(key: &str) -> String {
+    if key
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| is_identifier_start(*byte))
+        && key.as_bytes()[1..]
+            .iter()
+            .all(|byte| is_identifier_continue(*byte))
+        && !is_js_keyword(key)
+    {
+        format!(".{key}")
+    } else {
+        format!("[{key:?}]")
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UpdateOperator {
+    Increment,
+    Decrement,
+}
+
+impl UpdateOperator {
+    fn source(self) -> &'static str {
+        match self {
+            Self::Increment => "++",
+            Self::Decrement => "--",
+        }
+    }
+}
+
+fn update_operator_at(bytes: &[u8], cursor: usize) -> Option<UpdateOperator> {
+    match (bytes.get(cursor), bytes.get(cursor + 1)) {
+        (Some(b'+'), Some(b'+')) => Some(UpdateOperator::Increment),
+        (Some(b'-'), Some(b'-')) => Some(UpdateOperator::Decrement),
+        _ => None,
+    }
+}
+
+fn is_simple_update_target(source: &str, start: usize, end: usize) -> bool {
+    let bytes = source.as_bytes();
+    let identifier = &source[start..end];
+    if is_js_keyword(identifier) {
+        return false;
+    }
+    if start
+        .checked_sub(1)
+        .and_then(|index| bytes.get(index))
+        .is_some_and(|byte| matches!(*byte, b'#' | b'.'))
+    {
+        return false;
+    }
+    let after = skip_ws(bytes, end);
+    !matches!(bytes.get(after), Some(b'.' | b'['))
+}
+
+fn rewrite_runtime_helper_writes(source: &str, helpers: &BTreeSet<BindingName>) -> String {
+    let mut output = String::new();
+    let mut last = 0usize;
+    let mut changed = false;
+    let declaration_bindings = variable_declaration_binding_starts(source);
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'+' | b'-' => {
+                let Some(operator) = update_operator_at(bytes, cursor) else {
+                    cursor += 1;
+                    continue;
+                };
+                let target_start = skip_ws(bytes, cursor + 2);
+                let Some((identifier, target_end)) = parse_identifier(source, target_start) else {
+                    cursor += 1;
+                    continue;
+                };
+                if declaration_bindings.contains(&target_start)
+                    || !is_simple_update_target(source, target_start, target_end)
+                {
+                    cursor += 1;
+                    continue;
+                }
+                let Some(helper) = helpers
+                    .iter()
+                    .find(|binding| binding.as_str() == identifier)
+                else {
+                    cursor += 1;
+                    continue;
+                };
+                output.push_str(&source[last..cursor]);
+                output.push_str(
+                    runtime_helper_update_expression(helper, operator, UpdatePosition::Prefix)
+                        .as_str(),
+                );
+                last = target_end;
+                cursor = target_end;
+                changed = true;
+            }
+            b'{' => {
+                if let Some((end, replacement)) =
+                    rewrite_object_destructuring_helper_writes(source, cursor, helpers)
+                {
+                    output.push_str(&source[last..cursor]);
+                    output.push_str(replacement.as_str());
+                    last = end;
+                    cursor = end;
+                    changed = true;
+                } else {
+                    cursor += 1;
+                }
+            }
+            b'[' => {
+                if let Some((end, replacement)) =
+                    rewrite_array_destructuring_helper_writes(source, cursor, helpers)
+                {
+                    output.push_str(&source[last..cursor]);
+                    output.push_str(replacement.as_str());
+                    last = end;
+                    cursor = end;
+                    changed = true;
+                } else {
+                    cursor += 1;
+                }
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                if declaration_bindings.contains(&start) {
+                    continue;
+                }
+                let identifier = &source[start..cursor];
+                let Some(helper) = helpers
+                    .iter()
+                    .find(|binding| binding.as_str() == identifier)
+                else {
+                    continue;
+                };
+                if start
+                    .checked_sub(1)
+                    .and_then(|index| bytes.get(index))
+                    .is_some_and(|byte| matches!(*byte, b'#' | b'.'))
+                {
+                    continue;
+                }
+                let equals = skip_ws(bytes, cursor);
+                if let Some(operator) = update_operator_at(bytes, equals) {
+                    output.push_str(&source[last..start]);
+                    output.push_str(
+                        runtime_helper_update_expression(helper, operator, UpdatePosition::Postfix)
+                            .as_str(),
+                    );
+                    last = equals + 2;
+                    cursor = equals + 2;
+                    changed = true;
+                    continue;
+                }
+                if bytes.get(equals) != Some(&b'=')
+                    || bytes.get(equals + 1) == Some(&b'=')
+                    || bytes.get(equals + 1) == Some(&b'>')
+                {
+                    continue;
+                }
+                let rhs_start = skip_ws(bytes, equals + 1);
+                let rhs_end = find_assignment_rhs_end(source, rhs_start);
+                let mut nested_helpers = helpers.clone();
+                nested_helpers.remove(helper);
+                let rhs =
+                    rewrite_runtime_helper_writes(&source[rhs_start..rhs_end], &nested_helpers);
+                output.push_str(&source[last..start]);
+                output.push_str(runtime_helper_setter_name(helper).as_str());
+                output.push('(');
+                output.push_str(rhs.as_str());
+                output.push(')');
+                last = rhs_end;
+                cursor = rhs_end;
+                changed = true;
+            }
+            _ => cursor += 1,
+        }
+    }
+    if !changed {
+        return source.to_string();
+    }
+    output.push_str(&source[last..]);
+    output
+}
+
+#[derive(Clone, Copy)]
+enum UpdatePosition {
+    Prefix,
+    Postfix,
+}
+
+fn runtime_helper_update_expression(
+    binding: &BindingName,
+    operator: UpdateOperator,
+    position: UpdatePosition,
+) -> String {
+    let binding_name = binding.as_str();
+    let setter = runtime_helper_setter_name(binding);
+    match position {
+        UpdatePosition::Prefix => format!(
+            "(() => {{ let __reverts_update = {binding_name}; let __reverts_next = {operator}__reverts_update; {setter}(__reverts_update); return __reverts_next; }})()",
+            operator = operator.source()
+        ),
+        UpdatePosition::Postfix => format!(
+            "(() => {{ let __reverts_update = {binding_name}; let __reverts_previous = __reverts_update{operator}; {setter}(__reverts_update); return __reverts_previous; }})()",
+            operator = operator.source()
+        ),
+    }
+}
+
+fn find_assignment_rhs_end(source: &str, mut cursor: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => return cursor,
+            b']' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => return cursor,
+            b'}' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => return cursor,
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' | b';' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                return cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    cursor
+}
+
+fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
+    identifier_reference_positions(source, identifier).any(|cursor| {
+        let after = skip_ws(source.as_bytes(), cursor);
+        source.as_bytes().get(after) == Some(&b'(')
+    })
+}
+
+fn contains_identifier_reference(source: &str, identifier: &str) -> bool {
+    identifiers_in_source(source).contains(identifier)
+}
+
+fn identifier_reference_positions<'a>(
+    source: &'a str,
+    identifier: &'a str,
+) -> impl Iterator<Item = usize> + 'a {
+    let mut positions = Vec::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
             }
             byte if is_identifier_start(byte) => {
                 let start = cursor;
@@ -927,16 +3035,13 @@ fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
                     {
                         continue;
                     }
-                    let after = skip_ws(bytes, cursor);
-                    if bytes.get(after) == Some(&b'(') {
-                        return true;
-                    }
+                    positions.push(cursor);
                 }
             }
             _ => cursor += 1,
         }
     }
-    false
+    positions.into_iter()
 }
 
 fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {
@@ -999,6 +3104,9 @@ fn is_js_keyword(value: &str) -> bool {
 }
 
 fn skip_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
+    if quote == b'`' {
+        return skip_template_literal(bytes, start);
+    }
     let mut cursor = start + 1;
     while cursor < bytes.len() {
         if bytes[cursor] == b'\\' {
@@ -1009,6 +3117,52 @@ fn skip_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
             return cursor + 1;
         }
         cursor += 1;
+    }
+    bytes.len()
+}
+
+fn skip_template_literal(bytes: &[u8], start: usize) -> usize {
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor += 2,
+            b'`' => return cursor + 1,
+            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
+                cursor = skip_template_expression(bytes, cursor + 2);
+            }
+            _ => cursor += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_template_expression(bytes: &[u8], mut cursor: usize) -> usize {
+    let mut depth = 1usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+                if depth == 0 {
+                    return cursor;
+                }
+            }
+            _ => cursor += 1,
+        }
     }
     bytes.len()
 }
@@ -1106,6 +3260,10 @@ fn runtime_prelude_path(source_file_id: u32) -> String {
     format!("modules/runtime/source-{source_file_id}-prelude.ts")
 }
 
+fn runtime_helpers_path(source_file_id: u32) -> String {
+    format!("modules/runtime/source-{source_file_id}-helpers.ts")
+}
+
 fn named_import_statement<'a>(
     bindings: impl Iterator<Item = &'a BindingName>,
     specifier: &str,
@@ -1117,12 +3275,83 @@ fn named_import_statement<'a>(
     format!("import {{ {names} }} from '{specifier}';")
 }
 
+fn runtime_helper_import_statement(
+    bindings: &BTreeSet<BindingName>,
+    setter_bindings: &BTreeSet<BindingName>,
+    specifier: &str,
+) -> String {
+    let mut names = bindings
+        .iter()
+        .map(|binding| binding.as_str().to_string())
+        .collect::<Vec<_>>();
+    names.extend(setter_bindings.iter().map(runtime_helper_setter_name));
+    format!("import {{ {} }} from '{specifier}';", names.join(", "))
+}
+
+fn runtime_helper_setter_name(binding: &BindingName) -> String {
+    format!("__reverts_set_{}", binding.as_str())
+}
+
+fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
+    let setter = runtime_helper_setter_name(binding);
+    let binding = binding.as_str();
+    format!("function {setter}(value) {{ {binding} = value; return value; }}")
+}
+
+fn runtime_namespace_export_statement(namespace_export: &RuntimeNamespaceExport) -> String {
+    let properties = namespace_export
+        .exports
+        .iter()
+        .map(|(export_name, binding)| {
+            format!(
+                "{}: {{ enumerable: true, get: () => {} }}",
+                property_key_source(export_name),
+                binding.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Object.defineProperties({}, {{ {} }});",
+        namespace_export.namespace.as_str(),
+        properties
+    )
+}
+
+fn property_key_source(key: &str) -> String {
+    if key
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| is_identifier_start(*byte))
+        && key.as_bytes()[1..]
+            .iter()
+            .all(|byte| is_identifier_continue(*byte))
+        && !is_js_keyword(key)
+    {
+        key.to_string()
+    } else {
+        format!("{key:?}")
+    }
+}
+
+fn node_require_prelude_statement() -> String {
+    "import { createRequire as __reverts_createRequire } from 'node:module';\nvar require = __reverts_createRequire(import.meta.url);".to_string()
+}
+
 fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
     let names = bindings
         .map(BindingName::as_str)
         .collect::<Vec<_>>()
         .join(", ");
     format!("export {{ {names} }};")
+}
+
+fn variable_declaration_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
+    let names = bindings
+        .map(BindingName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("var {names};")
 }
 
 fn relative_import_specifier(from_file: &str, to_file: &str) -> String {
@@ -1207,7 +3436,9 @@ mod tests {
 
     use reverts_graph::RuntimePreludeBindingKind;
     use reverts_input::{
-        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
+        InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
+        PackageAttributionInput, PackageEmissionMode, ProjectInput, SourceFileInput, SourceSpan,
+        SymbolInput,
     };
     use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
     use reverts_model::{
@@ -1638,11 +3869,11 @@ mod tests {
     }
 
     #[test]
-    fn entrypoint_prelude_imports_source_modules_and_exports_cli() {
+    fn entrypoint_runtime_is_inlined_into_cli_with_tail_side_effects() {
         let planner = ImportExportPlanner;
         let prelude = "function main() { return cliEntry(); }\n";
-        let body = "var cliEntry = () => 'ok';\n";
-        let tail = "main();\n";
+        let body = "var cliEntry = () => 'ok';\nvar cliInit = () => {};\n";
+        let tail = "cliInit();\nprocess.env.FLAG = 'ok';\nmain();\n";
         let source = format!("{prelude}{body}{tail}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files
@@ -1672,32 +3903,844 @@ mod tests {
             .iter()
             .find(|file| file.path == "modules/entry.ts")
             .expect("module file should be planned");
-        let runtime_file = plan
-            .files
-            .iter()
-            .find(|file| file.path == "modules/runtime/source-1-prelude.ts")
-            .expect("runtime prelude should be planned");
         let cli_file = plan
             .files
             .iter()
             .find(|file| file.path == "cli.ts")
             .expect("cli entrypoint should be planned");
 
-        assert!(module_file.body.join("\n").contains("export { cliEntry };"));
         assert!(
-            runtime_file
+            plan.files
+                .iter()
+                .all(|file| file.path != "modules/runtime/source-1-prelude.ts")
+        );
+        let module_source = module_file.body.join("\n");
+        let cli_source = cli_file.body.join("\n");
+
+        assert!(module_source.contains("export { cliEntry, cliInit };"));
+        assert!(cli_source.contains("#!/usr/bin/env node"));
+        assert!(cli_source.contains("import { cliEntry, cliInit } from './modules/entry.js';"));
+        assert!(cli_source.contains("function main()"));
+        assert!(cli_source.contains("cliInit();"));
+        assert!(cli_source.contains("process.env.FLAG = 'ok';"));
+        assert!(cli_source.contains("await main();"));
+        assert!(!cli_source.contains("source-1-prelude"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_imports_source_required_package_bindings() {
+        let planner = ImportExportPlanner;
+        let prelude = "function main() { return packageInit(); }\n";
+        let body = "var value = packageInit();\nexport { value };\n";
+        let tail = "packageInit();\nmain();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some("function packageInit() { return 1; }".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let cli_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "cli.ts")
+            .expect("cli entrypoint should be planned");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("source-required package file should be emitted");
+        let cli_source = cli_file.body.join("\n");
+
+        assert!(cli_source.contains("import { packageInit } from './modules/package.js';"));
+        assert!(cli_source.contains("packageInit();"));
+        assert!(
+            package_file
                 .body
                 .join("\n")
-                .contains("import { cliEntry } from '../entry.js';")
+                .contains("export { packageInit };")
         );
-        assert!(runtime_file.body.join("\n").contains("export { main };"));
-        assert!(cli_file.body.join("\n").contains("#!/usr/bin/env node"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_drops_noop_runtime_side_effects() {
+        let planner = ImportExportPlanner;
+        let prelude = "var noop = () => {};\nfunction main() { return 1; }\n";
+        let body = "export const value = 1;\n";
+        let tail = "noop();\nmain();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let cli_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "cli.ts")
+            .expect("cli entrypoint should be planned");
+        let cli_source = cli_file.body.join("\n");
+
+        assert!(!cli_source.contains("noop();"));
+        assert!(!cli_source.contains("var noop"));
+        assert!(cli_source.contains("function main()"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_keeps_non_noop_runtime_side_effect_dependencies() {
+        let planner = ImportExportPlanner;
+        let prelude =
+            "var setup = () => { globalThis.ready = true; };\nfunction main() { return 1; }\n";
+        let body = "export const value = 1;\n";
+        let tail = "setup();\nmain();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let cli_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "cli.ts")
+            .expect("cli entrypoint should be planned");
+        let cli_source = cli_file.body.join("\n");
+
+        assert!(cli_source.contains("var setup"));
+        assert!(cli_source.contains("setup();"));
+        assert!(cli_source.contains("globalThis.ready = true"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_ignores_globals_and_property_names() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "function local() { function nested() {} }\n\
+             let { isReady: localAlias } = source;\n\
+             class Transport { buffer = Buffer.alloc(0); async start() {} stop() {} }\n\
+             console.log(request.method); Promise.resolve().then(() => (packageInit(), ns));",
+        );
+
+        assert!(identifiers.contains("packageInit"));
+        assert!(identifiers.contains("request"));
+        assert!(identifiers.contains("ns"));
+        assert!(identifiers.contains("source"));
+        assert!(!identifiers.contains("console"));
+        assert!(!identifiers.contains("log"));
+        assert!(!identifiers.contains("method"));
+        assert!(!identifiers.contains("Promise"));
+        assert!(!identifiers.contains("resolve"));
+        assert!(!identifiers.contains("then"));
+        assert!(!identifiers.contains("local"));
+        assert!(!identifiers.contains("nested"));
+        assert!(!identifiers.contains("localAlias"));
+        assert!(!identifiers.contains("buffer"));
+        assert!(!identifiers.contains("start"));
+        assert!(!identifiers.contains("stop"));
+    }
+
+    #[test]
+    fn runtime_namespace_exports_ignore_local_empty_objects() {
+        let exports = super::runtime_namespace_exports(
+            "function local() { var localNs = {}; expose(localNs, { bad: () => missing }); }\n\
+             var ns = {};\n\
+             expose(ns, { ok: () => ready });",
+        );
+
+        assert!(exports.contains_key(&BindingName::new("ns")));
+        assert!(!exports.contains_key(&BindingName::new("localNs")));
+    }
+
+    #[test]
+    fn module_dependencies_import_unresolved_source_bindings() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "entry.js",
+            Some("var value = (() => helper())();\nexport { value };".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "helper.js",
+            Some("function helper() { return 1; }".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "helper",
+                "modules/helper.ts",
+                "fixture-helper",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::proposed(
+                ModuleId(2),
+                "fixture-helper",
+                Some("1.0.0".to_string()),
+                PackageEmissionMode::ApplicationSource,
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/helper.ts")
+            .expect("helper file should be planned");
+
         assert!(
-            cli_file
+            entry_file
                 .body
                 .join("\n")
-                .contains("import { main } from './modules/runtime/source-1-prelude.js';")
+                .contains("import { helper } from './helper.js';")
         );
-        assert!(cli_file.body.join("\n").contains("await main();"));
+        assert!(helper_file.body.join("\n").contains("export { helper };"));
+    }
+
+    #[test]
+    fn accepted_external_package_with_source_read_is_emitted_locally() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "entry.js",
+            Some("packageInit();\nexport const value = 1;".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some("function packageInit() { return 1; }".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("source-read package file should be emitted");
+
+        assert!(
+            entry_file
+                .body
+                .join("\n")
+                .contains("import { packageInit } from './package.js';")
+        );
+        assert!(
+            package_file
+                .body
+                .join("\n")
+                .contains("export { packageInit };")
+        );
+    }
+
+    #[test]
+    fn source_module_import_takes_precedence_over_same_named_runtime_helper() {
+        let planner = ImportExportPlanner;
+        let prelude = "function shared() { return 0; }\n";
+        let body = "var value = shared();\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "shared.js",
+            Some("function shared() { return 2; }\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "shared", "modules/shared.ts")
+                .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
+
+        assert!(entry_source.contains("import { shared } from './shared.js';"));
+        assert!(!entry_source.contains("source-1-prelude"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.path != "modules/runtime/source-1-helpers.ts")
+        );
+    }
+
+    #[test]
+    fn runtime_prelude_binding_written_by_module_uses_live_setter() {
+        let planner = ImportExportPlanner;
+        let prelude = "var shared = 0;\n";
+        let body = "shared = 1;\nexport { shared };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
+
+        assert!(entry_source.contains(
+            "import { shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(entry_source.contains("__reverts_set_shared(1);"));
+        assert!(entry_source.contains("export { shared };"));
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { shared = value; return value; }")
+        );
+        assert!(helper_source.contains("export { __reverts_set_shared, shared };"));
+    }
+
+    #[test]
+    fn runtime_prelude_update_writes_use_live_setters() {
+        let planner = ImportExportPlanner;
+        let prelude = "var counter = 2;\nvar result;\n";
+        let body = "result = counter--;\n++counter;\nexport { counter, result };\n";
+        let source = format!("{prelude}{body}");
+        assert!(
+            super::implicit_global_writes_in_source(body).contains(&BindingName::new("counter"))
+        );
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
+
+        assert!(entry_source.contains(
+            "import { counter, result, __reverts_set_counter, __reverts_set_result } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(entry_source.contains("__reverts_set_result((() => {"));
+        assert!(entry_source.contains("let __reverts_previous = __reverts_update--;"));
+        assert!(entry_source.contains("let __reverts_next = ++__reverts_update;"));
+        assert!(entry_source.contains("__reverts_set_counter(__reverts_update);"));
+        assert!(!entry_source.contains("counter--"));
+        assert!(!entry_source.contains("++counter"));
+    }
+
+    #[test]
+    fn runtime_helper_files_import_source_module_dependencies_and_initialize_namespaces() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { ready: () => ready });\n",
+            "function ready() { return true; }\n",
+            "function helper() { return Promise.resolve().then(() => (init(), ns)); }\n",
+        );
+        let entry_body = "var value = helper();\nexport { value };\n";
+        let init_body = "var init = () => {};\n";
+        let source = format!("{prelude}{entry_body}{init_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + entry_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "init", "modules/init.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + entry_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+        let init_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/init.ts")
+            .expect("init file should be planned");
+        let init_source = init_file.body.join("\n");
+
+        assert!(helper_source.contains("import { init } from '../init.js';"));
+        assert!(helper_source.contains("Object.defineProperties(ns,"));
+        assert!(helper_source.contains("get: () => ready"));
+        assert!(init_source.contains("export { init };"));
+    }
+
+    #[test]
+    fn runtime_prelude_array_destructuring_writes_use_live_setters() {
+        let planner = ImportExportPlanner;
+        let prelude = "var left, right;\n";
+        let body = "[left, right] = [1, 2];\nexport { left, right };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
+
+        assert!(entry_source.contains(
+            "import { left, right, __reverts_set_left, __reverts_set_right } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(entry_source.contains("__reverts_set_left(__reverts_destructure[0]);"));
+        assert!(entry_source.contains("__reverts_set_right(__reverts_destructure[1]);"));
+        assert!(!entry_source.contains("[left, right] ="));
+    }
+
+    #[test]
+    fn runtime_prelude_write_inside_computed_class_key_uses_live_setter() {
+        let planner = ImportExportPlanner;
+        let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream;\nvar holder;\n";
+        let body = "var init = J(() => { Stream = class Stream { [(holder = new WeakMap(), Symbol.iterator)]() { return 1; } }; });\nexport { Stream, init };\n";
+        let source = format!("{prelude}{body}");
+        assert!(
+            super::implicit_global_writes_in_source(body).contains(&BindingName::new("holder"))
+        );
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
+
+        assert!(entry_source.contains("__reverts_set_Stream"));
+        assert!(entry_source.contains("__reverts_set_holder"));
+        assert!(entry_source.contains("__reverts_set_holder(new WeakMap())"));
+        assert!(!entry_source.contains("holder = new WeakMap()"));
+    }
+
+    #[test]
+    fn runtime_helper_namespace_exports_initialize_empty_object_helpers() {
+        let planner = ImportExportPlanner;
+        let prelude = "var zT = () => 'enum';\nvar m = {};\nM5(m, { enum: () => zT });\nvar d2;\n";
+        let body = "d2 = m;\nexport { d2 };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(
+            entry_source.contains(
+                "import { d2, m, __reverts_set_d2 } from './runtime/source-1-helpers.js';"
+            )
+        );
+        assert!(helper_source.contains("var zT = () => 'enum';"));
+        assert!(helper_source.contains("var m = {};"));
+        assert!(helper_source.contains(
+            "Object.defineProperties(m, { enum: { enumerable: true, get: () => zT } });"
+        ));
+        assert!(helper_source.contains("export { __reverts_set_d2, d2, m };"));
+    }
+
+    #[test]
+    fn array_member_assignment_is_not_treated_as_binding_pattern() {
+        assert!(
+            super::array_destructuring_assignment_writes("[this.value] = values;", 0).is_none()
+        );
+        assert!(super::array_destructuring_assignment_writes("object[key] = value;", 6).is_none());
+    }
+
+    #[test]
+    fn template_interpolation_runtime_helper_is_imported_from_prelude() {
+        let planner = ImportExportPlanner;
+        let prelude = "var EDL = 'date';\n";
+        let body = "var value = new RegExp(`^${EDL}$`);\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(entry_source.contains("import { EDL } from './runtime/source-1-helpers.js';"));
+        assert!(helper_source.contains("var EDL = 'date';"));
+        assert!(helper_source.contains("export { EDL };"));
+    }
+
+    #[test]
+    fn bare_commonjs_require_gets_esm_create_require_bridge() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("var crypto = require('crypto');\nexport { crypto };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_source = plan.files[0].body.join("\n");
+
+        assert!(
+            entry_source.contains(
+                "import { createRequire as __reverts_createRequire } from 'node:module';"
+            )
+        );
+        assert!(entry_source.contains("var require = __reverts_createRequire(import.meta.url);"));
+        assert!(entry_source.contains("require('crypto')"));
+    }
+
+    #[test]
+    fn require_bridge_does_not_redeclare_implicit_require_global() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("require('fs');\nrequire = require;\nexport const value = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_source = plan.files[0].body.join("\n");
+
+        assert!(entry_source.contains("var require = __reverts_createRequire(import.meta.url);"));
+        assert!(!entry_source.contains("const require ="));
+        assert!(!entry_source.contains("var require;\n"));
     }
 }

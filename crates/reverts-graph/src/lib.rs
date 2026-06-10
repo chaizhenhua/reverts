@@ -72,9 +72,28 @@ impl RuntimePrelude {
         &self,
         bindings: impl Iterator<Item = &'a BindingName>,
     ) -> String {
+        let needed = self.required_bindings_for(bindings);
+        let mut snippets = BTreeMap::<u32, String>::new();
+
+        for binding in needed {
+            let Some(snippet) = self.snippets.get(&binding) else {
+                continue;
+            };
+            snippets
+                .entry(snippet.byte_start)
+                .or_insert_with(|| snippet.source.clone());
+        }
+
+        snippets.into_values().collect::<Vec<_>>().join("\n")
+    }
+
+    #[must_use]
+    pub fn required_bindings_for<'a>(
+        &self,
+        bindings: impl Iterator<Item = &'a BindingName>,
+    ) -> BTreeSet<BindingName> {
         let mut needed = bindings.cloned().collect::<BTreeSet<_>>();
         let mut visited = BTreeSet::<BindingName>::new();
-        let mut snippets = BTreeMap::<u32, String>::new();
 
         while let Some(binding) = needed
             .iter()
@@ -85,9 +104,6 @@ impl RuntimePrelude {
             let Some(snippet) = self.snippets.get(&binding) else {
                 continue;
             };
-            snippets
-                .entry(snippet.byte_start)
-                .or_insert_with(|| snippet.source.clone());
             for identifier in identifiers_in_source(snippet.source.as_str()) {
                 let candidate = BindingName::new(identifier);
                 if self.bindings.contains_key(&candidate) && !visited.contains(&candidate) {
@@ -96,7 +112,7 @@ impl RuntimePrelude {
             }
         }
 
-        snippets.into_values().collect::<Vec<_>>().join("\n")
+        visited
     }
 }
 
@@ -107,10 +123,17 @@ pub struct RuntimePreludeSnippet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreludeSideEffect {
+    pub source: String,
+    pub byte_start: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEntrypoint {
     pub source_file_id: u32,
     pub callee: BindingName,
     pub statement_source: String,
+    pub side_effects: Vec<RuntimePreludeSideEffect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -567,18 +590,32 @@ fn collect_runtime_prelude_declarations(
     let mut snippets_by_binding = BTreeMap::new();
     let mut snippets = Vec::new();
     let mut entrypoint_candidate = None;
+    let mut entrypoint_side_effects = Vec::new();
+    let tail_runtime_start = module_spans.iter().map(|(_, end)| *end).max().unwrap_or(0);
     for statement in &program.body {
         let span = statement.span();
         if !span_outside_module_spans(span.start, span.end, module_spans) {
             continue;
         }
-        if let Some(candidate) =
+        if let Some(mut candidate) =
             runtime_entrypoint_from_statement(source_file_id, statement, source)
         {
+            candidate.side_effects = entrypoint_side_effects.clone();
             entrypoint_candidate = Some(candidate);
+        }
+        if let Some(namespace_initializer) =
+            runtime_namespace_initializer_statement(statement, source)
+        {
+            snippets.push(namespace_initializer);
         }
         let declarations = runtime_prelude_declarations_from_statement(statement, source);
         if declarations.is_empty() {
+            if span.start >= tail_runtime_start
+                && let Some(side_effect) =
+                    runtime_entrypoint_side_effect_from_statement(statement, source)
+            {
+                entrypoint_side_effects.push(side_effect);
+            }
             continue;
         }
         for declaration in declarations {
@@ -625,6 +662,50 @@ fn runtime_entrypoint_from_statement(
         source_file_id,
         callee: BindingName::new(callee.name.as_str()),
         statement_source,
+        side_effects: Vec::new(),
+    })
+}
+
+fn runtime_namespace_initializer_statement(
+    statement: &Statement<'_>,
+    source: &str,
+) -> Option<String> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    let Expression::CallExpression(_) = &statement.expression else {
+        return None;
+    };
+    let span = statement.span();
+    let statement_source = source.get(span.start as usize..span.end as usize)?;
+    (statement_source.contains("=>") && statement_source.contains('{'))
+        .then(|| statement_source.to_string())
+}
+
+fn runtime_entrypoint_side_effect_from_statement(
+    statement: &Statement<'_>,
+    source: &str,
+) -> Option<RuntimePreludeSideEffect> {
+    if runtime_namespace_initializer_statement(statement, source).is_some() {
+        return None;
+    }
+    match statement {
+        Statement::VariableDeclaration(_)
+        | Statement::FunctionDeclaration(_)
+        | Statement::ClassDeclaration(_)
+        | Statement::ImportDeclaration(_)
+        | Statement::ExportNamedDeclaration(_)
+        | Statement::ExportDefaultDeclaration(_)
+        | Statement::ExportAllDeclaration(_) => return None,
+        _ => {}
+    }
+    let span = statement.span();
+    let source = source
+        .get(span.start as usize..span.end as usize)?
+        .to_string();
+    Some(RuntimePreludeSideEffect {
+        source,
+        byte_start: span.start,
     })
 }
 
@@ -801,8 +882,12 @@ fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
-        if matches!(byte, b'\'' | b'"' | b'`') {
+        if matches!(byte, b'\'' | b'"') {
             index = skip_quoted_source(bytes, index, byte);
+            continue;
+        }
+        if byte == b'`' {
+            index = collect_template_identifiers(source, index, &mut identifiers);
             continue;
         }
         if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
@@ -828,6 +913,61 @@ fn identifiers_in_source(source: &str) -> BTreeSet<String> {
         index += 1;
     }
     identifiers
+}
+
+fn collect_template_identifiers(
+    source: &str,
+    start: usize,
+    identifiers: &mut BTreeSet<String>,
+) -> usize {
+    let bytes = source.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => return index + 1,
+            b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                let open = index + 1;
+                let Some(close) = find_matching_template_expression(source, open) else {
+                    return skip_quoted_source(bytes, start, b'`');
+                };
+                identifiers.extend(identifiers_in_source(&source[open + 1..close]));
+                index = close + 1;
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn find_matching_template_expression(source: &str, open: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut index = open;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => index = skip_quoted_source(bytes, index, bytes[index]),
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index = skip_line_comment(bytes, index + 2);
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment(bytes, index + 2);
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 fn skip_quoted_source(bytes: &[u8], start: usize, quote: u8) -> usize {
@@ -2366,7 +2506,7 @@ mod tests {
             "function main() { return helper(); }\n",
         );
         let body = "export const moduleValue = 1;\n";
-        let tail = "main();\n";
+        let tail = "init();\nprocess.env.FLAG = '1';\nmain();\n";
         let source = format!("{prelude}{body}{tail}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files
@@ -2394,11 +2534,48 @@ mod tests {
 
         assert_eq!(entrypoint.callee.as_str(), "main");
         assert_eq!(entrypoint.statement_source.as_str(), "main();");
+        assert_eq!(
+            entrypoint
+                .side_effects
+                .iter()
+                .map(|side_effect| side_effect.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["init();", "process.env.FLAG = '1';"]
+        );
         assert!(source.contains("function main()"));
         assert!(source.contains("var helper"));
         assert!(source.contains("var dependency"));
         assert!(!source.contains("unused"));
         assert!(!source.contains("Missing"));
+    }
+
+    #[test]
+    fn runtime_snippet_dependencies_include_template_interpolations() {
+        let prelude = concat!(
+            "var dependency = 'value';\n",
+            "function main() { return new RegExp(`^${dependency}$`); }\n",
+        );
+        let body = "export const moduleValue = 1;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let main = BindingName::new("main");
+        let source = prelude.source_for_bindings(std::iter::once(&main));
+
+        assert!(source.contains("function main()"));
+        assert!(source.contains("var dependency = 'value';"));
     }
 
     #[test]
