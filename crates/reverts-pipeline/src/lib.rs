@@ -226,7 +226,7 @@ fn audit_binding_shape_consistency(plan: &EmitPlan, project: &EmittedProject) ->
                 audit.push(
                     AuditFinding::error(
                         FindingCode::CallableEmittedAsNonCallable,
-                        "binding planned as callable was emitted as a non-callable declaration",
+                        "source-backed binding declared as a non-callable value is called like a function — likely a runtime error in the input",
                     )
                     .with_module(planned_file.path.clone())
                     .with_binding(binding.emitted.as_str()),
@@ -848,10 +848,21 @@ mod tests {
 
         let run = generate_project_from_input(input).expect("fixture should emit");
 
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| finding.code == FindingCode::CallableEmittedAsNonCallable)
+            .expect("expected CallableEmittedAsNonCallable finding");
         assert!(
-            run.audit.has(FindingCode::CallableEmittedAsNonCallable),
-            "expected CallableEmittedAsNonCallable finding, got: {:?}",
-            run.audit.findings(),
+            finding.message.contains("source-backed"),
+            "finding must blame the source, not the emitter; got: {:?}",
+            finding.message,
+        );
+        assert!(
+            finding.message.contains("called like a function"),
+            "finding must describe the runtime-error symptom; got: {:?}",
+            finding.message,
         );
     }
 
