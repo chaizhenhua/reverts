@@ -477,6 +477,9 @@ fn persist_package_attribution(
         "export_specifier": module_match.export_specifier,
         "source_path": module_match.source_path,
         "normalized_source_hash": module_match.normalized_source_hash,
+        "match_strategy": module_match.strategy.as_str(),
+        "function_signature_matches": module_match.function_signature_matches,
+        "string_anchor_matches": module_match.string_anchor_matches,
         "writes_package_version": true,
     })
     .to_string();

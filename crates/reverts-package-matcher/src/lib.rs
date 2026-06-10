@@ -1,12 +1,23 @@
-use std::collections::BTreeSet;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use oxc_allocator::Allocator;
+use oxc_ast::{
+    AstKind, Visit,
+    ast::{ArrowFunctionExpression, TemplateElement},
+    visit::walk::walk_template_element,
+};
+use oxc_parser::{ParseOptions, Parser};
 use reverts_input::{
     InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
 };
 use reverts_ir::{ModuleId, ModuleKind, split_bare_specifier};
-use reverts_js::{JsError, normalize_source_for_pipeline};
+use reverts_js::{
+    JsError, ParseError, ParseGoal, normalize_source_for_pipeline, source_type_candidates,
+};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use semver::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Package source candidate with a verified import surface.
@@ -43,6 +54,260 @@ impl PackageSource {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Structural fingerprint used to compare one bundle module with package source candidates.
+pub struct ModuleMatchFingerprint {
+    /// module id in the input bundle.
+    pub module_id: ModuleId,
+    /// optional package hint attached to the module.
+    pub package_name: Option<String>,
+    /// stable hash of the AST-normalized source body.
+    pub normalized_source_hash: String,
+    /// AST-derived function signature hashes.
+    pub function_signature_hashes: BTreeSet<String>,
+    /// string literal anchors collected from the AST.
+    pub string_anchors: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Fingerprint for one cached package source file.
+pub struct PackageSourceFingerprint<'a> {
+    /// cached source candidate.
+    pub source: &'a PackageSource,
+    /// stable hash of the AST-normalized source body.
+    pub normalized_source_hash: String,
+    /// AST-derived function signature hashes.
+    pub function_signature_hashes: BTreeSet<String>,
+    /// string literal anchors collected from the AST.
+    pub string_anchors: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Version bucket for one package.
+pub struct PackageVersionCandidate<'a> {
+    /// npm package name.
+    pub package_name: String,
+    /// concrete package version.
+    pub package_version: String,
+    /// cached source files belonging to this package version.
+    pub sources: Vec<PackageSourceFingerprint<'a>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Strategy that proved a module-to-package-source match.
+pub enum ModuleMatchStrategy {
+    /// Full module source identity after AST normalization.
+    NormalizedSourceHash,
+    /// Function signatures plus string anchors matched the package source.
+    FunctionSignatureAndStringAnchors,
+}
+
+impl ModuleMatchStrategy {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NormalizedSourceHash => "normalized_source_hash",
+            Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Evidence that one module matched one source inside a package version.
+pub struct ModulePackageMatch {
+    /// matched module id.
+    pub module_id: ModuleId,
+    /// matched npm package name.
+    pub package_name: String,
+    /// matched concrete package version.
+    pub package_version: String,
+    /// accepted import specifier.
+    pub export_specifier: String,
+    /// cached package source path.
+    pub source_path: String,
+    /// strategy that proved the match.
+    pub strategy: ModuleMatchStrategy,
+    /// stable hash of the normalized matched source.
+    pub normalized_source_hash: String,
+    /// overlapping function signatures.
+    pub function_signature_matches: usize,
+    /// overlapping string anchors.
+    pub string_anchor_matches: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Aggregate score for one package version.
+pub struct VersionMatchScore {
+    /// npm package name.
+    pub package_name: String,
+    /// concrete package version.
+    pub package_version: String,
+    /// package modules that were considered for this package.
+    pub total_modules: usize,
+    /// modules matched by any accepted strategy.
+    pub matched_modules: usize,
+    /// modules matched by normalized source identity.
+    pub source_hash_matches: usize,
+    /// total overlapping function signatures.
+    pub function_signature_matches: usize,
+    /// total overlapping string anchors.
+    pub string_anchor_matches: usize,
+    /// weighted score used for version ordering.
+    pub score: u32,
+    /// number of package versions probed by binary search before certification.
+    pub binary_search_probes: usize,
+}
+
+impl VersionMatchScore {
+    #[must_use]
+    pub const fn has_evidence(&self) -> bool {
+        self.score > 0 && self.matched_modules > 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Selected or rejected best-version decision for one package.
+pub enum BestVersionMatch {
+    /// One concrete version has unique best evidence.
+    Selected {
+        /// selected score.
+        score: VersionMatchScore,
+        /// module-level source matches for the selected version.
+        module_matches: Vec<ModulePackageMatch>,
+    },
+    /// More than one version has the same best score.
+    Ambiguous {
+        /// package name.
+        package_name: String,
+        /// best tied scores.
+        scores: Vec<VersionMatchScore>,
+    },
+    /// No version produced usable evidence.
+    NoMatch {
+        /// package name.
+        package_name: String,
+        /// scores that were evaluated.
+        scores: Vec<VersionMatchScore>,
+    },
+    /// Evidence exists but does not satisfy the configured acceptance threshold.
+    InsufficientEvidence {
+        /// strongest score.
+        score: VersionMatchScore,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Configuration for version-level package matching.
+pub struct VersionedPackageMatcherConfig {
+    /// Minimum function signature overlap for non-source-identity matches.
+    pub min_function_signature_matches: usize,
+    /// Minimum string anchor overlap for non-source-identity matches.
+    pub min_string_anchor_matches: usize,
+}
+
+impl Default for VersionedPackageMatcherConfig {
+    fn default() -> Self {
+        Self {
+            min_function_signature_matches: 2,
+            min_string_anchor_matches: 1,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+/// Package matcher that scores concrete package versions before emitting attributions.
+pub struct VersionedPackageMatcher {
+    config: VersionedPackageMatcherConfig,
+}
+
+impl VersionedPackageMatcher {
+    #[must_use]
+    pub fn new(config: VersionedPackageMatcherConfig) -> Self {
+        Self { config }
+    }
+
+    /// Matches unresolved package modules to the best concrete package version.
+    #[must_use]
+    pub fn match_rows(
+        &self,
+        rows: &InputRows,
+        package_sources: &[PackageSource],
+    ) -> VersionedPackageMatchReport {
+        let mut audit = AuditReport::default();
+        let index = PackageVersionIndex::build(package_sources, &mut audit);
+        let mut decisions = Vec::new();
+        let mut matches = Vec::new();
+        let mut attributions = Vec::new();
+
+        for package_name in package_names_for_matching(rows) {
+            let module_fingerprints =
+                fingerprint_modules_for_package(rows, package_name.as_str(), &mut audit);
+            if module_fingerprints.is_empty() {
+                continue;
+            }
+
+            let decision = index.best_version_for_package(
+                package_name.as_str(),
+                &module_fingerprints,
+                &self.config,
+            );
+            if let BestVersionMatch::Selected {
+                score: _score,
+                module_matches,
+            } = &decision
+            {
+                for module_match in module_matches {
+                    attributions.push(accepted_attribution_from_match(module_match));
+                    matches.push(PackageMatch::from_module_match(module_match));
+                }
+            } else if let BestVersionMatch::Ambiguous {
+                package_name,
+                scores: _scores,
+            } = &decision
+            {
+                audit.push(
+                    AuditFinding::error(
+                        FindingCode::AmbiguousPackageMatch,
+                        "package version search found more than one best version",
+                    )
+                    .with_binding(package_name.clone()),
+                );
+            }
+            decisions.push(decision);
+        }
+
+        VersionedPackageMatchReport {
+            attributions,
+            matches,
+            version_matches: decisions,
+            audit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Result of a versioned package matching pass.
+pub struct VersionedPackageMatchReport {
+    /// Accepted attributions that can be persisted by the caller.
+    pub attributions: Vec<PackageAttributionInput>,
+    /// Match evidence for accepted attributions.
+    pub matches: Vec<PackageMatch>,
+    /// Per-package best-version decisions.
+    pub version_matches: Vec<BestVersionMatch>,
+    /// Ambiguity, missing source, and parse findings.
+    pub audit: AuditReport,
+}
+
+impl From<VersionedPackageMatchReport> for PackageMatchReport {
+    fn from(report: VersionedPackageMatchReport) -> Self {
+        Self {
+            attributions: report.attributions,
+            matches: report.matches,
+            audit: report.audit,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 /// Exact package matcher over normalized module and package sources.
 pub struct ExactPackageMatcher;
@@ -58,86 +323,9 @@ impl ExactPackageMatcher {
         rows: &InputRows,
         package_sources: &[PackageSource],
     ) -> PackageMatchReport {
-        let mut audit = AuditReport::default();
-        let source_index = index_package_sources(package_sources, &mut audit);
-        let mut matches = Vec::new();
-        let mut attributions = Vec::new();
-
-        for module in rows
-            .modules
-            .iter()
-            .filter(|module| module.kind == ModuleKind::Package)
-        {
-            if has_accepted_attribution(rows, module.id) {
-                continue;
-            }
-
-            let Some(slice) = rows.module_source_slice(module.id) else {
-                audit.push(
-                    AuditFinding::error(
-                        FindingCode::MissingPackageSource,
-                        "package module has no real source slice for matching",
-                    )
-                    .with_module(module.id.0.to_string())
-                    .with_binding(module.original_name.clone()),
-                );
-                continue;
-            };
-
-            let normalized = match normalize_source(slice.source_file_path, slice.source) {
-                Ok(normalized) => normalized,
-                Err(message) => {
-                    audit.push(
-                        AuditFinding::error(FindingCode::UnparseablePackageSource, message)
-                            .with_module(module.id.0.to_string())
-                            .with_binding(module.original_name.clone()),
-                    );
-                    continue;
-                }
-            };
-
-            let hash = stable_hash(normalized.as_bytes());
-            let Some(candidates) = source_index.candidates_for_hash(hash.as_str()) else {
-                continue;
-            };
-
-            match select_unique_candidate(module, candidates) {
-                CandidateSelection::Selected(source) => {
-                    let attribution = accepted_attribution(module.id, source);
-                    matches.push(PackageMatch {
-                        module_id: module.id,
-                        package_name: source.package_name.clone(),
-                        package_version: source.package_version.clone(),
-                        export_specifier: source.export_specifier.clone(),
-                        source_path: source.source_path.clone(),
-                        normalized_source_hash: hash.clone(),
-                    });
-                    attributions.push(attribution);
-                }
-                CandidateSelection::Ambiguous => {
-                    audit.push(
-                        AuditFinding::error(
-                            FindingCode::AmbiguousPackageMatch,
-                            "package source matched more than one package candidate",
-                        )
-                        .with_module(module.id.0.to_string())
-                        .with_binding(
-                            module
-                                .package_name
-                                .clone()
-                                .unwrap_or_else(|| module.original_name.clone()),
-                        ),
-                    );
-                }
-                CandidateSelection::NoCandidate => {}
-            }
-        }
-
-        PackageMatchReport {
-            attributions,
-            matches,
-            audit,
-        }
+        VersionedPackageMatcher::default()
+            .match_rows(rows, package_sources)
+            .into()
     }
 }
 
@@ -167,6 +355,28 @@ pub struct PackageMatch {
     pub source_path: String,
     /// stable hash of the normalized matched source.
     pub normalized_source_hash: String,
+    /// strategy that proved this module/source match.
+    pub strategy: ModuleMatchStrategy,
+    /// overlapping function signatures.
+    pub function_signature_matches: usize,
+    /// overlapping string anchors.
+    pub string_anchor_matches: usize,
+}
+
+impl PackageMatch {
+    fn from_module_match(module_match: &ModulePackageMatch) -> Self {
+        Self {
+            module_id: module_match.module_id,
+            package_name: module_match.package_name.clone(),
+            package_version: module_match.package_version.clone(),
+            export_specifier: module_match.export_specifier.clone(),
+            source_path: module_match.source_path.clone(),
+            normalized_source_hash: module_match.normalized_source_hash.clone(),
+            strategy: module_match.strategy,
+            function_signature_matches: module_match.function_signature_matches,
+            string_anchor_matches: module_match.string_anchor_matches,
+        }
+    }
 }
 
 fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
@@ -177,142 +387,661 @@ fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     })
 }
 
-fn index_package_sources<'a>(
-    package_sources: &'a [PackageSource],
-    audit: &mut AuditReport,
-) -> PackageSourceIndex<'a> {
-    let mut entries = Vec::new();
-    for source in package_sources {
-        match normalize_source(source.source_path.as_str(), source.source.as_str()) {
-            Ok(normalized) => {
-                entries.push(PackageSourceIndexEntry {
-                    normalized_source_hash: stable_hash(normalized.as_bytes()),
-                    source,
-                });
+fn package_names_for_matching(rows: &InputRows) -> BTreeSet<String> {
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter(|module| !has_accepted_attribution(rows, module.id))
+        .filter_map(|module| module.package_name.clone())
+        .collect()
+}
+
+#[derive(Debug)]
+struct PackageVersionIndex<'a> {
+    packages: BTreeMap<String, Vec<PackageVersionCandidate<'a>>>,
+}
+
+impl<'a> PackageVersionIndex<'a> {
+    fn build(package_sources: &'a [PackageSource], audit: &mut AuditReport) -> Self {
+        let mut by_version = BTreeMap::<(String, String), Vec<PackageSourceFingerprint<'a>>>::new();
+        for source in package_sources {
+            match package_source_fingerprint(source) {
+                Ok(fingerprint) => {
+                    by_version
+                        .entry((source.package_name.clone(), source.package_version.clone()))
+                        .or_default()
+                        .push(fingerprint);
+                }
+                Err(message) => {
+                    audit.push(
+                        AuditFinding::error(FindingCode::UnparseablePackageSource, message)
+                            .with_module(source.source_path.clone())
+                            .with_binding(format!(
+                                "{}@{}",
+                                source.package_name, source.package_version
+                            )),
+                    );
+                }
             }
+        }
+
+        let mut packages = BTreeMap::<String, Vec<PackageVersionCandidate<'a>>>::new();
+        for ((package_name, package_version), mut sources) in by_version {
+            sources.sort_by(|left, right| {
+                left.normalized_source_hash
+                    .cmp(&right.normalized_source_hash)
+                    .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+                    .then_with(|| {
+                        left.source
+                            .export_specifier
+                            .cmp(&right.source.export_specifier)
+                    })
+            });
+            packages
+                .entry(package_name.clone())
+                .or_default()
+                .push(PackageVersionCandidate {
+                    package_name,
+                    package_version,
+                    sources,
+                });
+        }
+
+        for versions in packages.values_mut() {
+            versions.sort_by(|left, right| {
+                compare_versions(
+                    left.package_version.as_str(),
+                    right.package_version.as_str(),
+                )
+            });
+        }
+
+        Self { packages }
+    }
+
+    fn best_version_for_package(
+        &self,
+        package_name: &str,
+        module_fingerprints: &[ModuleMatchFingerprint],
+        config: &VersionedPackageMatcherConfig,
+    ) -> BestVersionMatch {
+        let Some(versions) = self.packages.get(package_name) else {
+            return BestVersionMatch::NoMatch {
+                package_name: package_name.to_string(),
+                scores: Vec::new(),
+            };
+        };
+        if versions.is_empty() {
+            return BestVersionMatch::NoMatch {
+                package_name: package_name.to_string(),
+                scores: Vec::new(),
+            };
+        }
+
+        let mut scored = binary_search_best_version(versions, module_fingerprints, config);
+        certify_version_scores(versions, module_fingerprints, config, &mut scored);
+        let Some(best_score) = scored
+            .iter()
+            .map(|scored| &scored.score)
+            .max_by(|left, right| left.score.cmp(&right.score))
+        else {
+            return BestVersionMatch::NoMatch {
+                package_name: package_name.to_string(),
+                scores: Vec::new(),
+            };
+        };
+
+        if !best_score.has_evidence() {
+            return BestVersionMatch::NoMatch {
+                package_name: package_name.to_string(),
+                scores: scored.into_iter().map(|scored| scored.score).collect(),
+            };
+        }
+
+        let tied_best = scored
+            .iter()
+            .filter(|scored| scored.score.score == best_score.score)
+            .collect::<Vec<_>>();
+        if tied_best.len() > 1 {
+            return BestVersionMatch::Ambiguous {
+                package_name: package_name.to_string(),
+                scores: tied_best
+                    .into_iter()
+                    .map(|scored| scored.score.clone())
+                    .collect(),
+            };
+        }
+
+        if best_score.source_hash_matches == 0
+            && (best_score.function_signature_matches < config.min_function_signature_matches
+                || best_score.string_anchor_matches < config.min_string_anchor_matches)
+        {
+            return BestVersionMatch::InsufficientEvidence {
+                score: best_score.clone(),
+            };
+        }
+
+        let best_package_version = best_score.package_version.clone();
+        let selected = scored
+            .into_iter()
+            .find(|scored| scored.score.package_version == best_package_version)
+            .expect("selected score was computed");
+        BestVersionMatch::Selected {
+            score: selected.score,
+            module_matches: selected.module_matches,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ScoredPackageVersion {
+    score: VersionMatchScore,
+    module_matches: Vec<ModulePackageMatch>,
+}
+
+fn fingerprint_modules_for_package(
+    rows: &InputRows,
+    package_name: &str,
+    audit: &mut AuditReport,
+) -> Vec<ModuleMatchFingerprint> {
+    let mut fingerprints = Vec::new();
+    for module in rows.modules.iter().filter(|module| {
+        module.kind == ModuleKind::Package
+            && module.package_name.as_deref() == Some(package_name)
+            && !has_accepted_attribution(rows, module.id)
+    }) {
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::MissingPackageSource,
+                    "package module has no real source slice for matching",
+                )
+                .with_module(module.id.0.to_string())
+                .with_binding(module.original_name.clone()),
+            );
+            continue;
+        };
+
+        match module_match_fingerprint(module, slice.source_file_path, slice.source) {
+            Ok(fingerprint) => fingerprints.push(fingerprint),
             Err(message) => {
                 audit.push(
                     AuditFinding::error(FindingCode::UnparseablePackageSource, message)
-                        .with_module(source.source_path.clone())
-                        .with_binding(format!(
-                            "{}@{}",
-                            source.package_name, source.package_version
-                        )),
+                        .with_module(module.id.0.to_string())
+                        .with_binding(module.original_name.clone()),
                 );
             }
         }
     }
-    entries.sort_by(|left, right| {
-        left.normalized_source_hash
-            .cmp(&right.normalized_source_hash)
-            .then_with(|| left.source.package_name.cmp(&right.source.package_name))
-            .then_with(|| {
-                left.source
-                    .package_version
-                    .cmp(&right.source.package_version)
-            })
-            .then_with(|| {
-                left.source
-                    .export_specifier
-                    .cmp(&right.source.export_specifier)
-            })
-            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
-    });
-    PackageSourceIndex { entries }
+    fingerprints
+}
+
+fn module_match_fingerprint(
+    module: &ModuleInput,
+    path: &str,
+    source: &str,
+) -> Result<ModuleMatchFingerprint, String> {
+    let source_fingerprint = fingerprint_source(path, source)?;
+    Ok(ModuleMatchFingerprint {
+        module_id: module.id,
+        package_name: module.package_name.clone(),
+        normalized_source_hash: source_fingerprint.normalized_source_hash,
+        function_signature_hashes: source_fingerprint.function_signature_hashes,
+        string_anchors: source_fingerprint.string_anchors,
+    })
+}
+
+fn package_source_fingerprint<'a>(
+    source: &'a PackageSource,
+) -> Result<PackageSourceFingerprint<'a>, String> {
+    let fingerprint = fingerprint_source(source.source_path.as_str(), source.source.as_str())?;
+    Ok(PackageSourceFingerprint {
+        source,
+        normalized_source_hash: fingerprint.normalized_source_hash,
+        function_signature_hashes: fingerprint.function_signature_hashes,
+        string_anchors: fingerprint.string_anchors,
+    })
 }
 
 #[derive(Debug)]
-struct PackageSourceIndex<'a> {
-    entries: Vec<PackageSourceIndexEntry<'a>>,
+struct SourceFingerprint {
+    normalized_source_hash: String,
+    function_signature_hashes: BTreeSet<String>,
+    string_anchors: BTreeSet<String>,
 }
 
-impl<'a> PackageSourceIndex<'a> {
-    fn candidates_for_hash(&self, hash: &str) -> Option<&[PackageSourceIndexEntry<'a>]> {
-        let index = self
-            .entries
-            .binary_search_by(|entry| entry.normalized_source_hash.as_str().cmp(hash))
-            .ok()?;
+fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint, String> {
+    let normalized = normalize_source(path, source)?;
+    let ast = ast_fingerprint(path, normalized.as_str())?;
+    Ok(SourceFingerprint {
+        normalized_source_hash: stable_hash(normalized.as_bytes()),
+        function_signature_hashes: ast.function_signature_hashes,
+        string_anchors: ast.string_anchors,
+    })
+}
 
-        let mut start = index;
-        while start > 0 && self.entries[start - 1].normalized_source_hash == hash {
-            start -= 1;
+#[derive(Debug, Default)]
+struct AstFingerprint {
+    function_signature_hashes: BTreeSet<String>,
+    string_anchors: BTreeSet<String>,
+}
+
+fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint, String> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+    for source_type in source_type_candidates(Some(Path::new(path)), ParseGoal::TypeScript) {
+        let parsed = Parser::new(&allocator, normalized_source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            let mut visitor = FingerprintVisitor {
+                source: normalized_source,
+                fingerprint: AstFingerprint::default(),
+            };
+            visitor.visit_program(&parsed.program);
+            return Ok(visitor.fingerprint);
         }
 
-        let mut end = index + 1;
-        while end < self.entries.len() && self.entries[end].normalized_source_hash == hash {
-            end += 1;
-        }
+        errors.push(ParseError {
+            source_type: format!("{source_type:?}"),
+            diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+        });
+    }
 
-        Some(&self.entries[start..end])
+    Err(parse_error_message(&JsError::ParseFailed(errors)))
+}
+
+fn parse_options_for(source_type: oxc_span::SourceType) -> ParseOptions {
+    ParseOptions {
+        allow_return_outside_function: source_type.is_script(),
+        ..Default::default()
     }
 }
 
-#[derive(Debug)]
-struct PackageSourceIndexEntry<'a> {
-    normalized_source_hash: String,
-    source: &'a PackageSource,
+struct FingerprintVisitor<'s> {
+    source: &'s str,
+    fingerprint: AstFingerprint,
+}
+
+impl<'a> Visit<'a> for FingerprintVisitor<'_> {
+    fn enter_node(&mut self, kind: AstKind<'a>) {
+        match kind {
+            AstKind::Function(function) => self.record_function(
+                "function",
+                function.r#async,
+                function.generator,
+                function.params.items.len(),
+                function.span.start,
+                function.span.end,
+            ),
+            AstKind::ArrowFunctionExpression(arrow) => self.record_arrow_function(arrow),
+            AstKind::StringLiteral(literal) => self.record_string_anchor(literal.value.as_str()),
+            _ => {}
+        }
+    }
+
+    fn visit_template_element(&mut self, it: &TemplateElement<'a>) {
+        if let Some(cooked) = &it.value.cooked {
+            self.record_string_anchor(cooked.as_str());
+        } else {
+            self.record_string_anchor(it.value.raw.as_str());
+        }
+        walk_template_element(self, it);
+    }
+}
+
+impl FingerprintVisitor<'_> {
+    fn record_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'_>) {
+        self.record_function(
+            "arrow",
+            arrow.r#async,
+            false,
+            arrow.params.items.len(),
+            arrow.span.start,
+            arrow.span.end,
+        );
+    }
+
+    fn record_function(
+        &mut self,
+        kind: &str,
+        r#async: bool,
+        generator: bool,
+        parameter_count: usize,
+        start: u32,
+        end: u32,
+    ) {
+        let Some(source_slice) = self.source.get(start as usize..end as usize) else {
+            return;
+        };
+        let mut hash = FNV_OFFSET_BASIS;
+        update_stable_hash(&mut hash, kind.as_bytes());
+        update_stable_hash(&mut hash, b"|async=");
+        update_stable_hash(&mut hash, if r#async { b"1" } else { b"0" });
+        update_stable_hash(&mut hash, b"|generator=");
+        update_stable_hash(&mut hash, if generator { b"1" } else { b"0" });
+        update_stable_hash(&mut hash, b"|params=");
+        update_stable_hash(&mut hash, parameter_count.to_string().as_bytes());
+        update_stable_hash(&mut hash, b"|source=");
+        update_stable_hash(&mut hash, source_slice.as_bytes());
+        self.fingerprint
+            .function_signature_hashes
+            .insert(format!("{hash:016x}"));
+    }
+
+    fn record_string_anchor(&mut self, value: &str) {
+        let trimmed = value.trim();
+        if trimmed.len() >= MIN_STRING_ANCHOR_LEN {
+            self.fingerprint.string_anchors.insert(trimmed.to_string());
+        }
+    }
+}
+
+fn binary_search_best_version<'a>(
+    versions: &'a [PackageVersionCandidate<'a>],
+    module_fingerprints: &[ModuleMatchFingerprint],
+    config: &VersionedPackageMatcherConfig,
+) -> Vec<ScoredPackageVersion> {
+    let mut scores = BTreeMap::<usize, ScoredPackageVersion>::new();
+    if versions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut low = 0usize;
+    let mut high = versions.len() - 1;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        score_version_at(mid, versions, module_fingerprints, config, &mut scores);
+        if mid > 0 {
+            score_version_at(mid - 1, versions, module_fingerprints, config, &mut scores);
+        }
+        if mid < versions.len() - 1 {
+            score_version_at(mid + 1, versions, module_fingerprints, config, &mut scores);
+        }
+
+        let mid_score = scores.get(&mid).expect("midpoint was scored").score.score;
+        let left_score = mid
+            .checked_sub(1)
+            .and_then(|index| scores.get(&index))
+            .map_or(0, |score| score.score.score);
+        let right_score = scores.get(&(mid + 1)).map_or(0, |score| score.score.score);
+
+        if right_score > mid_score && mid < high {
+            low = mid + 1;
+        } else if left_score > mid_score && mid > low {
+            high = mid - 1;
+        } else {
+            break;
+        }
+    }
+
+    let probe_count = scores.len();
+    scores
+        .into_values()
+        .map(|mut scored| {
+            scored.score.binary_search_probes = probe_count;
+            scored
+        })
+        .collect()
+}
+
+fn certify_version_scores<'a>(
+    versions: &'a [PackageVersionCandidate<'a>],
+    module_fingerprints: &[ModuleMatchFingerprint],
+    config: &VersionedPackageMatcherConfig,
+    scored: &mut Vec<ScoredPackageVersion>,
+) {
+    let mut existing = scored
+        .iter()
+        .map(|scored| scored.score.package_version.clone())
+        .collect::<BTreeSet<_>>();
+    let probe_count = scored
+        .first()
+        .map_or(0, |scored| scored.score.binary_search_probes);
+
+    for version in versions {
+        if existing.insert(version.package_version.clone()) {
+            let mut score = score_version(version, module_fingerprints, config);
+            score.score.binary_search_probes = probe_count;
+            scored.push(score);
+        }
+    }
+}
+
+fn score_version_at<'a>(
+    index: usize,
+    versions: &'a [PackageVersionCandidate<'a>],
+    module_fingerprints: &[ModuleMatchFingerprint],
+    config: &VersionedPackageMatcherConfig,
+    scores: &mut BTreeMap<usize, ScoredPackageVersion>,
+) {
+    scores
+        .entry(index)
+        .or_insert_with(|| score_version(&versions[index], module_fingerprints, config));
+}
+
+fn score_version<'a>(
+    version: &PackageVersionCandidate<'a>,
+    module_fingerprints: &[ModuleMatchFingerprint],
+    config: &VersionedPackageMatcherConfig,
+) -> ScoredPackageVersion {
+    let mut module_matches = Vec::new();
+    for module in module_fingerprints {
+        if let Some(module_match) = best_source_match(version, module, config) {
+            module_matches.push(module_match);
+        }
+    }
+
+    let source_hash_matches = module_matches
+        .iter()
+        .filter(|module_match| module_match.strategy == ModuleMatchStrategy::NormalizedSourceHash)
+        .count();
+    let function_signature_matches = module_matches
+        .iter()
+        .map(|module_match| module_match.function_signature_matches)
+        .sum::<usize>();
+    let string_anchor_matches = module_matches
+        .iter()
+        .map(|module_match| module_match.string_anchor_matches)
+        .sum::<usize>();
+    let score = weighted_score(
+        source_hash_matches,
+        module_matches.len(),
+        function_signature_matches,
+        string_anchor_matches,
+    );
+
+    ScoredPackageVersion {
+        score: VersionMatchScore {
+            package_name: version.package_name.clone(),
+            package_version: version.package_version.clone(),
+            total_modules: module_fingerprints.len(),
+            matched_modules: module_matches.len(),
+            source_hash_matches,
+            function_signature_matches,
+            string_anchor_matches,
+            score,
+            binary_search_probes: 0,
+        },
+        module_matches,
+    }
+}
+
+fn best_source_match(
+    version: &PackageVersionCandidate<'_>,
+    module: &ModuleMatchFingerprint,
+    config: &VersionedPackageMatcherConfig,
+) -> Option<ModulePackageMatch> {
+    let exact_candidates = candidates_for_source_hash(
+        version.sources.as_slice(),
+        module.normalized_source_hash.as_str(),
+    );
+    if let Some(candidates) = exact_candidates {
+        if let Some(source) = unique_source_candidate(candidates) {
+            return Some(module_package_match(
+                module,
+                source,
+                ModuleMatchStrategy::NormalizedSourceHash,
+                source
+                    .function_signature_hashes
+                    .intersection(&module.function_signature_hashes)
+                    .count(),
+                source
+                    .string_anchors
+                    .intersection(&module.string_anchors)
+                    .count(),
+            ));
+        }
+        return None;
+    }
+
+    let mut ranked = version
+        .sources
+        .iter()
+        .filter_map(|source| {
+            let function_signature_matches = source
+                .function_signature_hashes
+                .intersection(&module.function_signature_hashes)
+                .count();
+            let string_anchor_matches = source
+                .string_anchors
+                .intersection(&module.string_anchors)
+                .count();
+            if function_signature_matches >= config.min_function_signature_matches
+                && string_anchor_matches >= config.min_string_anchor_matches
+            {
+                Some((source, function_signature_matches, string_anchor_matches))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.0.source.source_path.cmp(&right.0.source.source_path))
+    });
+
+    let best = ranked.first()?;
+    if ranked
+        .get(1)
+        .is_some_and(|next| next.1 == best.1 && next.2 == best.2)
+    {
+        return None;
+    }
+
+    Some(module_package_match(
+        module,
+        best.0,
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors,
+        best.1,
+        best.2,
+    ))
+}
+
+fn candidates_for_source_hash<'a>(
+    sources: &'a [PackageSourceFingerprint<'a>],
+    hash: &str,
+) -> Option<&'a [PackageSourceFingerprint<'a>]> {
+    let index = sources
+        .binary_search_by(|source| source.normalized_source_hash.as_str().cmp(hash))
+        .ok()?;
+
+    let mut start = index;
+    while start > 0 && sources[start - 1].normalized_source_hash == hash {
+        start -= 1;
+    }
+
+    let mut end = index + 1;
+    while end < sources.len() && sources[end].normalized_source_hash == hash {
+        end += 1;
+    }
+
+    Some(&sources[start..end])
+}
+
+fn unique_source_candidate<'a>(
+    candidates: &'a [PackageSourceFingerprint<'a>],
+) -> Option<&'a PackageSourceFingerprint<'a>> {
+    let unique_keys = candidates
+        .iter()
+        .map(|source| {
+            (
+                source.source.package_name.as_str(),
+                source.source.package_version.as_str(),
+                source.source.export_specifier.as_str(),
+                source.source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if unique_keys.len() == 1 {
+        candidates.first()
+    } else {
+        None
+    }
+}
+
+fn module_package_match(
+    module: &ModuleMatchFingerprint,
+    source: &PackageSourceFingerprint<'_>,
+    strategy: ModuleMatchStrategy,
+    function_signature_matches: usize,
+    string_anchor_matches: usize,
+) -> ModulePackageMatch {
+    ModulePackageMatch {
+        module_id: module.module_id,
+        package_name: source.source.package_name.clone(),
+        package_version: source.source.package_version.clone(),
+        export_specifier: source.source.export_specifier.clone(),
+        source_path: source.source.source_path.clone(),
+        strategy,
+        normalized_source_hash: source.normalized_source_hash.clone(),
+        function_signature_matches,
+        string_anchor_matches,
+    }
+}
+
+fn accepted_attribution_from_match(module_match: &ModulePackageMatch) -> PackageAttributionInput {
+    let mut attribution = PackageAttributionInput::accepted_external(
+        module_match.module_id,
+        module_match.package_name.as_str(),
+        module_match.package_version.as_str(),
+        module_match.export_specifier.as_str(),
+    );
+    if let Some((_package_name, Some(subpath))) =
+        split_bare_specifier(&module_match.export_specifier)
+    {
+        attribution = attribution.with_subpath(subpath);
+    }
+    attribution
+}
+
+fn compare_versions(left: &str, right: &str) -> Ordering {
+    match (Version::parse(left), Version::parse(right)) {
+        (Ok(left), Ok(right)) => left.cmp(&right),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => left.cmp(right),
+    }
+}
+
+fn weighted_score(
+    source_hash_matches: usize,
+    matched_modules: usize,
+    function_signature_matches: usize,
+    string_anchor_matches: usize,
+) -> u32 {
+    (source_hash_matches as u32 * SOURCE_HASH_WEIGHT)
+        + (matched_modules as u32 * MODULE_MATCH_WEIGHT)
+        + (function_signature_matches as u32 * FUNCTION_SIGNATURE_WEIGHT)
+        + (string_anchor_matches as u32 * STRING_ANCHOR_WEIGHT)
 }
 
 fn normalize_source(path: &str, source: &str) -> Result<String, String> {
     normalize_source_for_pipeline(source, Some(Path::new(path)))
         .map_err(|error| parse_error_message(&error))
-}
-
-enum CandidateSelection<'a> {
-    Selected(&'a PackageSource),
-    Ambiguous,
-    NoCandidate,
-}
-
-fn select_unique_candidate<'a>(
-    module: &ModuleInput,
-    candidates: &[PackageSourceIndexEntry<'a>],
-) -> CandidateSelection<'a> {
-    let filtered = candidates
-        .iter()
-        .map(|candidate| candidate.source)
-        .filter(|source| {
-            module
-                .package_name
-                .as_deref()
-                .is_none_or(|package_name| package_name == source.package_name)
-        })
-        .collect::<Vec<_>>();
-
-    if filtered.is_empty() {
-        return CandidateSelection::NoCandidate;
-    }
-
-    let unique_keys = filtered
-        .iter()
-        .map(|source| {
-            (
-                source.package_name.as_str(),
-                source.package_version.as_str(),
-                source.export_specifier.as_str(),
-                source.source_path.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-
-    if unique_keys.len() == 1 {
-        CandidateSelection::Selected(filtered[0])
-    } else {
-        CandidateSelection::Ambiguous
-    }
-}
-
-fn accepted_attribution(module_id: ModuleId, source: &PackageSource) -> PackageAttributionInput {
-    let mut attribution = PackageAttributionInput::accepted_external(
-        module_id,
-        source.package_name.as_str(),
-        source.package_version.as_str(),
-        source.export_specifier.as_str(),
-    );
-    if let Some((_package_name, Some(subpath))) = split_bare_specifier(&source.export_specifier) {
-        attribution = attribution.with_subpath(subpath);
-    }
-    attribution
 }
 
 fn parse_error_message(error: &JsError) -> String {
@@ -335,15 +1064,24 @@ fn parse_error_message(error: &JsError) -> String {
 
 fn stable_hash(bytes: &[u8]) -> String {
     let mut hash = FNV_OFFSET_BASIS;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
+    update_stable_hash(&mut hash, bytes);
     format!("{hash:016x}")
+}
+
+fn update_stable_hash(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
 }
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
+const MIN_STRING_ANCHOR_LEN: usize = 3;
+const SOURCE_HASH_WEIGHT: u32 = 10_000;
+const MODULE_MATCH_WEIGHT: u32 = 1_000;
+const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
+const STRING_ANCHOR_WEIGHT: u32 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -353,7 +1091,10 @@ mod tests {
     use reverts_ir::ModuleId;
     use reverts_observe::FindingCode;
 
-    use super::{ExactPackageMatcher, PackageSource, index_package_sources};
+    use super::{
+        BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageSource,
+        VersionedPackageMatcher,
+    };
 
     fn rows_with_package_source(source: &str) -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -480,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn package_source_index_uses_binary_lookup_over_sorted_hashes() {
+    fn versioned_matcher_uses_binary_lookup_over_sorted_hashes() {
         let package_sources = [
             PackageSource::external("pkg", "1.0.0", "pkg/a", "a.js", "export const a = 1;"),
             PackageSource::external(
@@ -492,17 +1233,123 @@ mod tests {
             ),
             PackageSource::external("pkg", "3.0.0", "pkg/z", "z.js", "export const z = 26;"),
         ];
-        let mut audit = Default::default();
-        let index = index_package_sources(&package_sources, &mut audit);
         let rows = rows_with_package_source("export const target=42");
         let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
 
-        assert!(audit.is_clean());
-        assert_eq!(index.entries.len(), 3);
+        assert!(report.audit.is_clean());
         assert_eq!(report.attributions.len(), 1);
         assert_eq!(
             report.attributions[0].package_version.as_deref(),
             Some("2.0.0")
         );
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::NormalizedSourceHash
+        );
+    }
+
+    #[test]
+    fn versioned_matcher_selects_best_package_version_by_module_score() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some("export const one = 1;\nexport const two = 2;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(ModuleId(10), "one", "pkg/one.ts", "pkg", None)
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(0, 21)),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(11), "two", "pkg/two.ts", "pkg", None)
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(22, 43)),
+        );
+        let package_sources = [
+            PackageSource::external("pkg", "1.0.0", "pkg/one", "one.js", "export const one = 1;"),
+            PackageSource::external("pkg", "2.0.0", "pkg/one", "one.js", "export const one = 1;"),
+            PackageSource::external("pkg", "2.0.0", "pkg/two", "two.js", "export const two = 2;"),
+        ];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 2);
+        assert!(
+            report
+                .attributions
+                .iter()
+                .all(|attribution| attribution.package_version.as_deref() == Some("2.0.0"))
+        );
+        let selected = report
+            .version_matches
+            .iter()
+            .find_map(|decision| match decision {
+                BestVersionMatch::Selected { score, .. } => Some(score),
+                _ => None,
+            })
+            .expect("best version should be selected");
+        assert_eq!(selected.package_version, "2.0.0");
+        assert_eq!(selected.total_modules, 2);
+        assert_eq!(selected.matched_modules, 2);
+        assert!(selected.binary_search_probes > 0);
+    }
+
+    #[test]
+    fn versioned_matcher_rejects_equal_best_versions() {
+        let rows = rows_with_package_source("export const value=1");
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/value",
+                "value.js",
+                "export const value = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/value",
+                "value.js",
+                "export const value = 1;",
+            ),
+        ];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.attributions.is_empty());
+        assert!(report.audit.has(FindingCode::AmbiguousPackageMatch));
+        assert!(
+            report
+                .version_matches
+                .iter()
+                .any(|decision| matches!(decision, BestVersionMatch::Ambiguous { .. }))
+        );
+    }
+
+    #[test]
+    fn versioned_matcher_can_match_by_function_signatures_and_string_anchors() {
+        let rows = rows_with_package_source(
+            "export function first(){return 'stable-anchor'}\nexport function second(){return 'other-anchor'}",
+        );
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/functions",
+            "functions.js",
+            "function first(){return 'stable-anchor'}\nfunction second(){return 'other-anchor'}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        );
+        assert!(report.matches[0].function_signature_matches >= 2);
+        assert!(report.matches[0].string_anchor_matches >= 1);
     }
 }

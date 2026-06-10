@@ -9,7 +9,12 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+oxc_allocator.workspace = true
+oxc_ast = "0.42"
+oxc_parser.workspace = true
+oxc_span.workspace = true
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
 reverts-observe = { path = "../reverts-observe" }
+semver = "1"

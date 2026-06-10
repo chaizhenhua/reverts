@@ -793,10 +793,15 @@ dependencies = [
 name = "reverts-package-matcher"
 version = "0.1.0"
 dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
  "reverts-input",
  "reverts-ir",
  "reverts-js",
  "reverts-observe",
+ "semver",
 ]
 
 [[package]]
