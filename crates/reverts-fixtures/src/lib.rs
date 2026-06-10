@@ -1,3 +1,5 @@
+pub mod external_corpus;
+
 use reverts_input::{InputBundle, InputBundleError, InputRows, ModuleInput, ProjectInput};
 use reverts_ir::ModuleId;
 
