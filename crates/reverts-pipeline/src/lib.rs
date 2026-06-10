@@ -1952,6 +1952,78 @@ mod tests {
     }
 
     #[test]
+    fn esbuild_runtime_helper_definitions_are_stripped_when_unused() {
+        // Esbuild bundles always declare a fixed set of CJS-interop helpers
+        // at the top (`__commonJS`, `__toCommonJS`, `__defProp`, ...). When
+        // none of them are referenced in the emitted module body, the
+        // lowering must strip the dead definitions.
+        let source = "var __commonJS = (cb, mod) => function __require() { return mod; };\n\
+                      var __toCommonJS = (mod) => mod;\n\
+                      var __defProp = Object.defineProperty;\n\
+                      var __export = (target, all) => { return target; };\n\
+                      var entry = 42;\n";
+        let run = run_with_source(
+            source,
+            &[
+                "__commonJS",
+                "__toCommonJS",
+                "__defProp",
+                "__export",
+                "entry",
+            ],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: esbuild"),
+            "esbuild fixture must carry esbuild banner; got:\n{emitted}",
+        );
+        for helper in ["__commonJS", "__toCommonJS", "__defProp", "__export"] {
+            assert!(
+                !emitted.contains(&format!("var {helper} =")),
+                "dead esbuild helper `{helper}` definition must be stripped; got:\n{emitted}",
+            );
+        }
+        assert!(
+            emitted.contains("var entry = 42"),
+            "unrelated declarations must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn esbuild_runtime_helper_definitions_are_kept_when_referenced() {
+        // The strip must only fire when the helper is genuinely unused.
+        // Add a call site for `__commonJS` and verify both the helper
+        // definition AND its caller survive.
+        let source = "var __commonJS = (cb, mod) => function __require() { return mod; };\n\
+                      var __toCommonJS = (mod) => mod;\n\
+                      var require_foo = __commonJS({ 'foo'() { return 1; } });\n\
+                      var entry = require_foo();\n";
+        let run = run_with_source(
+            source,
+            &["__commonJS", "__toCommonJS", "require_foo", "entry"],
+        );
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("// reverts-recovery: esbuild"),
+            "esbuild fixture must carry esbuild banner; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var __commonJS"),
+            "referenced helper must remain; got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("var __toCommonJS"),
+            "unreferenced helper `__toCommonJS` must still be stripped; got:\n{emitted}",
+        );
+        assert!(
+            emitted.contains("var require_foo = __commonJS("),
+            "call site must be preserved; got:\n{emitted}",
+        );
+    }
+
+    #[test]
     fn terser_minified_source_emits_terser_banner() {
         // Long single-line source with low whitespace ratio triggers looks_minified
         // without matching any specific compiler runtime identifier.

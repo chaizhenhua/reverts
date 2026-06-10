@@ -81,9 +81,9 @@ fn emit_binding_name(binding: &BindingName) -> String {
 const fn compiler_lowering(action: CompilerRecoveryAction) -> CompilerLowering {
     match action {
         CompilerRecoveryAction::PreserveBabelTranspiledOutput => CompilerLowering::Babel,
+        CompilerRecoveryAction::PreserveEsbuildHelpers => CompilerLowering::Esbuild,
         CompilerRecoveryAction::DirectModuleSource
         | CompilerRecoveryAction::PreserveWebpackRuntime
-        | CompilerRecoveryAction::PreserveEsbuildHelpers
         | CompilerRecoveryAction::PreserveRollupFacade
         | CompilerRecoveryAction::PreserveTerserMinifiedOutput => CompilerLowering::None,
     }

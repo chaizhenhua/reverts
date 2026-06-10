@@ -477,7 +477,26 @@ pub enum CompilerLowering {
     #[default]
     None,
     Babel,
+    Esbuild,
 }
+
+/// Canonical esbuild runtime helper names. Each is declared at the top of
+/// esbuild bundles whether or not it is referenced; the lowering pass strips
+/// the declaration once we can prove the helper is unused.
+const ESBUILD_RUNTIME_HELPERS: &[&str] = &[
+    "__commonJS",
+    "__toCommonJS",
+    "__defProp",
+    "__defProps",
+    "__export",
+    "__copyProps",
+    "__toESM",
+    "__require",
+    "__esm",
+    "__getOwnPropDesc",
+    "__getOwnPropNames",
+    "__hasOwnProp",
+];
 
 pub fn format_source_with_module_items(
     body_source: &str,
@@ -521,6 +540,15 @@ pub fn format_source_with_module_items(
                         .program
                         .body
                         .retain(|statement| !is_babel_interop_helper_definition(statement, helper));
+                }
+            }
+        }
+        if matches!(lowering, CompilerLowering::Esbuild) {
+            for helper_name in ESBUILD_RUNTIME_HELPERS {
+                if !program_references_named_identifier(&parsed.program, helper_name) {
+                    parsed.program.body.retain(|statement| {
+                        !is_top_level_var_declaration_named(statement, helper_name)
+                    });
                 }
             }
         }
@@ -735,6 +763,24 @@ fn is_babel_interop_helper_definition(
         return false;
     };
     body.statements.len() == 1 && matches!(body.statements[0], Statement::ReturnStatement(_))
+}
+
+/// Recognise a top-level `var <name> = ...;` declaration (one declarator)
+/// whose binding identifier matches `target_name`. Used by the esbuild
+/// helper-strip pass — the helper bodies are too varied to match
+/// structurally, so we identify them solely by their canonical names.
+fn is_top_level_var_declaration_named(statement: &Statement<'_>, target_name: &str) -> bool {
+    let Statement::VariableDeclaration(declaration) = statement else {
+        return false;
+    };
+    if declaration.declarations.len() != 1 {
+        return false;
+    }
+    let declarator = &declaration.declarations[0];
+    let BindingPatternKind::BindingIdentifier(identifier) = &declarator.id.kind else {
+        return false;
+    };
+    identifier.name.as_str() == target_name && declarator.init.is_some()
 }
 
 /// Recognise the canonical Babel CJS-to-ESM marker statement:
