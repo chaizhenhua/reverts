@@ -521,12 +521,8 @@ impl ImportExportPlanner {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
             source_bindings = prelude.required_bindings_for(source_bindings.iter());
-            let helper_source = entrypoint.map_or_else(
-                || prelude.source_for_bindings(source_bindings.iter()),
-                |entrypoint| {
-                    runtime_entrypoint_helper_source(prelude, &source_bindings, entrypoint)
-                },
-            );
+            let helper_source =
+                runtime_helper_source(prelude, &source_bindings, &namespace_exports, entrypoint);
             let helper_imports = runtime_source_module_imports(
                 program,
                 prelude,
@@ -544,9 +540,6 @@ impl ImportExportPlanner {
                 file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
             }
             file.push_source(helper_source);
-            for namespace_export in &namespace_exports {
-                file.push_source(runtime_namespace_export_statement(namespace_export));
-            }
             let setter_bindings = used_runtime_helper_setters
                 .get(source_file_id)
                 .cloned()
@@ -685,10 +678,11 @@ fn runtime_entrypoint_root_bindings(
     source_bindings
 }
 
-fn runtime_entrypoint_helper_source(
+fn runtime_helper_source(
     prelude: &RuntimePrelude,
     source_bindings: &BTreeSet<BindingName>,
-    entrypoint: &RuntimeEntrypoint,
+    namespace_exports: &[RuntimeNamespaceExport],
+    entrypoint: Option<&RuntimeEntrypoint>,
 ) -> String {
     let mut chunks = BTreeMap::<(u32, u8), String>::new();
     for binding in source_bindings {
@@ -699,10 +693,17 @@ fn runtime_entrypoint_helper_source(
             .entry((snippet.byte_start, 0))
             .or_insert_with(|| snippet.source.clone());
     }
-    for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
+    for namespace_export in namespace_exports {
         chunks
-            .entry((side_effect.byte_start, 1))
-            .or_insert(side_effect.source);
+            .entry((namespace_export.byte_start, 1))
+            .or_insert_with(|| runtime_namespace_export_statement(namespace_export));
+    }
+    if let Some(entrypoint) = entrypoint {
+        for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
+            chunks
+                .entry((side_effect.byte_start, 2))
+                .or_insert(side_effect.source);
+        }
     }
     chunks.into_values().collect::<Vec<_>>().join("\n")
 }
@@ -3755,6 +3756,66 @@ mod tests {
             .find("var command = new Constructor();")
             .expect("later runtime declaration should be emitted");
         assert!(initialize_index < command_index);
+        assert!(helper_source.contains("function main()"));
+        assert!(helper_source.contains("export { main };"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_preserves_namespace_export_order_before_tail_side_effects() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "function zString() { return 'schema'; }\n",
+            "var m = {};\n",
+            "M5(m, { string: () => zString });\n",
+        );
+        let body = "export const value = 1;\n";
+        let tail = concat!(
+            "initializeSchemas();\n",
+            "function initializeSchemas() { if (typeof m.string !== 'function') throw Error('missing zod string'); }\n",
+            "function main() { return m.string(); }\n",
+            "main();\n",
+        );
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+
+        let namespace_index = helper_source
+            .find("Object.defineProperties(m")
+            .expect("namespace export should be emitted");
+        let side_effect_index = helper_source
+            .find("initializeSchemas();")
+            .expect("entrypoint side effect should be emitted");
+        assert!(
+            namespace_index < side_effect_index,
+            "namespace export must precede tail side effects that read it, got:\n{helper_source}"
+        );
         assert!(helper_source.contains("function main()"));
         assert!(helper_source.contains("export { main };"));
     }
