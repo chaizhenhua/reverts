@@ -506,10 +506,12 @@ impl ImportExportPlanner {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
             source_bindings = prelude.required_bindings_for(source_bindings.iter());
-            let mut helper_source = prelude.source_for_bindings(source_bindings.iter());
-            if let Some(entrypoint) = entrypoint {
-                append_runtime_entrypoint_side_effects(&mut helper_source, prelude, entrypoint);
-            }
+            let helper_source = entrypoint.map_or_else(
+                || prelude.source_for_bindings(source_bindings.iter()),
+                |entrypoint| {
+                    runtime_entrypoint_helper_source(prelude, &source_bindings, entrypoint)
+                },
+            );
             let helper_imports = runtime_source_module_imports(
                 program,
                 prelude,
@@ -668,17 +670,26 @@ fn runtime_entrypoint_root_bindings(
     source_bindings
 }
 
-fn append_runtime_entrypoint_side_effects(
-    source: &mut String,
+fn runtime_entrypoint_helper_source(
     prelude: &RuntimePrelude,
+    source_bindings: &BTreeSet<BindingName>,
     entrypoint: &RuntimeEntrypoint,
-) {
-    for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
-        if !source.trim().is_empty() {
-            source.push('\n');
-        }
-        source.push_str(side_effect.source.as_str());
+) -> String {
+    let mut chunks = BTreeMap::<(u32, u8), String>::new();
+    for binding in source_bindings {
+        let Some(snippet) = prelude.snippets.get(binding) else {
+            continue;
+        };
+        chunks
+            .entry((snippet.byte_start, 0))
+            .or_insert_with(|| snippet.source.clone());
     }
+    for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
+        chunks
+            .entry((side_effect.byte_start, 1))
+            .or_insert(side_effect.source);
+    }
+    chunks.into_values().collect::<Vec<_>>().join("\n")
 }
 
 fn runtime_entrypoint_side_effects(
@@ -3092,6 +3103,21 @@ mod tests {
         CompilerRecoveryAction, ImportExportPlanner, SourceCompilerStrategy, lower_runtime_helpers,
     };
 
+    /// Build an `EnrichedProgram` with the binding-shape solution derived from the
+    /// def-use graph. Use this in tests where planner output should observe real
+    /// shapes; existing tests that explicitly construct
+    /// `BindingShapeSolution::default()` are intentionally shape-agnostic.
+    fn enriched_with_solved_shapes(input: InputBundle) -> reverts_model::EnrichedProgram {
+        let model = ProgramModel::from_input(input);
+        let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
+        reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            binding_shapes,
+        )
+    }
+
     #[test]
     fn enriched_program_plans_real_source_without_synthetic_declarations() {
         let planner = ImportExportPlanner;
@@ -3667,6 +3693,62 @@ mod tests {
                 .contains("function __reverts_set_yA(value) { yA = value; return value; }")
         );
         assert!(helper_source.contains("export { __reverts_set_yA, main, yA };"));
+    }
+
+    #[test]
+    fn entrypoint_runtime_preserves_side_effect_order_before_later_runtime_declarations() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var Constructor;\n",
+            "function initializeConstructor() { Constructor = class RuntimeCommand {}; }\n",
+        );
+        let body = "export const value = 1;\n";
+        let tail = concat!(
+            "initializeConstructor();\n",
+            "var command = new Constructor();\n",
+            "function main() { return command; }\n",
+            "main();\n",
+        );
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+
+        let initialize_index = helper_source
+            .find("initializeConstructor();")
+            .expect("entrypoint side effect should be emitted");
+        let command_index = helper_source
+            .find("var command = new Constructor();")
+            .expect("later runtime declaration should be emitted");
+        assert!(initialize_index < command_index);
+        assert!(helper_source.contains("function main()"));
+        assert!(helper_source.contains("export { main };"));
     }
 
     #[test]
