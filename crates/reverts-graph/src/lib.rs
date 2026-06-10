@@ -10,7 +10,7 @@ use oxc_ast::{
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
         ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression, Program,
         SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
-        VariableDeclarator,
+        VariableDeclaration, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -52,6 +52,8 @@ pub struct RuntimePrelude {
     pub source_file_path: String,
     pub source: String,
     pub bindings: BTreeMap<BindingName, RuntimePreludeBindingKind>,
+    pub snippets: BTreeMap<BindingName, RuntimePreludeSnippet>,
+    pub entrypoint: Option<RuntimeEntrypoint>,
 }
 
 impl RuntimePrelude {
@@ -64,6 +66,51 @@ impl RuntimePrelude {
     pub fn binding_kind(&self, binding: &BindingName) -> Option<RuntimePreludeBindingKind> {
         self.bindings.get(binding).copied()
     }
+
+    #[must_use]
+    pub fn source_for_bindings<'a>(
+        &self,
+        bindings: impl Iterator<Item = &'a BindingName>,
+    ) -> String {
+        let mut needed = bindings.cloned().collect::<BTreeSet<_>>();
+        let mut visited = BTreeSet::<BindingName>::new();
+        let mut snippets = BTreeMap::<u32, String>::new();
+
+        while let Some(binding) = needed
+            .iter()
+            .find(|binding| !visited.contains(*binding))
+            .cloned()
+        {
+            visited.insert(binding.clone());
+            let Some(snippet) = self.snippets.get(&binding) else {
+                continue;
+            };
+            snippets
+                .entry(snippet.byte_start)
+                .or_insert_with(|| snippet.source.clone());
+            for identifier in identifiers_in_source(snippet.source.as_str()) {
+                let candidate = BindingName::new(identifier);
+                if self.bindings.contains_key(&candidate) && !visited.contains(&candidate) {
+                    needed.insert(candidate);
+                }
+            }
+        }
+
+        snippets.into_values().collect::<Vec<_>>().join("\n")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreludeSnippet {
+    pub source: String,
+    pub byte_start: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeEntrypoint {
+    pub source_file_id: u32,
+    pub callee: BindingName,
+    pub statement_source: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -482,8 +529,12 @@ fn parse_runtime_prelude(
             .with_options(parse_options_for(source_type))
             .parse();
         if parsed.errors.is_empty() && !parsed.panicked {
-            let (bindings, source) =
-                collect_runtime_prelude_declarations(&parsed.program, source, module_spans);
+            let (bindings, snippets, source, entrypoint) = collect_runtime_prelude_declarations(
+                source_file_id,
+                &parsed.program,
+                source,
+                module_spans,
+            );
             if bindings.is_empty() {
                 return None;
             }
@@ -492,6 +543,8 @@ fn parse_runtime_prelude(
                 source_file_path: source_file_path.to_string(),
                 source,
                 bindings,
+                snippets,
+                entrypoint,
             });
         }
     }
@@ -500,27 +553,79 @@ fn parse_runtime_prelude(
 }
 
 fn collect_runtime_prelude_declarations(
+    source_file_id: u32,
     program: &Program<'_>,
     source: &str,
     module_spans: &[(u32, u32)],
-) -> (BTreeMap<BindingName, RuntimePreludeBindingKind>, String) {
+) -> (
+    BTreeMap<BindingName, RuntimePreludeBindingKind>,
+    BTreeMap<BindingName, RuntimePreludeSnippet>,
+    String,
+    Option<RuntimeEntrypoint>,
+) {
     let mut bindings = BTreeMap::new();
+    let mut snippets_by_binding = BTreeMap::new();
     let mut snippets = Vec::new();
+    let mut entrypoint_candidate = None;
     for statement in &program.body {
         let span = statement.span();
         if !span_outside_module_spans(span.start, span.end, module_spans) {
             continue;
         }
-        let before = bindings.len();
-        collect_statement_runtime_prelude_bindings(statement, source, &mut bindings);
-        if bindings.len() == before {
+        if let Some(candidate) =
+            runtime_entrypoint_from_statement(source_file_id, statement, source)
+        {
+            entrypoint_candidate = Some(candidate);
+        }
+        let declarations = runtime_prelude_declarations_from_statement(statement, source);
+        if declarations.is_empty() {
             continue;
         }
-        if let Some(snippet) = source.get(span.start as usize..span.end as usize) {
-            snippets.push(snippet.to_string());
+        for declaration in declarations {
+            bindings.insert(declaration.binding.clone(), declaration.kind);
+            snippets_by_binding.insert(
+                declaration.binding,
+                RuntimePreludeSnippet {
+                    source: declaration.source.clone(),
+                    byte_start: declaration.byte_start,
+                },
+            );
+            snippets.push(declaration.source);
         }
     }
-    (bindings, snippets.join("\n"))
+    let entrypoint =
+        entrypoint_candidate.filter(|candidate| bindings.contains_key(&candidate.callee));
+    (
+        bindings,
+        snippets_by_binding,
+        snippets.join("\n"),
+        entrypoint,
+    )
+}
+
+fn runtime_entrypoint_from_statement(
+    source_file_id: u32,
+    statement: &Statement<'_>,
+    source: &str,
+) -> Option<RuntimeEntrypoint> {
+    let Statement::ExpressionStatement(statement) = statement else {
+        return None;
+    };
+    let Expression::CallExpression(call) = &statement.expression else {
+        return None;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return None;
+    };
+    let span = statement.span();
+    let statement_source = source
+        .get(span.start as usize..span.end as usize)?
+        .to_string();
+    Some(RuntimeEntrypoint {
+        source_file_id,
+        callee: BindingName::new(callee.name.as_str()),
+        statement_source,
+    })
 }
 
 fn span_outside_module_spans(start: u32, end: u32, module_spans: &[(u32, u32)]) -> bool {
@@ -529,13 +634,21 @@ fn span_outside_module_spans(start: u32, end: u32, module_spans: &[(u32, u32)]) 
         .all(|(module_start, module_end)| end <= *module_start || start >= *module_end)
 }
 
-fn collect_statement_runtime_prelude_bindings(
+struct RuntimePreludeDeclaration {
+    binding: BindingName,
+    kind: RuntimePreludeBindingKind,
+    source: String,
+    byte_start: u32,
+}
+
+fn runtime_prelude_declarations_from_statement(
     statement: &Statement<'_>,
     source: &str,
-    bindings: &mut BTreeMap<BindingName, RuntimePreludeBindingKind>,
-) {
+) -> Vec<RuntimePreludeDeclaration> {
+    let mut declarations = Vec::new();
     match statement {
         Statement::VariableDeclaration(declaration) => {
+            let keyword = variable_declaration_keyword(declaration, source);
             for declarator in &declaration.declarations {
                 let kind = declarator
                     .init
@@ -544,67 +657,117 @@ fn collect_statement_runtime_prelude_bindings(
                         runtime_binding_kind_from_initializer(init, source)
                     });
                 for binding in binding_pattern_names(&declarator.id) {
-                    bindings.insert(BindingName::new(binding), kind);
+                    declarations.push(RuntimePreludeDeclaration {
+                        binding: BindingName::new(binding),
+                        kind,
+                        source: variable_declarator_snippet(keyword.as_str(), declarator, source),
+                        byte_start: declarator.span.start,
+                    });
                 }
             }
         }
         Statement::FunctionDeclaration(function) => {
             if let Some(id) = &function.id {
-                bindings.insert(
-                    BindingName::new(id.name.as_str()),
-                    RuntimePreludeBindingKind::SourceBacked,
-                );
+                declarations.push(RuntimePreludeDeclaration {
+                    binding: BindingName::new(id.name.as_str()),
+                    kind: RuntimePreludeBindingKind::SourceBacked,
+                    source: statement_snippet(statement, source),
+                    byte_start: statement.span().start,
+                });
             }
         }
         Statement::ClassDeclaration(class) => {
             if let Some(id) = &class.id {
-                bindings.insert(
-                    BindingName::new(id.name.as_str()),
-                    RuntimePreludeBindingKind::SourceBacked,
-                );
+                declarations.push(RuntimePreludeDeclaration {
+                    binding: BindingName::new(id.name.as_str()),
+                    kind: RuntimePreludeBindingKind::SourceBacked,
+                    source: statement_snippet(statement, source),
+                    byte_start: statement.span().start,
+                });
             }
         }
         Statement::ImportDeclaration(declaration) => {
             let mut imported = BTreeSet::new();
             collect_import_module_bindings(declaration, &mut imported);
             for binding in imported {
-                bindings.insert(
-                    BindingName::new(binding),
-                    RuntimePreludeBindingKind::SourceBacked,
-                );
+                declarations.push(RuntimePreludeDeclaration {
+                    binding: BindingName::new(binding),
+                    kind: RuntimePreludeBindingKind::SourceBacked,
+                    source: statement_snippet(statement, source),
+                    byte_start: statement.span().start,
+                });
             }
         }
         Statement::ExportNamedDeclaration(declaration) => {
             if let Some(declaration) = &declaration.declaration {
                 for binding in declaration_binding_names(declaration) {
-                    bindings.insert(
-                        BindingName::new(binding),
-                        RuntimePreludeBindingKind::SourceBacked,
-                    );
+                    declarations.push(RuntimePreludeDeclaration {
+                        binding: BindingName::new(binding),
+                        kind: RuntimePreludeBindingKind::SourceBacked,
+                        source: statement_snippet(statement, source),
+                        byte_start: statement.span().start,
+                    });
                 }
             }
         }
         Statement::ExportDefaultDeclaration(declaration) => match &declaration.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
                 if let Some(id) = &function.id {
-                    bindings.insert(
-                        BindingName::new(id.name.as_str()),
-                        RuntimePreludeBindingKind::SourceBacked,
-                    );
+                    declarations.push(RuntimePreludeDeclaration {
+                        binding: BindingName::new(id.name.as_str()),
+                        kind: RuntimePreludeBindingKind::SourceBacked,
+                        source: statement_snippet(statement, source),
+                        byte_start: statement.span().start,
+                    });
                 }
             }
             ExportDefaultDeclarationKind::ClassDeclaration(class) => {
                 if let Some(id) = &class.id {
-                    bindings.insert(
-                        BindingName::new(id.name.as_str()),
-                        RuntimePreludeBindingKind::SourceBacked,
-                    );
+                    declarations.push(RuntimePreludeDeclaration {
+                        binding: BindingName::new(id.name.as_str()),
+                        kind: RuntimePreludeBindingKind::SourceBacked,
+                        source: statement_snippet(statement, source),
+                        byte_start: statement.span().start,
+                    });
                 }
             }
             _ => {}
         },
         _ => {}
     }
+    declarations
+}
+
+fn variable_declaration_keyword(declaration: &VariableDeclaration<'_>, source: &str) -> String {
+    let Some(first) = declaration.declarations.first() else {
+        return "var".to_string();
+    };
+    source
+        .get(declaration.span.start as usize..first.span.start as usize)
+        .map(str::trim)
+        .filter(|keyword| matches!(*keyword, "var" | "let" | "const"))
+        .unwrap_or("var")
+        .to_string()
+}
+
+fn variable_declarator_snippet(
+    keyword: &str,
+    declarator: &VariableDeclarator<'_>,
+    source: &str,
+) -> String {
+    source
+        .get(declarator.span.start as usize..declarator.span.end as usize)
+        .map(str::trim)
+        .map(|declarator| format!("{keyword} {declarator};"))
+        .unwrap_or_else(|| format!("{keyword};"))
+}
+
+fn statement_snippet(statement: &Statement<'_>, source: &str) -> String {
+    let span = statement.span();
+    source
+        .get(span.start as usize..span.end as usize)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn runtime_binding_kind_from_initializer(
@@ -630,6 +793,125 @@ fn compact_source(source: &str) -> String {
         .chars()
         .filter(|character| !character.is_whitespace())
         .collect()
+}
+
+fn identifiers_in_source(source: &str) -> BTreeSet<String> {
+    let mut identifiers = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if matches!(byte, b'\'' | b'"' | b'`') {
+            index = skip_quoted_source(bytes, index, byte);
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            index = skip_line_comment(bytes, index + 2);
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            index = skip_block_comment(bytes, index + 2);
+            continue;
+        }
+        if is_identifier_start(byte) {
+            let start = index;
+            index += 1;
+            while index < bytes.len() && is_identifier_continue(bytes[index]) {
+                index += 1;
+            }
+            let identifier = &source[start..index];
+            if !is_js_keyword(identifier) {
+                identifiers.insert(identifier.to_string());
+            }
+            continue;
+        }
+        index += 1;
+    }
+    identifiers
+}
+
+fn skip_quoted_source(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && bytes[index] != b'\n' {
+        index += 1;
+    }
+    index
+}
+
+fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn is_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+fn is_identifier_continue(byte: u8) -> bool {
+    is_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+fn is_js_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "else"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "from"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "let"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "undefined"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+    )
 }
 
 fn looks_like_commonjs_wrapper(compact: &str) -> bool {
@@ -2074,6 +2356,49 @@ mod tests {
         );
         assert_eq!(runtime_binding_names, vec!["$wrap7", "_lazy9"]);
         assert!(graph.def_use().unresolved_reads().is_empty());
+    }
+
+    #[test]
+    fn graph_recovers_entrypoint_and_minimal_runtime_snippets() {
+        let prelude = concat!(
+            "var helper = () => dependency();\n",
+            "var unused = new Missing(), dependency = () => 1;\n",
+            "function main() { return helper(); }\n",
+        );
+        let body = "export const moduleValue = 1;\n";
+        let tail = "main();\n";
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let entrypoint = prelude
+            .entrypoint
+            .as_ref()
+            .expect("tail call should be recovered as entrypoint");
+        let main = BindingName::new("main");
+        let source = prelude.source_for_bindings(std::iter::once(&main));
+
+        assert_eq!(entrypoint.callee.as_str(), "main");
+        assert_eq!(entrypoint.statement_source.as_str(), "main();");
+        assert!(source.contains("function main()"));
+        assert!(source.contains("var helper"));
+        assert!(source.contains("var dependency"));
+        assert!(!source.contains("unused"));
+        assert!(!source.contains("Missing"));
     }
 
     #[test]

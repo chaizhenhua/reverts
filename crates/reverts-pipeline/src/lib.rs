@@ -535,7 +535,8 @@ mod tests {
         );
         let body = concat!(
             "var entry = $wrap7((exports, module) => { module.exports = 1; });\n",
-            "_lazy9();\n",
+            "var init = _lazy9(() => { entry(); });\n",
+            "init();\n",
             "export { entry };\n",
         );
         let source = format!("{prelude}{body}");
@@ -552,27 +553,17 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.is_clean());
-        assert_eq!(run.project.files.len(), 2);
+        assert_eq!(run.project.files.len(), 1);
         let entry = run
             .project
             .files
             .iter()
             .find(|file| file.path == "modules/entry.ts")
             .expect("entry file should be emitted");
-        let runtime = run
-            .project
-            .files
-            .iter()
-            .find(|file| file.path == "modules/runtime/source-1-prelude.ts")
-            .expect("runtime prelude should be emitted");
-        assert!(entry.source.contains("import { $wrap7, _lazy9 }"));
-        assert!(
-            entry
-                .source
-                .contains("from './runtime/source-1-prelude.js';")
-        );
-        assert!(runtime.source.contains("var $wrap7"));
-        assert!(runtime.source.contains("export { $wrap7, _lazy9 };"));
+        assert!(!entry.source.contains("$wrap7"));
+        assert!(!entry.source.contains("_lazy9"));
+        assert!(entry.source.contains("__reverts_cached_module"));
+        assert!(entry.source.contains("__reverts_initialized"));
     }
 
     #[test]
