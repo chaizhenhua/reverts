@@ -8,14 +8,15 @@
 //! cargo test -p reverts-pipeline --test external_corpus -- --ignored --nocapture
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_analyze::enrich_program;
 use reverts_fixtures::external_corpus::{ExternalCase, load_external_cases};
 use reverts_input::{
-    InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
+    InputBundle, InputRows, ModuleInput, PackageAttributionStatus, PackageSurfaceInput,
+    ProjectInput, SourceFileInput, SymbolInput,
 };
-use reverts_ir::ModuleId;
+use reverts_ir::{ModuleId, split_bare_specifier};
 use reverts_model::{CompilerKind, ProgramModel};
 use reverts_pipeline::generate_project_from_input;
 
@@ -133,7 +134,47 @@ fn build_bundle(case: &ExternalCase, source: &str) -> Option<InputBundle> {
     // against; the corpus's own oracle isn't reused here because we only want
     // to measure what the current pipeline observes about the artifact.
     rows.symbols.push(SymbolInput::new(ModuleId(1), "entry"));
+
+    // Paper #2 (Schwartz 2013) iterative-recovery scaffold: probe the input to
+    // discover bare package specifiers via the AST extractor, then synthesize a
+    // permissive `PackageSurfaceInput` for each so that audit's strict
+    // `UnresolvableBareImport` rule does not block exploratory corpus runs.
+    // The synthesized surfaces are clearly tagged so a real pipeline run on
+    // unmatched bundles can tell them apart from authentic attribution data.
+    augment_with_synthesized_surfaces(&mut rows)?;
+
     InputBundle::from_rows(rows).ok()
+}
+
+fn augment_with_synthesized_surfaces(rows: &mut InputRows) -> Option<()> {
+    let probe = InputBundle::from_rows(rows.clone()).ok()?;
+    let model = ProgramModel::from_input(probe);
+
+    let mut specifiers = BTreeSet::<String>::new();
+    for module in model.modules() {
+        for specifier in model.graph().import_export().package_imports_for(module.id) {
+            specifiers.insert(specifier.to_string());
+        }
+    }
+
+    for specifier in specifiers {
+        let Some((package_name, _)) = split_bare_specifier(&specifier) else {
+            continue;
+        };
+        if !reverts_ir::is_valid_package_name(&package_name) {
+            continue;
+        }
+        rows.package_surfaces.push(PackageSurfaceInput {
+            package_name,
+            // PackageSurfaceInput requires a non-empty version string when the
+            // status is Accepted; the value is opaque to downstream stages.
+            package_version: Some("0.0.0-corpus".to_string()),
+            export_specifier: specifier,
+            status: PackageAttributionStatus::Accepted,
+            evidence: Some("auto-synthesized for corpus exploration".to_string()),
+        });
+    }
+    Some(())
 }
 
 fn banner_compiler(run: &reverts_pipeline::OutputRun) -> Option<CompilerKind> {
