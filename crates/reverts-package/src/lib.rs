@@ -22,9 +22,7 @@ impl PackageSurfaceIndex {
         }
 
         if let Some(name) = normalize_builtin(specifier) {
-            return PackageResolution::Builtin {
-                specifier: name.to_string(),
-            };
+            return PackageResolution::Builtin { specifier: name };
         }
 
         let Some((package_name, _subpath)) = split_bare_specifier(specifier) else {
@@ -100,28 +98,66 @@ pub fn is_node_builtin(specifier: &str) -> bool {
     normalize_builtin(specifier).is_some()
 }
 
-fn normalize_builtin(specifier: &str) -> Option<&str> {
+fn normalize_builtin(specifier: &str) -> Option<String> {
     let name = specifier.strip_prefix("node:").unwrap_or(specifier);
     matches!(
         name,
         "assert"
+            | "assert/strict"
+            | "async_hooks"
             | "buffer"
             | "child_process"
+            | "cluster"
+            | "console"
+            | "constants"
             | "crypto"
+            | "dgram"
+            | "diagnostics_channel"
+            | "dns"
+            | "dns/promises"
+            | "domain"
             | "events"
             | "fs"
+            | "fs/promises"
             | "http"
+            | "http2"
             | "https"
+            | "inspector"
             | "module"
+            | "net"
             | "os"
             | "path"
+            | "path/posix"
+            | "path/win32"
+            | "perf_hooks"
             | "process"
+            | "punycode"
+            | "querystring"
+            | "readline"
+            | "readline/promises"
+            | "repl"
             | "stream"
+            | "stream/consumers"
+            | "stream/promises"
+            | "stream/web"
+            | "string_decoder"
+            | "test"
+            | "test/reporters"
+            | "timers"
+            | "timers/promises"
+            | "tls"
+            | "trace_events"
+            | "tty"
             | "url"
             | "util"
+            | "util/types"
+            | "v8"
+            | "vm"
+            | "wasi"
+            | "worker_threads"
             | "zlib"
     )
-    .then_some(name)
+    .then(|| name.to_string())
 }
 
 #[cfg(test)]
@@ -134,6 +170,16 @@ mod tests {
     fn builtin_modules_are_classified_without_package_surface() {
         assert!(is_node_builtin("fs"));
         assert!(is_node_builtin("node:path"));
+        assert!(is_node_builtin("fs/promises"));
+        assert!(is_node_builtin("node:fs/promises"));
+        assert!(is_node_builtin("timers/promises"));
+        assert!(is_node_builtin("path/win32"));
+        assert!(is_node_builtin("async_hooks"));
+        assert!(is_node_builtin("http2"));
+        assert!(is_node_builtin("tls"));
+        assert!(is_node_builtin("net"));
+        assert!(!is_node_builtin("ws"));
+        assert!(!is_node_builtin("undici"));
     }
 
     #[test]
@@ -143,6 +189,14 @@ mod tests {
         assert_eq!(index.resolve("./local").specifier(), Some("./local"));
         assert_eq!(index.resolve("../shared").specifier(), Some("../shared"));
         assert_eq!(index.resolve("node:path").specifier(), Some("path"));
+        assert_eq!(
+            index.resolve("node:fs/promises").specifier(),
+            Some("fs/promises")
+        );
+        assert_eq!(
+            index.resolve("timers/promises").specifier(),
+            Some("timers/promises")
+        );
         assert!(matches!(
             index.resolve("/absolute"),
             PackageResolution::Local { .. }

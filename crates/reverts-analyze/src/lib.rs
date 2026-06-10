@@ -266,7 +266,12 @@ fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
         if !mapped_originals.insert((symbol.module_id, symbol.name.clone())) {
             continue;
         }
-        let base = sanitize_identifier(symbol.name.as_str());
+        let naming_hint = symbol
+            .semantic_name
+            .as_deref()
+            .or(symbol.export_name.as_deref())
+            .unwrap_or(symbol.name.as_str());
+        let base = sanitize_identifier(naming_hint);
         let semantic = reserve_unique_name(&mut used_by_module, symbol.module_id, &base);
         semantic_names.insert_binding(symbol.module_id, symbol.name.clone(), semantic);
     }
@@ -647,10 +652,7 @@ mod tests {
     #[test]
     fn semantic_naming_sanitizes_reserved_words() {
         let mut rows = valid_rows();
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "class".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "class"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let output = enrich_program(ProgramModel::from_input(input));
@@ -661,6 +663,31 @@ mod tests {
             .expect("semantic binding should exist");
 
         assert_eq!(binding.as_str(), "_class");
+    }
+
+    #[test]
+    fn semantic_name_hint_does_not_replace_source_binding_identity() {
+        let mut rows = valid_rows();
+        rows.symbols.push(
+            SymbolInput::new(ModuleId(1), "$F1").with_semantic_name("lodashGlobalObjectInit"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+        let binding = output
+            .program
+            .semantic_names()
+            .binding_name(ModuleId(1), "$F1")
+            .expect("semantic binding should be keyed by original identity");
+
+        assert_eq!(binding.as_str(), "lodashGlobalObjectInit");
+        assert!(
+            output
+                .program
+                .semantic_names()
+                .binding_name(ModuleId(1), "lodashGlobalObjectInit")
+                .is_none()
+        );
     }
 
     #[test]

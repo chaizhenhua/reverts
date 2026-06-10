@@ -209,7 +209,16 @@ impl RevertsGraph {
 
         let mut definitions: BTreeMap<ModuleId, BTreeSet<BindingName>> = BTreeMap::new();
         let mut def_use = DefUseGraph::default();
+        let source_backed_modules = input
+            .modules
+            .iter()
+            .filter(|module| input.module_source_slice(module.id).is_some())
+            .map(|module| module.id)
+            .collect::<BTreeSet<_>>();
         for symbol in &input.symbols {
+            if source_backed_modules.contains(&symbol.module_id) {
+                continue;
+            }
             def_use.define(symbol.module_id, symbol.name.clone());
             definitions
                 .entry(symbol.module_id)
@@ -429,41 +438,39 @@ fn extract_runtime_preludes(input: &InputBundle) -> BTreeMap<u32, RuntimePrelude
         let Some(source) = source_file.source.as_deref() else {
             continue;
         };
-        let Some(prefix_end) = runtime_prelude_prefix_end(input, source_file.id) else {
-            continue;
-        };
-        if prefix_end == 0 {
+        let module_spans = runtime_scope_module_spans(input, source_file.id);
+        if module_spans.is_empty() {
             continue;
         }
-        let Some(prefix_source) = source.get(..prefix_end) else {
-            continue;
-        };
-        if prefix_source.trim().is_empty() {
-            continue;
-        }
-        if let Some(prelude) =
-            parse_runtime_prelude(source_file.id, source_file.path.as_str(), prefix_source)
-        {
+        if let Some(prelude) = parse_runtime_prelude(
+            source_file.id,
+            source_file.path.as_str(),
+            source,
+            &module_spans,
+        ) {
             preludes.insert(source_file.id, prelude);
         }
     }
     preludes
 }
 
-fn runtime_prelude_prefix_end(input: &InputBundle, source_file_id: u32) -> Option<usize> {
-    input
+fn runtime_scope_module_spans(input: &InputBundle, source_file_id: u32) -> Vec<(u32, u32)> {
+    let mut spans = input
         .modules
         .iter()
         .filter(|module| module.source_file_id == Some(source_file_id))
         .filter_map(|module| module.source_span)
-        .map(|span| span.byte_start as usize)
-        .min()
+        .map(|span| (span.byte_start, span.byte_end))
+        .collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans
 }
 
 fn parse_runtime_prelude(
     source_file_id: u32,
     source_file_path: &str,
     source: &str,
+    module_spans: &[(u32, u32)],
 ) -> Option<RuntimePrelude> {
     let allocator = Allocator::default();
     for source_type in source_type_candidates(
@@ -474,14 +481,15 @@ fn parse_runtime_prelude(
             .with_options(parse_options_for(source_type))
             .parse();
         if parsed.errors.is_empty() && !parsed.panicked {
-            let bindings = collect_runtime_prelude_bindings(&parsed.program, source);
+            let (bindings, source) =
+                collect_runtime_prelude_declarations(&parsed.program, source, module_spans);
             if bindings.is_empty() {
                 return None;
             }
             return Some(RuntimePrelude {
                 source_file_id,
                 source_file_path: source_file_path.to_string(),
-                source: source.to_string(),
+                source,
                 bindings,
             });
         }
@@ -490,15 +498,34 @@ fn parse_runtime_prelude(
     None
 }
 
-fn collect_runtime_prelude_bindings(
+fn collect_runtime_prelude_declarations(
     program: &Program<'_>,
     source: &str,
-) -> BTreeMap<BindingName, RuntimePreludeBindingKind> {
+    module_spans: &[(u32, u32)],
+) -> (BTreeMap<BindingName, RuntimePreludeBindingKind>, String) {
     let mut bindings = BTreeMap::new();
+    let mut snippets = Vec::new();
     for statement in &program.body {
+        let span = statement.span();
+        if !span_outside_module_spans(span.start, span.end, module_spans) {
+            continue;
+        }
+        let before = bindings.len();
         collect_statement_runtime_prelude_bindings(statement, source, &mut bindings);
+        if bindings.len() == before {
+            continue;
+        }
+        if let Some(snippet) = source.get(span.start as usize..span.end as usize) {
+            snippets.push(snippet.to_string());
+        }
     }
-    bindings
+    (bindings, snippets.join("\n"))
+}
+
+fn span_outside_module_spans(start: u32, end: u32, module_spans: &[(u32, u32)]) -> bool {
+    module_spans
+        .iter()
+        .all(|(module_start, module_end)| end <= *module_start || start >= *module_end)
 }
 
 fn collect_statement_runtime_prelude_bindings(
@@ -1518,10 +1545,7 @@ mod tests {
         });
         rows.modules
             .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "main".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "main"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let graph = RevertsGraph::from_input(&input);
@@ -2061,5 +2085,50 @@ mod tests {
                 .any(|(module_id, binding)| *module_id == ModuleId(1)
                     && binding.as_str() == "shared")
         );
+    }
+
+    #[test]
+    fn graph_recovers_runtime_declarations_between_module_spans() {
+        let first = "var first = 1;\n";
+        let runtime = concat!(
+            "var $lateRuntime = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+        );
+        let second = "var second = $lateRuntime((exports, module) => { module.exports = 2; });\n";
+        let source = format!("{first}{runtime}{second}");
+        let first_start = 0;
+        let first_end = first.len() as u32;
+        let second_start = (first.len() + runtime.len()) as u32;
+        let second_end = source.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "first", "modules/first.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(first_start, first_end)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "second", "modules/second.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(second_start, second_end)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        assert!(
+            graph
+                .runtime_prelude(1)
+                .expect("runtime prelude should be recovered")
+                .defines(&BindingName::new("$lateRuntime"))
+        );
+        assert!(
+            graph
+                .runtime_imports_for(ModuleId(2))
+                .iter()
+                .any(|import| import.binding.as_str() == "$lateRuntime")
+        );
+        assert!(graph.runtime_imports_for(ModuleId(1)).is_empty());
     }
 }

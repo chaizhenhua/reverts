@@ -163,21 +163,25 @@ fn load_module_symbols(
         r"
         SELECT DISTINCT
             s.module_id,
-            COALESCE(NULLIF(TRIM(s.semantic_name), ''), NULLIF(TRIM(s.export_name), ''), s.original_name) AS symbol_name
+            s.original_name AS symbol_name,
+            NULLIF(TRIM(s.semantic_name), '') AS semantic_name,
+            NULLIF(TRIM(s.export_name), '') AS export_name
         FROM symbols s
         JOIN modules m ON m.id = s.module_id
         JOIN project_files pf ON pf.file_id = m.file_id
         WHERE pf.project_id = ?1
           AND s.module_id IS NOT NULL
           AND s.scope_level = 'module'
-          AND TRIM(COALESCE(NULLIF(TRIM(s.semantic_name), ''), NULLIF(TRIM(s.export_name), ''), s.original_name)) != ''
-        ORDER BY s.module_id, symbol_name
+          AND TRIM(s.original_name) != ''
+        ORDER BY s.module_id, symbol_name, semantic_name, export_name
         ",
     )?;
     let rows = statement.query_map(params![i64::from(project_id)], |row| {
         Ok(SymbolRow {
             module_id: row.get(0)?,
             name: row.get(1)?,
+            semantic_name: row.get(2)?,
+            export_name: row.get(3)?,
         })
     })?;
 
@@ -455,6 +459,11 @@ mod tests {
         assert_eq!(bundle.modules[0].semantic_path, "modules/10-entry/main.ts");
         assert_eq!(bundle.modules[1].kind, ModuleKind::Package);
         assert_eq!(bundle.symbols.len(), 1);
+        assert_eq!(bundle.symbols[0].name, "activate");
+        assert_eq!(
+            bundle.symbols[0].semantic_name.as_deref(),
+            Some("runActivation")
+        );
         assert!(matches!(
             bundle.dependencies[0].target,
             ModuleDependencyTarget::Module(ModuleId(11))
@@ -566,8 +575,8 @@ mod tests {
                 INSERT INTO symbols
                     (id, module_id, original_name, semantic_name, export_name, scope_level)
                     VALUES
-                    (1001, 10, 'activate', 'activate', NULL, 'module'),
-                    (1002, 10, 'activate', 'activate', NULL, 'module'),
+                    (1001, 10, 'activate', 'runActivation', NULL, 'module'),
+                    (1002, 10, 'activate', 'runActivation', NULL, 'module'),
                     (1003, 10, 'inner', 'inner', NULL, 'local');
                 INSERT INTO module_dependencies (module_id, dependency_id) VALUES (10, 11);
                 INSERT INTO package_attributions

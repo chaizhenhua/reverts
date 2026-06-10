@@ -237,10 +237,7 @@ mod tests {
             "lodash",
             Some("4.17.21".to_string()),
         ));
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "activate".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "activate"));
         rows.dependencies.push(ModuleDependencyInput {
             from_module_id: ModuleId(1),
             target: ModuleDependencyTarget::Package {
@@ -571,10 +568,7 @@ mod tests {
     #[test]
     fn missing_symbol_source_is_reported_without_emitting_generated_implementation() {
         let mut rows = rows_with_application_module();
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "activate".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "activate"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
@@ -601,14 +595,8 @@ mod tests {
     #[test]
     fn duplicate_input_symbols_emit_single_missing_source_finding() {
         let mut rows = rows_with_application_module();
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "activate".to_string(),
-        });
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "activate".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "activate"));
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "activate"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
@@ -645,14 +633,8 @@ mod tests {
             package_name: None,
             package_version: None,
         });
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "one".to_string(),
-        });
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(2),
-            name: "two".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "one"));
+        rows.symbols.push(SymbolInput::new(ModuleId(2), "two"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
@@ -679,14 +661,8 @@ mod tests {
                 .with_source_file(1)
                 .with_source_span(reverts_input::SourceSpan::new(22, 43)),
         );
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "one".to_string(),
-        });
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(2),
-            name: "two".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "one"));
+        rows.symbols.push(SymbolInput::new(ModuleId(2), "two"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
@@ -698,21 +674,16 @@ mod tests {
     }
 
     #[test]
-    fn symbol_not_recovered_from_source_is_rejected_before_emit() {
+    fn source_module_symbol_hint_not_recovered_from_ast_is_not_synthesized() {
         let mut rows = rows_with_application_source("export const real = 1;");
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "missing".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "missing"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
 
-        assert!(
-            run.audit
-                .has(FindingCode::SyntheticReferenceWithoutDeclaration)
-        );
-        assert!(run.project.files.is_empty());
+        assert!(run.audit.is_clean());
+        assert_eq!(run.project.files.len(), 1);
+        assert!(!run.project.files[0].source.contains("missing"));
     }
 
     #[test]

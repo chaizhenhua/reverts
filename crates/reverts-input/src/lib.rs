@@ -147,7 +147,37 @@ impl ModuleInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInput {
     pub module_id: ModuleId,
+    /// Source-backed binding identity as it appears in the module body.
     pub name: String,
+    /// Optional readability hint. This is not a declaration identity unless an
+    /// AST rewrite pass later proves that every use was renamed consistently.
+    pub semantic_name: Option<String>,
+    /// Optional export-name hint from the source database.
+    pub export_name: Option<String>,
+}
+
+impl SymbolInput {
+    #[must_use]
+    pub fn new(module_id: ModuleId, name: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            name: name.into(),
+            semantic_name: None,
+            export_name: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_semantic_name(mut self, semantic_name: impl Into<String>) -> Self {
+        self.semantic_name = Some(semantic_name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_export_name(mut self, export_name: impl Into<String>) -> Self {
+        self.export_name = Some(export_name.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,6 +393,8 @@ impl InputRows {
             symbols.push(SymbolInput {
                 module_id: ModuleId(checked_u32_id(row.module_id, "symbol.module_id")?),
                 name: non_empty(row.name, "symbol.name")?,
+                semantic_name: normalize_optional(row.semantic_name),
+                export_name: normalize_optional(row.export_name),
             });
         }
 
@@ -534,6 +566,8 @@ pub struct ModuleRow {
 pub struct SymbolRow {
     pub module_id: i64,
     pub name: String,
+    pub semantic_name: Option<String>,
+    pub export_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,6 +819,12 @@ fn validate_symbols(
     for symbol in symbols {
         ensure_module_exists(symbol.module_id, module_ids, "symbol")?;
         ensure_non_empty(symbol.name.as_str(), "symbol.name")?;
+        if let Some(semantic_name) = &symbol.semantic_name {
+            ensure_non_empty(semantic_name.as_str(), "symbol.semantic_name")?;
+        }
+        if let Some(export_name) = &symbol.export_name {
+            ensure_non_empty(export_name.as_str(), "symbol.export_name")?;
+        }
     }
     Ok(())
 }
@@ -1017,10 +1057,7 @@ mod tests {
             "m10",
             "src/index.ts",
         ));
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(10),
-            name: "main".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(10), "main"));
 
         let bundle = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
@@ -1054,6 +1091,8 @@ mod tests {
         rows.symbols.push(SymbolRow {
             module_id: 17,
             name: "answer".to_string(),
+            semantic_name: Some("readableAnswer".to_string()),
+            export_name: None,
         });
 
         let bundle = InputBundle::from_database_rows(rows).expect("database rows should convert");
@@ -1064,6 +1103,10 @@ mod tests {
         assert_eq!(bundle.modules[0].source_file_id, Some(11));
         assert_eq!(bundle.modules[0].source_span, Some(SourceSpan::new(0, 18)));
         assert_eq!(bundle.symbols[0].name, "answer");
+        assert_eq!(
+            bundle.symbols[0].semantic_name.as_deref(),
+            Some("readableAnswer")
+        );
     }
 
     #[test]

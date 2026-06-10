@@ -248,10 +248,7 @@ mod tests {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules
             .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "main".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "main"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let model = ProgramModel::from_input(input);

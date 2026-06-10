@@ -264,13 +264,17 @@ impl ImportExportPlanner {
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
             let source_imports = program.model().graph().ast_imports_for(module.id);
             for original in program.model().graph().definitions_for(module.id) {
-                let emitted = program
-                    .semantic_names()
-                    .binding_name(module.id, original.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| original.clone());
                 let shape = program.binding_shape(module.id, original.as_str());
                 let source_backed = source_definitions.contains(&original);
+                let emitted = if source_backed {
+                    original.clone()
+                } else {
+                    program
+                        .semantic_names()
+                        .binding_name(module.id, original.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| original.clone())
+                };
                 planned_bindings.insert(original.clone());
                 file.add_binding(PlannedBinding::new(original, emitted, shape, source_backed));
             }
@@ -303,12 +307,7 @@ impl ImportExportPlanner {
                 .import_export()
                 .exports_for(module.id)
             {
-                let emitted = program
-                    .semantic_names()
-                    .binding_name(module.id, export.as_str())
-                    .cloned()
-                    .unwrap_or(export);
-                file.add_export_with_source_backed(emitted, true);
+                file.add_export_with_source_backed(export, true);
             }
 
             plan.push_file(file);
@@ -712,18 +711,12 @@ mod tests {
     fn input_symbol_without_ast_definition_is_planned_as_not_source_backed() {
         let planner = ImportExportPlanner;
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-        rows.source_files.push(SourceFileInput::new(
-            1,
+        rows.modules.push(ModuleInput::application(
+            ModuleId(1),
+            "entry",
             "src/index.ts",
-            Some("export const real = 1;".to_string()),
         ));
-        rows.modules.push(
-            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
-        );
-        rows.symbols.push(SymbolInput {
-            module_id: ModuleId(1),
-            name: "missing".to_string(),
-        });
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "missing"));
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
         let model = ProgramModel::from_input(input);
         let enriched = reverts_model::EnrichedProgram::new(
@@ -743,6 +736,44 @@ mod tests {
             .find(|binding| binding.original.as_str() == "missing")
             .expect("input symbol should be planned");
         assert!(!missing.source_backed);
+    }
+
+    #[test]
+    fn source_backed_symbol_keeps_original_emitted_binding_until_ast_rewrite_exists() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("var $F1 = 1; export { $F1 };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        rows.symbols.push(
+            SymbolInput::new(ModuleId(1), "$F1").with_semantic_name("lodashGlobalObjectInit"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "$F1")
+            .expect("source binding should be planned");
+
+        assert!(binding.source_backed);
+        assert_eq!(binding.emitted.as_str(), "$F1");
+        assert_eq!(plan.files[0].exports[0].binding.as_str(), "$F1");
     }
 
     #[test]
