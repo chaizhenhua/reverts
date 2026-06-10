@@ -137,6 +137,19 @@ mod tests {
     }
 
     #[test]
+    fn local_and_builtin_specifiers_resolve_without_package_surface() {
+        let index = PackageSurfaceIndex::default();
+
+        assert_eq!(index.resolve("./local").specifier(), Some("./local"));
+        assert_eq!(index.resolve("../shared").specifier(), Some("../shared"));
+        assert_eq!(index.resolve("node:path").specifier(), Some("path"));
+        assert!(matches!(
+            index.resolve("/absolute"),
+            PackageResolution::Local { .. }
+        ));
+    }
+
+    #[test]
     fn absent_package_subpath_is_rejected() {
         let mut index = PackageSurfaceIndex::default();
         index.insert(PackageSurface::new("lodash").with_root_importable());
@@ -158,5 +171,44 @@ mod tests {
 
         assert_eq!(index.resolve("lodash").specifier(), Some("lodash"));
         assert_eq!(index.resolve("lodash/fp").specifier(), None);
+    }
+
+    #[test]
+    fn malformed_or_invalid_bare_specifiers_are_rejected() {
+        let index = PackageSurfaceIndex::default();
+
+        assert!(matches!(
+            index.resolve(""),
+            PackageResolution::Rejected { reason, .. } if reason == "specifier is not importable"
+        ));
+        assert!(matches!(
+            index.resolve("@scope"),
+            PackageResolution::Rejected { reason, .. } if reason == "specifier is not importable"
+        ));
+        assert!(matches!(
+            index.resolve("UPPER"),
+            PackageResolution::Rejected { reason, .. } if reason == "package name is invalid"
+        ));
+        assert!(matches!(
+            index.resolve("missing"),
+            PackageResolution::Rejected { reason, .. } if reason == "package surface is unknown"
+        ));
+    }
+
+    #[test]
+    fn package_resolution_acceptance_matches_emittable_specifier() {
+        let accepted = PackageResolution::External {
+            specifier: "pkg/sub".to_string(),
+            package_name: "pkg".to_string(),
+        };
+        let rejected = PackageResolution::Rejected {
+            specifier: "pkg/missing".to_string(),
+            reason: "package surface does not accept subpath".to_string(),
+        };
+
+        assert!(accepted.is_accepted());
+        assert_eq!(accepted.specifier(), Some("pkg/sub"));
+        assert!(!rejected.is_accepted());
+        assert_eq!(rejected.specifier(), None);
     }
 }

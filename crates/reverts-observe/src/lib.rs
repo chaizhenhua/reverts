@@ -111,3 +111,59 @@ impl TelemetryEvent {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{AuditFinding, AuditReport, FindingCode, Severity, TelemetryEvent};
+
+    #[test]
+    fn audit_finding_builders_record_context_without_changing_severity() {
+        let finding = AuditFinding::error(FindingCode::MissingDefinition, "missing binding")
+            .with_module("module-1")
+            .with_binding("activate");
+
+        assert_eq!(finding.code, FindingCode::MissingDefinition);
+        assert_eq!(finding.severity, Severity::Error);
+        assert_eq!(finding.message, "missing binding");
+        assert_eq!(finding.module.as_deref(), Some("module-1"));
+        assert_eq!(finding.binding.as_deref(), Some("activate"));
+    }
+
+    #[test]
+    fn audit_report_tracks_clean_state_has_and_extend() {
+        let mut report = AuditReport::default();
+        assert!(report.is_clean());
+        assert!(!report.has(FindingCode::UnparseableOutput));
+
+        report.push(AuditFinding::error(
+            FindingCode::UnparseableOutput,
+            "output failed to parse",
+        ));
+        assert!(!report.is_clean());
+        assert!(report.has(FindingCode::UnparseableOutput));
+        assert_eq!(report.findings().len(), 1);
+
+        let mut other = AuditReport::default();
+        other.push(AuditFinding::error(
+            FindingCode::UnresolvableBareImport,
+            "package surface is unknown",
+        ));
+        report.extend(other);
+
+        assert_eq!(report.findings().len(), 2);
+        assert!(report.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn telemetry_event_records_optional_detail_and_duration() {
+        let mut event = TelemetryEvent::new("emit", "parse").with_detail("src/index.ts");
+        event.duration = Some(Duration::from_millis(7));
+
+        assert_eq!(event.phase, "emit");
+        assert_eq!(event.event, "parse");
+        assert_eq!(event.detail.as_deref(), Some("src/index.ts"));
+        assert_eq!(event.duration, Some(Duration::from_millis(7)));
+    }
+}
