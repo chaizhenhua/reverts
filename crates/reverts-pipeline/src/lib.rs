@@ -6,8 +6,11 @@ use std::path::Path;
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
 use reverts_input::{InputBundle, PackageAttributionStatus};
-use reverts_ir::{BindingName, ModuleId, ModuleKind};
-use reverts_js::{ParseGoal, parse_error_message, parse_source};
+use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+use reverts_js::{
+    DeclarationCallability, ParseGoal, classify_top_level_bindings, parse_error_message,
+    parse_source,
+};
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::{EmitPlan, ImportExportPlanner, PlanError, PlannedFile};
@@ -57,6 +60,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
     let project = emit_project(&plan).map_err(PipelineError::Emit)?;
 
     audit.extend(audit_emitted_project_parse(&project));
+    audit.extend(audit_binding_shape_consistency(&plan, &project));
 
     Ok(OutputRun {
         project,
@@ -195,6 +199,42 @@ fn planned_declarations(file: &PlannedFile) -> std::collections::BTreeSet<Bindin
         .map(|import| import.namespace.clone())
         .chain(file.bindings.iter().map(|binding| binding.emitted.clone()))
         .collect()
+}
+
+fn audit_binding_shape_consistency(plan: &EmitPlan, project: &EmittedProject) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for planned_file in &plan.files {
+        let Some(emitted) = project
+            .files
+            .iter()
+            .find(|file| file.path == planned_file.path)
+        else {
+            continue;
+        };
+        let classifications = classify_top_level_bindings(
+            emitted.source.as_str(),
+            Some(Path::new(emitted.path.as_str())),
+            ParseGoal::TypeScript,
+        );
+        for binding in &planned_file.bindings {
+            if !binding.source_backed || binding.shape != BindingShape::Callable {
+                continue;
+            }
+            if classifications.get(binding.emitted.as_str())
+                == Some(&DeclarationCallability::NotCallable)
+            {
+                audit.push(
+                    AuditFinding::error(
+                        FindingCode::CallableEmittedAsNonCallable,
+                        "binding planned as callable was emitted as a non-callable declaration",
+                    )
+                    .with_module(planned_file.path.clone())
+                    .with_binding(binding.emitted.as_str()),
+                );
+            }
+        }
+    }
+    audit
 }
 
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
@@ -786,6 +826,33 @@ mod tests {
             FindingCode::SyntheticReferenceWithoutDeclaration
         );
         assert_eq!(audit.findings()[0].binding.as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn callable_shape_emitted_as_value_declaration_is_reported_by_pipeline() {
+        // The bundle defines `runner` as a plain value but also calls it. The shape
+        // solver upgrades `runner` to Callable; the audit must notice that the
+        // emitted source declares `runner` as a non-callable variable and report.
+        let source = "const runner = 42;\nrunner();\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/runner.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "runner", "src/runner.ts").with_source_file(1),
+        );
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "runner"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(
+            run.audit.has(FindingCode::CallableEmittedAsNonCallable),
+            "expected CallableEmittedAsNonCallable finding, got: {:?}",
+            run.audit.findings(),
+        );
     }
 
     #[test]

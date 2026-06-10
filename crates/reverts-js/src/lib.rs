@@ -1,9 +1,13 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, NONE,
-    ast::{ImportOrExportKind, Statement},
+    ast::{
+        BindingPatternKind, Declaration, ExportDefaultDeclarationKind, Expression,
+        ImportOrExportKind, Statement, VariableDeclarator,
+    },
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
@@ -198,6 +202,119 @@ pub fn format_source_with_module_items(
 }
 
 #[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationCallability {
+    Callable,
+    NotCallable,
+    Unknown,
+}
+
+#[must_use]
+pub fn classify_top_level_bindings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> BTreeMap<String, DeclarationCallability> {
+    let mut classifications = BTreeMap::new();
+    let allocator = Allocator::default();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        for statement in &parsed.program.body {
+            classify_statement(statement, &mut classifications);
+        }
+        return classifications;
+    }
+
+    classifications
+}
+
+fn classify_statement(
+    statement: &Statement<'_>,
+    classifications: &mut BTreeMap<String, DeclarationCallability>,
+) {
+    match statement {
+        Statement::FunctionDeclaration(function) => {
+            if let Some(name) = function.id.as_ref().map(|id| id.name.as_str()) {
+                classifications.insert(name.to_string(), DeclarationCallability::Callable);
+            }
+        }
+        Statement::ClassDeclaration(class) => {
+            if let Some(name) = class.id.as_ref().map(|id| id.name.as_str()) {
+                classifications.insert(name.to_string(), DeclarationCallability::Callable);
+            }
+        }
+        Statement::VariableDeclaration(declaration) => {
+            for declarator in &declaration.declarations {
+                classify_declarator(declarator, classifications);
+            }
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            if let Some(Declaration::FunctionDeclaration(function)) = &export.declaration
+                && let Some(name) = function.id.as_ref().map(|id| id.name.as_str())
+            {
+                classifications.insert(name.to_string(), DeclarationCallability::Callable);
+            }
+            if let Some(Declaration::ClassDeclaration(class)) = &export.declaration
+                && let Some(name) = class.id.as_ref().map(|id| id.name.as_str())
+            {
+                classifications.insert(name.to_string(), DeclarationCallability::Callable);
+            }
+            if let Some(Declaration::VariableDeclaration(declaration)) = &export.declaration {
+                for declarator in &declaration.declarations {
+                    classify_declarator(declarator, classifications);
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(name) = function.id.as_ref().map(|id| id.name.as_str()) {
+                    classifications.insert(name.to_string(), DeclarationCallability::Callable);
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(name) = class.id.as_ref().map(|id| id.name.as_str()) {
+                    classifications.insert(name.to_string(), DeclarationCallability::Callable);
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
+
+fn classify_declarator(
+    declarator: &VariableDeclarator<'_>,
+    classifications: &mut BTreeMap<String, DeclarationCallability>,
+) {
+    let BindingPatternKind::BindingIdentifier(identifier) = &declarator.id.kind else {
+        return;
+    };
+    let name = identifier.name.as_str().to_string();
+    let callability = match declarator.init.as_ref() {
+        Some(Expression::FunctionExpression(_)) | Some(Expression::ArrowFunctionExpression(_)) => {
+            DeclarationCallability::Callable
+        }
+        Some(Expression::ClassExpression(_)) => DeclarationCallability::Callable,
+        Some(
+            Expression::NumericLiteral(_)
+            | Expression::StringLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::TemplateLiteral(_),
+        ) => DeclarationCallability::NotCallable,
+        Some(_) | None => DeclarationCallability::Unknown,
+    };
+    classifications.insert(name, callability);
+}
+
 pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
