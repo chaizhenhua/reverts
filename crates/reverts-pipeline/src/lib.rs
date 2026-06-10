@@ -975,6 +975,134 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_recognizes_asset_reference_via_new_url_with_import_meta_url() {
+        // The `new URL('X', import.meta.url)` idiom is the modern ESM way to
+        // reference a sibling asset (wasm, native bindings). The detector
+        // must accept the first-argument string as an asset specifier.
+        let mut rows = rows_with_application_source(
+            "const wasm = new URL('/$bunfs/root/parser.wasm', import.meta.url);\n\
+             export { wasm };",
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/parser.wasm",
+            "src/parser.wasm",
+            b"\x00asm\x01\x00\x00\x00".to_vec(),
+            AssetKind::Wasm,
+            false,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings(),);
+        assert_eq!(run.assets.len(), 1);
+        assert_eq!(run.assets[0].path, "src/parser.wasm");
+        let source = run.project.files[0].source.as_str();
+        assert!(
+            source.contains("new URL('./parser.wasm', import.meta.url)"),
+            "new URL specifier must be rewritten to relative path; got:\n{source}",
+        );
+    }
+
+    #[test]
+    fn pipeline_recognizes_asset_reference_via_static_import_statement() {
+        // ESM modules commonly reference native bindings via static imports
+        // rather than CommonJS `require`. The asset detector must accept the
+        // import specifier as an asset reference and rewrite it.
+        let mut rows = rows_with_application_source(
+            "import addon from '/$bunfs/root/addon.node';\nexport { addon };",
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/addon.node",
+            "src/addon.node",
+            b"native".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings(),);
+        assert_eq!(run.assets.len(), 1);
+        let source = run.project.files[0].source.as_str();
+        assert!(
+            source.contains("from './addon.node'"),
+            "static import must be rewritten to relative path; got:\n{source}",
+        );
+        assert!(
+            !source.contains("/$bunfs/root/addon.node"),
+            "rewritten source must not retain original logical path; got:\n{source}",
+        );
+    }
+
+    #[test]
+    fn pipeline_emits_shared_asset_once_when_referenced_by_multiple_modules() {
+        // Two application modules reference the same on-disk asset. The
+        // pipeline must:
+        //   - emit the asset bytes exactly once,
+        //   - rewrite the literal in BOTH modules to a relative path.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/loader-a.ts",
+            Some("const a = require('/$bunfs/root/addon.node'); export { a };".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "src/loader-b.ts",
+            Some("const b = require('/$bunfs/root/addon.node'); export { b };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "loader_a", "src/loader-a.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "loader_b", "src/loader-b.ts")
+                .with_source_file(2),
+        );
+        rows.assets.push(AssetInput::new(
+            100,
+            "/$bunfs/root/addon.node",
+            "src/addon.node",
+            b"native".to_vec(),
+            AssetKind::NativeNode,
+            false,
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        assert_eq!(
+            run.assets.len(),
+            1,
+            "shared asset must not be emitted multiple times: {:?}",
+            run.assets,
+        );
+        assert_eq!(run.assets[0].path, "src/addon.node");
+        assert_eq!(run.assets[0].bytes, b"native");
+
+        assert_eq!(run.project.files.len(), 2);
+        for file in &run.project.files {
+            assert!(
+                file.source.contains("require('./addon.node')"),
+                "module {} must rewrite to relative path; got:\n{}",
+                file.path,
+                file.source,
+            );
+            assert!(
+                !file.source.contains("/$bunfs/root/addon.node"),
+                "module {} must not retain the original logical path; got:\n{}",
+                file.path,
+                file.source,
+            );
+        }
+    }
+
+    #[test]
     fn pipeline_canonicalizes_build_file_url_source_locations_for_asset_paths() {
         let mut rows = rows_with_application_source(
             "\

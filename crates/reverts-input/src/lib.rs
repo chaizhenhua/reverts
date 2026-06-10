@@ -1533,6 +1533,36 @@ mod tests {
     }
 
     #[test]
+    fn absolute_asset_output_path_is_rejected_before_writing() {
+        // The existing `unsafe_asset_output_path_is_rejected_before_writing`
+        // test covers `../` escapes. An absolute path is just as dangerous:
+        // it would write outside the project root. The validator must also
+        // reject that case so the writer cannot be tricked into clobbering
+        // arbitrary filesystem locations.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::application(
+            ModuleId(10),
+            "m10",
+            "src/index.ts",
+        ));
+        rows.assets.push(AssetInput::new(
+            100,
+            "vendor/rg",
+            "/etc/passwd",
+            Vec::new(),
+            AssetKind::Executable,
+            false,
+        ));
+
+        let error = InputBundle::from_rows(rows);
+
+        assert!(
+            matches!(error, Err(InputBundleError::UnsafeAssetOutputPath { .. })),
+            "absolute output paths must be rejected; got: {error:?}",
+        );
+    }
+
+    #[test]
     fn unsafe_asset_output_path_is_rejected_before_writing() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::application(
