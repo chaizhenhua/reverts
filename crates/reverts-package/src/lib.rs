@@ -77,6 +77,16 @@ impl PackageResolution {
         )
     }
 
+    #[must_use]
+    pub fn specifier(&self) -> Option<&str> {
+        match self {
+            Self::Builtin { specifier }
+            | Self::External { specifier, .. }
+            | Self::Local { specifier } => Some(specifier),
+            Self::Rejected { .. } => None,
+        }
+    }
+
     fn rejected(specifier: &str, reason: &str) -> Self {
         Self::Rejected {
             specifier: specifier.to_string(),
@@ -139,5 +149,14 @@ mod tests {
             index.resolve("lodash/_mapCacheProto.js"),
             PackageResolution::Rejected { .. }
         ));
+    }
+
+    #[test]
+    fn accepted_resolution_exposes_emittable_specifier() {
+        let mut index = PackageSurfaceIndex::default();
+        index.insert(PackageSurface::new("lodash").with_root_importable());
+
+        assert_eq!(index.resolve("lodash").specifier(), Some("lodash"));
+        assert_eq!(index.resolve("lodash/fp").specifier(), None);
     }
 }

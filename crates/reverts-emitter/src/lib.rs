@@ -1,12 +1,11 @@
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
 
 use reverts_ir::BindingName;
 use reverts_js::{
-    GeneratedExport, GeneratedImport, JsError, format_source_with_module_items, sanitize_identifier,
+    GeneratedExport, GeneratedImport, format_source_with_module_items, parse_error_message,
+    sanitize_identifier,
 };
-use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -35,7 +34,7 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         if import.source_backed {
             continue;
         }
-        if let Some(specifier) = accepted_specifier(&import.resolution) {
+        if let Some(specifier) = import.resolution.specifier() {
             generated_imports.push(GeneratedImport::new(
                 emit_binding_name(&import.namespace),
                 specifier,
@@ -57,12 +56,12 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         &body_source,
         &generated_imports,
         &generated_exports,
-        emit_path_hint(file),
+        file.source_strategy().path_hint(file.path.as_str()),
         file.source_strategy().parse_goal(),
     )
     .map_err(|source_error| EmitError::UnparseableOutput {
         path: file.path.clone(),
-        message: parse_error_message(&source_error),
+        message: parse_error_message(&source_error, "output could not be parsed"),
     })?;
 
     Ok(EmittedFile {
@@ -71,48 +70,8 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
     })
 }
 
-fn emit_path_hint(file: &PlannedFile) -> Option<&Path> {
-    match file.source_strategy() {
-        reverts_planner::SourceCompilerStrategy::DirectSource => {
-            Some(Path::new(file.path.as_str()))
-        }
-        reverts_planner::SourceCompilerStrategy::WebpackRuntime
-        | reverts_planner::SourceCompilerStrategy::EsbuildHelpers
-        | reverts_planner::SourceCompilerStrategy::RollupFacade
-        | reverts_planner::SourceCompilerStrategy::BabelTranspiled
-        | reverts_planner::SourceCompilerStrategy::TerserMinified => None,
-    }
-}
-
-fn accepted_specifier(resolution: &PackageResolution) -> Option<&str> {
-    match resolution {
-        PackageResolution::Builtin { specifier }
-        | PackageResolution::External { specifier, .. }
-        | PackageResolution::Local { specifier } => Some(specifier),
-        PackageResolution::Rejected { .. } => None,
-    }
-}
-
 fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
-}
-
-fn parse_error_message(error: &JsError) -> String {
-    match error {
-        JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || "output could not be parsed".to_string(),
-            |error| {
-                let diagnostic = error
-                    .diagnostics
-                    .first()
-                    .map_or("no diagnostic", String::as_str);
-                format!(
-                    "output could not be parsed as {}: {diagnostic}",
-                    error.source_type
-                )
-            },
-        ),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

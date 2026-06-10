@@ -197,6 +197,22 @@ pub fn format_source_with_module_items(
     Err(JsError::ParseFailed(errors))
 }
 
+#[must_use]
+pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
+    match error {
+        JsError::ParseFailed(errors) => errors.first().map_or_else(
+            || fallback.to_string(),
+            |error| {
+                let diagnostic = error
+                    .diagnostics
+                    .first()
+                    .map_or("no diagnostic", String::as_str);
+                format!("{fallback} as {}: {diagnostic}", error.source_type)
+            },
+        ),
+    }
+}
+
 fn generated_import_statement<'a>(
     builder: &AstBuilder<'a>,
     generated_import: &GeneratedImport,
@@ -348,8 +364,8 @@ mod tests {
 
     use super::{
         GeneratedExport, GeneratedImport, JsError, ParseGoal, format_source_pretty,
-        format_source_with_module_items, normalize_source_for_pipeline, parse_source,
-        sanitize_identifier,
+        format_source_with_module_items, normalize_source_for_pipeline, parse_error_message,
+        parse_source, sanitize_identifier,
     };
 
     #[test]
@@ -364,6 +380,16 @@ mod tests {
         let error = parse_source("const =", None, ParseGoal::TypeScript);
 
         assert!(matches!(error, Err(JsError::ParseFailed(errors)) if !errors.is_empty()));
+    }
+
+    #[test]
+    fn shared_parse_error_message_uses_first_diagnostic() {
+        let error = parse_source("const =", None, ParseGoal::TypeScript)
+            .expect_err("fixture should not parse");
+
+        let message = parse_error_message(&error, "source could not be parsed");
+
+        assert!(message.starts_with("source could not be parsed as"));
     }
 
     #[test]

@@ -29,7 +29,7 @@ use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
     ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, split_bare_specifier,
 };
-use reverts_js::{JsError, ParseError, ParseGoal, source_type_candidates};
+use reverts_js::{JsError, ParseError, ParseGoal, parse_error_message, source_type_candidates};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevertsGraph {
@@ -280,6 +280,28 @@ impl RevertsGraph {
     }
 
     #[must_use]
+    pub fn ast_definitions_for(&self, module_id: ModuleId) -> BTreeSet<BindingName> {
+        self.ast_bindings_for(module_id, |kind| *kind == AstFactKind::Definition)
+    }
+
+    #[must_use]
+    pub fn ast_imports_for(&self, module_id: ModuleId) -> BTreeSet<BindingName> {
+        self.ast_bindings_for(module_id, |kind| *kind == AstFactKind::Import)
+    }
+
+    fn ast_bindings_for(
+        &self,
+        module_id: ModuleId,
+        predicate: impl Fn(&AstFactKind) -> bool,
+    ) -> BTreeSet<BindingName> {
+        self.ast_facts
+            .iter()
+            .filter(|fact| fact.module_id == module_id && predicate(&fact.kind))
+            .filter_map(|fact| fact.binding.clone())
+            .collect()
+    }
+
+    #[must_use]
     pub fn ast_errors(&self) -> &[AstFactError] {
         &self.ast_errors
     }
@@ -374,7 +396,10 @@ impl AstFactExtractor {
             });
         }
 
-        Err(parse_error_message(&JsError::ParseFailed(errors)))
+        Err(parse_error_message(
+            &JsError::ParseFailed(errors),
+            "source could not be parsed",
+        ))
     }
 }
 
@@ -488,24 +513,6 @@ fn parse_options_for(source_type: oxc_span::SourceType) -> ParseOptions {
     ParseOptions {
         allow_return_outside_function: source_type.is_script(),
         ..Default::default()
-    }
-}
-
-fn parse_error_message(error: &JsError) -> String {
-    match error {
-        JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || "source could not be parsed".to_string(),
-            |error| {
-                let diagnostic = error
-                    .diagnostics
-                    .first()
-                    .map_or("no diagnostic", String::as_str);
-                format!(
-                    "source could not be parsed as {}: {diagnostic}",
-                    error.source_type
-                )
-            },
-        ),
     }
 }
 

@@ -14,7 +14,8 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind, split_bare_specifier};
 use reverts_js::{
-    JsError, ParseError, ParseGoal, normalize_source_for_pipeline, source_type_candidates,
+    JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
+    source_type_candidates,
 };
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use semver::Version;
@@ -648,7 +649,10 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
         });
     }
 
-    Err(parse_error_message(&JsError::ParseFailed(errors)))
+    Err(parse_error_message(
+        &JsError::ParseFailed(errors),
+        "source could not be parsed",
+    ))
 }
 
 fn parse_options_for(source_type: oxc_span::SourceType) -> ParseOptions {
@@ -1041,25 +1045,7 @@ fn weighted_score(
 
 fn normalize_source(path: &str, source: &str) -> Result<String, String> {
     normalize_source_for_pipeline(source, Some(Path::new(path)))
-        .map_err(|error| parse_error_message(&error))
-}
-
-fn parse_error_message(error: &JsError) -> String {
-    match error {
-        JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || "source could not be parsed".to_string(),
-            |error| {
-                let diagnostic = error
-                    .diagnostics
-                    .first()
-                    .map_or("no diagnostic", String::as_str);
-                format!(
-                    "source could not be parsed as {}: {diagnostic}",
-                    error.source_type
-                )
-            },
-        ),
-    }
+        .map_err(|error| parse_error_message(&error, "source could not be parsed"))
 }
 
 fn stable_hash(bytes: &[u8]) -> String {

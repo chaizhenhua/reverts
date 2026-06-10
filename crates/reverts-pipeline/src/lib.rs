@@ -6,7 +6,7 @@ use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
 use reverts_input::InputBundle;
 use reverts_ir::{BindingName, ModuleId, ModuleKind};
-use reverts_js::{JsError, ParseGoal, parse_source};
+use reverts_js::{ParseGoal, parse_error_message, parse_source};
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::{EmitPlan, ImportExportPlanner, PlanError, PlannedFile};
@@ -150,30 +150,15 @@ fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
             ParseGoal::TypeScript,
         ) {
             audit.push(
-                AuditFinding::error(FindingCode::UnparseableOutput, parse_error_message(&error))
-                    .with_module(file.path.clone()),
+                AuditFinding::error(
+                    FindingCode::UnparseableOutput,
+                    parse_error_message(&error, "output could not be parsed"),
+                )
+                .with_module(file.path.clone()),
             );
         }
     }
     audit
-}
-
-fn parse_error_message(error: &JsError) -> String {
-    match error {
-        JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || "output could not be parsed".to_string(),
-            |error| {
-                let diagnostic = error
-                    .diagnostics
-                    .first()
-                    .map_or("no diagnostic", String::as_str);
-                format!(
-                    "output could not be parsed as {}: {diagnostic}",
-                    error.source_type
-                )
-            },
-        ),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

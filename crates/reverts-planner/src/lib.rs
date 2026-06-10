@@ -1,11 +1,10 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
-use std::path::Path;
 
-use reverts_graph::{AstFactKind, RevertsGraph};
+use reverts_graph::RevertsGraph;
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
-use reverts_js::{JsError, ParseGoal, format_source_pretty};
+use reverts_js::{ParseGoal, format_source_pretty, parse_error_message};
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
 
@@ -194,6 +193,18 @@ impl SourceCompilerStrategy {
             | Self::TerserMinified => ParseGoal::JavaScript,
         }
     }
+
+    #[must_use]
+    pub fn path_hint(self, path: &str) -> Option<&std::path::Path> {
+        match self {
+            Self::DirectSource => Some(std::path::Path::new(path)),
+            Self::WebpackRuntime
+            | Self::EsbuildHelpers
+            | Self::RollupFacade
+            | Self::BabelTranspiled
+            | Self::TerserMinified => None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +236,8 @@ impl ImportExportPlanner {
                 });
             }
 
-            let source_definitions = ast_definitions_for(program.model().graph(), module.id);
-            let source_imports = ast_imports_for(program.model().graph(), module.id);
+            let source_definitions = program.model().graph().ast_definitions_for(module.id);
+            let source_imports = program.model().graph().ast_imports_for(module.id);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
             for original in program.model().graph().definitions_for(module.id) {
                 let emitted = program
@@ -297,24 +308,6 @@ impl ImportExportPlanner {
     }
 }
 
-fn ast_definitions_for(graph: &RevertsGraph, module_id: ModuleId) -> BTreeSet<BindingName> {
-    graph
-        .ast_facts()
-        .iter()
-        .filter(|fact| fact.module_id == module_id && fact.kind == AstFactKind::Definition)
-        .filter_map(|fact| fact.binding.clone())
-        .collect()
-}
-
-fn ast_imports_for(graph: &RevertsGraph, module_id: ModuleId) -> BTreeSet<BindingName> {
-    graph
-        .ast_facts()
-        .iter()
-        .filter(|fact| fact.module_id == module_id && fact.kind == AstFactKind::Import)
-        .filter_map(|fact| fact.binding.clone())
-        .collect()
-}
-
 fn normalize_source_for_emit(
     module_id: ModuleId,
     path: &str,
@@ -323,43 +316,14 @@ fn normalize_source_for_emit(
 ) -> Result<String, PlanError> {
     format_source_pretty(
         source,
-        source_path_hint(path, source_strategy),
+        source_strategy.path_hint(path),
         source_strategy.parse_goal(),
     )
     .map_err(|error| PlanError::UnparseableSource {
         module_id,
         path: path.to_string(),
-        message: parse_error_message(&error),
+        message: parse_error_message(&error, "source could not be parsed"),
     })
-}
-
-fn source_path_hint(path: &str, source_strategy: SourceCompilerStrategy) -> Option<&Path> {
-    match source_strategy {
-        SourceCompilerStrategy::DirectSource => Some(Path::new(path)),
-        SourceCompilerStrategy::WebpackRuntime
-        | SourceCompilerStrategy::EsbuildHelpers
-        | SourceCompilerStrategy::RollupFacade
-        | SourceCompilerStrategy::BabelTranspiled
-        | SourceCompilerStrategy::TerserMinified => None,
-    }
-}
-
-fn parse_error_message(error: &JsError) -> String {
-    match error {
-        JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || "source could not be parsed".to_string(),
-            |error| {
-                let diagnostic = error
-                    .diagnostics
-                    .first()
-                    .map_or("no diagnostic", String::as_str);
-                format!(
-                    "source could not be parsed as {}: {diagnostic}",
-                    error.source_type
-                )
-            },
-        ),
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
