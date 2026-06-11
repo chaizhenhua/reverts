@@ -1,5 +1,5 @@
-use reverts_ir::{FunctionFingerprint, MatchTier, NormalizationPassId};
-use reverts_package_index::{Candidate, ExactKey, PackageFingerprintIndex};
+use reverts_ir::{AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
+use reverts_package_index::{Candidate, CfgKey, ExactKey, FeatureKey, PackageFingerprintIndex};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionMatch {
@@ -42,6 +42,58 @@ pub fn try_exact_alternate(
         }
     }
     None
+}
+
+#[must_use]
+pub fn try_structural_anchored(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
+    let cfg_key = CfgKey {
+        param_count: fp.param_count,
+        cfg_hash: fp.primary.cfg,
+    };
+    let cfg_candidates = index.query_cfg(cfg_key);
+    if cfg_candidates.is_empty() {
+        return None;
+    }
+
+    // Gather anchor (axis, hash) tuples that are present on the function side.
+    let mut fp_anchors: Vec<(AxisKind, u64)> = Vec::new();
+    if let Some(h) = fp.primary.literal_anchor {
+        fp_anchors.push((AxisKind::LiteralAnchor, h));
+    }
+    if let Some(h) = fp.primary.callee_set {
+        fp_anchors.push((AxisKind::CalleeSet, h));
+    }
+    if let Some(h) = fp.primary.throw_set {
+        fp_anchors.push((AxisKind::ThrowSet, h));
+    }
+    if fp_anchors.is_empty() {
+        return None;
+    }
+
+    // Retain candidates that share at least one anchor (axis, hash) with the fp.
+    let surviving: Vec<Candidate> = cfg_candidates
+        .into_iter()
+        .filter(|c| {
+            fp_anchors.iter().any(|(axis, h)| {
+                index
+                    .query_feature(FeatureKey {
+                        param_count: fp.param_count,
+                        kind: *axis,
+                        hash: *h,
+                    })
+                    .iter()
+                    .any(|cand| {
+                        cand.package == c.package
+                            && cand.external_function_id == c.external_function_id
+                    })
+            })
+        })
+        .collect();
+
+    pick_unique(surviving, MatchTier::StructuralAnchored, None)
 }
 
 pub(crate) fn pick_unique(

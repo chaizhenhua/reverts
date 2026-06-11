@@ -1,15 +1,16 @@
 use reverts_ir::FunctionFingerprint;
 use reverts_package_index::PackageFingerprintIndex;
 
-use crate::tier::{FunctionMatch, try_exact, try_exact_alternate};
+use crate::tier::{FunctionMatch, try_exact, try_exact_alternate, try_structural_anchored};
 
 #[must_use]
 pub fn match_function(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    try_exact(fp, index).or_else(|| try_exact_alternate(fp, index))
-    // Tier 2-4 added in subsequent tasks.
+    try_exact(fp, index)
+        .or_else(|| try_exact_alternate(fp, index))
+        .or_else(|| try_structural_anchored(fp, index))
 }
 
 #[cfg(test)]
@@ -146,5 +147,85 @@ mod tests {
             m.matched_alternate,
             Some(NormalizationPassId::TsRuntimeErased)
         );
+    }
+
+    #[test]
+    fn structural_anchored_requires_cfg_and_anchor_overlap() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        let candidate = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 1,
+            matched_axis: AxisKind::Cfg,
+            matched_alternate: None,
+        };
+        idx.insert_cfg(
+            reverts_package_index::CfgKey {
+                param_count: 1,
+                cfg_hash: 7,
+            },
+            candidate.clone(),
+        );
+        idx.insert_feature(
+            reverts_package_index::FeatureKey {
+                param_count: 1,
+                kind: AxisKind::LiteralAnchor,
+                hash: 99,
+            },
+            candidate.clone(),
+        );
+
+        let mut axes = sample_axes(0);
+        axes.cfg = 7;
+        axes.literal_anchor = Some(99);
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        let m = match_function(&fp, &idx).expect("structural-anchored match");
+        assert_eq!(m.tier, MatchTier::StructuralAnchored);
+    }
+
+    #[test]
+    fn structural_anchored_rejects_when_no_anchor_overlap() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        // CFG matches but no anchor overlap
+        idx.insert_cfg(
+            reverts_package_index::CfgKey {
+                param_count: 1,
+                cfg_hash: 7,
+            },
+            Candidate {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1".into(),
+                },
+                variant_path: "i.js".into(),
+                external_function_id: 1,
+                matched_axis: AxisKind::Cfg,
+                matched_alternate: None,
+            },
+        );
+        // No insert_feature — anchor side empty in index
+
+        let mut axes = sample_axes(0);
+        axes.cfg = 7;
+        axes.literal_anchor = Some(99);
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        assert!(match_function(&fp, &idx).is_none());
     }
 }
