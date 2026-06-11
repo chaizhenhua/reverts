@@ -219,6 +219,7 @@ fn load_module_dependencies(
     collect_sqlite_rows(rows)
 }
 
+// TODO(post-phase-I): persist function_span + confidence
 fn load_package_attributions(
     connection: &Connection,
     project_id: u32,

@@ -312,7 +312,7 @@ impl VersionedPackageMatcher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 /// Result of a versioned package matching pass.
 pub struct VersionedPackageMatchReport {
     /// Accepted attributions that can be persisted by the caller.
@@ -359,7 +359,7 @@ impl ExactPackageMatcher {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 /// Result of a package matching pass.
 pub struct PackageMatchReport {
     /// Accepted attributions that can be persisted by the caller.

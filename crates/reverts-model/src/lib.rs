@@ -5,7 +5,7 @@ use reverts_input::{InputBundle, ModuleInput, SymbolInput};
 use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
 use reverts_package::PackageResolution;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ProgramModel {
     input: InputBundle,
     graph: RevertsGraph,
@@ -108,7 +108,7 @@ impl PackageImportDecision {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnrichedProgram {
     model: ProgramModel,
     semantic_names: SemanticNameMap,

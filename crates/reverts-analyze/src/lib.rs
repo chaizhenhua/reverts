@@ -14,7 +14,7 @@ use reverts_model::{
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::{PackageResolution, PackageSurfaceIndex};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EnrichmentOutput {
     pub program: EnrichedProgram,
     pub audit: AuditReport,

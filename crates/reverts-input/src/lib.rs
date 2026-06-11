@@ -3,7 +3,10 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Component, Path};
 
-use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
+use reverts_ir::{
+    AxisKind, ByteRange, MatchTier, ModuleId, ModuleKind, NormalizationPassId,
+    is_valid_package_name, split_bare_specifier,
+};
 
 pub mod sqlite;
 
@@ -317,7 +320,17 @@ pub enum PackageAttributionStatus {
     Rejected,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributionConfidence {
+    pub tier: MatchTier,
+    pub matched_axes: Vec<AxisKind>,
+    pub matched_alternate: Option<NormalizationPassId>,
+    pub top_score: f64,
+    pub runner_up_score: f64,
+    pub margin: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PackageAttributionInput {
     pub module_id: ModuleId,
     pub package_name: String,
@@ -327,6 +340,8 @@ pub struct PackageAttributionInput {
     pub emission_mode: PackageEmissionMode,
     pub status: PackageAttributionStatus,
     pub rejection_reason: Option<String>,
+    pub function_span: Option<ByteRange>,
+    pub confidence: Option<AttributionConfidence>,
 }
 
 impl PackageAttributionInput {
@@ -346,6 +361,8 @@ impl PackageAttributionInput {
             emission_mode,
             status: PackageAttributionStatus::Proposed,
             rejection_reason: None,
+            function_span: None,
+            confidence: None,
         }
     }
 
@@ -365,6 +382,8 @@ impl PackageAttributionInput {
             emission_mode: PackageEmissionMode::ExternalImport,
             status: PackageAttributionStatus::Accepted,
             rejection_reason: None,
+            function_span: None,
+            confidence: None,
         }
     }
 
@@ -383,12 +402,26 @@ impl PackageAttributionInput {
             emission_mode: PackageEmissionMode::ApplicationSource,
             status: PackageAttributionStatus::Rejected,
             rejection_reason: Some(rejection_reason.into()),
+            function_span: None,
+            confidence: None,
         }
     }
 
     #[must_use]
     pub fn with_subpath(mut self, subpath: impl Into<String>) -> Self {
         self.subpath = normalize_optional(Some(subpath.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn with_function_span(mut self, span: ByteRange) -> Self {
+        self.function_span = Some(span);
+        self
+    }
+
+    #[must_use]
+    pub fn with_confidence(mut self, conf: AttributionConfidence) -> Self {
+        self.confidence = Some(conf);
         self
     }
 }
@@ -425,7 +458,7 @@ impl PackageSurfaceInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputBundle {
     pub project: ProjectInput,
     pub source_files: Vec<SourceFileInput>,
@@ -476,7 +509,7 @@ impl InputBundle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InputRows {
     pub project: ProjectInput,
     pub source_files: Vec<SourceFileInput>,
@@ -628,6 +661,8 @@ impl InputRows {
                 emission_mode: row.emission_mode,
                 status: row.status,
                 rejection_reason: normalize_optional(row.rejection_reason),
+                function_span: None,
+                confidence: None,
             });
         }
 
@@ -2069,6 +2104,8 @@ mod tests {
             emission_mode: PackageEmissionMode::VendoredAsset,
             status: PackageAttributionStatus::Accepted,
             rejection_reason: None,
+            function_span: None,
+            confidence: None,
         });
 
         let bundle = InputBundle::from_rows(rows).expect("vendored attribution should be valid");
@@ -2077,5 +2114,29 @@ mod tests {
             bundle.package_attributions[0].emission_mode,
             PackageEmissionMode::VendoredAsset
         );
+    }
+
+    #[test]
+    fn package_attribution_function_span_defaults_to_none() {
+        let attr = PackageAttributionInput::accepted_external(
+            reverts_ir::ModuleId(1),
+            "pkg",
+            "1.0",
+            "pkg",
+        );
+        assert!(attr.function_span.is_none());
+        assert!(attr.confidence.is_none());
+    }
+
+    #[test]
+    fn package_attribution_with_function_span_round_trips() {
+        let attr = PackageAttributionInput::accepted_external(
+            reverts_ir::ModuleId(1),
+            "pkg",
+            "1.0",
+            "pkg",
+        )
+        .with_function_span(reverts_ir::ByteRange::new(10, 30));
+        assert_eq!(attr.function_span, Some(reverts_ir::ByteRange::new(10, 30)));
     }
 }
