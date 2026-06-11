@@ -9,9 +9,9 @@ use oxc_ast::{
         ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
         ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression,
-        ObjectExpression, ObjectPropertyKind, Program, PropertyKind, SimpleAssignmentTarget,
-        Statement, StaticMemberExpression, UpdateExpression, VariableDeclaration,
-        VariableDeclarator,
+        ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
+        VariableDeclaration, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -408,16 +408,6 @@ impl RevertsGraph {
 
     pub fn record_write(&mut self, module_id: ModuleId, binding: impl Into<String>) {
         self.def_use.write(module_id, binding);
-    }
-
-    pub fn record_constraint(
-        &mut self,
-        module_id: ModuleId,
-        binding: impl Into<String>,
-        kind: BindingConstraintKind,
-    ) {
-        self.def_use
-            .constrain(BindingConstraint::new(module_id, binding, kind));
     }
 
     #[must_use]
@@ -1499,6 +1489,22 @@ impl<'a> Visit<'a> for AstFactVisitor {
             {
                 self.constraint(bindings[0], kind);
             }
+            // Paper #7 — `const { foo, bar } = ns;` is a property access on
+            // `ns`. Record each statically recoverable key so the namespace
+            // surface sees what the destructuring pattern consumed.
+            if let Some(init) = &it.init
+                && let Some(rhs) = direct_member_object(init)
+                && let BindingPatternKind::ObjectPattern(pattern) = &it.id.kind
+            {
+                for property in &pattern.properties {
+                    if property.computed {
+                        continue;
+                    }
+                    if let Some(name) = property_key_name(&property.key) {
+                        self.member_constraint(rhs, BindingConstraintKind::MemberRead, name);
+                    }
+                }
+            }
         }
         walk_variable_declarator(self, it);
     }
@@ -1617,20 +1623,11 @@ impl<'a> Visit<'a> for AstFactVisitor {
                 }
             }
         }
-        match &it.callee {
-            Expression::StaticMemberExpression(member) => {
-                if let Some(object) = expression_identifier(&member.object) {
-                    self.constraint(object, BindingConstraintKind::MemberRead);
-                }
-            }
-            Expression::ComputedMemberExpression(member) => {
-                if let Some(object) = expression_identifier(&member.object) {
-                    self.constraint(object, BindingConstraintKind::MemberRead);
-                }
-            }
-            _ => {}
-        }
-
+        // Member-access tracking on the callee (e.g. `ns.foo()`) is
+        // already handled by `visit_static_member_expression` /
+        // `visit_computed_member_expression` via the walk below, which now
+        // also records the property name (paper #7 downstream). No need to
+        // double-record here.
         walk_call_expression(self, it);
     }
 
@@ -2125,6 +2122,17 @@ fn expression_is_static_member(
     )
 }
 
+/// Recover the property name on a destructuring `BindingProperty`'s key
+/// when it is a plain identifier or string literal. Computed or numeric
+/// keys return `None` because we cannot statically attribute them.
+fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
+        _ => None,
+    }
+}
+
 /// Extract `(binding, property)` from an assignment target when the
 /// target is `<identifier>.<prop>` or `<identifier>["<prop>"]` — i.e. the
 /// property name is recoverable AND the object is a direct identifier
@@ -2446,6 +2454,92 @@ mod tests {
             ns["bar"];
             ns.foo;
             ns[dynamicKey];
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_member_call_property_through_static_member_visitor() {
+        // `ns.foo()` should still record `foo` as a member of `ns` — the
+        // static-member walker handles it, so `visit_call_expression` does
+        // not need its own member-access branch. Pinning this so we can
+        // delete the redundant branch with confidence.
+        let source = r#"
+            const ns = {};
+            ns.foo();
+            ns["bar"]();
+            ns.foo.deep();
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        // `bar` and `foo` are direct properties; `deep` belongs to `ns.foo`
+        // (chained) and must not bleed back onto `ns`.
+        assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_known_members_from_object_destructuring() {
+        // `const { foo, bar } = ns;` is semantically equivalent to
+        // `const foo = ns.foo; const bar = ns.bar;` — the user is accessing
+        // those specific members. The solver should see them so paper #7
+        // downstream can keep the namespace surface accurate when the
+        // emitted bundle uses destructuring instead of dot access.
+        let source = r#"
+            const ns = { foo: 1, bar: 2, qux: 3 };
+            const { foo, bar } = ns;
+            const { qux: localQux = 9 } = ns;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo", "qux"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_known_members_through_optional_chaining() {
+        // `ns?.foo` and `ns?.['bar']` should record `foo` and `bar` as
+        // properties of `ns`, just like the non-optional forms.
+        let source = r#"
+            const ns = {};
+            ns?.foo;
+            ns?.['bar'];
         "#;
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
