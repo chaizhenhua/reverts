@@ -18,5 +18,6 @@ reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
 reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
+reverts-package-index = { path = "../reverts-package-index" }
 semver = "1"
 serde_json = "1"
