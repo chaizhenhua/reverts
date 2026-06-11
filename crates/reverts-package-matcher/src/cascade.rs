@@ -20,8 +20,16 @@ pub fn match_function(
 }
 
 /// Cascade per function, collecting up to 5 ranked candidates per function.
-/// Returns the candidate list — global assignment will pick one per fn.
-fn cascade_candidates(
+///
+/// Each candidate is the best match the corresponding tier could produce.
+/// The order is significant: index 0 is the top-tier candidate (Exact when
+/// available), index 1 the next tier, and so on. Both
+/// [`assign_globally`] (for cross-package collision resolution) and
+/// [`crate::acceptance::classify`] (for per-fp confidence margin) consume
+/// this list; classify in particular relies on the runner-up entries to
+/// distinguish a confident match from an ambiguous one.
+#[must_use]
+pub fn cascade_candidates(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Vec<FunctionMatch> {
@@ -44,6 +52,17 @@ fn cascade_candidates(
     all
 }
 
+/// Per-function output of [`assign_globally`]: both the full pre-Hungarian
+/// candidate list (so callers can call [`crate::acceptance::classify`] with
+/// real runner-up information) and the chosen match after the global
+/// bipartite assignment, when one exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GlobalAssignment {
+    pub function_id: FunctionId,
+    pub candidates: Vec<FunctionMatch>,
+    pub chosen: Option<FunctionMatch>,
+}
+
 /// Assign bundle functions to package candidates globally using the Hungarian
 /// algorithm, resolving cross-package collisions optimally instead of greedily.
 ///
@@ -55,13 +74,16 @@ fn cascade_candidates(
 pub fn assign_globally(
     bundle_fps: &[FunctionFingerprint],
     index: &dyn PackageFingerprintIndex,
-) -> Vec<(FunctionId, FunctionMatch)> {
+) -> Vec<GlobalAssignment> {
     use reverts_package_index::PackageId;
 
-    // Per-function candidate lists
-    let candidates: Vec<Vec<FunctionMatch>> = bundle_fps
+    let mut out: Vec<GlobalAssignment> = bundle_fps
         .iter()
-        .map(|fp| cascade_candidates(fp, index))
+        .map(|fp| GlobalAssignment {
+            function_id: fp.id,
+            candidates: cascade_candidates(fp, index),
+            chosen: None,
+        })
         .collect();
 
     // Right-side global candidate dictionary: (PackageId, external_function_id) -> column idx.
@@ -69,8 +91,8 @@ pub fn assign_globally(
     // a unique sequential index equal to the count at insertion time.
     let mut col_index: std::collections::BTreeMap<(PackageId, u64), usize> =
         std::collections::BTreeMap::new();
-    for cand_list in &candidates {
-        for cand in cand_list {
+    for assignment in &out {
+        for cand in &assignment.candidates {
             let key = (
                 cand.candidate.package.clone(),
                 cand.candidate.external_function_id,
@@ -81,16 +103,16 @@ pub fn assign_globally(
     }
 
     if col_index.is_empty() {
-        return Vec::new();
+        return out;
     }
 
-    let n_rows = candidates.len();
+    let n_rows = out.len();
     let n_cols = col_index.len();
 
     // Build cost matrix (max-weight).
     let mut cost = vec![vec![0.0_f64; n_cols]; n_rows];
-    for (row, cand_list) in candidates.iter().enumerate() {
-        for (rank, cand) in cand_list.iter().enumerate() {
+    for (row, assignment) in out.iter().enumerate() {
+        for (rank, cand) in assignment.candidates.iter().enumerate() {
             let key = (
                 cand.candidate.package.clone(),
                 cand.candidate.external_function_id,
@@ -108,7 +130,6 @@ pub fn assign_globally(
     let assign = assign_max_weight(&cost);
 
     // Map row → matched candidate (skip unassigned or zero-weight padding rows).
-    let mut out = Vec::new();
     for (row, &col) in assign.iter().enumerate() {
         if col == usize::MAX || col >= n_cols {
             continue;
@@ -117,18 +138,21 @@ pub fn assign_globally(
             continue; // zero weight = unmatched (padding column)
         }
         // Reverse-lookup: find the (PackageId, external_function_id) for this column.
-        let key_pair = col_index
+        let Some(key_pair) = col_index
             .iter()
             .find(|(_, v)| **v == col)
-            .map(|(k, _)| k.clone());
-        let Some(key_pair) = key_pair else { continue };
-        let cand_list = &candidates[row];
-        let matched = cand_list.iter().find(|m| {
-            m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
-        });
-        if let Some(m) = matched {
-            out.push((bundle_fps[row].id, m.clone()));
-        }
+            .map(|(k, _)| k.clone())
+        else {
+            continue;
+        };
+        let chosen = out[row]
+            .candidates
+            .iter()
+            .find(|m| {
+                m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
+            })
+            .cloned();
+        out[row].chosen = chosen;
     }
     out
 }
@@ -556,6 +580,102 @@ mod tests {
     }
 
     #[test]
+    fn global_assignment_exposes_full_candidate_list_to_callers() {
+        // Build an index where one fp can match at TWO tiers (Exact via
+        // primary ast, plus StructuralAnchored via cfg + literal_anchor).
+        // assign_globally must surface both candidates so downstream code
+        // (e.g. `acceptance::classify`) can compute a real margin instead
+        // of seeing only the Hungarian winner.
+        let mut idx = InMemoryFingerprintIndex::new();
+        let pkg_top = PackageId {
+            name: "exactpkg".into(),
+            version: "1.0".into(),
+        };
+        let pkg_runner = PackageId {
+            name: "structpkg".into(),
+            version: "1.0".into(),
+        };
+        idx.insert_exact(
+            ExactKey {
+                param_count: 1,
+                statement_count: 1,
+                ast_hash: 123,
+            },
+            Candidate {
+                package: pkg_top.clone(),
+                variant_path: "i.js".into(),
+                external_function_id: 1,
+                matched_axis: AxisKind::Ast,
+                matched_alternate: None,
+            },
+        );
+        idx.insert_cfg(
+            reverts_package_index::CfgKey {
+                param_count: 1,
+                cfg_hash: 456,
+            },
+            Candidate {
+                package: pkg_runner.clone(),
+                variant_path: "i.js".into(),
+                external_function_id: 2,
+                matched_axis: AxisKind::Cfg,
+                matched_alternate: None,
+            },
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::LiteralAnchor,
+                hash: 789,
+            },
+            Candidate {
+                package: pkg_runner.clone(),
+                variant_path: "i.js".into(),
+                external_function_id: 2,
+                matched_axis: AxisKind::LiteralAnchor,
+                matched_alternate: None,
+            },
+        );
+
+        let mut axes = sample_axes(123);
+        axes.cfg = 456;
+        axes.literal_anchor = Some(789);
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        let out = assign_globally(std::slice::from_ref(&fp), &idx);
+        assert_eq!(out.len(), 1);
+        // Exact tier dominates → it wins the Hungarian allocation.
+        let chosen = out[0]
+            .chosen
+            .as_ref()
+            .expect("Hungarian must pick a winner");
+        assert_eq!(chosen.tier, MatchTier::Exact);
+        assert_eq!(chosen.candidate.package.name, "exactpkg");
+        // …but the runner-up StructuralAnchored candidate must still appear in
+        // the candidate list so classify() can see a real margin instead of
+        // assuming a single-element slice.
+        assert!(
+            out[0].candidates.len() >= 2,
+            "expected ≥2 cascade candidates exposed for classify(); got {}",
+            out[0].candidates.len(),
+        );
+        assert!(
+            out[0]
+                .candidates
+                .iter()
+                .any(|m| m.tier == MatchTier::StructuralAnchored
+                    && m.candidate.package.name == "structpkg"),
+            "structural-anchored runner-up must appear in candidates list",
+        );
+    }
+
+    #[test]
     fn global_assignment_splits_two_packages_with_shared_helper_names() {
         // Build an index with 10 functions: evens go to pkg_a, odds to pkg_b.
         // Each bundle fp has exactly one candidate (exact match), so Hungarian
@@ -615,11 +735,11 @@ mod tests {
 
         let count_a = assignments
             .iter()
-            .filter(|(_, m)| m.candidate.package.name == "a")
+            .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("a"))
             .count();
         let count_b = assignments
             .iter()
-            .filter(|(_, m)| m.candidate.package.name == "b")
+            .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("b"))
             .count();
         assert_eq!(count_a, 5);
         assert_eq!(count_b, 5);
@@ -698,10 +818,10 @@ mod tests {
 
         let assigned_a = assignments
             .iter()
-            .find(|(_, m)| m.candidate.package.name == "pa");
+            .find(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("pa"));
         let assigned_b = assignments
             .iter()
-            .find(|(_, m)| m.candidate.package.name == "pb");
+            .find(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("pb"));
         assert!(assigned_a.is_some(), "fp[0] should be assigned to pkg_a");
         assert!(assigned_b.is_some(), "fp[1] should be assigned to pkg_b");
     }

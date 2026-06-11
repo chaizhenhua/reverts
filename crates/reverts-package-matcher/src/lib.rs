@@ -7,7 +7,7 @@ pub mod variant;
 pub mod version;
 
 pub use acceptance::{AcceptanceDecision, classify};
-pub use cascade::{assign_globally, match_function};
+pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, match_with_cascade};
 pub use hungarian::assign_max_weight;
 pub use tier::{

@@ -57,19 +57,32 @@ pub fn match_with_cascade(
     let mut attributions = Vec::new();
     for (module_id, fps) in fingerprints_by_module {
         let assignments = assign_globally(fps, &index);
-        for (fn_id, function_match) in assignments {
-            let decision = classify(std::slice::from_ref(&function_match));
+        for assignment in assignments {
+            // Per-fp acceptance decision is computed from the full cascade
+            // candidate list — including runner-ups — so the classifier can
+            // see the margin between the top tier and the next-best. The
+            // Hungarian-chosen candidate (which may not be the top of the
+            // list, if cross-package collisions forced a swap) supplies the
+            // actual attribution row.
+            let decision = classify(&assignment.candidates);
+            let fn_id = assignment.function_id;
             match decision {
                 AcceptanceDecision::Accepted { confidence } => {
+                    let Some(chosen) = assignment.chosen else {
+                        continue;
+                    };
                     attributions.push(build_attribution(
                         *module_id,
                         fn_id,
-                        &function_match.candidate,
+                        &chosen.candidate,
                         confidence,
                     ));
                 }
                 AcceptanceDecision::AcceptedWithCaveat { confidence } => {
-                    let cand = &function_match.candidate;
+                    let Some(chosen) = assignment.chosen else {
+                        continue;
+                    };
+                    let cand = &chosen.candidate;
                     attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
                     audit.push(
                         AuditFinding::warning(
@@ -81,14 +94,21 @@ pub fn match_with_cascade(
                     );
                 }
                 AcceptanceDecision::Ambiguous { .. } => {
-                    let cand = &function_match.candidate;
+                    // Use the top candidate's package name for the binding
+                    // tag; we are not emitting an attribution row because
+                    // the matcher cannot pick decisively.
+                    let binding = assignment
+                        .candidates
+                        .first()
+                        .map(|m| m.candidate.package.name.clone())
+                        .unwrap_or_default();
                     audit.push(
                         AuditFinding::error(
                             FindingCode::AmbiguousPackageMatch,
                             "cascade function match has ambiguous tier",
                         )
                         .with_module(module_id.0.to_string())
-                        .with_binding(cand.package.name.clone()),
+                        .with_binding(binding),
                     );
                 }
                 AcceptanceDecision::NoMatch => {}
