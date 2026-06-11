@@ -266,6 +266,7 @@ impl ImportExportPlanner {
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
         let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        let mut required_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let accepted_externalized_packages = externalized_package_modules(program);
         let source_required_packages =
@@ -275,6 +276,9 @@ impl ImportExportPlanner {
             .copied()
             .collect::<BTreeSet<_>>();
         let source_module_wiring = source_module_wiring(program, &externalized_packages);
+        let lowered_runtime_sources = lowered_runtime_sources(program, &source_module_wiring);
+        let runtime_lazy_folds =
+            runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
 
         for module in program.model().modules() {
             if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
@@ -290,6 +294,36 @@ impl ImportExportPlanner {
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
             file.set_compiler_recovery(compiler_recovery);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
+
+            if let Some(folded) = runtime_lazy_folds.modules.get(&module.id) {
+                used_runtime_helper_files
+                    .entry(folded.source_file_id)
+                    .or_default()
+                    .extend(folded.stub_exports.iter().cloned());
+                required_runtime_helper_bindings
+                    .entry(folded.source_file_id)
+                    .or_default()
+                    .extend(folded.required_bindings.iter().cloned());
+                let specifier = relative_import_specifier(
+                    path,
+                    runtime_helpers_path(folded.source_file_id).as_str(),
+                );
+                file.push_source(named_reexport_statement(
+                    folded.stub_exports.iter(),
+                    specifier.as_str(),
+                ));
+                for export in &folded.stub_exports {
+                    file.add_binding(PlannedBinding::new(
+                        export.clone(),
+                        export.clone(),
+                        BindingShape::Unknown,
+                        true,
+                    ));
+                    file.add_export_with_source_backed(export.clone(), true);
+                }
+                plan.push_file(file);
+                continue;
+            }
 
             for decision in program.package_imports_for(module.id) {
                 file.add_import(PlannedImport {
@@ -320,63 +354,47 @@ impl ImportExportPlanner {
             }
 
             let runtime_imports = program.model().graph().runtime_imports_for(module.id);
-            let source = program.model().input().module_source_slice(module.id);
-            let (lowered_source, lowered_helpers, remaining_runtime_helpers) = source.map_or_else(
-                || (None, BTreeSet::new(), BTreeSet::new()),
-                |source| {
-                    let mut helper_kinds =
-                        runtime_helper_kinds(program.model().graph(), &runtime_imports);
-                    helper_kinds.extend(runtime_helper_kinds_for_source(
-                        program.model().graph(),
-                        source.source_file_id,
-                        source.source,
-                    ));
-                    let lowering = lower_runtime_helpers(source.source, &helper_kinds);
-                    (
-                        Some((
-                            source.source_file_id,
-                            source.source_file_path,
-                            lowering.source,
-                        )),
-                        lowering.lowered_helpers,
-                        lowering.remaining_helpers,
-                    )
-                },
-            );
+            let lowered_source = lowered_runtime_sources.get(&module.id);
+            let lowered_helpers = lowered_source
+                .map(|source| source.lowered_helpers.clone())
+                .unwrap_or_default();
             let local_source_definitions = lowered_source
                 .as_ref()
-                .map(|(_, _, source)| top_level_definitions_in_source(source.as_str()))
+                .map(|source| source.local_definitions.clone())
                 .unwrap_or_default();
             let local_source_writes = lowered_source
                 .as_ref()
-                .map(|(_, _, source)| implicit_global_writes_in_source(source.as_str()))
+                .map(|source| source.local_writes.clone())
                 .unwrap_or_default();
-            let remaining_runtime_helpers = remaining_runtime_helpers
-                .into_iter()
-                .filter(|binding| !planned_bindings.contains(binding))
-                .filter(|binding| !local_source_definitions.contains(binding))
-                .collect::<BTreeSet<_>>();
-            let written_runtime_helpers = remaining_runtime_helpers
-                .intersection(&local_source_writes)
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            let remaining_runtime_helpers = lowered_source
+                .map(|source| source.remaining_helpers.clone())
+                .unwrap_or_default();
+            let written_runtime_helpers = lowered_source
+                .map(|source| source.written_helpers.clone())
+                .unwrap_or_default();
 
             let runtime_import_groups = group_runtime_imports(runtime_imports);
-            if let Some((source_file_id, _, _)) = &lowered_source
+            if let Some(lowered_source) = lowered_source
                 && !remaining_runtime_helpers.is_empty()
             {
                 used_runtime_helper_files
-                    .entry(*source_file_id)
+                    .entry(lowered_source.source_file_id)
+                    .or_default()
+                    .extend(remaining_runtime_helpers.iter().cloned());
+                required_runtime_helper_bindings
+                    .entry(lowered_source.source_file_id)
                     .or_default()
                     .extend(remaining_runtime_helpers.iter().cloned());
                 if !written_runtime_helpers.is_empty() {
                     used_runtime_helper_setters
-                        .entry(*source_file_id)
+                        .entry(lowered_source.source_file_id)
                         .or_default()
                         .extend(written_runtime_helpers.iter().cloned());
                 }
-                let specifier =
-                    relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
+                let specifier = relative_import_specifier(
+                    path,
+                    runtime_helpers_path(lowered_source.source_file_id).as_str(),
+                );
                 file.push_source(runtime_helper_import_statement(
                     &remaining_runtime_helpers,
                     &written_runtime_helpers,
@@ -410,6 +428,10 @@ impl ImportExportPlanner {
                     continue;
                 }
                 used_runtime_helper_files
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(bindings.iter().cloned());
+                required_runtime_helper_bindings
                     .entry(source_file_id)
                     .or_default()
                     .extend(bindings.iter().cloned());
@@ -472,7 +494,9 @@ impl ImportExportPlanner {
                 ));
             }
 
-            if let Some((_source_file_id, source_file_path, mut source)) = lowered_source {
+            if let Some(lowered_source) = lowered_source {
+                let source_file_path = lowered_source.source_file_path.as_str();
+                let mut source = lowered_source.source.clone();
                 if !written_runtime_helpers.is_empty() {
                     source =
                         rewrite_runtime_helper_writes(source.as_str(), &written_runtime_helpers);
@@ -542,6 +566,10 @@ impl ImportExportPlanner {
                 .entry(entrypoint.source_file_id)
                 .or_default()
                 .insert(entrypoint.callee.clone());
+            required_runtime_helper_bindings
+                .entry(entrypoint.source_file_id)
+                .or_default()
+                .insert(entrypoint.callee.clone());
         }
 
         for (source_file_id, helper_bindings) in &used_runtime_helper_files {
@@ -553,9 +581,24 @@ impl ImportExportPlanner {
                 .entrypoint
                 .as_ref()
                 .filter(|entrypoint| helper_bindings.contains(&entrypoint.callee));
-            let mut root_bindings = helper_bindings.clone();
+            let mut root_bindings = required_runtime_helper_bindings
+                .get(source_file_id)
+                .cloned()
+                .unwrap_or_else(|| helper_bindings.clone());
             if let Some(entrypoint) = entrypoint {
                 root_bindings.extend(runtime_entrypoint_root_bindings(prelude, entrypoint));
+            }
+            if let Some(folded_chunks) =
+                runtime_lazy_folds.chunks_by_source_file.get(source_file_id)
+            {
+                for chunk in folded_chunks {
+                    for identifier in identifiers_in_source(chunk.source.as_str()) {
+                        let binding = BindingName::new(identifier);
+                        if prelude.defines(&binding) {
+                            root_bindings.insert(binding);
+                        }
+                    }
+                }
             }
             let mut source_bindings = prelude.required_bindings_for(root_bindings.iter());
             let namespace_exports =
@@ -564,8 +607,18 @@ impl ImportExportPlanner {
                 source_bindings.extend(namespace_export.exports.values().cloned());
             }
             source_bindings = prelude.required_bindings_for(source_bindings.iter());
-            let helper_source =
-                runtime_helper_source(prelude, &source_bindings, &namespace_exports, entrypoint);
+            let folded_chunks = runtime_lazy_folds
+                .chunks_by_source_file
+                .get(source_file_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let helper_source = runtime_helper_source(
+                prelude,
+                &source_bindings,
+                &namespace_exports,
+                entrypoint,
+                folded_chunks,
+            );
             let helper_imports = runtime_source_module_imports(
                 program,
                 prelude,
@@ -690,6 +743,464 @@ struct SourceModuleWiring {
     exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoweredRuntimeModuleSource {
+    source_file_id: u32,
+    source_file_path: String,
+    byte_start: u32,
+    source: String,
+    lowered_helpers: BTreeSet<BindingName>,
+    remaining_helpers: BTreeSet<BindingName>,
+    local_definitions: BTreeSet<BindingName>,
+    local_writes: BTreeSet<BindingName>,
+    written_helpers: BTreeSet<BindingName>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RuntimeLazyFoldPlan {
+    modules: BTreeMap<ModuleId, RuntimeLazyFoldModule>,
+    chunks_by_source_file: BTreeMap<u32, Vec<RuntimeFoldedSourceChunk>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeLazyFoldModule {
+    source_file_id: u32,
+    required_bindings: BTreeSet<BindingName>,
+    stub_exports: BTreeSet<BindingName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeFoldedSourceChunk {
+    byte_start: u32,
+    source: String,
+}
+
+fn lowered_runtime_sources(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+) -> BTreeMap<ModuleId, LoweredRuntimeModuleSource> {
+    let mut sources = BTreeMap::new();
+    for module in program.model().modules() {
+        let runtime_imports = program.model().graph().runtime_imports_for(module.id);
+        let Some(source) = program.model().input().module_source_slice(module.id) else {
+            continue;
+        };
+        let mut helper_kinds = runtime_helper_kinds(program.model().graph(), &runtime_imports);
+        helper_kinds.extend(runtime_helper_kinds_for_source(
+            program.model().graph(),
+            source.source_file_id,
+            source.source,
+        ));
+        let lowering = lower_runtime_helpers(source.source, &helper_kinds);
+        let local_definitions = top_level_definitions_in_source(lowering.source.as_str());
+        let local_writes = implicit_global_writes_in_source(lowering.source.as_str());
+        let mut planned_bindings = BTreeSet::<BindingName>::new();
+        if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
+            for bindings in module_imports.values() {
+                planned_bindings.extend(bindings.iter().cloned());
+            }
+        }
+        let remaining_helpers = lowering
+            .remaining_helpers
+            .into_iter()
+            .filter(|binding| !planned_bindings.contains(binding))
+            .filter(|binding| !local_definitions.contains(binding))
+            .collect::<BTreeSet<_>>();
+        let written_helpers = remaining_helpers
+            .intersection(&local_writes)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let byte_start = source.span.map(|span| span.byte_start).unwrap_or_default();
+        sources.insert(
+            module.id,
+            LoweredRuntimeModuleSource {
+                source_file_id: source.source_file_id,
+                source_file_path: source.source_file_path.to_string(),
+                byte_start,
+                source: lowering.source,
+                lowered_helpers: lowering.lowered_helpers,
+                remaining_helpers,
+                local_definitions,
+                local_writes,
+                written_helpers,
+            },
+        );
+    }
+    sources
+}
+
+fn runtime_lazy_fold_plan(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+) -> RuntimeLazyFoldPlan {
+    let mut plan = RuntimeLazyFoldPlan::default();
+    for module in program.model().modules() {
+        if module.kind != ModuleKind::Application {
+            continue;
+        }
+        if !program.package_imports_for(module.id).is_empty() {
+            continue;
+        }
+        let Some(source) = lowered_runtime_sources.get(&module.id) else {
+            continue;
+        };
+        if source.written_helpers.is_empty() {
+            continue;
+        }
+        let Some(prelude) = program
+            .model()
+            .graph()
+            .runtime_prelude(source.source_file_id)
+        else {
+            continue;
+        };
+        if !source
+            .written_helpers
+            .iter()
+            .all(|binding| prelude.defines(binding))
+        {
+            continue;
+        }
+        let Some((folded_source, explicit_exports)) =
+            strip_top_level_named_exports(source.source.as_str())
+        else {
+            continue;
+        };
+        if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
+            continue;
+        }
+        let available_bindings = top_level_definitions_in_source(folded_source.as_str())
+            .into_iter()
+            .chain(source.written_helpers.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut stub_exports = program
+            .model()
+            .graph()
+            .import_export()
+            .exports_for(module.id)
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        stub_exports.extend(explicit_exports);
+        if let Some(extra_exports) = source_module_wiring.exports_by_module.get(&module.id) {
+            stub_exports.extend(extra_exports.iter().cloned());
+        }
+        if stub_exports.is_empty()
+            || !stub_exports
+                .iter()
+                .all(|binding| available_bindings.contains(binding))
+        {
+            continue;
+        }
+        let mut required_bindings = source.remaining_helpers.clone();
+        required_bindings.extend(source.written_helpers.iter().cloned());
+        plan.modules.insert(
+            module.id,
+            RuntimeLazyFoldModule {
+                source_file_id: source.source_file_id,
+                required_bindings,
+                stub_exports,
+            },
+        );
+        plan.chunks_by_source_file
+            .entry(source.source_file_id)
+            .or_default()
+            .push(RuntimeFoldedSourceChunk {
+                byte_start: source.byte_start,
+                source: folded_source.trim().to_string(),
+            });
+    }
+    for chunks in plan.chunks_by_source_file.values_mut() {
+        chunks.sort_by_key(|chunk| chunk.byte_start);
+    }
+    plan
+}
+
+fn strip_top_level_named_exports(source: &str) -> Option<(String, BTreeSet<BindingName>)> {
+    let bytes = source.as_bytes();
+    let mut output = String::new();
+    let mut exports = BTreeSet::new();
+    let mut cursor = 0usize;
+    let mut last = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            _ if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && keyword_at(source, cursor, "import") =>
+            {
+                return None;
+            }
+            _ if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && keyword_at(source, cursor, "export") =>
+            {
+                let export_start = cursor;
+                cursor = skip_ws(bytes, cursor + "export".len());
+                if bytes.get(cursor) != Some(&b'{') {
+                    return None;
+                }
+                let export_end = find_matching_brace(source, cursor)?;
+                exports.extend(parse_named_export_bindings(
+                    &source[cursor + 1..export_end],
+                )?);
+                cursor = skip_ws(bytes, export_end + 1);
+                if keyword_at(source, cursor, "from") {
+                    return None;
+                }
+                if bytes.get(cursor) == Some(&b';') {
+                    cursor += 1;
+                }
+                output.push_str(&source[last..export_start]);
+                last = cursor;
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    output.push_str(&source[last..]);
+    Some((output, exports))
+}
+
+fn parse_named_export_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
+    let mut bindings = BTreeSet::new();
+    for item in split_top_level_properties(source) {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        if item.starts_with("type ") || item == "type" {
+            return None;
+        }
+        let parts = item.split_whitespace().collect::<Vec<_>>();
+        if parts.iter().any(|part| *part == "as") {
+            return None;
+        }
+        let local = parts.first().copied()?;
+        let (binding, end) = parse_identifier(local, 0)?;
+        if end != local.len() || is_js_keyword(binding) {
+            return None;
+        }
+        bindings.insert(BindingName::new(binding));
+    }
+    Some(bindings)
+}
+
+fn source_is_lazy_preserving_foldable(source: &str) -> bool {
+    let mut saw_lazy_initializer = false;
+    for statement in top_level_statement_slices(source) {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            continue;
+        }
+        if lowered_lazy_initializer_statement_binding(statement).is_some() {
+            saw_lazy_initializer = true;
+            continue;
+        }
+        if variable_declaration_without_initializer(statement) {
+            continue;
+        }
+        return false;
+    }
+    saw_lazy_initializer
+}
+
+fn top_level_statement_slices(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let mut cursor = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b';' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                statements.push(&source[start..=cursor]);
+                cursor += 1;
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    if source[start..].trim().is_empty() {
+        statements
+    } else {
+        statements.push(&source[start..]);
+        statements
+    }
+}
+
+fn variable_declaration_without_initializer(statement: &str) -> bool {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    let Some((keyword, after_keyword)) = declaration_keyword_at_start(statement) else {
+        return false;
+    };
+    if keyword == "const" {
+        return false;
+    }
+    let mut cursor = skip_ws(statement.as_bytes(), after_keyword);
+    let Some((_binding, next)) = parse_identifier(statement, cursor) else {
+        return false;
+    };
+    cursor = next;
+    !contains_top_level_initializer_operator(statement, cursor)
+}
+
+fn lowered_lazy_initializer_statement_binding(statement: &str) -> Option<BindingName> {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    let (_keyword, after_keyword) = declaration_keyword_at_start(statement)?;
+    let cursor = skip_ws(statement.as_bytes(), after_keyword);
+    let (binding, after_binding) = parse_identifier(statement, cursor)?;
+    let equals = skip_ws(statement.as_bytes(), after_binding);
+    if statement.as_bytes().get(equals) != Some(&b'=') {
+        return None;
+    }
+    let initializer = statement[skip_ws(statement.as_bytes(), equals + 1)..].trim();
+    looks_like_lowered_lazy_initializer(initializer).then(|| BindingName::new(binding))
+}
+
+fn declaration_keyword_at_start(source: &str) -> Option<(&'static str, usize)> {
+    ["var", "let", "const"]
+        .into_iter()
+        .find(|keyword| keyword_at(source, 0, keyword))
+        .map(|keyword| (keyword, keyword.len()))
+}
+
+fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
+    let compact = compact_js_source(initializer);
+    compact.starts_with(
+        "(()=>{let__reverts_initialized=false;let__reverts_value;return()=>{if(!__reverts_initialized){__reverts_initialized=true;__reverts_value=(()=>{",
+    ) && compact.contains("})();}return__reverts_value;};})()")
+}
+
+fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'=' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && bytes.get(cursor + 1) != Some(&b'=')
+                && bytes.get(cursor + 1) != Some(&b'>') =>
+            {
+                return true;
+            }
+            _ => cursor += 1,
+        }
+    }
+    false
+}
+
 fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &RuntimeEntrypoint)> {
     program
         .model()
@@ -726,29 +1237,42 @@ fn runtime_helper_source(
     source_bindings: &BTreeSet<BindingName>,
     namespace_exports: &[RuntimeNamespaceExport],
     entrypoint: Option<&RuntimeEntrypoint>,
+    folded_chunks: &[RuntimeFoldedSourceChunk],
 ) -> String {
-    let mut chunks = BTreeMap::<(u32, u8), String>::new();
+    let mut snippets = BTreeMap::<u32, String>::new();
     for binding in source_bindings {
         let Some(snippet) = prelude.snippets.get(binding) else {
             continue;
         };
-        chunks
-            .entry((snippet.byte_start, 0))
+        snippets
+            .entry(snippet.byte_start)
             .or_insert_with(|| snippet.source.clone());
     }
+    let mut chunks = snippets
+        .into_iter()
+        .map(|(byte_start, source)| (byte_start, 0u8, source))
+        .collect::<Vec<_>>();
     for namespace_export in namespace_exports {
-        chunks
-            .entry((namespace_export.byte_start, 1))
-            .or_insert_with(|| runtime_namespace_export_statement(namespace_export));
+        chunks.push((
+            namespace_export.byte_start,
+            1,
+            runtime_namespace_export_statement(namespace_export),
+        ));
+    }
+    for folded_chunk in folded_chunks {
+        chunks.push((folded_chunk.byte_start, 2, folded_chunk.source.clone()));
     }
     if let Some(entrypoint) = entrypoint {
         for side_effect in runtime_entrypoint_side_effects(prelude, entrypoint) {
-            chunks
-                .entry((side_effect.byte_start, 2))
-                .or_insert(side_effect.source);
+            chunks.push((side_effect.byte_start, 3, side_effect.source));
         }
     }
-    chunks.into_values().collect::<Vec<_>>().join("\n")
+    chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
+    chunks
+        .into_iter()
+        .map(|(_, _, source)| source)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn runtime_entrypoint_side_effects(
@@ -833,23 +1357,72 @@ fn runtime_source_module_imports(
 
 fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
     let local_bindings = local_bindings_in_source(source);
-    identifiers_in_source(source)
+    value_identifiers_in_source(source)
         .into_iter()
         .filter(|identifier| !is_runtime_global_identifier(identifier))
         .filter(|identifier| !local_bindings.contains(identifier))
-        .filter(|identifier| contains_value_identifier_reference(source, identifier))
         .collect()
 }
 
-fn contains_value_identifier_reference(source: &str, identifier: &str) -> bool {
+fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
+    let mut identifiers = BTreeSet::new();
+    let bytes = source.as_bytes();
     let mut cursor = 0usize;
-    while let Some(start) = find_identifier_occurrence(source, identifier, cursor) {
-        cursor = start + identifier.len();
-        if identifier_occurrence_is_value_reference(source, start, cursor) {
-            return true;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'`' => cursor = collect_template_value_identifiers(source, cursor, &mut identifiers),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let identifier = &source[start..cursor];
+                if !is_js_keyword(identifier)
+                    && identifier_occurrence_is_value_reference(source, start, cursor)
+                {
+                    identifiers.insert(identifier.to_string());
+                }
+            }
+            _ => cursor += 1,
         }
     }
-    false
+    identifiers
+}
+
+fn collect_template_value_identifiers(
+    source: &str,
+    start: usize,
+    identifiers: &mut BTreeSet<String>,
+) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor += 2,
+            b'`' => return cursor + 1,
+            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
+                let open = cursor + 1;
+                let Some(close) = find_matching_brace(source, open) else {
+                    return skip_quoted(bytes, start, b'`');
+                };
+                identifiers.extend(value_identifiers_in_source(&source[open + 1..close]));
+                cursor = close + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    bytes.len()
 }
 
 fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usize) -> bool {
@@ -1152,26 +1725,6 @@ fn runtime_namespace_exports_for_helpers(
         .filter(|namespace_export| helper_bindings.contains(&namespace_export.namespace))
         .cloned()
         .collect()
-}
-
-fn find_identifier_occurrence(source: &str, identifier: &str, from: usize) -> Option<usize> {
-    let mut cursor = from;
-    while let Some(relative) = source[cursor..].find(identifier) {
-        let start = cursor + relative;
-        let end = start + identifier.len();
-        let before = start
-            .checked_sub(1)
-            .and_then(|index| source.as_bytes().get(index))
-            .copied();
-        let after = source.as_bytes().get(end).copied();
-        if before.is_none_or(|byte| !is_identifier_continue(byte))
-            && after.is_none_or(|byte| !is_identifier_continue(byte))
-        {
-            return Some(start);
-        }
-        cursor = end;
-    }
-    None
 }
 
 fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
@@ -3059,6 +3612,17 @@ fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -
     format!("export {{ {names} }};")
 }
 
+fn named_reexport_statement<'a>(
+    bindings: impl Iterator<Item = &'a BindingName>,
+    specifier: &str,
+) -> String {
+    let names = bindings
+        .map(BindingName::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("export {{ {names} }} from '{specifier}';")
+}
+
 fn variable_declaration_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
     let names = bindings
         .map(BindingName::as_str)
@@ -4604,6 +5168,183 @@ mod tests {
     }
 
     #[test]
+    fn lazy_initializer_module_written_runtime_bindings_are_folded_into_helper() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = { ready: true }; });\n",
+            "export { initShared, shared };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(
+            entry_source
+                .contains("export { initShared, shared } from './runtime/source-1-helpers.js';")
+        );
+        assert!(!entry_source.contains("__reverts_set_shared"));
+        assert!(helper_source.contains("var shared;"));
+        assert!(helper_source.contains("var initShared = (() => {"));
+        assert!(helper_source.contains("shared = { ready: true }"));
+        assert!(!helper_source.contains("__reverts_set_shared"));
+        assert!(helper_source.contains("export { initShared, shared };"));
+    }
+
+    #[test]
+    fn lazy_initializer_fold_preserves_tail_side_effect_order_before_entrypoint() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = 1; });\n",
+            "export { initShared, shared };\n",
+        );
+        let tail = concat!(
+            "var main = () => { console.log(shared); };\n",
+            "initShared();\n",
+            "main();\n",
+        );
+        let source = format!("{prelude}{body}{tail}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + body.len()) as u32,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+        let init_decl = helper_source
+            .find("var initShared = (() =>")
+            .expect("folded lazy initializer should be before side effects");
+        let tail_call = helper_source
+            .find("initShared();")
+            .expect("tail side effect should be preserved");
+
+        assert!(init_decl < tail_call);
+        assert!(helper_source.contains("var main = () => { console.log(shared); };"));
+        assert!(helper_source.contains("export { initShared, main, shared };"));
+    }
+
+    #[test]
+    fn lazy_initializer_fold_imports_source_module_dependencies_from_helper() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = buildValue(); });\n",
+            "export { initShared, shared };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "dep.js",
+            Some("function buildValue() { return 42; }\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "dep", "modules/dep.ts").with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let dep_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/dep.ts")
+            .expect("source dependency should be planned");
+        let helper_source = helper_file.body.join("\n");
+        let dep_source = dep_file.body.join("\n");
+
+        assert!(helper_source.contains("import { buildValue } from '../dep.js';"));
+        assert!(helper_source.contains("shared = buildValue();"));
+        assert!(dep_source.contains("export { buildValue };"));
+    }
+
+    #[test]
     fn runtime_prelude_update_writes_use_live_setters() {
         let planner = ImportExportPlanner;
         let prelude = "var counter = 2;\nvar result;\n";
@@ -4758,7 +5499,7 @@ mod tests {
     fn runtime_prelude_write_inside_computed_class_key_uses_live_setter() {
         let planner = ImportExportPlanner;
         let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream;\nvar holder;\n";
-        let body = "var init = J(() => { Stream = class Stream { [(holder = new WeakMap(), Symbol.iterator)]() { return 1; } }; });\nexport { Stream, init };\n";
+        let body = "void 0;\nvar init = J(() => { Stream = class Stream { [(holder = new WeakMap(), Symbol.iterator)]() { return 1; } }; });\nexport { Stream, init };\n";
         let source = format!("{prelude}{body}");
         assert!(
             super::implicit_global_writes_in_source(body).contains(&BindingName::new("holder"))
