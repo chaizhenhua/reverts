@@ -106,6 +106,7 @@ fn external_corpus_pipeline_coverage_report() {
                         | FindingCode::CallableEmittedAsNonCallable
                         | FindingCode::UnresolvableBareImport
                         | FindingCode::AstFactExtractionFailed
+                        | FindingCode::NamespaceMemberStripped
                 ) {
                     cases_by_finding.entry(finding.code).or_default().push((
                         case.manifest.id.clone(),

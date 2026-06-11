@@ -22,6 +22,11 @@ pub enum FindingCode {
     MissingPackageSource,
     UnreachableTopLevelCode,
     MissingRequiredAsset,
+    /// Paper #7 downstream: a planned `NamespaceObject` binding records
+    /// member accesses (e.g. `ns.foo`, `ns.bar`) that the emitted source no
+    /// longer mentions. Fires when emit machinery drops or shadows a known
+    /// property name, masking a real regression in the namespace surface.
+    NamespaceMemberStripped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

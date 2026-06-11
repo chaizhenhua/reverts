@@ -87,6 +87,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
 
     audit.extend(audit_emitted_project_parse(&project));
     audit.extend(audit_binding_shape_consistency(&plan, &project));
+    audit.extend(audit_namespace_object_member_consistency(&plan, &project));
 
     Ok(OutputRun {
         project,
@@ -656,6 +657,116 @@ fn audit_binding_shape_consistency(plan: &EmitPlan, project: &EmittedProject) ->
     audit
 }
 
+/// Paper #7 downstream consumer: for every planned `NamespaceObject`
+/// binding, every property name the planner recorded must still appear
+/// in the emitted source. Catches refactors that silently strip a member
+/// from a namespace surface. Uses a simple whole-word identifier match
+/// on the emitted text — false positives would only happen if a member
+/// name is shadowed by a literal string of the same name, which would
+/// itself be a real concern worth flagging.
+fn audit_namespace_object_member_consistency(
+    plan: &EmitPlan,
+    project: &EmittedProject,
+) -> AuditReport {
+    let mut audit = AuditReport::default();
+    for planned_file in &plan.files {
+        let Some(emitted) = project
+            .files
+            .iter()
+            .find(|file| file.path == planned_file.path)
+        else {
+            continue;
+        };
+        for binding in &planned_file.bindings {
+            if binding.shape != BindingShape::NamespaceObject || binding.known_members.is_empty() {
+                continue;
+            }
+            let namespace = binding.emitted.as_str();
+            let missing: Vec<&str> = binding
+                .known_members
+                .iter()
+                .map(|member| member.as_str())
+                .filter(|member| {
+                    !namespace_member_access_present(emitted.source.as_str(), namespace, member)
+                })
+                .collect();
+            if missing.is_empty() {
+                continue;
+            }
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::NamespaceMemberStripped,
+                    format!(
+                        "namespace binding lost member access for: {}",
+                        missing.join(", "),
+                    ),
+                )
+                .with_module(planned_file.path.clone())
+                .with_binding(binding.emitted.as_str()),
+            );
+        }
+    }
+    audit
+}
+
+/// True when `source` contains any of:
+///   - `<namespace>.<member>`  (dot access; member must be a valid identifier)
+///   - `<namespace>["<member>"]`  (double-quoted computed access)
+///   - `<namespace>['<member>']`  (single-quoted computed access)
+///
+/// Members that are not valid identifiers can only appear through quoted
+/// forms; bundlers like esbuild also routinely quote reserved or
+/// non-identifier names. Matching any of the three forms keeps the audit
+/// from false-firing on those cases.
+fn namespace_member_access_present(source: &str, namespace: &str, member: &str) -> bool {
+    if is_member_name_identifier(member)
+        && contains_identifier(source, &format!("{namespace}.{member}"))
+    {
+        return true;
+    }
+    let double_quoted = format!("{namespace}[\"{member}\"]");
+    if contains_identifier(source, &double_quoted) {
+        return true;
+    }
+    let single_quoted = format!("{namespace}['{member}']");
+    contains_identifier(source, &single_quoted)
+}
+
+fn is_member_name_identifier(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+        return false;
+    }
+    bytes.all(is_identifier_part)
+}
+
+fn contains_identifier(source: &str, identifier: &str) -> bool {
+    let identifier_bytes = identifier.as_bytes();
+    if identifier_bytes.is_empty() {
+        return false;
+    }
+    let source_bytes = source.as_bytes();
+    let mut cursor = 0;
+    while let Some(offset) = source[cursor..].find(identifier) {
+        let start = cursor + offset;
+        let end = start + identifier_bytes.len();
+        let before_ok = start == 0 || !is_identifier_part(source_bytes[start - 1]);
+        let after_ok = end >= source_bytes.len() || !is_identifier_part(source_bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        cursor = start + 1;
+    }
+    false
+}
+
+const fn is_identifier_part(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
 fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
     let mut audit = AuditReport::default();
     for file in &project.files {
@@ -719,9 +830,13 @@ mod tests {
     use reverts_observe::FindingCode;
     use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
+    use std::collections::BTreeSet;
+
+    use reverts_emitter::{EmittedFile, EmittedProject};
+
     use super::{
-        OutputRun, audit_emit_plan_synthesis, collect_dynamic_asset_references,
-        current_node_platform_dir, generate_project_from_input,
+        OutputRun, audit_emit_plan_synthesis, audit_namespace_object_member_consistency,
+        collect_dynamic_asset_references, current_node_platform_dir, generate_project_from_input,
     };
 
     fn rows_with_application_module() -> InputRows {
@@ -1579,6 +1694,151 @@ mod tests {
             FindingCode::SyntheticReferenceWithoutDeclaration
         );
         assert_eq!(audit.findings()[0].binding.as_deref(), Some("missing"));
+    }
+
+    #[test]
+    fn namespace_object_member_audit_fires_when_emit_drops_a_known_member() {
+        // Paper #7 downstream consumer: when the planner recorded that `ns`
+        // is accessed via `.foo` and `.bar`, but the emitted source only
+        // mentions `ns.foo`, the audit must call this out so a refactor that
+        // accidentally strips a member never ships silently.
+        let mut file = PlannedFile::new("src/index.ts");
+        let mut known = BTreeSet::new();
+        known.insert(BindingName::new("foo"));
+        known.insert(BindingName::new("bar"));
+        file.add_binding(
+            PlannedBinding::new(
+                BindingName::new("ns"),
+                BindingName::new("ns"),
+                BindingShape::NamespaceObject,
+                true,
+            )
+            .with_known_members(known),
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/index.ts".to_string(),
+                source: "const ns = { foo: 1, bar: 2 };\nconst a = ns.foo;\n".to_string(),
+            }],
+        };
+
+        let audit = audit_namespace_object_member_consistency(&plan, &project);
+
+        assert_eq!(audit.findings().len(), 1);
+        let finding = &audit.findings()[0];
+        assert_eq!(finding.code, FindingCode::NamespaceMemberStripped);
+        assert_eq!(finding.binding.as_deref(), Some("ns"));
+        assert!(
+            finding.message.contains("bar"),
+            "finding must name the stripped member; got {:?}",
+            finding.message,
+        );
+        assert!(
+            !finding.message.contains("foo"),
+            "finding must not blame members that are still present; got {:?}",
+            finding.message,
+        );
+    }
+
+    #[test]
+    fn namespace_object_member_audit_is_silent_when_emit_keeps_all_members() {
+        let mut file = PlannedFile::new("src/index.ts");
+        let mut known = BTreeSet::new();
+        known.insert(BindingName::new("foo"));
+        known.insert(BindingName::new("bar"));
+        file.add_binding(
+            PlannedBinding::new(
+                BindingName::new("ns"),
+                BindingName::new("ns"),
+                BindingShape::NamespaceObject,
+                true,
+            )
+            .with_known_members(known),
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/index.ts".to_string(),
+                source: "const ns = { foo: 1, bar: 2 };\nns.foo;\nns.bar;".to_string(),
+            }],
+        };
+
+        let audit = audit_namespace_object_member_consistency(&plan, &project);
+        assert!(audit.findings().is_empty());
+    }
+
+    #[test]
+    fn namespace_object_member_audit_accepts_quoted_property_access() {
+        // esbuild and similar tools emit `ns["mustBeQuoted"]` for names that
+        // are not valid bare identifiers. The audit must treat that as a real
+        // access, not a missing member — otherwise it false-fires on every
+        // bundle that quotes a property.
+        let mut file = PlannedFile::new("src/index.ts");
+        let mut known = BTreeSet::new();
+        known.insert(BindingName::new("plain"));
+        known.insert(BindingName::new("must-be-quoted"));
+        known.insert(BindingName::new("with space"));
+        file.add_binding(
+            PlannedBinding::new(
+                BindingName::new("ns"),
+                BindingName::new("ns"),
+                BindingShape::NamespaceObject,
+                true,
+            )
+            .with_known_members(known),
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/index.ts".to_string(),
+                source: r#"ns.plain; ns["must-be-quoted"]; ns['with space'];"#.to_string(),
+            }],
+        };
+
+        let audit = audit_namespace_object_member_consistency(&plan, &project);
+        assert!(
+            audit.findings().is_empty(),
+            "expected no findings, got: {:?}",
+            audit.findings(),
+        );
+    }
+
+    #[test]
+    fn namespace_object_member_audit_ignores_non_namespace_shapes() {
+        // Non-NamespaceObject bindings must never be inspected, even if they
+        // somehow carry known_members — the planner shouldn't attach them
+        // there, but the audit's gate is the shape, not the field.
+        let mut file = PlannedFile::new("src/index.ts");
+        let mut known = BTreeSet::new();
+        known.insert(BindingName::new("never_emitted"));
+        file.add_binding(
+            PlannedBinding::new(
+                BindingName::new("not_a_namespace"),
+                BindingName::new("not_a_namespace"),
+                BindingShape::Callable,
+                true,
+            )
+            .with_known_members(known),
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/index.ts".to_string(),
+                source: "function not_a_namespace() {}\n".to_string(),
+            }],
+        };
+
+        let audit = audit_namespace_object_member_consistency(&plan, &project);
+        assert!(audit.findings().is_empty());
     }
 
     #[test]

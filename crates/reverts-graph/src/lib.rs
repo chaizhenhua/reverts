@@ -1631,7 +1631,7 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
-        if let Some(binding) = expression_identifier(&it.object) {
+        if let Some(binding) = direct_member_object(&it.object) {
             self.member_constraint(
                 binding,
                 BindingConstraintKind::MemberRead,
@@ -1642,7 +1642,7 @@ impl<'a> Visit<'a> for AstFactVisitor {
     }
 
     fn visit_computed_member_expression(&mut self, it: &ComputedMemberExpression<'a>) {
-        if let Some(binding) = expression_identifier(&it.object) {
+        if let Some(binding) = direct_member_object(&it.object) {
             // Computed key may be a string literal (e.g. `ns["foo"]`) — capture
             // it when we can recover a property name. Other expressions
             // (numeric index, dynamic) record the constraint without a
@@ -1876,6 +1876,30 @@ fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> 
         Expression::TSTypeAssertion(expression) => expression_identifier(&expression.expression),
         Expression::TSInstantiationExpression(expression) => {
             expression_identifier(&expression.expression)
+        }
+        _ => None,
+    }
+}
+
+/// Like [`expression_identifier`] but stops at member expressions — `ns.foo`
+/// resolves to `Some("ns")`, while `ns.foo.bar` resolves to `None` so the
+/// outer access never attributes `bar` to `ns`. Used by the member-access
+/// visitors so property names only attach to the binding that immediately
+/// owns them.
+fn direct_member_object<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        Expression::ParenthesizedExpression(parenthesized) => {
+            direct_member_object(&parenthesized.expression)
+        }
+        Expression::TSAsExpression(expression) => direct_member_object(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => {
+            direct_member_object(&expression.expression)
+        }
+        Expression::TSNonNullExpression(expression) => direct_member_object(&expression.expression),
+        Expression::TSTypeAssertion(expression) => direct_member_object(&expression.expression),
+        Expression::TSInstantiationExpression(expression) => {
+            direct_member_object(&expression.expression)
         }
         _ => None,
     }
@@ -2371,6 +2395,41 @@ mod tests {
         let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
         let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
         assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_only_records_direct_property_on_chained_member_access() {
+        // Regression: `expression_identifier` recurses through nested member
+        // expressions, so before this fix `ns.foo.bar` recorded `bar` as a
+        // direct property of `ns` (it was actually a property of `ns.foo`).
+        // The corpus surfaced this via the esbuild `import_fs.default.X`
+        // pattern — `X` was being attributed to `import_fs` instead of
+        // `import_fs.default`. Only the immediate object's property name
+        // belongs to that binding.
+        let source = r#"
+            const ns = {};
+            ns.foo;
+            ns.foo.bar;
+            ns["foo"].baz;
+            ns.foo["qux"];
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        // `foo` is the only direct property of `ns`. `bar`, `baz`, `qux` are
+        // properties of `ns.foo` and must not bleed onto `ns`.
+        assert_eq!(names, vec!["foo"]);
     }
 
     #[test]
