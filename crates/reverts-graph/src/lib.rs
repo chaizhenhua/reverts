@@ -1,3 +1,6 @@
+mod fingerprint;
+pub use fingerprint::{ExtractedFunction, FunctionExtractor};
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxc_allocator::Allocator;
