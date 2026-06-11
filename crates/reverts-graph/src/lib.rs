@@ -174,6 +174,10 @@ pub struct AstFact {
     pub module_id: ModuleId,
     pub binding: Option<BindingName>,
     pub kind: AstFactKind,
+    /// Optional property name accompanying a member-access constraint. Set
+    /// for MemberRead/MemberWrite facts that originate from a static or
+    /// computed member expression with a recoverable property name.
+    pub property: Option<BindingName>,
 }
 
 impl AstFact {
@@ -183,6 +187,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::Definition,
+            property: None,
         }
     }
 
@@ -192,6 +197,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::Read,
+            property: None,
         }
     }
 
@@ -201,6 +207,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::Write,
+            property: None,
         }
     }
 
@@ -210,6 +217,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::Import,
+            property: None,
         }
     }
 
@@ -219,6 +227,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(specifier)),
             kind: AstFactKind::PackageImport,
+            property: None,
         }
     }
 
@@ -228,6 +237,7 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::Export,
+            property: None,
         }
     }
 
@@ -241,6 +251,25 @@ impl AstFact {
             module_id,
             binding: Some(BindingName::new(binding)),
             kind: AstFactKind::BindingConstraint(kind),
+            property: None,
+        }
+    }
+
+    /// Construct a member-access constraint fact that records both the
+    /// accessed binding and the property name observed on it. Used by the
+    /// extractor to populate `BindingConstraint::property` downstream.
+    #[must_use]
+    pub fn constraint_with_property(
+        module_id: ModuleId,
+        binding: impl Into<String>,
+        kind: BindingConstraintKind,
+        property: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(binding)),
+            kind: AstFactKind::BindingConstraint(kind),
+            property: Some(BindingName::new(property)),
         }
     }
 
@@ -250,6 +279,7 @@ impl AstFact {
             module_id,
             binding: None,
             kind: AstFactKind::WrapperRegion(kind),
+            property: None,
         }
     }
 }
@@ -512,11 +542,12 @@ fn apply_ast_fact(
         }
         AstFactKind::BindingConstraint(kind) => {
             if let Some(binding) = &fact.binding {
-                def_use.constrain(BindingConstraint::new(
-                    fact.module_id,
-                    binding.as_str(),
-                    *kind,
-                ));
+                let mut constraint =
+                    BindingConstraint::new(fact.module_id, binding.as_str(), *kind);
+                if let Some(property) = &fact.property {
+                    constraint = constraint.with_property(property.as_str());
+                }
+                def_use.constrain(constraint);
             }
         }
         AstFactKind::WrapperRegion(_) => {}
@@ -1553,6 +1584,7 @@ impl<'a> Visit<'a> for AstFactVisitor {
                         module_id: self.module_id,
                         binding: Some(BindingName::new(binding)),
                         kind: AstFactKind::WrapperRegion(AstWrapperKind::EnumIife),
+                        property: None,
                     });
                 }
                 Some(_) => {
@@ -1600,14 +1632,30 @@ impl<'a> Visit<'a> for AstFactVisitor {
 
     fn visit_static_member_expression(&mut self, it: &StaticMemberExpression<'a>) {
         if let Some(binding) = expression_identifier(&it.object) {
-            self.constraint(binding, BindingConstraintKind::MemberRead);
+            self.member_constraint(
+                binding,
+                BindingConstraintKind::MemberRead,
+                it.property.name.as_str(),
+            );
         }
         walk_static_member_expression(self, it);
     }
 
     fn visit_computed_member_expression(&mut self, it: &ComputedMemberExpression<'a>) {
         if let Some(binding) = expression_identifier(&it.object) {
-            self.constraint(binding, BindingConstraintKind::MemberRead);
+            // Computed key may be a string literal (e.g. `ns["foo"]`) — capture
+            // it when we can recover a property name. Other expressions
+            // (numeric index, dynamic) record the constraint without a
+            // property name so the shape constraint still applies.
+            if let Expression::StringLiteral(literal) = &it.expression {
+                self.member_constraint(
+                    binding,
+                    BindingConstraintKind::MemberRead,
+                    literal.value.as_str(),
+                );
+            } else {
+                self.constraint(binding, BindingConstraintKind::MemberRead);
+            }
         }
         walk_computed_member_expression(self, it);
     }
@@ -1652,6 +1700,17 @@ impl AstFactVisitor {
         if self.should_emit_binding_fact(binding) {
             self.facts
                 .push(AstFact::constraint(self.module_id, binding, kind));
+        }
+    }
+
+    fn member_constraint(&mut self, binding: &str, kind: BindingConstraintKind, property: &str) {
+        if self.should_emit_binding_fact(binding) {
+            self.facts.push(AstFact::constraint_with_property(
+                self.module_id,
+                binding,
+                kind,
+                property,
+            ));
         }
     }
 
@@ -2283,6 +2342,35 @@ mod tests {
             )),
             "namespace augmentation IIFE must not be tagged as a generic bundler IIFE wrapper",
         );
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_property_names_on_member_access_constraints() {
+        // Paper #7 plumbing: `ns.foo` / `ns["bar"]` member accesses must
+        // surface as constraints carrying the property name. The DefUseGraph
+        // query `members_accessed_on` then exposes the deduplicated set.
+        let source = r#"
+            const ns = {};
+            ns.foo;
+            ns["bar"];
+            ns.foo;
+            ns[dynamicKey];
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo"]);
     }
 
     #[test]
