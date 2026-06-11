@@ -1,14 +1,16 @@
+mod errors;
+mod help;
+
+pub use errors::{CliError, CliRunError, ExtractAssetsError, MatchPackagesError};
+pub use help::{HelpTopic, help_text, version_text};
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use reverts_input::sqlite::{
-    SqliteInputError, load_project_bundle_from_sqlite, load_project_rows_from_connection,
-};
+use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
     AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode, SourceFileInput,
@@ -20,7 +22,7 @@ use reverts_package_matcher::{
     VersionedPackageMatcher, package_import_names_from_sources,
 };
 use reverts_pipeline::{
-    AssetReference, EmittedAsset, EmittedFile, PipelineError, RuntimeDependency,
+    AssetReference, EmittedAsset, EmittedFile, RuntimeDependency,
     collect_required_asset_references_from_rows, generate_project_from_input,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -168,14 +170,6 @@ pub enum CliCommand {
     ExtractAssets(ExtractAssetsArgs),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpTopic {
-    TopLevel,
-    GenerateProjectV2,
-    MatchPackages,
-    ExtractAssets,
-}
-
 impl CliCommand {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         let args = args.into_iter().collect::<Vec<_>>();
@@ -285,31 +279,6 @@ fn parse_project_id(value: String) -> Result<u32, CliError> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliError {
-    MissingCommand,
-    MissingArgument(&'static str),
-    InvalidProjectId(String),
-    InvalidPackageName(String),
-    UnknownCommand(String),
-    UnknownArgument(String),
-}
-
-impl fmt::Display for CliError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingCommand => write!(formatter, "missing command"),
-            Self::MissingArgument(argument) => write!(formatter, "missing argument {argument}"),
-            Self::InvalidProjectId(value) => write!(formatter, "invalid project id {value}"),
-            Self::InvalidPackageName(value) => write!(formatter, "invalid package name {value}"),
-            Self::UnknownCommand(command) => write!(formatter, "unknown command {command}"),
-            Self::UnknownArgument(argument) => write!(formatter, "unknown argument {argument}"),
-        }
-    }
-}
-
-impl Error for CliError {}
-
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
     match CliCommand::parse(args).map_err(CliRunError::Args)? {
         CliCommand::Help(topic) => {
@@ -323,27 +292,6 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::GenerateProjectV2(args) => run_generate_project(args),
         CliCommand::MatchPackages(args) => run_match_packages(args),
         CliCommand::ExtractAssets(args) => run_extract_assets(args),
-    }
-}
-
-pub fn version_text() -> String {
-    format!("reverts-cli {}", env!("CARGO_PKG_VERSION"))
-}
-
-pub fn help_text(topic: HelpTopic) -> &'static str {
-    match topic {
-        HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages        Populate package_attributions/package_surfaces in SQLite\n    extract-assets        Populate project_assets from asset references in source slices\n    generate-project-v2   Generate a TypeScript project from SQLite input\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
-        }
-        HelpTopic::GenerateProjectV2 => {
-            "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
-        }
-        HelpTopic::MatchPackages => {
-            "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--apply]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --package-name <NAME>     Restrict matching to one package name; repeatable\n    --apply                   Persist accepted package attributions and surfaces"
-        }
-        HelpTopic::ExtractAssets => {
-            "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR-OR-BUN-EXE>]... [--apply]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --asset-root <DIR-OR-BUN-EXE>   Root directory for asset files, or a Bun standalone executable for /$bunfs/root assets (repeatable)\n    --apply                         Persist discovered project_assets rows"
-        }
     }
 }
 
@@ -2076,258 +2024,6 @@ fn format_audit_findings(audit: &AuditReport) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-#[derive(Debug)]
-pub enum MatchPackagesError {
-    OpenDatabase {
-        path: PathBuf,
-        source: rusqlite::Error,
-    },
-    ConfigureDatabase(rusqlite::Error),
-    LoadInput(SqliteInputError),
-    QueryPackageSources(rusqlite::Error),
-    WriteAttribution(rusqlite::Error),
-    WritePackageSurface(rusqlite::Error),
-    MissingTable(&'static str),
-    MissingMatchEvidence {
-        module_id: ModuleId,
-    },
-    MissingModuleForAttribution {
-        module_id: ModuleId,
-    },
-    InvalidAttribution {
-        module_id: ModuleId,
-        message: String,
-    },
-    InvalidPackageSurface {
-        export_specifier: String,
-        message: String,
-    },
-}
-
-impl fmt::Display for MatchPackagesError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OpenDatabase { path, source } => {
-                write!(formatter, "failed to open {}: {source}", path.display())
-            }
-            Self::ConfigureDatabase(source) => {
-                write!(formatter, "failed to configure SQLite: {source}")
-            }
-            Self::LoadInput(source) => write!(formatter, "{source}"),
-            Self::QueryPackageSources(source) => {
-                write!(formatter, "failed to load package source cache: {source}")
-            }
-            Self::WriteAttribution(source) => {
-                write!(formatter, "failed to write package attribution: {source}")
-            }
-            Self::WritePackageSurface(source) => {
-                write!(formatter, "failed to write package surface: {source}")
-            }
-            Self::MissingTable(table) => {
-                write!(formatter, "required SQLite table is missing: {table}")
-            }
-            Self::MissingMatchEvidence { module_id } => {
-                write!(
-                    formatter,
-                    "package attribution for module {} has no match evidence",
-                    module_id.0
-                )
-            }
-            Self::MissingModuleForAttribution { module_id } => {
-                write!(
-                    formatter,
-                    "package attribution references unknown module {}",
-                    module_id.0
-                )
-            }
-            Self::InvalidAttribution { module_id, message } => {
-                write!(
-                    formatter,
-                    "invalid package attribution for module {}: {message}",
-                    module_id.0
-                )
-            }
-            Self::InvalidPackageSurface {
-                export_specifier,
-                message,
-            } => {
-                write!(
-                    formatter,
-                    "invalid package surface {export_specifier}: {message}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for MatchPackagesError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::OpenDatabase { source, .. }
-            | Self::ConfigureDatabase(source)
-            | Self::QueryPackageSources(source)
-            | Self::WriteAttribution(source)
-            | Self::WritePackageSurface(source) => Some(source),
-            Self::LoadInput(source) => Some(source),
-            Self::MissingTable(_)
-            | Self::MissingMatchEvidence { .. }
-            | Self::MissingModuleForAttribution { .. }
-            | Self::InvalidAttribution { .. }
-            | Self::InvalidPackageSurface { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ExtractAssetsError {
-    OpenDatabase {
-        path: PathBuf,
-        source: rusqlite::Error,
-    },
-    ConfigureDatabase(rusqlite::Error),
-    LoadInput(SqliteInputError),
-    CannotInferAssetRoot {
-        project_id: u32,
-    },
-    ReadAsset {
-        path: PathBuf,
-        source: io::Error,
-    },
-    WriteMaterializedAsset {
-        path: PathBuf,
-        source: io::Error,
-    },
-    InvalidAssetPath {
-        logical_path: String,
-    },
-    AmbiguousAsset {
-        logical_path: String,
-        candidates: Vec<String>,
-    },
-    WriteAsset(rusqlite::Error),
-}
-
-impl fmt::Display for ExtractAssetsError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OpenDatabase { path, source } => {
-                write!(formatter, "failed to open {}: {source}", path.display())
-            }
-            Self::ConfigureDatabase(source) => {
-                write!(formatter, "failed to configure SQLite: {source}")
-            }
-            Self::LoadInput(source) => write!(formatter, "{source}"),
-            Self::CannotInferAssetRoot { project_id } => {
-                write!(
-                    formatter,
-                    "cannot infer asset root for project {project_id} without source files"
-                )
-            }
-            Self::ReadAsset { path, source } => {
-                write!(
-                    formatter,
-                    "failed to read asset {}: {source}",
-                    path.display()
-                )
-            }
-            Self::WriteMaterializedAsset { path, source } => {
-                write!(
-                    formatter,
-                    "failed to materialize asset {}: {source}",
-                    path.display()
-                )
-            }
-            Self::InvalidAssetPath { logical_path } => {
-                write!(formatter, "invalid asset path {logical_path}")
-            }
-            Self::AmbiguousAsset {
-                logical_path,
-                candidates,
-            } => {
-                write!(
-                    formatter,
-                    "asset {logical_path} matched multiple roots: {}",
-                    candidates.join(", ")
-                )
-            }
-            Self::WriteAsset(source) => {
-                write!(formatter, "failed to write project asset: {source}")
-            }
-        }
-    }
-}
-
-impl Error for ExtractAssetsError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::OpenDatabase { source, .. }
-            | Self::ConfigureDatabase(source)
-            | Self::WriteAsset(source) => Some(source),
-            Self::ReadAsset { source, .. } | Self::WriteMaterializedAsset { source, .. } => {
-                Some(source)
-            }
-            Self::LoadInput(source) => Some(source),
-            Self::CannotInferAssetRoot { .. }
-            | Self::InvalidAssetPath { .. }
-            | Self::AmbiguousAsset { .. } => None,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum CliRunError {
-    Args(CliError),
-    LoadInput(SqliteInputError),
-    Pipeline(PipelineError),
-    MatchPackages(MatchPackagesError),
-    ExtractAssets(ExtractAssetsError),
-    AuditRejected(String),
-    UnsafeOutputPath(PathBuf),
-    WriteOutput { path: PathBuf, source: io::Error },
-}
-
-impl fmt::Display for CliRunError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Args(source) => write!(formatter, "{source}"),
-            Self::LoadInput(source) => write!(formatter, "{source}"),
-            Self::Pipeline(source) => write!(formatter, "{source}"),
-            Self::MatchPackages(source) => write!(formatter, "{source}"),
-            Self::ExtractAssets(source) => write!(formatter, "{source}"),
-            Self::AuditRejected(summary) => {
-                write!(
-                    formatter,
-                    "generated project was rejected by audit:\n{summary}"
-                )
-            }
-            Self::UnsafeOutputPath(path) => {
-                write!(
-                    formatter,
-                    "emitted file path is not safe: {}",
-                    path.display()
-                )
-            }
-            Self::WriteOutput { path, source } => {
-                write!(formatter, "failed to write {}: {source}", path.display())
-            }
-        }
-    }
-}
-
-impl Error for CliRunError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Args(source) => Some(source),
-            Self::LoadInput(source) => Some(source),
-            Self::Pipeline(source) => Some(source),
-            Self::MatchPackages(source) => Some(source),
-            Self::ExtractAssets(source) => Some(source),
-            Self::WriteOutput { source, .. } => Some(source),
-            Self::AuditRejected(_) | Self::UnsafeOutputPath(_) => None,
-        }
-    }
 }
 
 #[cfg(test)]

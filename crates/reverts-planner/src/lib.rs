@@ -1011,7 +1011,7 @@ fn parse_named_export_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
             return None;
         }
         let parts = item.split_whitespace().collect::<Vec<_>>();
-        if parts.iter().any(|part| *part == "as") {
+        if parts.contains(&"as") {
             return None;
         }
         let local = parts.first().copied()?;
