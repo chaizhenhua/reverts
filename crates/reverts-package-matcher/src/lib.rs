@@ -1,11 +1,13 @@
 pub mod acceptance;
 pub mod cascade;
+pub mod cascade_match;
 pub mod hungarian;
 pub mod tier;
 pub mod variant;
 pub mod version;
 pub use acceptance::*;
 pub use cascade::*;
+pub use cascade_match::*;
 pub use hungarian::*;
 pub use tier::*;
 pub use variant::*;

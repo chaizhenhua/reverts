@@ -1029,6 +1029,7 @@ dependencies = [
  "oxc_ast",
  "oxc_parser",
  "oxc_span",
+ "reverts-graph",
  "reverts-input",
  "reverts-ir",
  "reverts-js",
