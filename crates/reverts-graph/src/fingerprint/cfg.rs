@@ -1,67 +1,165 @@
-// CFG nodes don't carry byte spans in v1; we hash the entire module CFG.
-// The span parameter is reserved for when per-function CFG slicing is added.
+//! Control-flow topology hash. Identifier-blind, expression-blind: only the
+//! shape of statements + branches contributes. Distinct from `ast` (which
+//! also hashes expressions) and from `structural_anchor` (which counts but
+//! does not record branching topology).
 
+use oxc_ast::ast::{FunctionBody, Statement};
 use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};
-use reverts_ir::{ByteRange, ControlFlowEdgeKind, ControlFlowGraph, ControlFlowNodeKind, ModuleId};
 
 #[must_use]
-pub fn compute(cfg: &ControlFlowGraph, module_id: ModuleId, _span: ByteRange) -> u64 {
+pub fn compute(body: &FunctionBody<'_>) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;
     update_fnv1a(&mut hash, b"cfg|");
-
-    // Hash all nodes for this module in ascending id order.
-    let mut nodes: Vec<_> = cfg.nodes_for(module_id).iter().collect();
-    nodes.sort_by_key(|n| n.id.0);
-    for node in &nodes {
-        update_fnv1a(&mut hash, b"n:");
-        update_fnv1a(&mut hash, node_kind_tag(node.kind).as_bytes());
-        update_fnv1a(&mut hash, b"|");
-    }
-
-    // Hash all edges for this module in ascending (from, to) order.
-    let mut edges: Vec<_> = cfg.edges_for(module_id).iter().collect();
-    edges.sort_by_key(|e| (e.from.0, e.to.0));
-    for edge in &edges {
-        update_fnv1a(&mut hash, b"e:");
-        update_fnv1a(&mut hash, edge_kind_tag(edge.kind).as_bytes());
-        update_fnv1a(&mut hash, b"|");
-    }
-
+    walk_statements(&mut hash, &body.statements);
     hash
 }
 
-const fn node_kind_tag(k: ControlFlowNodeKind) -> &'static str {
-    match k {
-        ControlFlowNodeKind::Entry => "entry",
-        ControlFlowNodeKind::Exit => "exit",
-        ControlFlowNodeKind::Statement => "stmt",
-        ControlFlowNodeKind::Branch => "branch",
-        ControlFlowNodeKind::Loop => "loop",
-        ControlFlowNodeKind::Return => "return",
-        ControlFlowNodeKind::Throw => "throw",
+fn walk_statements(hash: &mut u64, stmts: &[Statement<'_>]) {
+    update_fnv1a(hash, b"(");
+    for stmt in stmts {
+        walk_statement(hash, stmt);
     }
+    update_fnv1a(hash, b")");
 }
 
-const fn edge_kind_tag(k: ControlFlowEdgeKind) -> &'static str {
-    match k {
-        ControlFlowEdgeKind::Entry => "entry",
-        ControlFlowEdgeKind::Sequential => "seq",
-        ControlFlowEdgeKind::Conditional => "cond",
-        ControlFlowEdgeKind::LoopBack => "back",
-        ControlFlowEdgeKind::Termination => "term",
+fn walk_statement(hash: &mut u64, stmt: &Statement<'_>) {
+    match stmt {
+        Statement::BlockStatement(b) => {
+            update_fnv1a(hash, b"blk");
+            walk_statements(hash, &b.body);
+        }
+        Statement::IfStatement(i) => {
+            update_fnv1a(hash, b"if");
+            walk_statement(hash, &i.consequent);
+            update_fnv1a(hash, b"|else");
+            if let Some(alt) = &i.alternate {
+                walk_statement(hash, alt);
+            } else {
+                update_fnv1a(hash, b"_");
+            }
+            update_fnv1a(hash, b";");
+        }
+        Statement::ForStatement(s) => {
+            update_fnv1a(hash, b"for");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        Statement::WhileStatement(s) => {
+            update_fnv1a(hash, b"wh");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        Statement::DoWhileStatement(s) => {
+            update_fnv1a(hash, b"dw");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        Statement::ForInStatement(s) => {
+            update_fnv1a(hash, b"fin");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        Statement::ForOfStatement(s) => {
+            update_fnv1a(hash, b"fof");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        Statement::SwitchStatement(s) => {
+            update_fnv1a(hash, b"sw");
+            for case in &s.cases {
+                update_fnv1a(hash, b"|case");
+                walk_statements(hash, &case.consequent);
+            }
+            update_fnv1a(hash, b";");
+        }
+        Statement::TryStatement(s) => {
+            update_fnv1a(hash, b"try");
+            walk_statements(hash, &s.block.body);
+            if let Some(handler) = &s.handler {
+                update_fnv1a(hash, b"|catch");
+                walk_statements(hash, &handler.body.body);
+            }
+            if let Some(fin) = &s.finalizer {
+                update_fnv1a(hash, b"|fin");
+                walk_statements(hash, &fin.body);
+            }
+            update_fnv1a(hash, b";");
+        }
+        Statement::ReturnStatement(_) => update_fnv1a(hash, b"ret;"),
+        Statement::ThrowStatement(_) => update_fnv1a(hash, b"thr;"),
+        Statement::BreakStatement(_) => update_fnv1a(hash, b"brk;"),
+        Statement::ContinueStatement(_) => update_fnv1a(hash, b"cont;"),
+        Statement::LabeledStatement(s) => {
+            update_fnv1a(hash, b"lbl");
+            walk_statement(hash, &s.body);
+            update_fnv1a(hash, b";");
+        }
+        // Any other statement is an opaque flow point (expression statements,
+        // declarations, with-statement, etc.). Collapsing them all to a single
+        // tag is the intended distinction from `ast` axis — only branching
+        // topology shapes the cfg hash.
+        _ => update_fnv1a(hash, b".;"),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reverts_ir::{ByteRange, ControlFlowGraph, ModuleId};
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn hash_first(src: &str) -> u64 {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(&alloc, src, SourceType::default()).parse();
+        assert!(parsed.errors.is_empty(), "parse: {:?}", parsed.errors);
+        let func = parsed
+            .program
+            .body
+            .iter()
+            .find_map(|s| {
+                if let oxc_ast::ast::Statement::FunctionDeclaration(f) = s {
+                    Some(f)
+                } else {
+                    None
+                }
+            })
+            .expect("function");
+        compute(func.body.as_ref().expect("body"))
+    }
 
     #[test]
-    fn cfg_hash_is_deterministic_on_empty_cfg() {
-        let cfg = ControlFlowGraph::default();
-        let h1 = compute(&cfg, ModuleId(1), ByteRange::new(0, 100));
-        let h2 = compute(&cfg, ModuleId(1), ByteRange::new(0, 100));
-        assert_eq!(h1, h2);
+    fn cfg_collides_when_only_expressions_differ_under_same_branches() {
+        let a = hash_first("function f(x) { if (x > 0) return 1; return 2; }");
+        let b = hash_first("function f(x) { if (x.foo()) return 'a'; return 'b'; }");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn cfg_distinguishes_if_with_else_from_if_without_else() {
+        let with_else = hash_first("function f(x) { if (x) return 1; else return 2; }");
+        let no_else = hash_first("function f(x) { if (x) return 1; return 2; }");
+        assert_ne!(with_else, no_else);
+    }
+
+    #[test]
+    fn cfg_distinguishes_loop_kinds() {
+        let for_loop = hash_first("function f(xs) { for (let x of xs) {} }");
+        let while_loop = hash_first("function f(xs) { while (xs.length) {} }");
+        assert_ne!(for_loop, while_loop);
+    }
+
+    #[test]
+    fn cfg_distinguishes_try_with_catch_from_bare_try() {
+        let with_catch = hash_first("function f() { try { return 1; } catch (e) { throw e; } }");
+        let with_finally = hash_first("function f() { try { return 1; } finally { return 2; } }");
+        assert_ne!(with_catch, with_finally);
+    }
+
+    #[test]
+    fn cfg_collides_under_identifier_rename() {
+        let a = hash_first("function f(a, b) { try { return a + b; } catch (err) { throw err; } }");
+        let b = hash_first("function g(x, y) { try { return x + y; } catch (z) { throw z; } }");
+        assert_eq!(a, b);
     }
 }

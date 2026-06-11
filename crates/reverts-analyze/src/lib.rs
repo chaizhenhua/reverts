@@ -39,10 +39,9 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     let mut function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
-    let cfg = model.graph().control_flow();
     for module in model.modules() {
         if let Some(slice) = model.input().module_source_slice(module.id) {
-            let fps = FunctionExtractor::fingerprint(module.id, slice.source, cfg);
+            let fps = FunctionExtractor::fingerprint(module.id, slice.source);
             if !fps.is_empty() {
                 function_fingerprints.insert(module.id, fps);
             }

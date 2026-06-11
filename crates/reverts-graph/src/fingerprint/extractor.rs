@@ -7,9 +7,7 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
-use reverts_ir::{
-    AxisHashes, ByteRange, ControlFlowGraph, FunctionFingerprint, FunctionId, ModuleId,
-};
+use reverts_ir::{AxisHashes, ByteRange, FunctionFingerprint, FunctionId, ModuleId};
 use reverts_js::normalize::{apply_to_source, stable_passes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,11 +71,7 @@ impl FunctionExtractor {
     /// Computes per-function fingerprints with primary axes plus one alternate
     /// per normalization pass. Returns empty if the source fails to parse.
     #[must_use]
-    pub fn fingerprint(
-        module_id: ModuleId,
-        source: &str,
-        cfg: &ControlFlowGraph,
-    ) -> Vec<FunctionFingerprint> {
+    pub fn fingerprint(module_id: ModuleId, source: &str) -> Vec<FunctionFingerprint> {
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
         let parsed = Parser::new(&alloc, source, source_type).parse();
@@ -90,26 +84,11 @@ impl FunctionExtractor {
             .iter()
             .filter_map(|f| {
                 let (params, body) = locate_function(&parsed.program, f.id.span)?;
-                let (acc_p, acc_s) = super::access::compute(body);
-                let axes = AxisHashes {
-                    ast: super::ast::compute(body),
-                    cfg: super::cfg::compute(cfg, module_id, f.id.span),
-                    return_pattern: super::return_pattern::compute(body),
-                    effect_pattern: super::effect_pattern::compute(body),
-                    literal_anchor: super::literal_anchor::compute(body),
-                    access_pattern: acc_p,
-                    structural_anchor: super::structural_anchor::compute(params, body),
-                    literal_shape: super::literal_shape::compute(body),
-                    access_shape: acc_s,
-                    callee_set: super::callee_set::compute(body),
-                    binding_pattern: super::binding_pattern::compute(params, body),
-                    throw_set: super::throw_set::compute(body),
-                };
                 Some(FunctionFingerprint {
                     id: f.id,
                     param_count: f.param_count,
                     statement_count: f.statement_count,
-                    primary: axes,
+                    primary: compute_axes(params, body),
                     alternates: Vec::new(),
                 })
             })
@@ -136,25 +115,28 @@ impl FunctionExtractor {
                 else {
                     continue;
                 };
-                let (acc_p, acc_s) = super::access::compute(body);
-                let axes = AxisHashes {
-                    ast: super::ast::compute(body),
-                    cfg: fp.primary.cfg,
-                    return_pattern: super::return_pattern::compute(body),
-                    effect_pattern: super::effect_pattern::compute(body),
-                    literal_anchor: super::literal_anchor::compute(body),
-                    access_pattern: acc_p,
-                    structural_anchor: super::structural_anchor::compute(params, body),
-                    literal_shape: super::literal_shape::compute(body),
-                    access_shape: acc_s,
-                    callee_set: super::callee_set::compute(body),
-                    binding_pattern: super::binding_pattern::compute(params, body),
-                    throw_set: super::throw_set::compute(body),
-                };
-                fp.alternates.push((pass.id(), axes));
+                fp.alternates.push((pass.id(), compute_axes(params, body)));
             }
         }
         out
+    }
+}
+
+fn compute_axes<'a>(params: &FormalParameters<'a>, body: &FunctionBody<'a>) -> AxisHashes {
+    let (acc_p, acc_s) = super::access::compute(body);
+    AxisHashes {
+        ast: super::ast::compute(body),
+        cfg: super::cfg::compute(body),
+        return_pattern: super::return_pattern::compute(body),
+        effect_pattern: super::effect_pattern::compute(body),
+        literal_anchor: super::literal_anchor::compute(body),
+        access_pattern: acc_p,
+        structural_anchor: super::structural_anchor::compute(params, body),
+        literal_shape: super::literal_shape::compute(body),
+        access_shape: acc_s,
+        callee_set: super::callee_set::compute(body),
+        binding_pattern: super::binding_pattern::compute(params, body),
+        throw_set: super::throw_set::compute(body),
     }
 }
 
@@ -199,15 +181,13 @@ fn locate_function<'a>(
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
-    use reverts_ir::ControlFlowGraph;
 
     #[test]
     fn alpha_renamed_functions_share_primary_ast_hash() {
         let src1 = "function f(a, b) { return a + b; }";
         let src2 = "function g(x, y) { return x + y; }";
-        let cfg = ControlFlowGraph::default();
-        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1, &cfg);
-        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2, &cfg);
+        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1);
+        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2);
         assert_eq!(fp1.len(), 1);
         assert_eq!(fp2.len(), 1);
         assert_eq!(fp1[0].primary.ast, fp2[0].primary.ast);
@@ -217,9 +197,8 @@ mod fingerprint_tests {
     fn export_keyword_collapse_lands_as_alternate() {
         let src1 = "export function f(a) { return a; }";
         let src2 = "function f(a) { return a; }";
-        let cfg = ControlFlowGraph::default();
-        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1, &cfg);
-        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2, &cfg);
+        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1);
+        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2);
         assert!(!fp1.is_empty() && !fp2.is_empty());
 
         let target = fp2[0].primary.ast;
@@ -233,8 +212,7 @@ mod fingerprint_tests {
 
     #[test]
     fn fingerprint_returns_empty_on_parse_error() {
-        let cfg = ControlFlowGraph::default();
-        let fp = FunctionExtractor::fingerprint(ModuleId(1), "function f( { )", &cfg);
+        let fp = FunctionExtractor::fingerprint(ModuleId(1), "function f( { )");
         assert!(fp.is_empty());
     }
 }

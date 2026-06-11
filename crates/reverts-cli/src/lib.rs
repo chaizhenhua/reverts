@@ -18,7 +18,7 @@ use reverts_input::{
     AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode, SourceFileInput,
 };
-use reverts_ir::{ControlFlowGraph, ModuleId, ModuleKind};
+use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, PackageMatch, PackageSource, VersionedPackageMatchReport,
@@ -398,11 +398,10 @@ pub fn match_packages_from_connection(
 fn fingerprints_from_rows(
     rows: &InputRows,
 ) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
-    let cfg = ControlFlowGraph::default();
     let mut out = BTreeMap::new();
     for module in &rows.modules {
         if let Some(slice) = rows.module_source_slice(module.id) {
-            let fps = FunctionExtractor::fingerprint(module.id, slice.source, &cfg);
+            let fps = FunctionExtractor::fingerprint(module.id, slice.source);
             if !fps.is_empty() {
                 out.insert(module.id, fps);
             }

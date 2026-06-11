@@ -20,9 +20,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use reverts_graph::FunctionExtractor;
 use reverts_input::PackageAttributionInput;
-use reverts_ir::{
-    AxisHashes, AxisKind, ControlFlowGraph, FunctionFingerprint, FunctionId, ModuleId,
-};
+use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, FunctionId, ModuleId};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_index::{
     Candidate, CfgKey, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
@@ -128,9 +126,7 @@ fn build_index(
             );
             continue;
         }
-        let cfg = ControlFlowGraph::default();
-        let pkg_fps =
-            FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str(), &cfg);
+        let pkg_fps = FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str());
         let pkg_id = PackageId {
             name: source.package_name.clone(),
             version: source.package_version.clone(),
@@ -276,13 +272,12 @@ fn axes_to_feature_keys(axes: &AxisHashes) -> Vec<(AxisKind, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reverts_ir::{ControlFlowGraph, ModuleId};
+    use reverts_ir::ModuleId;
 
     #[test]
     fn cascade_match_attributes_exact_function_with_function_span() {
         let bundle_source = "function f(a, b) { return a + b; }";
-        let cfg = ControlFlowGraph::default();
-        let bundle_fps = FunctionExtractor::fingerprint(ModuleId(10), bundle_source, &cfg);
+        let bundle_fps = FunctionExtractor::fingerprint(ModuleId(10), bundle_source);
         assert!(
             !bundle_fps.is_empty(),
             "extractor must produce fingerprints for the bundle body",
@@ -319,9 +314,7 @@ mod tests {
     #[test]
     fn cascade_match_yields_no_attributions_when_index_is_empty() {
         let mut fps_map: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
-        let cfg = ControlFlowGraph::default();
-        let bundle_fps =
-            FunctionExtractor::fingerprint(ModuleId(1), "function f(){return 1;}", &cfg);
+        let bundle_fps = FunctionExtractor::fingerprint(ModuleId(1), "function f(){return 1;}");
         fps_map.insert(ModuleId(1), bundle_fps);
 
         let report = match_with_cascade(&fps_map, &[]);

@@ -15,12 +15,11 @@
 use std::collections::BTreeMap;
 
 use reverts_graph::FunctionExtractor;
-use reverts_ir::{ControlFlowGraph, FunctionFingerprint, ModuleId};
+use reverts_ir::{FunctionFingerprint, ModuleId};
 use reverts_package_matcher::{PackageSource, match_with_cascade};
 
 fn fingerprints_for(src: &str, module_id: ModuleId) -> FunctionFingerprint {
-    let cfg = ControlFlowGraph::default();
-    let fps = FunctionExtractor::fingerprint(module_id, src, &cfg);
+    let fps = FunctionExtractor::fingerprint(module_id, src);
     assert!(
         !fps.is_empty(),
         "expected at least one function fingerprint from: {src}"

@@ -11,7 +11,6 @@ use reverts_graph::fingerprint::{
     access, ast, binding_pattern, callee_set, cfg, effect_pattern, literal_anchor, literal_shape,
     return_pattern, structural_anchor, throw_set,
 };
-use reverts_ir::{ByteRange, ControlFlowGraph, ModuleId};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,42 +103,63 @@ fn axis_ast_collides_for_only_rename_of_arg() {
 }
 
 // ---------------------------------------------------------------------------
-// CFG axis
+// CFG axis (function-level topology; expression-blind, identifier-blind)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn axis_cfg_empty_graph_is_deterministic() {
-    let cfg = ControlFlowGraph::default();
-    let h1 = cfg::compute(&cfg, ModuleId(1), ByteRange::new(0, 100));
-    let h2 = cfg::compute(&cfg, ModuleId(1), ByteRange::new(0, 100));
+fn axis_cfg_collides_when_only_expressions_differ() {
+    let h1 = with_first_fn!(
+        a1,
+        "function f(x) { if (x > 0) return 1; return 2; }",
+        |_p, b| { cfg::compute(b) }
+    );
+    let h2 = with_first_fn!(
+        a2,
+        "function f(x) { if (x.foo()) return 'a'; return 'b'; }",
+        |_p, b| { cfg::compute(b) }
+    );
     assert_eq!(h1, h2);
 }
 
 #[test]
-fn axis_cfg_compiles_with_different_module_ids() {
-    let cfg = ControlFlowGraph::default();
-    let h1 = cfg::compute(&cfg, ModuleId(1), ByteRange::new(0, 100));
-    let h2 = cfg::compute(&cfg, ModuleId(2), ByteRange::new(0, 100));
-    // Both calls must compile and produce a result without panicking.
-    // With an empty cfg both hashes are identical; we assert they are stable.
-    assert_eq!(h1, h2, "empty cfg is module-id-agnostic");
+fn axis_cfg_distinguishes_if_with_else_from_if_without_else() {
+    let with_else = with_first_fn!(
+        a1,
+        "function f(x) { if (x) return 1; else return 2; }",
+        |_p, b| { cfg::compute(b) }
+    );
+    let no_else = with_first_fn!(
+        a2,
+        "function f(x) { if (x) return 1; return 2; }",
+        |_p, b| { cfg::compute(b) }
+    );
+    assert_ne!(with_else, no_else);
 }
 
 #[test]
-fn axis_cfg_different_ranges_produce_same_hash_on_empty_graph() {
-    let cfg = ControlFlowGraph::default();
-    let h1 = cfg::compute(&cfg, ModuleId(1), ByteRange::new(0, 10));
-    let h2 = cfg::compute(&cfg, ModuleId(1), ByteRange::new(100, 200));
-    // The span is reserved; on an empty graph both are equal.
+fn axis_cfg_distinguishes_loop_kinds() {
+    let for_of = with_first_fn!(a1, "function f(xs) { for (let x of xs) {} }", |_p, b| {
+        cfg::compute(b)
+    });
+    let while_loop = with_first_fn!(a2, "function f(xs) { while (xs.length) {} }", |_p, b| {
+        cfg::compute(b)
+    });
+    assert_ne!(for_of, while_loop);
+}
+
+#[test]
+fn axis_cfg_collides_under_identifier_rename() {
+    let h1 = with_first_fn!(
+        a1,
+        "function f(a, b) { try { return a + b; } catch (err) { throw err; } }",
+        |_p, b| { cfg::compute(b) }
+    );
+    let h2 = with_first_fn!(
+        a2,
+        "function g(x, y) { try { return x + y; } catch (z) { throw z; } }",
+        |_p, b| { cfg::compute(b) }
+    );
     assert_eq!(h1, h2);
-}
-
-#[test]
-fn axis_cfg_non_default_module_gives_stable_result() {
-    let cfg = ControlFlowGraph::default();
-    let h = cfg::compute(&cfg, ModuleId(42), ByteRange::new(0, 50));
-    let h2 = cfg::compute(&cfg, ModuleId(42), ByteRange::new(0, 50));
-    assert_eq!(h, h2);
 }
 
 // ---------------------------------------------------------------------------
