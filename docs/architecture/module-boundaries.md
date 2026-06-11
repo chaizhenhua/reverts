@@ -141,13 +141,57 @@ InputBundle
   -> ProgramModel
   -> EnrichedProgram
   -> EmitPlan
-  -> EmittedProject
+  -> EmittedProject (+ EmittedAssets)
   -> AuditReport
 ```
 
 The planner and emitter receive already-validated structural data. If a required
 definition, import, package subpath, or binding shape is missing, the pipeline
 reports a structured finding before writing files.
+
+## Compiler Lowering Pipeline
+
+`reverts-js::CompilerLowering` enumerates the per-compiler AST transforms
+applied during emit. Each variant maps from a
+`reverts-planner::CompilerRecoveryAction` and is dispatched inside
+`format_source_with_module_items`. Lowerings run on the **emitted module
+source** between the parse pass and the codegen pass, so audits operate on
+the lowered text.
+
+| Compiler | Lowering rules in `reverts-js` |
+| --- | --- |
+| `Babel` | Strip `Object.defineProperty(exports, "__esModule", ...)`; rewrite `_interopRequireDefault(require(X))` → `{ default: require(X) }`; rewrite `_interopRequireWildcard(require(X))` → `require(X)`; strip dead `_interopRequireDefault` / `_interopRequireWildcard` helper definitions when no references remain |
+| `Esbuild` | Strip unreferenced runtime helper var declarations (`__commonJS`, `__defProp`, `__export`, ...); descend into a top-level IIFE wrapper to apply the same rule to IIFE-internal helpers |
+| `Webpack` | Strip `__webpack_require__.r(...)` no-op marker calls; strip unreferenced webpack runtime helper var/function declarations (`__webpack_require__`, `__webpack_modules__`, ...); descend into a top-level IIFE wrapper |
+| `None` | No transforms — used for `DirectModuleSource` (compiler classified as `Unknown`) |
+
+Lowering rules never strip helper definitions that still have at least one
+`IdentifierReference` somewhere in the parsed program — the strip pass is
+governed by a global reference counter (`program_references_named_identifier`)
+that walks the entire AST including IIFE-internal scopes.
+
+## Asset Subsystem
+
+Static assets referenced by application source (native bindings, wasm,
+vendor binaries) are first-class pipeline outputs:
+
+- `reverts-input::AssetInput` carries logical path, output path, raw bytes,
+  and executable flag. `validate_package_surfaces` rejects unsafe
+  `output_path`s (paths starting with `..` or absolute paths).
+- `reverts-js::collect_static_resource_specifiers` /
+  `collect_path_builder_calls` / `collect_file_url_source_location_rewrites`
+  extract asset references from emitted source as AST facts.
+- `reverts-pipeline::collect_required_asset_references` resolves the union
+  of static-import, `require()`, `new URL(spec, import.meta.url)`, and
+  dynamic `path.resolve`-style references against `InputBundle.assets`.
+- `reverts-pipeline::audit_required_assets` raises
+  `FindingCode::MissingRequiredAsset` when a referenced asset has no
+  matching `AssetInput`.
+- `reverts-pipeline::rewrite_emitted_asset_references` rewrites the literal
+  spec inside the emitted source to the relative path from the module to the
+  asset's `output_path`.
+- `reverts-cli::extract-assets` discovers assets from Bun-embedded binaries
+  or vendor directories and persists `AssetRow`s back into the SQLite input.
 
 ## Filesystem and External Access
 
@@ -180,13 +224,14 @@ now live only in their final owner crates:
 
 | Mechanism | Final owner |
 | --- | --- |
-| `InputBundle` and row conversion | `reverts-input` |
+| `InputBundle` and row conversion (incl. `AssetInput` / `AssetKind`) | `reverts-input` |
 | `RevertsGraph`, `DefUseGraph`, `ImportExportGraph`, and `ControlFlowGraph` construction | `reverts-graph` |
 | Program snapshots and enrichment records | `reverts-model` |
-| Semantic naming, package-decision enrichment, and shape-solution wiring | `reverts-analyze` |
+| Semantic naming, package-decision enrichment, shape-solution wiring, compiler-profile detection, and CFG-based audits (e.g. `UnreachableTopLevelCode`) | `reverts-analyze` |
 | Package name, builtin, exports, and subpath resolution | `reverts-package` |
 | Bundle-to-package AST-fingerprint matching | `reverts-package-matcher` |
 | Import/export/local/synthetic binding planning | `reverts-planner` |
+| Per-compiler AST lowerings (`CompilerLowering`), AST/codegen plumbing | `reverts-js` |
 | AST emission and `EmittedProject` assembly | `reverts-emitter` |
 | In-memory core pipeline orchestration | `reverts-pipeline` |
 | CLI command wiring | `reverts-cli` |
