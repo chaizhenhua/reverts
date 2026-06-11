@@ -126,6 +126,7 @@ mod tests {
             top_score: f64::from(tier.weight()),
             runner_up_score: 0.0,
             matched_alternate: None,
+            matched_axes: vec![reverts_ir::AxisKind::Ast],
         }
     }
 

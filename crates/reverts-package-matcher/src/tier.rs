@@ -11,6 +11,19 @@ pub struct FunctionMatch {
     pub top_score: f64,
     pub runner_up_score: f64,
     pub matched_alternate: Option<NormalizationPassId>,
+    /// Every axis that actually contributed evidence to this match.
+    ///
+    /// - Exact / ExactAlternate: `[Ast]` (the only axis the tier consults).
+    /// - StructuralAnchored: `[Cfg, …overlapping anchor axes]` — every
+    ///   `(LiteralAnchor | CalleeSet | ThrowSet)` whose hash actually
+    ///   matched the candidate in the index.
+    /// - FeatureSimilarity: `[primary, …remaining axes with Jaccard hit]`.
+    /// - StructuralOnly: `[StructuralAnchor]`.
+    ///
+    /// Carrying the real set (rather than a single axis) lets
+    /// [`crate::acceptance::AttributionConfidence`] surface the
+    /// multi-axis evidence that drove the decision.
+    pub matched_axes: Vec<AxisKind>,
 }
 
 #[must_use]
@@ -24,7 +37,7 @@ pub fn try_exact(
         ast_hash: fp.primary.ast,
     };
     let candidates = index.query_exact(key);
-    pick_unique(candidates, MatchTier::Exact, None)
+    pick_unique(candidates, MatchTier::Exact, None, vec![AxisKind::Ast])
 }
 
 #[must_use]
@@ -39,7 +52,12 @@ pub fn try_exact_alternate(
             ast_hash: axes.ast,
         };
         let candidates = index.query_exact(key);
-        if let Some(m) = pick_unique(candidates, MatchTier::ExactAlternate, Some(*pass_id)) {
+        if let Some(m) = pick_unique(
+            candidates,
+            MatchTier::ExactAlternate,
+            Some(*pass_id),
+            vec![AxisKind::Ast],
+        ) {
             return Some(m);
         }
     }
@@ -75,27 +93,59 @@ pub fn try_structural_anchored(
         return None;
     }
 
-    // Retain candidates that share at least one anchor (axis, hash) with the fp.
-    let surviving: Vec<Candidate> = cfg_candidates
+    // Pair each cfg candidate with the anchor axes that actually overlap;
+    // drop candidates with zero overlap. Tracking the overlap set (rather
+    // than a boolean) lets us record real multi-axis evidence on the
+    // resulting FunctionMatch.
+    let surviving: Vec<(Candidate, Vec<AxisKind>)> = cfg_candidates
         .into_iter()
-        .filter(|c| {
-            fp_anchors.iter().any(|(axis, h)| {
-                index
-                    .query_feature(FeatureKey {
-                        param_count: fp.param_count,
-                        kind: *axis,
-                        hash: *h,
-                    })
-                    .iter()
-                    .any(|cand| {
-                        cand.package == c.package
-                            && cand.external_function_id == c.external_function_id
-                    })
-            })
+        .filter_map(|c| {
+            let overlap_axes: Vec<AxisKind> = fp_anchors
+                .iter()
+                .filter(|(axis, h)| {
+                    index
+                        .query_feature(FeatureKey {
+                            param_count: fp.param_count,
+                            kind: *axis,
+                            hash: *h,
+                        })
+                        .iter()
+                        .any(|cand| {
+                            cand.package == c.package
+                                && cand.external_function_id == c.external_function_id
+                        })
+                })
+                .map(|(axis, _)| *axis)
+                .collect();
+            if overlap_axes.is_empty() {
+                None
+            } else {
+                Some((c, overlap_axes))
+            }
         })
         .collect();
 
-    pick_unique(surviving, MatchTier::StructuralAnchored, None)
+    let mut unique = surviving;
+    unique.dedup_by(|a, b| {
+        a.0.package == b.0.package && a.0.external_function_id == b.0.external_function_id
+    });
+    if unique.len() != 1 {
+        return None;
+    }
+    let (candidate, overlap_axes) = unique.into_iter().next()?;
+    let mut matched_axes = Vec::with_capacity(1 + overlap_axes.len());
+    matched_axes.push(AxisKind::Cfg);
+    matched_axes.extend(overlap_axes);
+
+    Some(FunctionMatch {
+        tier: MatchTier::StructuralAnchored,
+        candidate,
+        margin: 1.0,
+        top_score: f64::from(MatchTier::StructuralAnchored.weight()),
+        runner_up_score: 0.0,
+        matched_alternate: None,
+        matched_axes,
+    })
 }
 
 /// Tier 3: pick the most-distinctive axis present on the fingerprint,
@@ -126,10 +176,12 @@ pub fn try_feature_similarity(
     // candidate's full axis set without a per-candidate bag lookup).
     let remaining = collect_remaining_axes(&fp.primary, primary_axis);
 
-    let mut scored: Vec<(Candidate, f64)> = cands
+    // For each candidate, record the actual overlapping axes (not just a
+    // count) so the resulting FunctionMatch can carry multi-axis evidence.
+    let mut scored: Vec<(Candidate, f64, Vec<AxisKind>)> = cands
         .into_iter()
         .map(|cand| {
-            let mut overlap = 0u32;
+            let mut overlap_axes = Vec::new();
             for (axis, hash) in &remaining {
                 let cand_hits = index.query_feature(FeatureKey {
                     param_count: fp.param_count,
@@ -139,12 +191,12 @@ pub fn try_feature_similarity(
                 if cand_hits.iter().any(|c| {
                     c.package == cand.package && c.external_function_id == cand.external_function_id
                 }) {
-                    overlap += 1;
+                    overlap_axes.push(*axis);
                 }
             }
             let denom = remaining.len().max(1) as f64;
-            let score = f64::from(overlap) / denom;
-            (cand, score)
+            let score = overlap_axes.len() as f64 / denom;
+            (cand, score, overlap_axes)
         })
         .collect();
 
@@ -161,6 +213,10 @@ pub fn try_feature_similarity(
         }
     }
 
+    let mut matched_axes = Vec::with_capacity(1 + best.2.len());
+    matched_axes.push(primary_axis);
+    matched_axes.extend(best.2.iter().copied());
+
     Some(FunctionMatch {
         tier: MatchTier::FeatureSimilarity,
         candidate: best.0.clone(),
@@ -169,6 +225,7 @@ pub fn try_feature_similarity(
         runner_up_score: scored.get(1).map_or(0.0, |s| s.1)
             * f64::from(MatchTier::FeatureSimilarity.weight()),
         matched_alternate: None,
+        matched_axes,
     })
 }
 
@@ -279,6 +336,7 @@ pub fn try_structural_only(
             top_score: f64::from(MatchTier::StructuralOnly.weight()),
             runner_up_score: 0.0,
             matched_alternate: None,
+            matched_axes: vec![AxisKind::StructuralAnchor],
         });
     }
 
@@ -287,10 +345,127 @@ pub fn try_structural_only(
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reverts_ir::{ByteRange, FunctionId, ModuleId};
+    use reverts_package_index::{InMemoryFingerprintIndex, PackageId};
+
+    fn sample_axes() -> AxisHashes {
+        AxisHashes {
+            ast: 0,
+            cfg: 7,
+            return_pattern: 0,
+            effect_pattern: 0,
+            literal_anchor: Some(11),
+            access_pattern: None,
+            structural_anchor: 0,
+            literal_shape: None,
+            access_shape: None,
+            callee_set: Some(22),
+            binding_pattern: 0,
+            throw_set: None,
+        }
+    }
+
+    #[test]
+    fn structural_anchored_records_all_overlapping_axes() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1.0".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 1,
+            matched_axis: AxisKind::Cfg,
+            matched_alternate: None,
+        };
+        idx.insert_cfg(
+            CfgKey {
+                param_count: 1,
+                cfg_hash: 7,
+            },
+            cand.clone(),
+        );
+        // Two anchor axes overlap: literal_anchor=11 and callee_set=22.
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::LiteralAnchor,
+                hash: 11,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::CalleeSet,
+                hash: 22,
+            },
+            cand,
+        );
+
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: sample_axes(),
+            alternates: Vec::new(),
+        };
+
+        let m = try_structural_anchored(&fp, &idx).expect("structural-anchored match");
+        // matched_axes must record CFG (the gating axis) AND every anchor
+        // axis that actually overlapped — proves the field carries real
+        // multi-axis evidence rather than a single placeholder.
+        assert_eq!(m.tier, MatchTier::StructuralAnchored);
+        assert!(m.matched_axes.contains(&AxisKind::Cfg));
+        assert!(m.matched_axes.contains(&AxisKind::LiteralAnchor));
+        assert!(m.matched_axes.contains(&AxisKind::CalleeSet));
+        assert!(!m.matched_axes.contains(&AxisKind::ThrowSet));
+    }
+
+    #[test]
+    fn exact_match_records_single_ast_axis() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        idx.insert_exact(
+            ExactKey {
+                param_count: 1,
+                statement_count: 1,
+                ast_hash: 99,
+            },
+            Candidate {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "i.js".into(),
+                external_function_id: 1,
+                matched_axis: AxisKind::Ast,
+                matched_alternate: None,
+            },
+        );
+
+        let mut axes = sample_axes();
+        axes.ast = 99;
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        let m = try_exact(&fp, &idx).expect("exact match");
+        assert_eq!(m.matched_axes, vec![AxisKind::Ast]);
+    }
+}
+
 pub(crate) fn pick_unique(
     mut candidates: Vec<Candidate>,
     tier: MatchTier,
     alt: Option<NormalizationPassId>,
+    matched_axes: Vec<AxisKind>,
 ) -> Option<FunctionMatch> {
     if candidates.is_empty() {
         return None;
@@ -309,5 +484,6 @@ pub(crate) fn pick_unique(
         top_score: f64::from(tier.weight()),
         runner_up_score: 0.0,
         matched_alternate: alt,
+        matched_axes,
     })
 }

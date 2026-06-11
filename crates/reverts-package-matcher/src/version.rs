@@ -148,6 +148,7 @@ mod tests {
                 top_score: f64::from(MatchTier::Exact.weight()),
                 runner_up_score: 0.0,
                 matched_alternate: None,
+                matched_axes: vec![reverts_ir::AxisKind::Ast],
             })
             .collect();
         let tier_sum: f64 = fms.iter().map(|m| f64::from(m.tier.weight())).sum();

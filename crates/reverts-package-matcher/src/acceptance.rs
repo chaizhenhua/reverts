@@ -77,12 +77,9 @@ fn build_confidence(
     margin: f64,
     runner_up_score: f64,
 ) -> AttributionConfidence {
-    // For tiers using multiple axes, the caller can populate further.
-    let axes = vec![winner.candidate.matched_axis];
-
     AttributionConfidence {
         tier: winner.tier,
-        matched_axes: axes,
+        matched_axes: winner.matched_axes.clone(),
         matched_alternate: winner.matched_alternate,
         top_score: winner.top_score,
         runner_up_score,
@@ -114,6 +111,7 @@ mod tests {
             top_score,
             runner_up_score: 0.0,
             matched_alternate: None,
+            matched_axes: vec![AxisKind::Ast],
         }
     }
 
