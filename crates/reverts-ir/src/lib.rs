@@ -186,6 +186,18 @@ pub struct DefUseGraph {
     /// `X = (await fetch(...)).data.value` could leave `X` as `null` or
     /// `undefined`. Used by the `UnprotectedNullableMemberRead` audit.
     maybe_nullable_writes: BTreeSet<(ModuleId, BindingName)>,
+    /// `target = source` identity edges. `target` inherits `source`'s
+    /// shape / known members / nullable status — without inlining, this
+    /// is the only way for the dataflow propagation to follow renames.
+    identity_aliases: BTreeSet<(ModuleId, BindingName, BindingName)>,
+    /// `target = callee(...)` edges. Combined with `function_returns`,
+    /// these turn `let A = F();` into the alias `A ← (anything F returns)`
+    /// so that information flowing into F's return survives the call.
+    call_aliases: BTreeSet<(ModuleId, BindingName, BindingName)>,
+    /// For a function binding `F`, the set of bindings that `F` is
+    /// observed to `return` directly. Populated by the AST visitor on
+    /// `return X;` statements at function-decl scope.
+    function_returns: BTreeMap<(ModuleId, BindingName), BTreeSet<BindingName>>,
 }
 
 impl DefUseGraph {
@@ -223,6 +235,83 @@ impl DefUseGraph {
     #[must_use]
     pub fn maybe_nullable_writes(&self) -> &BTreeSet<(ModuleId, BindingName)> {
         &self.maybe_nullable_writes
+    }
+
+    /// Record `target = source` — `target` inherits any propagatable info
+    /// from `source` via the alias closure.
+    pub fn record_identity_alias(
+        &mut self,
+        module_id: ModuleId,
+        target: impl Into<String>,
+        source: impl Into<String>,
+    ) {
+        self.identity_aliases.insert((
+            module_id,
+            BindingName::new(target),
+            BindingName::new(source),
+        ));
+    }
+
+    /// Record `target = callee(...)` — `target` inherits info from whatever
+    /// `callee` returns. Resolved against `function_returns` at query time.
+    pub fn record_call_alias(
+        &mut self,
+        module_id: ModuleId,
+        target: impl Into<String>,
+        callee: impl Into<String>,
+    ) {
+        self.call_aliases.insert((
+            module_id,
+            BindingName::new(target),
+            BindingName::new(callee),
+        ));
+    }
+
+    /// Record `function F() { return X; }` — the call-alias closure uses
+    /// this map to thread `X` through any `Y = F()` callers.
+    pub fn record_function_return(
+        &mut self,
+        module_id: ModuleId,
+        function: impl Into<String>,
+        returned: impl Into<String>,
+    ) {
+        self.function_returns
+            .entry((module_id, BindingName::new(function)))
+            .or_default()
+            .insert(BindingName::new(returned));
+    }
+
+    /// Bindings whose information flows into `(module_id, binding)` via
+    /// identity assignments and call/return composition. Includes
+    /// `binding` itself. Stops at fixed-point (lattice = subset on a
+    /// finite set, so termination is guaranteed).
+    #[must_use]
+    pub fn alias_sources_of(&self, module_id: ModuleId, binding: &str) -> BTreeSet<BindingName> {
+        let start = BindingName::new(binding);
+        let mut seen = BTreeSet::new();
+        seen.insert(start.clone());
+        let mut work = vec![start];
+        while let Some(current) = work.pop() {
+            for (m, target, source) in &self.identity_aliases {
+                if *m == module_id && *target == current && seen.insert(source.clone()) {
+                    work.push(source.clone());
+                }
+            }
+            for (m, target, callee) in &self.call_aliases {
+                if *m != module_id || *target != current {
+                    continue;
+                }
+                let key = (module_id, callee.clone());
+                if let Some(returned) = self.function_returns.get(&key) {
+                    for returned_binding in returned {
+                        if seen.insert(returned_binding.clone()) {
+                            work.push(returned_binding.clone());
+                        }
+                    }
+                }
+            }
+        }
+        seen
     }
 
     #[must_use]
@@ -751,6 +840,61 @@ mod tests {
             solution.shape_of(ModuleId(1), "Service"),
             BindingShape::ClassLike
         );
+    }
+
+    #[test]
+    fn alias_sources_of_closes_over_identity_and_call_return_edges() {
+        // Set up: `A = X` (identity), `B = F()` where F returns Y.
+        // alias_sources_of(A) should include {A, X};
+        // alias_sources_of(B) should include {B, Y};
+        // self-reference always present even without edges.
+        let mut graph = DefUseGraph::default();
+        graph.record_identity_alias(ModuleId(1), "A", "X");
+        graph.record_call_alias(ModuleId(1), "B", "F");
+        graph.record_function_return(ModuleId(1), "F", "Y");
+
+        let aliases_a = graph.alias_sources_of(ModuleId(1), "A");
+        let names_a: Vec<_> = aliases_a.iter().map(BindingName::as_str).collect();
+        assert_eq!(names_a, vec!["A", "X"]);
+
+        let aliases_b = graph.alias_sources_of(ModuleId(1), "B");
+        let names_b: Vec<_> = aliases_b.iter().map(BindingName::as_str).collect();
+        assert_eq!(names_b, vec!["B", "Y"]);
+
+        let aliases_loner = graph.alias_sources_of(ModuleId(1), "no_edges");
+        assert_eq!(
+            aliases_loner
+                .iter()
+                .map(BindingName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["no_edges"],
+        );
+    }
+
+    #[test]
+    fn alias_sources_of_terminates_on_cycle_and_chains_through_transitive_returns() {
+        // `A = X`, `X = A` is a cycle — must not loop. `C = F()` where F
+        // returns G() and G returns Y should resolve C → {C, Y} after two
+        // hops of call-alias composition.
+        let mut graph = DefUseGraph::default();
+        graph.record_identity_alias(ModuleId(1), "A", "X");
+        graph.record_identity_alias(ModuleId(1), "X", "A");
+
+        let aliases = graph.alias_sources_of(ModuleId(1), "A");
+        let names: Vec<_> = aliases.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["A", "X"]);
+
+        graph.record_call_alias(ModuleId(1), "C", "F");
+        graph.record_call_alias(ModuleId(1), "F_inner", "G");
+        graph.record_function_return(ModuleId(1), "F", "F_inner");
+        graph.record_function_return(ModuleId(1), "G", "Y");
+        let aliases = graph.alias_sources_of(ModuleId(1), "C");
+        let names: Vec<_> = aliases.iter().map(BindingName::as_str).collect();
+        // Expect closure includes the chain: C → F_inner (returned by F)
+        //                                   → Y          (returned by G via F_inner = G())
+        assert!(names.contains(&"C"));
+        assert!(names.contains(&"F_inner"));
+        assert!(names.contains(&"Y"));
     }
 
     #[test]
