@@ -11,6 +11,7 @@ members = [
     "crates/reverts-model",
     "crates/reverts-observe",
     "crates/reverts-package",
+    "crates/reverts-package-index",
     "crates/reverts-package-matcher",
     "crates/reverts-pipeline",
     "crates/reverts-planner",
