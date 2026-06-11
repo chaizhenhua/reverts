@@ -418,6 +418,10 @@ impl ControlFlowGraph {
 pub struct BindingShapeSolution {
     shapes: BTreeMap<(ModuleId, BindingName), BindingShape>,
     constraint_kinds: BTreeMap<(ModuleId, BindingName), BTreeSet<BindingConstraintKind>>,
+    /// Paper #7 downstream: per (module, binding) set of property names seen
+    /// on member-access constraints. Only populated when constraints carry an
+    /// explicit `property`; legacy property-less callers contribute nothing.
+    known_members: BTreeMap<(ModuleId, BindingName), BTreeSet<BindingName>>,
     conflicts: Vec<BindingShapeConflict>,
 }
 
@@ -465,9 +469,26 @@ impl BindingShapeSolution {
                 }));
         }
         self.shapes
-            .entry(key)
+            .entry(key.clone())
             .and_modify(|shape| *shape = shape.merge(required))
             .or_insert(required);
+        if let Some(property) = constraint.property.as_ref() {
+            self.known_members
+                .entry(key)
+                .or_default()
+                .insert(property.clone());
+        }
+    }
+
+    /// Property names accessed on `(module_id, binding)` across all member
+    /// constraints that carried an explicit property. Returns an empty set
+    /// when nothing is known.
+    #[must_use]
+    pub fn known_members_of(&self, module_id: ModuleId, binding: &str) -> BTreeSet<BindingName> {
+        self.known_members
+            .get(&(module_id, BindingName::new(binding)))
+            .cloned()
+            .unwrap_or_default()
     }
 
     #[must_use]
@@ -712,6 +733,58 @@ mod tests {
             solution.conflicts()[0].incoming_kind,
             BindingConstraintKind::Call
         );
+    }
+
+    #[test]
+    fn binding_shape_solution_aggregates_known_members_from_property_constraints() {
+        // Paper #7 downstream: once member-access constraints carry a property
+        // name, the solver must surface the same set per (module, binding) so
+        // consumers (planner, emitter) can materialise NamespaceObject shapes
+        // with real members instead of re-walking the def-use graph.
+        let mut graph = DefUseGraph::default();
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("foo"),
+        );
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberWrite)
+                .with_property("bar"),
+        );
+        // Duplicate property name must dedup.
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("foo"),
+        );
+        // Property-less member access must not pollute the member set.
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "ns",
+            BindingConstraintKind::MemberRead,
+        ));
+        // A different binding must keep its members isolated.
+        graph.constrain(
+            BindingConstraint::new(ModuleId(1), "other", BindingConstraintKind::MemberRead)
+                .with_property("baz"),
+        );
+
+        let solution = BindingShapeSolution::from_def_use_graph(&graph);
+
+        let members = solution.known_members_of(ModuleId(1), "ns");
+        let names: Vec<_> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo"]);
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "ns"),
+            BindingShape::NamespaceObject
+        );
+
+        let other = solution.known_members_of(ModuleId(1), "other");
+        assert_eq!(
+            other.iter().map(BindingName::as_str).collect::<Vec<_>>(),
+            vec!["baz"]
+        );
+
+        // Bindings with no property data return an empty set.
+        assert!(solution.known_members_of(ModuleId(1), "missing").is_empty());
     }
 
     #[test]

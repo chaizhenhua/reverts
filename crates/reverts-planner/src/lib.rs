@@ -92,6 +92,10 @@ pub struct PlannedBinding {
     pub emitted: BindingName,
     pub shape: BindingShape,
     pub source_backed: bool,
+    /// Paper #7 downstream: property names observed on this binding when
+    /// shape is `NamespaceObject`. Empty for every other shape and for
+    /// namespaces whose members the solver could not see.
+    pub known_members: BTreeSet<BindingName>,
 }
 
 impl PlannedBinding {
@@ -107,7 +111,14 @@ impl PlannedBinding {
             emitted,
             shape,
             source_backed,
+            known_members: BTreeSet::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_known_members(mut self, known_members: BTreeSet<BindingName>) -> Self {
+        self.known_members = known_members;
+        self
     }
 }
 
@@ -414,7 +425,15 @@ impl ImportExportPlanner {
                         .unwrap_or_else(|| original.clone())
                 };
                 planned_bindings.insert(original.clone());
-                file.add_binding(PlannedBinding::new(original, emitted, shape, source_backed));
+                let known_members = if shape == BindingShape::NamespaceObject {
+                    program.known_members(module.id, original.as_str())
+                } else {
+                    BTreeSet::new()
+                };
+                file.add_binding(
+                    PlannedBinding::new(original, emitted, shape, source_backed)
+                        .with_known_members(known_members),
+                );
             }
 
             for original in &source_imports {
@@ -3347,6 +3366,59 @@ mod tests {
             CompilerRecoveryAction::from_compiler(CompilerKind::Unknown),
             CompilerRecoveryAction::DirectModuleSource
         );
+    }
+
+    #[test]
+    fn enriched_program_attaches_known_members_to_namespace_object_bindings() {
+        // Paper #7 downstream: when the shape solver classifies a definition
+        // as `NamespaceObject` from `ns.foo` / `ns.bar` accesses, the planner
+        // must thread those property names onto the `PlannedBinding` so the
+        // emitter and audit gates can reason about the namespace's surface.
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some(
+                "const ns = { foo: 1, bar: 2 };\nconst a = ns.foo;\nconst b = ns.bar;".to_string(),
+            ),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let enriched = enriched_with_solved_shapes(input);
+
+        // Sanity-check the shape solver before asserting on planner output.
+        assert_eq!(
+            enriched.binding_shape(ModuleId(1), "ns"),
+            BindingShape::NamespaceObject
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let ns_binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "ns")
+            .expect("ns binding should be planned");
+        assert_eq!(ns_binding.shape, BindingShape::NamespaceObject);
+        let members: Vec<_> = ns_binding
+            .known_members
+            .iter()
+            .map(BindingName::as_str)
+            .collect();
+        assert_eq!(members, vec!["bar", "foo"]);
+
+        // Non-NamespaceObject bindings must remain memberless to avoid noise.
+        let a_binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "a")
+            .expect("a binding should be planned");
+        assert!(a_binding.known_members.is_empty());
     }
 
     #[test]

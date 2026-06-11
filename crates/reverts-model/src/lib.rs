@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstWrapperKind, RevertsGraph};
 use reverts_input::{InputBundle, ModuleInput, SymbolInput};
@@ -168,6 +168,16 @@ impl EnrichedProgram {
         self.binding_shapes.shape_of(module_id, original_name)
     }
 
+    /// Property names accumulated for `(module_id, original_name)` during
+    /// shape solving (paper #7 downstream). Returns an empty set when no
+    /// member accesses carried a property — older constraints without an
+    /// explicit property name do not contribute here.
+    #[must_use]
+    pub fn known_members(&self, module_id: ModuleId, original_name: &str) -> BTreeSet<BindingName> {
+        self.binding_shapes
+            .known_members_of(module_id, original_name)
+    }
+
     #[must_use]
     pub fn compiler_profile(&self) -> &CompilerProfile {
         &self.compiler_profile
@@ -240,9 +250,52 @@ pub enum CompilerEvidence {
 #[cfg(test)]
 mod tests {
     use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SymbolInput};
-    use reverts_ir::ModuleId;
+    use reverts_ir::{
+        BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
+        ModuleId,
+    };
 
-    use super::ProgramModel;
+    use super::{EnrichedProgram, PackageImportDecision, ProgramModel, SemanticNameMap};
+
+    #[test]
+    fn enriched_program_exposes_known_members_from_shape_solution() {
+        // Paper #7 downstream: the property names collected during shape
+        // solving must be reachable from the enriched program, so planners
+        // and emitters can rebuild a NamespaceObject's known surface without
+        // re-walking the def-use graph.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "ns"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+
+        let mut shapes = BindingShapeSolution::default();
+        shapes.add_constraint(
+            &BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
+                .with_property("foo"),
+        );
+        shapes.add_constraint(
+            &BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberWrite)
+                .with_property("bar"),
+        );
+
+        let program = EnrichedProgram::new(
+            model,
+            SemanticNameMap::default(),
+            Vec::<PackageImportDecision>::new(),
+            shapes,
+        );
+
+        assert_eq!(
+            program.binding_shape(ModuleId(1), "ns"),
+            BindingShape::NamespaceObject
+        );
+        let members = program.known_members(ModuleId(1), "ns");
+        let names: Vec<_> = members.iter().map(BindingName::as_str).collect();
+        assert_eq!(names, vec!["bar", "foo"]);
+        assert!(program.known_members(ModuleId(1), "absent").is_empty());
+    }
 
     #[test]
     fn program_model_builds_graph_from_input() {
