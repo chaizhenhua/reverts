@@ -1,7 +1,9 @@
 use reverts_ir::FunctionFingerprint;
 use reverts_package_index::PackageFingerprintIndex;
 
-use crate::tier::{FunctionMatch, try_exact, try_exact_alternate, try_structural_anchored};
+use crate::tier::{
+    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
+};
 
 #[must_use]
 pub fn match_function(
@@ -11,6 +13,7 @@ pub fn match_function(
     try_exact(fp, index)
         .or_else(|| try_exact_alternate(fp, index))
         .or_else(|| try_structural_anchored(fp, index))
+        .or_else(|| try_feature_similarity(fp, index))
 }
 
 #[cfg(test)]
@@ -19,7 +22,9 @@ mod tests {
     use reverts_ir::{
         AxisHashes, AxisKind, ByteRange, FunctionId, MatchTier, ModuleId, NormalizationPassId,
     };
-    use reverts_package_index::{Candidate, ExactKey, InMemoryFingerprintIndex, PackageId};
+    use reverts_package_index::{
+        Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId,
+    };
 
     fn sample_axes(ast: u64) -> AxisHashes {
         AxisHashes {
@@ -218,6 +223,136 @@ mod tests {
         let mut axes = sample_axes(0);
         axes.cfg = 7;
         axes.literal_anchor = Some(99);
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        assert!(match_function(&fp, &idx).is_none());
+    }
+
+    #[test]
+    fn feature_similarity_accepts_high_jaccard_candidate() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "lodash".into(),
+                version: "4.17".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 9,
+            matched_axis: AxisKind::CalleeSet,
+            matched_alternate: None,
+        };
+        // Insert under callee_set (the primary distinctive axis)
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::CalleeSet,
+                hash: 11,
+            },
+            cand.clone(),
+        );
+        // And under remaining axes: structural_anchor, binding_pattern, return_pattern, effect_pattern
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::StructuralAnchor,
+                hash: 22,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::BindingPattern,
+                hash: 33,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::ReturnPattern,
+                hash: 44,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::EffectPattern,
+                hash: 55,
+            },
+            cand.clone(),
+        );
+
+        let axes = AxisHashes {
+            ast: 0,
+            cfg: 0,
+            return_pattern: 44,
+            effect_pattern: 55,
+            literal_anchor: None,
+            access_pattern: None,
+            structural_anchor: 22,
+            literal_shape: None,
+            access_shape: None,
+            callee_set: Some(11),
+            binding_pattern: 33,
+            throw_set: None,
+        };
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        let m = match_function(&fp, &idx).expect("similarity match");
+        assert_eq!(m.tier, MatchTier::FeatureSimilarity);
+    }
+
+    #[test]
+    fn feature_similarity_rejects_low_jaccard() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 1,
+            matched_axis: AxisKind::CalleeSet,
+            matched_alternate: None,
+        };
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::CalleeSet,
+                hash: 11,
+            },
+            cand,
+        );
+        // Insert NO remaining axes — Jaccard will be 0.0, below 0.6 threshold
+
+        let axes = AxisHashes {
+            ast: 0,
+            cfg: 0,
+            return_pattern: 44,
+            effect_pattern: 55,
+            literal_anchor: None,
+            access_pattern: None,
+            structural_anchor: 22,
+            literal_shape: None,
+            access_shape: None,
+            callee_set: Some(11),
+            binding_pattern: 33,
+            throw_set: None,
+        };
         let fp = FunctionFingerprint {
             id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
             param_count: 1,

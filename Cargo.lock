@@ -1034,6 +1034,7 @@ dependencies = [
  "reverts-js",
  "reverts-observe",
  "reverts-package",
+ "reverts-package-index",
  "semver",
  "serde_json",
 ]
