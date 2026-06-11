@@ -1088,3 +1088,70 @@ mod tests {
         );
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MatchTier {
+    Exact,
+    ExactAlternate,
+    StructuralAnchored,
+    FeatureSimilarity,
+    StructuralOnly,
+}
+
+impl MatchTier {
+    #[must_use]
+    pub const fn weight(self) -> u32 {
+        match self {
+            Self::Exact => 10_000,
+            Self::ExactAlternate => 5_000,
+            Self::StructuralAnchored => 1_000,
+            Self::FeatureSimilarity => 100,
+            Self::StructuralOnly => 10,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::ExactAlternate => "exact_alternate",
+            Self::StructuralAnchored => "structural_anchored",
+            Self::FeatureSimilarity => "feature_similarity",
+            Self::StructuralOnly => "structural_only",
+        }
+    }
+}
+
+#[cfg(test)]
+mod match_tier_tests {
+    use super::MatchTier;
+
+    #[test]
+    fn match_tier_weights_strictly_decrease() {
+        let weights = [
+            MatchTier::Exact.weight(),
+            MatchTier::ExactAlternate.weight(),
+            MatchTier::StructuralAnchored.weight(),
+            MatchTier::FeatureSimilarity.weight(),
+            MatchTier::StructuralOnly.weight(),
+        ];
+        for window in weights.windows(2) {
+            assert!(
+                window[0] > window[1],
+                "tier weights must strictly decrease: {weights:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn match_tier_as_str_is_kebab_snake_case() {
+        assert_eq!(MatchTier::Exact.as_str(), "exact");
+        assert_eq!(MatchTier::ExactAlternate.as_str(), "exact_alternate");
+        assert_eq!(
+            MatchTier::StructuralAnchored.as_str(),
+            "structural_anchored"
+        );
+        assert_eq!(MatchTier::FeatureSimilarity.as_str(), "feature_similarity");
+        assert_eq!(MatchTier::StructuralOnly.as_str(), "structural_only");
+    }
+}
