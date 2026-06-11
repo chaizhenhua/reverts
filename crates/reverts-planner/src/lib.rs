@@ -870,6 +870,8 @@ fn runtime_lazy_fold_plan(
         if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
             continue;
         }
+        let folded_source =
+            purify_folded_lazy_initializers(folded_source.as_str(), &source.written_helpers);
         let available_bindings = top_level_definitions_in_source(folded_source.as_str())
             .into_iter()
             .chain(source.written_helpers.iter().cloned())
@@ -1041,6 +1043,449 @@ fn source_is_lazy_preserving_foldable(source: &str) -> bool {
         return false;
     }
     saw_lazy_initializer
+}
+
+fn purify_folded_lazy_initializers(
+    source: &str,
+    writable_helpers: &BTreeSet<BindingName>,
+) -> String {
+    top_level_statement_slices(source)
+        .into_iter()
+        .filter_map(|statement| {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                return None;
+            }
+            Some(
+                pure_lazy_initializer_replacement(statement, writable_helpers)
+                    .unwrap_or_else(|| statement.to_string()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn pure_lazy_initializer_replacement(
+    statement: &str,
+    writable_helpers: &BTreeSet<BindingName>,
+) -> Option<String> {
+    let initializer = parse_lowered_lazy_initializer_statement(statement)?;
+    let assignments = pure_lazy_body_assignments(initializer.body, writable_helpers)?;
+    if assignments.is_empty() {
+        return None;
+    }
+    let mut lines = assignments
+        .into_iter()
+        .map(|(target, value)| format!("{target} = {value};"))
+        .collect::<Vec<_>>();
+    lines.push(format!(
+        "var {} = () => {{}};",
+        initializer.binding.as_str()
+    ));
+    Some(lines.join("\n"))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedLoweredLazyInitializer<'a> {
+    binding: BindingName,
+    body: &'a str,
+}
+
+fn parse_lowered_lazy_initializer_statement(
+    statement: &str,
+) -> Option<ParsedLoweredLazyInitializer<'_>> {
+    let statement = statement.trim().trim_end_matches(';').trim();
+    let (_keyword, after_keyword) = declaration_keyword_at_start(statement)?;
+    let cursor = skip_ws(statement.as_bytes(), after_keyword);
+    let (binding, after_binding) = parse_identifier(statement, cursor)?;
+    let equals = skip_ws(statement.as_bytes(), after_binding);
+    if statement.as_bytes().get(equals) != Some(&b'=') {
+        return None;
+    }
+    let initializer_start = skip_ws(statement.as_bytes(), equals + 1);
+    let body = parse_lowered_lazy_initializer_body(&statement[initializer_start..])?;
+    Some(ParsedLoweredLazyInitializer {
+        binding: BindingName::new(binding),
+        body,
+    })
+}
+
+fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
+    if !looks_like_lowered_lazy_initializer(initializer) {
+        return None;
+    }
+    let marker = "__reverts_value";
+    let mut search_from = 0usize;
+    let equals = loop {
+        let marker_start = initializer[search_from..].find(marker)? + search_from;
+        let equals = skip_ws(initializer.as_bytes(), marker_start + marker.len());
+        if initializer.as_bytes().get(equals) == Some(&b'=') {
+            break equals;
+        }
+        search_from = marker_start + marker.len();
+    };
+    let mut cursor = skip_ws(initializer.as_bytes(), equals + 1);
+    if initializer.as_bytes().get(cursor) != Some(&b'(') {
+        return None;
+    }
+    cursor = skip_ws(initializer.as_bytes(), cursor + 1);
+    if initializer.as_bytes().get(cursor) != Some(&b'(') {
+        return None;
+    }
+    cursor = skip_ws(initializer.as_bytes(), cursor + 1);
+    if initializer.as_bytes().get(cursor) != Some(&b')') {
+        return None;
+    }
+    cursor = skip_ws(initializer.as_bytes(), cursor + 1);
+    cursor = expect_arrow(initializer.as_bytes(), cursor)?;
+    cursor = skip_ws(initializer.as_bytes(), cursor);
+    if initializer.as_bytes().get(cursor) != Some(&b'{') {
+        return None;
+    }
+    let body_end = find_matching_brace(initializer, cursor)?;
+    let after_body = skip_ws(initializer.as_bytes(), body_end + 1);
+    if initializer.as_bytes().get(after_body) != Some(&b')') {
+        return None;
+    }
+    let call_start = skip_ws(initializer.as_bytes(), after_body + 1);
+    if initializer.as_bytes().get(call_start) != Some(&b'(')
+        || initializer
+            .as_bytes()
+            .get(skip_ws(initializer.as_bytes(), call_start + 1))
+            != Some(&b')')
+    {
+        return None;
+    }
+    Some(initializer[cursor + 1..body_end].trim())
+}
+
+fn pure_lazy_body_assignments(
+    body: &str,
+    writable_helpers: &BTreeSet<BindingName>,
+) -> Option<Vec<(BindingName, String)>> {
+    let mut assignments = Vec::new();
+    let mut written = BTreeSet::new();
+    for statement in top_level_statement_slices(body) {
+        let statement = statement.trim().trim_end_matches(';').trim();
+        if statement.is_empty() {
+            continue;
+        }
+        let (target, after_target) = parse_identifier(statement, 0)?;
+        let target = BindingName::new(target);
+        if !writable_helpers.contains(&target) || !written.insert(target.clone()) {
+            return None;
+        }
+        let equals = skip_ws(statement.as_bytes(), after_target);
+        if statement.as_bytes().get(equals) != Some(&b'=')
+            || statement.as_bytes().get(equals + 1) == Some(&b'=')
+            || statement.as_bytes().get(equals + 1) == Some(&b'>')
+        {
+            return None;
+        }
+        let value_start = skip_ws(statement.as_bytes(), equals + 1);
+        let value = statement[value_start..].trim();
+        if !is_pure_initializer_expression(value) {
+            return None;
+        }
+        assignments.push((target, value.to_string()));
+    }
+    Some(assignments)
+}
+
+fn is_pure_initializer_expression(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+    if is_literal_expression(source) {
+        return true;
+    }
+    if source.as_bytes().first() == Some(&b'{') {
+        return pure_object_literal(source);
+    }
+    if source.as_bytes().first() == Some(&b'[') {
+        return pure_array_literal(source);
+    }
+    if keyword_at(source, 0, "class") {
+        return pure_class_expression(source);
+    }
+    if keyword_at(source, 0, "function") || looks_like_arrow_function_expression(source) {
+        return true;
+    }
+    false
+}
+
+fn is_literal_expression(source: &str) -> bool {
+    if matches!(
+        source,
+        "true" | "false" | "null" | "undefined" | "NaN" | "Infinity"
+    ) {
+        return true;
+    }
+    if quoted_literal_covers_source(source) {
+        return true;
+    }
+    if matches!(source, "!0" | "!1") {
+        return true;
+    }
+    if source.starts_with('`') && source.ends_with('`') && !source.contains("${") {
+        return true;
+    }
+    let number = source.strip_prefix(['+', '-']).unwrap_or(source);
+    !number.is_empty()
+        && number
+            .chars()
+            .all(|character| character.is_ascii_digit() || matches!(character, '.' | '_' | 'n'))
+        && number.chars().any(|character| character.is_ascii_digit())
+}
+
+fn quoted_literal_covers_source(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let Some(quote @ (b'\'' | b'"')) = bytes.first().copied() else {
+        return false;
+    };
+    skip_quoted(bytes, 0, quote) == bytes.len()
+}
+
+fn pure_object_literal(source: &str) -> bool {
+    let Some(close) = find_matching_brace(source, 0) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    split_top_level_properties(&source[1..close])
+        .into_iter()
+        .all(pure_object_property)
+}
+
+fn pure_object_property(property: &str) -> bool {
+    let property = property.trim();
+    if property.is_empty() || property.starts_with("...") {
+        return false;
+    }
+    if let Some(colon) = find_top_level_byte(property, b':') {
+        if !pure_object_property_key(property[..colon].trim()) {
+            return false;
+        }
+        let value = property[colon + 1..].trim();
+        return is_pure_initializer_expression(value);
+    }
+    pure_object_method_property(property)
+}
+
+fn pure_object_property_key(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+    if source.as_bytes().first() == Some(&b'[') {
+        let Some(close) = find_matching_bracket(source, 0) else {
+            return false;
+        };
+        return skip_ws(source.as_bytes(), close + 1) == source.len()
+            && is_literal_expression(&source[1..close]);
+    }
+    if quoted_literal_covers_source(source) {
+        return true;
+    }
+    let key = source.strip_prefix(['+', '-']).unwrap_or(source);
+    key.as_bytes()
+        .first()
+        .is_some_and(|byte| is_identifier_start(*byte) || byte.is_ascii_digit())
+        && key
+            .as_bytes()
+            .iter()
+            .all(|byte| is_identifier_continue(*byte) || *byte == b'.')
+}
+
+fn pure_object_method_property(source: &str) -> bool {
+    let source = source.trim();
+    let method_source = source
+        .strip_prefix("async ")
+        .or_else(|| source.strip_prefix("get "))
+        .or_else(|| source.strip_prefix("set "))
+        .unwrap_or(source)
+        .trim_start();
+    let Some(open_paren) = find_top_level_byte(method_source, b'(') else {
+        return false;
+    };
+    if !pure_object_property_key(method_source[..open_paren].trim()) {
+        return false;
+    }
+    let Some(close_paren) = find_matching_paren(method_source, open_paren) else {
+        return false;
+    };
+    let open_body = skip_ws(method_source.as_bytes(), close_paren + 1);
+    if method_source.as_bytes().get(open_body) != Some(&b'{') {
+        return false;
+    }
+    let Some(close_body) = find_matching_brace(method_source, open_body) else {
+        return false;
+    };
+    skip_ws(method_source.as_bytes(), close_body + 1) == method_source.len()
+}
+
+fn pure_array_literal(source: &str) -> bool {
+    let Some(close) = find_matching_bracket(source, 0) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    split_top_level_properties(&source[1..close])
+        .into_iter()
+        .all(|element| {
+            let element = element.trim();
+            !element.is_empty()
+                && !element.starts_with("...")
+                && is_pure_initializer_expression(element)
+        })
+}
+
+fn pure_class_expression(source: &str) -> bool {
+    let Some(open) = find_top_level_byte(source, b'{') else {
+        return false;
+    };
+    let header = source[..open].trim();
+    if header.contains('[') {
+        return false;
+    }
+    if let Some(extends) = header
+        .split_once("extends")
+        .map(|(_, extends)| extends.trim())
+    {
+        let (base, end) = match parse_identifier(extends, 0) {
+            Some(parsed) => parsed,
+            None => return false,
+        };
+        if end != extends.len() || !is_runtime_global_identifier(base) {
+            return false;
+        }
+    }
+    let Some(close) = find_matching_brace(source, open) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    !source[open + 1..close]
+        .split(|character: char| !is_identifier_continue(character as u8))
+        .any(|word| word == "static")
+}
+
+fn looks_like_arrow_function_expression(source: &str) -> bool {
+    find_top_level_arrow(source).is_some()
+}
+
+fn find_top_level_arrow(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor + 1 < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'=' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && bytes.get(cursor + 1) == Some(&b'>') =>
+            {
+                return Some(cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn find_top_level_byte(source: &str, target: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            byte if byte == target
+                && paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0 =>
+            {
+                return Some(cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
 }
 
 fn top_level_statement_slices(source: &str) -> Vec<&str> {
@@ -5173,9 +5618,74 @@ mod tests {
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
             "var shared;\n",
+            "var Custom;\n",
         );
         let body = concat!(
-            "var initShared = lazy(() => { shared = { ready: true }; });\n",
+            "var initShared = lazy(() => { shared = { ['required']: !1, matches: (A) => A.ready }; Custom = class Custom extends Error { constructor(A) { super(A); } }; });\n",
+            "export { initShared, shared, Custom };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry_file.body.join("\n");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(entry_source.contains(
+            "export { Custom, initShared, shared } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(!entry_source.contains("__reverts_set_shared"));
+        assert!(helper_source.contains("var shared;"));
+        assert!(helper_source.contains("var Custom;"));
+        assert!(helper_source.contains("shared = { ['required']: !1, matches: (A) => A.ready };"));
+        assert!(
+            helper_source
+                .contains("Custom = class Custom extends Error { constructor(A) { super(A); } };")
+        );
+        assert!(helper_source.contains("var initShared = () => {};"));
+        assert!(!helper_source.contains("__reverts_initialized"));
+        assert!(!helper_source.contains("__reverts_value"));
+        assert!(!helper_source.contains("var initShared = (() => {"));
+        assert!(!helper_source.contains("__reverts_set_shared"));
+        assert!(helper_source.contains("export { Custom, initShared, shared };"));
+    }
+
+    #[test]
+    fn impure_lazy_initializer_keeps_lazy_thunk_while_folding_into_helper() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = Date.now(); });\n",
             "export { initShared, shared };\n",
         );
         let source = format!("{prelude}{body}");
@@ -5216,10 +5726,9 @@ mod tests {
             entry_source
                 .contains("export { initShared, shared } from './runtime/source-1-helpers.js';")
         );
-        assert!(!entry_source.contains("__reverts_set_shared"));
-        assert!(helper_source.contains("var shared;"));
         assert!(helper_source.contains("var initShared = (() => {"));
-        assert!(helper_source.contains("shared = { ready: true }"));
+        assert!(helper_source.contains("__reverts_initialized"));
+        assert!(helper_source.contains("shared = Date.now()"));
         assert!(!helper_source.contains("__reverts_set_shared"));
         assert!(helper_source.contains("export { initShared, shared };"));
     }
@@ -5270,14 +5779,15 @@ mod tests {
             .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
             .expect("runtime helper file should be planned");
         let helper_source = helper_file.body.join("\n");
-        let init_decl = helper_source
-            .find("var initShared = (() =>")
-            .expect("folded lazy initializer should be before side effects");
+        let init_assignment = helper_source
+            .find("shared = 1;")
+            .expect("pure initializer assignment should be before side effects");
         let tail_call = helper_source
             .find("initShared();")
             .expect("tail side effect should be preserved");
 
-        assert!(init_decl < tail_call);
+        assert!(init_assignment < tail_call);
+        assert!(helper_source.contains("var initShared = () => {};"));
         assert!(helper_source.contains("var main = () => { console.log(shared); };"));
         assert!(helper_source.contains("export { initShared, main, shared };"));
     }
