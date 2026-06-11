@@ -19,6 +19,25 @@ The input-side data model is documented in
 The shorter invariant summary remains in
 [docs/architecture/output-core.md](docs/architecture/output-core.md).
 
+## Development
+
+The workspace is pinned to Rust `1.93.0` (`rust-toolchain.toml`). Every gate
+runs with `--locked` so a Cargo.lock drift fails fast.
+
+```bash
+cargo fmt --check                                          # formatting (edition 2024)
+cargo clippy --workspace --locked --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo test -p reverts-pipeline --test external_corpus -- --ignored --nocapture  # full corpus (~1s)
+```
+
+Git hooks live in `lefthook.yml`. Install once via
+`scripts/install-hooks.sh` (requires `lefthook` on `PATH` or at
+`$HOME/.local/bin/lefthook`). The hooks enforce `rustfmt --edition 2024` and
+`cargo check` on commit, and `cargo clippy -D warnings` + `cargo test` on
+push. The same checks also run in CI on every push and pull request to
+`main` (`.github/workflows/ci.yml`).
+
 ## Architecture Decisions
 
 - [ADR 0001: Use an AST-First Output Pipeline](docs/adr/0001-use-ast-first-output-pipeline.md)

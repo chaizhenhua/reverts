@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-flight runs for the same ref when a new commit arrives. A green
+# build on an older commit is no longer interesting once HEAD has moved.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # `--locked` everywhere mirrors the local hook gates and refuses CI to
+  # silently regenerate Cargo.lock — a drift between local and CI is exactly
+  # the class of bug this workflow exists to catch.
+  CARGO_NET_RETRY: 3
+
+jobs:
+  ci:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Toolchain pin lives in rust-toolchain.toml; rustup respects it
+      # automatically. We add the components defensively in case a future
+      # toolchain version drops them from the default profile.
+      - name: Install Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --locked
