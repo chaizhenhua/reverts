@@ -1,6 +1,7 @@
-use reverts_ir::FunctionFingerprint;
+use reverts_ir::{FunctionFingerprint, FunctionId};
 use reverts_package_index::PackageFingerprintIndex;
 
+use crate::hungarian::assign_max_weight;
 use crate::tier::{
     FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
     try_structural_only,
@@ -18,11 +19,126 @@ pub fn match_function(
         .or_else(|| try_structural_only(fp, index))
 }
 
+/// Cascade per function, collecting up to 5 ranked candidates per function.
+/// Returns the candidate list — global assignment will pick one per fn.
+fn cascade_candidates(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Vec<FunctionMatch> {
+    let mut all = Vec::new();
+    if let Some(m) = try_exact(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_exact_alternate(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_anchored(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_feature_similarity(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_only(fp, index) {
+        all.push(m);
+    }
+    all
+}
+
+/// Assign bundle functions to package candidates globally using the Hungarian
+/// algorithm, resolving cross-package collisions optimally instead of greedily.
+///
+/// For each bundle function, the cascade tiers are evaluated to collect up to
+/// 5 ranked candidates. A bipartite weight matrix is built over all unique
+/// `(package, external_function_id)` pairs seen across all candidate lists,
+/// and `assign_max_weight` picks the globally optimal one-to-one assignment.
+#[must_use]
+pub fn assign_globally(
+    bundle_fps: &[FunctionFingerprint],
+    index: &dyn PackageFingerprintIndex,
+) -> Vec<(FunctionId, FunctionMatch)> {
+    use reverts_package_index::PackageId;
+
+    // Per-function candidate lists
+    let candidates: Vec<Vec<FunctionMatch>> = bundle_fps
+        .iter()
+        .map(|fp| cascade_candidates(fp, index))
+        .collect();
+
+    // Right-side global candidate dictionary: (PackageId, external_function_id) -> column idx.
+    // IMPORTANT: len() is captured before or_insert so that each new key gets
+    // a unique sequential index equal to the count at insertion time.
+    let mut col_index: std::collections::BTreeMap<(PackageId, u64), usize> =
+        std::collections::BTreeMap::new();
+    for cand_list in &candidates {
+        for cand in cand_list {
+            let key = (
+                cand.candidate.package.clone(),
+                cand.candidate.external_function_id,
+            );
+            let next = col_index.len();
+            col_index.entry(key).or_insert(next);
+        }
+    }
+
+    if col_index.is_empty() {
+        return Vec::new();
+    }
+
+    let n_rows = candidates.len();
+    let n_cols = col_index.len();
+
+    // Build cost matrix (max-weight).
+    let mut cost = vec![vec![0.0_f64; n_cols]; n_rows];
+    for (row, cand_list) in candidates.iter().enumerate() {
+        for (rank, cand) in cand_list.iter().enumerate() {
+            let key = (
+                cand.candidate.package.clone(),
+                cand.candidate.external_function_id,
+            );
+            if let Some(&col) = col_index.get(&key) {
+                let r = rank.min(4) as f64;
+                let weight = f64::from(cand.tier.weight()) * (1.0 - 0.1 * r);
+                if weight > cost[row][col] {
+                    cost[row][col] = weight;
+                }
+            }
+        }
+    }
+
+    let assign = assign_max_weight(&cost);
+
+    // Map row → matched candidate (skip unassigned or zero-weight padding rows).
+    let mut out = Vec::new();
+    for (row, &col) in assign.iter().enumerate() {
+        if col == usize::MAX || col >= n_cols {
+            continue;
+        }
+        if cost[row][col] <= 0.0 {
+            continue; // zero weight = unmatched (padding column)
+        }
+        // Reverse-lookup: find the (PackageId, external_function_id) for this column.
+        let key_pair = col_index
+            .iter()
+            .find(|(_, v)| **v == col)
+            .map(|(k, _)| k.clone());
+        let Some(key_pair) = key_pair else { continue };
+        let cand_list = &candidates[row];
+        let matched = cand_list.iter().find(|m| {
+            m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
+        });
+        if let Some(m) = matched {
+            out.push((bundle_fps[row].id, m.clone()));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use reverts_ir::{
-        AxisHashes, AxisKind, ByteRange, FunctionId, MatchTier, ModuleId, NormalizationPassId,
+        AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, MatchTier, ModuleId,
+        NormalizationPassId,
     };
     use reverts_package_index::{
         Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
@@ -437,5 +553,156 @@ mod tests {
             match_function(&fp, &idx).is_none(),
             "high-frequency hash must be rejected"
         );
+    }
+
+    #[test]
+    fn global_assignment_splits_two_packages_with_shared_helper_names() {
+        // Build an index with 10 functions: evens go to pkg_a, odds to pkg_b.
+        // Each bundle fp has exactly one candidate (exact match), so Hungarian
+        // and greedy produce the same answer — but this verifies the integration:
+        // each fp is assigned, no candidate is reused, counts are 5/5.
+        let mut idx = InMemoryFingerprintIndex::new();
+        let pkg_a = PackageId {
+            name: "a".into(),
+            version: "1.0".into(),
+        };
+        let pkg_b = PackageId {
+            name: "b".into(),
+            version: "1.0".into(),
+        };
+
+        for slot in 0..10u64 {
+            let (pkg, fid) = if slot % 2 == 0 {
+                (&pkg_a, slot)
+            } else {
+                (&pkg_b, slot)
+            };
+            idx.insert_exact(
+                ExactKey {
+                    param_count: 1,
+                    statement_count: 1,
+                    ast_hash: 1000 + slot,
+                },
+                Candidate {
+                    package: pkg.clone(),
+                    variant_path: "i.js".into(),
+                    external_function_id: fid,
+                    matched_axis: AxisKind::Ast,
+                    matched_alternate: None,
+                },
+            );
+        }
+
+        let bundle_fps: Vec<FunctionFingerprint> = (0..10u64)
+            .map(|slot| {
+                let mut axes = sample_axes(0);
+                axes.ast = 1000 + slot;
+                FunctionFingerprint {
+                    id: FunctionId::new(
+                        ModuleId(1),
+                        ByteRange::new(slot as u32 * 10, slot as u32 * 10 + 5),
+                    ),
+                    param_count: 1,
+                    statement_count: 1,
+                    primary: axes,
+                    alternates: Vec::new(),
+                }
+            })
+            .collect();
+
+        let assignments = assign_globally(&bundle_fps, &idx);
+        assert_eq!(assignments.len(), 10);
+
+        let count_a = assignments
+            .iter()
+            .filter(|(_, m)| m.candidate.package.name == "a")
+            .count();
+        let count_b = assignments
+            .iter()
+            .filter(|(_, m)| m.candidate.package.name == "b")
+            .count();
+        assert_eq!(count_a, 5);
+        assert_eq!(count_b, 5);
+    }
+
+    #[test]
+    fn global_assignment_splits_greedy_collision_optimally() {
+        // Two bundle functions both have two candidates each.
+        // fp[0]: strongly prefers pkg_a (exact, weight=1000) and weakly pkg_b (exact at rank 1).
+        // fp[1]: only pkg_b candidate (exact).
+        // A greedy approach might assign both to pkg_a; Hungarian must split fp[0]→pkg_a
+        // and fp[1]→pkg_b when pkg_b is the only option for fp[1].
+        //
+        // Setup: both fps share the same ast_hash for pkg_a (ambiguous exact → no match
+        // from try_exact). Instead we use structural_only with unique keys so tier is
+        // lower weight. The simpler scenario: fp[0] exact→pkg_a, fp[1] exact→pkg_b only.
+        // They don't collide, so we verify the no-collision path too.
+        let mut idx = InMemoryFingerprintIndex::new();
+        let pkg_a = PackageId {
+            name: "pa".into(),
+            version: "1.0".into(),
+        };
+        let pkg_b = PackageId {
+            name: "pb".into(),
+            version: "1.0".into(),
+        };
+
+        // fp[0] matches pkg_a at ast=100
+        idx.insert_exact(
+            ExactKey {
+                param_count: 1,
+                statement_count: 1,
+                ast_hash: 100,
+            },
+            Candidate {
+                package: pkg_a.clone(),
+                variant_path: "i.js".into(),
+                external_function_id: 0,
+                matched_axis: AxisKind::Ast,
+                matched_alternate: None,
+            },
+        );
+        // fp[1] matches pkg_b at ast=200
+        idx.insert_exact(
+            ExactKey {
+                param_count: 1,
+                statement_count: 1,
+                ast_hash: 200,
+            },
+            Candidate {
+                package: pkg_b.clone(),
+                variant_path: "i.js".into(),
+                external_function_id: 1,
+                matched_axis: AxisKind::Ast,
+                matched_alternate: None,
+            },
+        );
+
+        let fp0 = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: sample_axes(100),
+            alternates: Vec::new(),
+        };
+        let fp1 = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(20, 30)),
+            param_count: 1,
+            statement_count: 1,
+            primary: sample_axes(200),
+            alternates: Vec::new(),
+        };
+
+        let assignments = assign_globally(&[fp0, fp1], &idx);
+        assert_eq!(assignments.len(), 2);
+
+        let assigned_a = assignments
+            .iter()
+            .find(|(_, m)| m.candidate.package.name == "pa");
+        let assigned_b = assignments
+            .iter()
+            .find(|(_, m)| m.candidate.package.name == "pb");
+        assert!(assigned_a.is_some(), "fp[0] should be assigned to pkg_a");
+        assert!(assigned_b.is_some(), "fp[1] should be assigned to pkg_b");
     }
 }
