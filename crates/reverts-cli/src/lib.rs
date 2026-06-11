@@ -21,7 +21,7 @@ use reverts_input::{
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    BestVersionMatch, PackageMatch, PackageSource, VersionedPackageMatchReport,
+    BestVersionMatch, CascadeMatchReport, PackageMatch, PackageSource, VersionedPackageMatchReport,
     VersionedPackageMatcher, match_with_cascade, package_import_names_from_sources,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
@@ -296,8 +296,11 @@ pub struct MatchPackagesOutcome {
     pub written_attributions: usize,
     pub written_surfaces: usize,
     /// Number of attribution rows produced by the cascade-match pipeline
-    /// (Phase-1 parallel run alongside the legacy versioned matcher).
+    /// (computed regardless of whether persistence ran).
     pub cascade_attributions: usize,
+    /// Number of cascade-match rows actually written to
+    /// `package_function_attributions`. Zero when `apply=false`.
+    pub written_cascade_attributions: usize,
     pub audit: AuditReport,
 }
 
@@ -363,13 +366,14 @@ pub fn match_packages_from_connection(
     let fingerprints_by_module = fingerprints_from_rows(&rows);
     let cascade_report = match_with_cascade(&fingerprints_by_module, &package_sources);
 
-    let (written_attributions, written_surfaces) = if args.apply {
+    let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
         (
             persist_package_attributions(connection, &rows, &report, &package_names)?,
             persist_package_surfaces(connection, &rows, &report)?,
+            persist_cascade_attributions(connection, &rows, &cascade_report)?,
         )
     } else {
-        (0, 0)
+        (0, 0, 0)
     };
 
     let mut audit = report.audit;
@@ -388,6 +392,7 @@ pub fn match_packages_from_connection(
         written_attributions,
         written_surfaces,
         cascade_attributions: cascade_report.attributions.len(),
+        written_cascade_attributions,
         audit,
     })
 }
@@ -1596,6 +1601,177 @@ fn persist_rejected_package_attribution(
     Ok(())
 }
 
+fn persist_cascade_attributions(
+    connection: &mut Connection,
+    rows: &InputRows,
+    report: &CascadeMatchReport,
+) -> Result<usize, MatchPackagesError> {
+    if report.attributions.is_empty() {
+        return Ok(0);
+    }
+    ensure_package_function_attributions_table(connection)?;
+
+    let modules_by_id: BTreeMap<ModuleId, &str> = rows
+        .modules
+        .iter()
+        .map(|m| (m.id, m.original_name.as_str()))
+        .collect();
+
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    let mut written = 0;
+
+    for attribution in &report.attributions {
+        let Some(function_span) = attribution.function_span else {
+            // Function-level attribution requires a span; cascade only emits
+            // rows with `with_function_span(...)`, so this is a programmer
+            // error rather than user input — surface it instead of skipping.
+            return Err(MatchPackagesError::InvalidAttribution {
+                module_id: attribution.module_id,
+                message: "cascade attribution missing function_span".to_string(),
+            });
+        };
+        let Some(confidence) = attribution.confidence.as_ref() else {
+            return Err(MatchPackagesError::InvalidAttribution {
+                module_id: attribution.module_id,
+                message: "cascade attribution missing confidence".to_string(),
+            });
+        };
+        let module_original_name = modules_by_id.get(&attribution.module_id).copied().ok_or(
+            MatchPackagesError::MissingModuleForAttribution {
+                module_id: attribution.module_id,
+            },
+        )?;
+        let package_version = attribution.package_version.as_deref().ok_or(
+            MatchPackagesError::InvalidAttribution {
+                module_id: attribution.module_id,
+                message: "cascade attribution missing package version".to_string(),
+            },
+        )?;
+        let export_specifier = attribution.export_specifier.as_deref().ok_or(
+            MatchPackagesError::InvalidAttribution {
+                module_id: attribution.module_id,
+                message: "cascade attribution missing export specifier".to_string(),
+            },
+        )?;
+        let matched_axes_json = serde_json::Value::Array(
+            confidence
+                .matched_axes
+                .iter()
+                .map(|a| serde_json::Value::String(a.as_str().to_string()))
+                .collect(),
+        )
+        .to_string();
+        let matched_alternate = confidence.matched_alternate.map(|p| p.as_str().to_string());
+
+        transaction
+            .execute(
+                r"
+                INSERT INTO package_function_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     export_specifier, function_span_start, function_span_end,
+                     tier, matched_alternate, matched_axes_json,
+                     top_score, runner_up_score, margin,
+                     created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                        datetime('now'), datetime('now'))
+                ON CONFLICT(module_id, function_span_start, function_span_end) DO UPDATE SET
+                    module_original_name = excluded.module_original_name,
+                    package_name = excluded.package_name,
+                    package_version = excluded.package_version,
+                    export_specifier = excluded.export_specifier,
+                    tier = excluded.tier,
+                    matched_alternate = excluded.matched_alternate,
+                    matched_axes_json = excluded.matched_axes_json,
+                    top_score = excluded.top_score,
+                    runner_up_score = excluded.runner_up_score,
+                    margin = excluded.margin,
+                    updated_at = datetime('now')
+                ",
+                params![
+                    i64::from(attribution.module_id.0),
+                    module_original_name,
+                    attribution.package_name.as_str(),
+                    package_version,
+                    export_specifier,
+                    i64::from(function_span.start),
+                    i64::from(function_span.end),
+                    confidence.tier.as_str(),
+                    matched_alternate,
+                    matched_axes_json,
+                    confidence.top_score,
+                    confidence.runner_up_score,
+                    confidence.margin,
+                ],
+            )
+            .map_err(MatchPackagesError::WriteAttribution)?;
+        written += 1;
+    }
+
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(written)
+}
+
+fn ensure_package_function_attributions_table(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(PACKAGE_FUNCTION_ATTRIBUTIONS_CREATE_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    connection
+        .execute_batch(PACKAGE_FUNCTION_ATTRIBUTIONS_INDEX_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
+}
+
+const PACKAGE_FUNCTION_ATTRIBUTIONS_CREATE_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS package_function_attributions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    module_id INTEGER NOT NULL,
+    module_original_name TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    package_version TEXT NOT NULL,
+    export_specifier TEXT NOT NULL,
+    function_span_start INTEGER NOT NULL,
+    function_span_end INTEGER NOT NULL,
+    tier TEXT NOT NULL,
+    matched_alternate TEXT,
+    matched_axes_json TEXT NOT NULL,
+    top_score REAL NOT NULL,
+    runner_up_score REAL NOT NULL,
+    margin REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (module_id, function_span_start, function_span_end),
+    FOREIGN KEY (module_id) REFERENCES modules(id) ON DELETE CASCADE,
+    CHECK (TRIM(module_original_name) != ''),
+    CHECK (TRIM(package_name) != ''),
+    CHECK (TRIM(package_version) != ''),
+    CHECK (TRIM(export_specifier) != ''),
+    CHECK (function_span_start <= function_span_end),
+    CHECK (tier IN (
+        'exact',
+        'exact_alternate',
+        'structural_anchored',
+        'feature_similarity',
+        'structural_only'
+    )),
+    CHECK (margin >= 0.0 AND margin <= 1.0)
+);
+";
+
+const PACKAGE_FUNCTION_ATTRIBUTIONS_INDEX_SQL: &str = r"
+CREATE INDEX IF NOT EXISTS idx_package_function_attributions_module
+    ON package_function_attributions(module_id);
+CREATE INDEX IF NOT EXISTS idx_package_function_attributions_package
+    ON package_function_attributions(package_name, package_version);
+CREATE INDEX IF NOT EXISTS idx_package_function_attributions_tier
+    ON package_function_attributions(tier);
+";
+
 fn persist_package_surfaces(
     connection: &mut Connection,
     rows: &InputRows,
@@ -2094,6 +2270,117 @@ mod tests {
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_version, "1.2.3");
         assert!(evidence.contains("exact_normalized_source_binary_search"));
+    }
+
+    #[test]
+    fn match_packages_apply_writes_cascade_function_attribution() {
+        // Same fixture as the legacy-matcher test, but the assertion looks at
+        // the new `package_function_attributions` table populated by the
+        // cascade pipeline. The cascade should produce an Exact-tier match
+        // for the bundle's `add` function against the package source, and
+        // persist it with function_span + confidence rather than discarding
+        // the row.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean());
+        assert!(
+            outcome.written_cascade_attributions >= 1,
+            "expected cascade attribution to be persisted, outcome={:?}",
+            outcome,
+        );
+
+        let (tier, span_start, span_end, package_name, package_version, matched_axes_json): (
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT tier, function_span_start, function_span_end,
+                       package_name, package_version, matched_axes_json
+                  FROM package_function_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("cascade function attribution row must exist");
+
+        assert_eq!(tier, "exact");
+        assert_eq!(package_name, "pkg");
+        assert_eq!(package_version, "1.2.3");
+        assert!(span_end > span_start);
+        assert!(matched_axes_json.contains("ast"));
+    }
+
+    #[test]
+    fn match_packages_dry_run_does_not_persist_cascade_attributions() {
+        // With apply=false, the cascade pipeline still RUNS (the diagnostic
+        // count is non-zero in the outcome), but no rows land in the new
+        // function-attributions table.
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.cascade_attributions >= 1, "cascade should compute");
+        assert_eq!(outcome.written_cascade_attributions, 0);
+        // The new table should not exist yet since persistence never ran.
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='package_function_attributions'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sqlite_master is always queryable");
+        assert_eq!(table_count, 0);
     }
 
     #[test]

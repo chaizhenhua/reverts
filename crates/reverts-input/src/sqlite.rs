@@ -219,7 +219,11 @@ fn load_module_dependencies(
     collect_sqlite_rows(rows)
 }
 
-// TODO(post-phase-I): persist function_span + confidence
+// Function-level cascade attributions (`function_span` + `confidence`)
+// live in the separate `package_function_attributions` table written by
+// `reverts-cli::persist_cascade_attributions`. This loader handles only
+// the legacy module-level rows; a cascade-aware loader would be a
+// separate function so the schemas stay decoupled.
 fn load_package_attributions(
     connection: &Connection,
     project_id: u32,
