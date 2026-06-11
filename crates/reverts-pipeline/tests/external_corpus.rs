@@ -35,6 +35,8 @@ fn external_corpus_pipeline_coverage_report() {
     let mut pipeline_failed = 0usize;
     let mut findings_by_code: BTreeMap<FindingCode, usize> = BTreeMap::new();
     let mut missing_definitions_by_binding: BTreeMap<String, usize> = BTreeMap::new();
+    let mut cases_by_finding: BTreeMap<FindingCode, Vec<(String, Option<String>, String)>> =
+        BTreeMap::new();
     let mut babel_lowering = BabelLoweringMetrics::default();
 
     for case in &cases {
@@ -95,6 +97,22 @@ fn external_corpus_pipeline_coverage_report() {
                         .entry(binding.to_string())
                         .or_default() += 1;
                 }
+                // Low-volume findings get a per-case detail dump for triage:
+                // we only need to look at every individual case for the
+                // codes we *don't* expect to see in large numbers.
+                if matches!(
+                    finding.code,
+                    FindingCode::DuplicateTopLevelBinding
+                        | FindingCode::CallableEmittedAsNonCallable
+                        | FindingCode::UnresolvableBareImport
+                        | FindingCode::AstFactExtractionFailed
+                ) {
+                    cases_by_finding.entry(finding.code).or_default().push((
+                        case.manifest.id.clone(),
+                        finding.binding.clone(),
+                        finding.message.clone(),
+                    ));
+                }
             }
         }
         if !run.project.files.is_empty() {
@@ -140,6 +158,17 @@ fn external_corpus_pipeline_coverage_report() {
         babel_lowering.interop_default_missed,
         babel_lowering.interop_default_absent,
     );
+
+    if !cases_by_finding.is_empty() {
+        println!("  per-case detail for low-volume findings:");
+        for (code, entries) in &cases_by_finding {
+            println!("    {code:?} ({}):", entries.len());
+            for (id, binding, message) in entries {
+                let binding = binding.as_deref().unwrap_or("-");
+                println!("      {id} [{binding}]: {message}");
+            }
+        }
+    }
 
     if !missing_definitions_by_binding.is_empty() {
         let mut top = missing_definitions_by_binding
