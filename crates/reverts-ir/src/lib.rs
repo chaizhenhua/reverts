@@ -181,6 +181,11 @@ pub struct DefUseGraph {
     reads: BTreeSet<(ModuleId, BindingName)>,
     writes: BTreeSet<(ModuleId, BindingName)>,
     constraints: Vec<BindingConstraint>,
+    /// Bindings observed to be written from a member-access chain on an
+    /// awaited or called value. The chain is statically nullable — e.g.
+    /// `X = (await fetch(...)).data.value` could leave `X` as `null` or
+    /// `undefined`. Used by the `UnprotectedNullableMemberRead` audit.
+    maybe_nullable_writes: BTreeSet<(ModuleId, BindingName)>,
 }
 
 impl DefUseGraph {
@@ -205,6 +210,19 @@ impl DefUseGraph {
         self.reads
             .insert((constraint.module_id, constraint.binding.clone()));
         self.constraints.push(constraint);
+    }
+
+    /// Record that `(module_id, binding)` was assigned from a member-access
+    /// chain on an awaited / called value (statically nullable RHS). Used
+    /// by the `UnprotectedNullableMemberRead` audit; no shape effect.
+    pub fn record_maybe_nullable_write(&mut self, module_id: ModuleId, binding: impl Into<String>) {
+        self.maybe_nullable_writes
+            .insert((module_id, BindingName::new(binding)));
+    }
+
+    #[must_use]
+    pub fn maybe_nullable_writes(&self) -> &BTreeSet<(ModuleId, BindingName)> {
+        &self.maybe_nullable_writes
     }
 
     #[must_use]

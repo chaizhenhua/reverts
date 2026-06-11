@@ -34,6 +34,7 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     audit.extend(audit_def_use_graph(&model));
     audit.extend(audit_duplicate_top_level_bindings(&model));
     audit.extend(audit_binding_shape_conflicts(&binding_shapes));
+    audit.extend(audit_unprotected_nullable_member_reads(&model));
     audit.extend(audit_unreachable_top_level_code(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
@@ -273,6 +274,53 @@ fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> Audit
             )
             .with_module(conflict.module_id.0.to_string())
             .with_binding(conflict.binding.as_str().to_string()),
+        );
+    }
+    audit
+}
+
+/// Surface the input-bundle pattern `X = (await fetch(...)).data.value;`
+/// followed by an unguarded `X.foo` member-read. ADR 0002 forbids
+/// repairing the input — we warn so the user knows the original bundle
+/// has a latent null deref, while keeping the emit faithful.
+///
+/// Current scope: only catches the DIRECT-access pattern (`X.foo` somewhere
+/// in the same module). Indirect exfiltration — e.g. `function get() {
+/// return X; }` then `get().foo` — is not yet detected (would require
+/// return-flow tracking that bridges identity through call results). The
+/// Claude Code `CT2 / UT2() / uH0` pattern is in this blind spot for now.
+fn audit_unprotected_nullable_member_reads(model: &ProgramModel) -> AuditReport {
+    use std::collections::BTreeSet;
+    let mut audit = AuditReport::default();
+    let def_use = model.graph().def_use();
+    let maybe_nullable = def_use.maybe_nullable_writes();
+    if maybe_nullable.is_empty() {
+        return audit;
+    }
+    let mut read_targets: BTreeSet<(reverts_ir::ModuleId, reverts_ir::BindingName)> =
+        BTreeSet::new();
+    for constraint in def_use.constraints() {
+        if matches!(
+            constraint.kind,
+            BindingConstraintKind::MemberRead | BindingConstraintKind::MemberWrite
+        ) {
+            read_targets.insert((constraint.module_id, constraint.binding.clone()));
+        }
+    }
+    for (module_id, binding) in maybe_nullable {
+        if !read_targets.contains(&(*module_id, binding.clone())) {
+            continue;
+        }
+        audit.push(
+            AuditFinding::error(
+                FindingCode::UnprotectedNullableMemberRead,
+                format!(
+                    "binding '{}' is assigned from a member chain on a call/await result and later member-read without a null guard — the original bundle can crash here",
+                    binding.as_str()
+                ),
+            )
+            .with_module(module_id.0.to_string())
+            .with_binding(binding.as_str().to_string()),
         );
     }
     audit

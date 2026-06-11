@@ -27,6 +27,14 @@ pub enum FindingCode {
     /// longer mentions. Fires when emit machinery drops or shadows a known
     /// property name, masking a real regression in the namespace surface.
     NamespaceMemberStripped,
+    /// Input bundle writes a binding from a member-access chain on an
+    /// awaited / called value (e.g. `X = (await fetch(...)).data.client_data`),
+    /// then later member-reads `X.foo` without a null guard. The chain can
+    /// resolve to `null`/`undefined`, and the unguarded read would crash at
+    /// runtime. We surface this as a warning rather than repair (ADR 0002):
+    /// the bug exists in the input and would crash the original bundle too;
+    /// the decompiler is faithful, not corrective.
+    UnprotectedNullableMemberRead,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

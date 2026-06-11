@@ -1697,6 +1697,66 @@ mod tests {
     }
 
     #[test]
+    fn audit_warns_when_binding_written_from_chained_call_is_member_read_unguarded() {
+        // Faithful decompilation of the Claude Code 2.0.75 pattern at uH0/
+        // CT2: `X = (await fetch(...)).data.value;` followed by `X.foo` with
+        // no null guard. The unguarded read crashes at runtime when the
+        // chain resolves to null. ADR 0002 forbids repairing the input — we
+        // surface the input bug as an audit warning instead.
+        let source = concat!(
+            "var X;\n",
+            "async function setUp() {\n",
+            "    X = (await fetch('/x')).data.value;\n",
+            "}\n",
+            "function read() {\n",
+            "    return X.foo;\n",
+            "}\n",
+            "setUp();\n",
+            "read();\n",
+        );
+        let rows = rows_with_application_source(source);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should run");
+
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| finding.code == FindingCode::UnprotectedNullableMemberRead)
+            .expect("UnprotectedNullableMemberRead finding for X");
+        assert_eq!(finding.binding.as_deref(), Some("X"));
+        assert!(
+            finding.message.contains("X"),
+            "finding message should name the binding; got {:?}",
+            finding.message,
+        );
+    }
+
+    #[test]
+    fn audit_does_not_warn_when_only_object_literal_writes_target_binding() {
+        // Negative control: a binding only assigned from object literals
+        // (no chained call/await on the RHS) must NOT trip the audit.
+        let source = concat!(
+            "var X = {};\n",
+            "function reset() { X = { ready: true }; }\n",
+            "function read() { return X.ready; }\n",
+            "reset();\n",
+            "read();\n",
+        );
+        let rows = rows_with_application_source(source);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should run");
+
+        assert!(
+            !run.audit.has(FindingCode::UnprotectedNullableMemberRead),
+            "object-literal writes must not trigger the audit; got: {:?}",
+            run.audit.findings(),
+        );
+    }
+
+    #[test]
     fn namespace_object_member_audit_fires_when_emit_drops_a_known_member() {
         // Paper #7 downstream consumer: when the planner recorded that `ns`
         // is accessed via `.foo` and `.bar`, but the emitted source only

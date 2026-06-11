@@ -254,6 +254,19 @@ impl AstFact {
         }
     }
 
+    /// Mark `(module_id, binding)` as written from a statically nullable
+    /// chain (e.g. `X = (await ...).data.value`). Powers the
+    /// `UnprotectedNullableMemberRead` audit; emits no constraint or shape.
+    #[must_use]
+    pub fn maybe_nullable_write(module_id: ModuleId, binding: impl Into<String>) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(binding)),
+            kind: AstFactKind::MaybeNullableWrite,
+            property: None,
+        }
+    }
+
     /// Construct a member-access constraint fact that records both the
     /// accessed binding and the property name observed on it. Used by the
     /// extractor to populate `BindingConstraint::property` downstream.
@@ -293,6 +306,10 @@ pub enum AstFactKind {
     Export,
     BindingConstraint(BindingConstraintKind),
     WrapperRegion(AstWrapperKind),
+    /// Binding was assigned from a member-access chain on an awaited or
+    /// called value (statically nullable RHS). Powers the
+    /// `UnprotectedNullableMemberRead` audit.
+    MaybeNullableWrite,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -540,6 +557,11 @@ fn apply_ast_fact(
             }
         }
         AstFactKind::WrapperRegion(_) => {}
+        AstFactKind::MaybeNullableWrite => {
+            if let Some(binding) = &fact.binding {
+                def_use.record_maybe_nullable_write(fact.module_id, binding.as_str());
+            }
+        }
     }
 }
 
@@ -1559,6 +1581,11 @@ impl<'a> Visit<'a> for AstFactVisitor {
                 } else {
                     self.constraint(binding, BindingConstraintKind::MemberWrite);
                 }
+            } else if it.operator.is_assign() && expression_is_maybe_nullable(&it.right) {
+                // Plain `X = expr` where the RHS is a member chain on an
+                // awaited/called value: X is statically nullable from now on.
+                // Powers the `UnprotectedNullableMemberRead` audit.
+                self.maybe_nullable_write(binding);
             }
         }
 
@@ -1730,6 +1757,13 @@ impl AstFactVisitor {
         }
     }
 
+    fn maybe_nullable_write(&mut self, binding: &str) {
+        if self.should_emit_binding_fact(binding) {
+            self.facts
+                .push(AstFact::maybe_nullable_write(self.module_id, binding));
+        }
+    }
+
     fn should_emit_binding_fact(&self, binding: &str) -> bool {
         self.function_depth == 0 || self.module_scope_bindings.contains(binding)
     }
@@ -1871,6 +1905,75 @@ fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
         ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
         ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
         ModuleExportName::StringLiteral(literal) => Some(literal.value.as_str()),
+    }
+}
+
+/// True when `expr` is a member-access chain rooted in a call /
+/// await / parenthesised call — the shape used by patterns like
+/// `(await fetch(...)).data.value` or `obj.fn().result.field`. The chain's
+/// terminal property can resolve to `null`/`undefined`, so any binding
+/// receiving such an RHS becomes statically nullable from that point on.
+fn expression_is_maybe_nullable(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::StaticMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        Expression::ChainExpression(chain) => {
+            // `obj?.data?.value` — same nullable-chain risk on the leaf
+            // binding even though the chain itself is null-safe at each
+            // step.
+            chain_expression_root_is_call_like(chain)
+        }
+        Expression::ParenthesizedExpression(inner) => {
+            expression_is_maybe_nullable(&inner.expression)
+        }
+        Expression::TSAsExpression(inner) => expression_is_maybe_nullable(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => expression_is_maybe_nullable(&inner.expression),
+        Expression::TSNonNullExpression(inner) => expression_is_maybe_nullable(&inner.expression),
+        _ => false,
+    }
+}
+
+fn expression_chain_root_is_call_like(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::CallExpression(_) | Expression::AwaitExpression(_) => true,
+        Expression::ParenthesizedExpression(inner) => {
+            expression_chain_root_is_call_like(&inner.expression)
+        }
+        Expression::TSAsExpression(inner) => expression_chain_root_is_call_like(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => {
+            expression_chain_root_is_call_like(&inner.expression)
+        }
+        Expression::TSNonNullExpression(inner) => {
+            expression_chain_root_is_call_like(&inner.expression)
+        }
+        Expression::StaticMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        _ => false,
+    }
+}
+
+fn chain_expression_root_is_call_like(chain: &oxc_ast::ast::ChainExpression<'_>) -> bool {
+    use oxc_ast::ast::ChainElement;
+    match &chain.expression {
+        ChainElement::CallExpression(_) => true,
+        ChainElement::StaticMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        ChainElement::ComputedMemberExpression(member) => {
+            expression_chain_root_is_call_like(&member.object)
+        }
+        ChainElement::TSNonNullExpression(inner) => {
+            expression_chain_root_is_call_like(&inner.expression)
+        }
+        _ => false,
     }
 }
 
