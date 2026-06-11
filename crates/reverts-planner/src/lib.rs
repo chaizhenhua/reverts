@@ -387,10 +387,11 @@ impl ImportExportPlanner {
                         continue;
                     }
                     planned_bindings.insert(binding.clone());
-                    file.add_binding(PlannedBinding::new(
+                    file.add_binding(plan_binding_from_program(
+                        program,
+                        module.id,
                         binding.clone(),
                         binding.clone(),
-                        BindingShape::Unknown,
                         true,
                     ));
                 }
@@ -424,10 +425,11 @@ impl ImportExportPlanner {
                         continue;
                     }
                     planned_bindings.insert(binding.clone());
-                    file.add_binding(PlannedBinding::new(
+                    file.add_binding(plan_binding_from_program(
+                        program,
+                        module.id,
                         binding.clone(),
                         binding,
-                        BindingShape::Unknown,
                         true,
                     ));
                 }
