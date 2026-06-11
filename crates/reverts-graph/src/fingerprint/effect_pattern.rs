@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use oxc_ast::Visit;
 use oxc_ast::ast::{
     AssignmentExpression, AssignmentTarget, AwaitExpression, CallExpression, FunctionBody,

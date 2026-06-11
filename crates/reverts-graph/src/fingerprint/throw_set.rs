@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use oxc_ast::Visit;
 use oxc_ast::ast::{Expression, FunctionBody, Statement};
 use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};

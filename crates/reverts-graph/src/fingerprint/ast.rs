@@ -1,7 +1,6 @@
 use oxc_ast::ast::{Expression, FunctionBody, Statement};
 use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};
 
-#[allow(dead_code)]
 #[must_use]
 pub fn compute(body: &FunctionBody<'_>) -> u64 {
     let mut hash = FNV_OFFSET_BASIS;

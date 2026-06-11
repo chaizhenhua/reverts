@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 // CFG nodes don't carry byte spans in v1; we hash the entire module CFG.
 // The span parameter is reserved for when per-function CFG slicing is added.
 
