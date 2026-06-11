@@ -14,3 +14,4 @@ oxc_ast = "0.42"
 oxc_codegen.workspace = true
 oxc_parser.workspace = true
 oxc_span.workspace = true
+reverts-ir = { path = "../reverts-ir" }

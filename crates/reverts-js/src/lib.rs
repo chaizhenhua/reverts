@@ -1,3 +1,5 @@
+pub mod normalize;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
