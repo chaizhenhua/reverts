@@ -5,13 +5,19 @@ pub mod hungarian;
 pub mod tier;
 pub mod variant;
 pub mod version;
-pub use acceptance::*;
-pub use cascade::*;
-pub use cascade_match::*;
-pub use hungarian::*;
-pub use tier::*;
-pub use variant::*;
-pub use version::*;
+
+pub use acceptance::{AcceptanceDecision, classify};
+pub use cascade::{assign_globally, match_function};
+pub use cascade_match::{CascadeMatchReport, match_with_cascade};
+pub use hungarian::assign_max_weight;
+pub use tier::{
+    FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,
+    try_feature_similarity, try_structural_anchored, try_structural_only,
+};
+pub use variant::{VariantSelection, pick_variants};
+pub use version::{
+    BestVersionDecision, VERSION_AMBIGUITY_EPSILON, VERSION_INSUFFICIENT_THRESHOLD, pick_versions,
+};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
