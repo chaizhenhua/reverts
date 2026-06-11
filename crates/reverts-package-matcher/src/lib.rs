@@ -1,8 +1,10 @@
 pub mod cascade;
+pub mod hungarian;
 pub mod tier;
 pub mod variant;
 pub mod version;
 pub use cascade::*;
+pub use hungarian::*;
 pub use tier::*;
 pub use variant::*;
 pub use version::*;
