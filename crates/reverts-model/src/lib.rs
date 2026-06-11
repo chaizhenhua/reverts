@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstWrapperKind, RevertsGraph};
 use reverts_input::{InputBundle, ModuleInput, SymbolInput};
-use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
+use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, FunctionFingerprint, ModuleId};
 use reverts_package::PackageResolution;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +115,7 @@ pub struct EnrichedProgram {
     package_imports: Vec<PackageImportDecision>,
     binding_shapes: BindingShapeSolution,
     compiler_profile: CompilerProfile,
+    function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
 }
 
 impl EnrichedProgram {
@@ -131,6 +132,7 @@ impl EnrichedProgram {
             package_imports,
             binding_shapes,
             compiler_profile: CompilerProfile::default(),
+            function_fingerprints: BTreeMap::default(),
         }
     }
 
@@ -138,6 +140,20 @@ impl EnrichedProgram {
     pub fn with_compiler_profile(mut self, compiler_profile: CompilerProfile) -> Self {
         self.compiler_profile = compiler_profile;
         self
+    }
+
+    #[must_use]
+    pub fn with_function_fingerprints(
+        mut self,
+        function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
+    ) -> Self {
+        self.function_fingerprints = function_fingerprints;
+        self
+    }
+
+    #[must_use]
+    pub fn function_fingerprints(&self) -> &BTreeMap<ModuleId, Vec<FunctionFingerprint>> {
+        &self.function_fingerprints
     }
 
     #[must_use]

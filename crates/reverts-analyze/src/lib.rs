@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_graph::{AstFactKind, AstWrapperKind};
+use reverts_graph::{AstFactKind, AstWrapperKind, FunctionExtractor};
 use reverts_input::ModuleDependencyTarget;
 use reverts_ir::{
     BindingConstraintKind, BindingName, BindingShapeSolution, ControlFlowEdgeKind,
-    ControlFlowNodeKind, ModuleId,
+    ControlFlowNodeKind, FunctionFingerprint, ModuleId,
 };
 use reverts_js::sanitize_identifier;
 use reverts_model::{
@@ -38,9 +38,21 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     audit.extend(audit_unreachable_top_level_code(&model));
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
+    let mut function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
+    let cfg = model.graph().control_flow();
+    for module in model.modules() {
+        if let Some(slice) = model.input().module_source_slice(module.id) {
+            let fps = FunctionExtractor::fingerprint(module.id, slice.source, cfg);
+            if !fps.is_empty() {
+                function_fingerprints.insert(module.id, fps);
+            }
+        }
+    }
+
     EnrichmentOutput {
         program: EnrichedProgram::new(model, semantic_names, package_imports, binding_shapes)
-            .with_compiler_profile(compiler_profile),
+            .with_compiler_profile(compiler_profile)
+            .with_function_fingerprints(function_fingerprints),
         audit,
     }
 }
@@ -1318,5 +1330,34 @@ NativeModuleType();
 
     fn identifiers<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
         values.into_iter().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn enriched_program_contains_function_fingerprints_for_modules_with_source() {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("function add(a, b) { return a + b; }".to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        let fps = output
+            .program
+            .function_fingerprints()
+            .get(&ModuleId(1))
+            .expect("module 1 should have fingerprints");
+        assert!(
+            !fps.is_empty(),
+            "expected at least one function fingerprint"
+        );
+        assert!(
+            fps.iter().any(|fp| fp.param_count == 2),
+            "expected the 2-param `add` fn to be fingerprinted",
+        );
     }
 }
