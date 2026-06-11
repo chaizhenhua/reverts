@@ -1,0 +1,192 @@
+use std::collections::BTreeMap;
+
+use crate::variant::VariantSelection;
+
+pub const VERSION_AMBIGUITY_EPSILON: f64 = 0.05;
+pub const VERSION_INSUFFICIENT_THRESHOLD: f64 = 300.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum BestVersionDecision {
+    Selected {
+        package_name: String,
+        package_version: String,
+        score: f64,
+        selection: VariantSelection,
+    },
+    Ambiguous {
+        package_name: String,
+        scores: Vec<(String, f64)>, // (version, score)
+    },
+    NoMatch {
+        package_name: String,
+    },
+    InsufficientEvidence {
+        package_name: String,
+        package_version: String,
+        score: f64,
+    },
+}
+
+#[must_use]
+pub fn pick_versions(
+    variants: Vec<VariantSelection>,
+    module_function_count: usize,
+) -> Vec<BestVersionDecision> {
+    // Group by package_name. Within each package_name, score per version.
+    let mut by_name: BTreeMap<String, Vec<VariantSelection>> = BTreeMap::new();
+    for v in variants {
+        by_name.entry(v.package.name.clone()).or_default().push(v);
+    }
+
+    let mut out = Vec::new();
+    for (pkg_name, vars) in by_name {
+        // Compute per-version score = variant_score * (matched_count / module_function_count)
+        let mut by_version: BTreeMap<String, (VariantSelection, f64)> = BTreeMap::new();
+        for v in vars {
+            let matched_count = v.function_matches.len();
+            let fraction = if module_function_count == 0 {
+                0.0
+            } else {
+                matched_count as f64 / module_function_count as f64
+            };
+            let final_score = v.score * fraction.max(0.001); // avoid pure-zero collapse
+            by_version
+                .entry(v.package.version.clone())
+                .and_modify(|(_existing, s)| {
+                    if final_score > *s {
+                        *_existing = v.clone();
+                        *s = final_score;
+                    }
+                })
+                .or_insert((v, final_score));
+        }
+
+        if by_version.is_empty() {
+            out.push(BestVersionDecision::NoMatch {
+                package_name: pkg_name,
+            });
+            continue;
+        }
+
+        // Find best score
+        let mut all: Vec<(String, VariantSelection, f64)> = by_version
+            .into_iter()
+            .map(|(ver, (sel, score))| (ver, sel, score))
+            .collect();
+        all.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        let (best_ver, best_sel, best_score) = all.first().cloned().expect("non-empty");
+
+        if all.len() > 1 {
+            let runner_up_score = all[1].2;
+            if (best_score - runner_up_score).abs() < VERSION_AMBIGUITY_EPSILON {
+                out.push(BestVersionDecision::Ambiguous {
+                    package_name: pkg_name,
+                    scores: all.iter().map(|(v, _, s)| (v.clone(), *s)).collect(),
+                });
+                continue;
+            }
+        }
+
+        if best_score < VERSION_INSUFFICIENT_THRESHOLD {
+            out.push(BestVersionDecision::InsufficientEvidence {
+                package_name: pkg_name,
+                package_version: best_ver,
+                score: best_score,
+            });
+            continue;
+        }
+
+        out.push(BestVersionDecision::Selected {
+            package_name: pkg_name,
+            package_version: best_ver,
+            score: best_score,
+            selection: best_sel,
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tier::FunctionMatch;
+    use reverts_ir::MatchTier;
+    use reverts_package_index::{Candidate, PackageId};
+
+    fn variant_with_score(ver: &str, n_exact_matches: usize) -> VariantSelection {
+        let pkg = PackageId {
+            name: "lodash".into(),
+            version: ver.into(),
+        };
+        let fms: Vec<FunctionMatch> = (0..n_exact_matches)
+            .map(|i| FunctionMatch {
+                tier: MatchTier::Exact,
+                candidate: Candidate {
+                    package: pkg.clone(),
+                    variant_path: "i.js".into(),
+                    external_function_id: i as u64,
+                    matched_axis: reverts_ir::AxisKind::Ast,
+                    matched_alternate: None,
+                },
+                margin: 1.0,
+                top_score: f64::from(MatchTier::Exact.weight()),
+                runner_up_score: 0.0,
+                matched_alternate: None,
+            })
+            .collect();
+        let tier_sum: f64 = fms.iter().map(|m| f64::from(m.tier.weight())).sum();
+        VariantSelection {
+            package: pkg,
+            variant_path: "i.js".into(),
+            tier_weight_sum: tier_sum,
+            jaccard: 1.0,
+            score: tier_sum + 100.0,
+            function_matches: fms,
+        }
+    }
+
+    #[test]
+    fn pick_versions_selects_unique_winner() {
+        let variants = vec![
+            variant_with_score("1.0", 1),
+            variant_with_score("2.0", 5),
+            variant_with_score("3.0", 2),
+        ];
+        let decisions = pick_versions(variants, 5);
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0] {
+            BestVersionDecision::Selected {
+                package_version, ..
+            } => {
+                assert_eq!(package_version, "2.0");
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pick_versions_emits_ambiguous_for_tied_scores() {
+        let variants = vec![variant_with_score("1.0", 5), variant_with_score("2.0", 5)];
+        let decisions = pick_versions(variants, 5);
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(
+            &decisions[0],
+            BestVersionDecision::Ambiguous { .. }
+        ));
+    }
+
+    #[test]
+    fn pick_versions_emits_insufficient_evidence_below_threshold() {
+        // Single match with low tier → low total score
+        let mut variants = vec![variant_with_score("1.0", 1)];
+        variants[0].score = 50.0; // below 300 threshold
+        variants[0].function_matches.truncate(1);
+        let decisions = pick_versions(variants, 100); // huge module count → small fraction
+        assert_eq!(decisions.len(), 1);
+        assert!(matches!(
+            &decisions[0],
+            BestVersionDecision::InsufficientEvidence { .. }
+        ));
+    }
+}
