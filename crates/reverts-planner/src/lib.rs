@@ -440,12 +440,17 @@ impl ImportExportPlanner {
                 if planned_bindings.contains(original) {
                     continue;
                 }
-                file.add_binding(PlannedBinding::new(
-                    original.clone(),
-                    original.clone(),
-                    BindingShape::Unknown,
-                    true,
-                ));
+                let shape = program.binding_shape(module.id, original.as_str());
+                let known_members = if shape == BindingShape::NamespaceObject {
+                    program.known_members(module.id, original.as_str())
+                } else {
+                    BTreeSet::new()
+                };
+                planned_bindings.insert(original.clone());
+                file.add_binding(
+                    PlannedBinding::new(original.clone(), original.clone(), shape, true)
+                        .with_known_members(known_members),
+                );
             }
 
             if let Some((_source_file_id, source_file_path, mut source)) = lowered_source {
@@ -3126,7 +3131,8 @@ mod tests {
     use reverts_graph::RuntimePreludeBindingKind;
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan, SymbolInput,
+        PackageAttributionInput, PackageAttributionStatus, PackageSurfaceInput, ProjectInput,
+        SourceFileInput, SourceSpan, SymbolInput,
     };
     use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
     use reverts_model::{
@@ -3366,6 +3372,57 @@ mod tests {
             CompilerRecoveryAction::from_compiler(CompilerKind::Unknown),
             CompilerRecoveryAction::DirectModuleSource
         );
+    }
+
+    #[test]
+    fn enriched_program_attaches_known_members_to_imported_namespace_bindings() {
+        // Paper #7 downstream — source-imports path: `import * as ns from
+        // 'pkg'` followed by `ns.foo` / `ns.bar` should reach the planner
+        // with shape=NamespaceObject and known_members={bar, foo}. Before
+        // this wiring, the source-imports loop hard-coded BindingShape::
+        // Unknown so imported namespaces could never carry known_members.
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("import * as ns from 'pkg';\nconst a = ns.foo;\nconst b = ns.bar;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        rows.package_surfaces.push(PackageSurfaceInput {
+            package_name: "pkg".to_string(),
+            package_version: Some("1.0.0".to_string()),
+            export_specifier: "pkg".to_string(),
+            status: PackageAttributionStatus::Accepted,
+            evidence: None,
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let enriched = enriched_with_solved_shapes(input);
+
+        assert_eq!(
+            enriched.binding_shape(ModuleId(1), "ns"),
+            BindingShape::NamespaceObject,
+            "solver should classify the imported namespace",
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let ns_binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "ns")
+            .expect("imported ns binding should be planned");
+        assert_eq!(ns_binding.shape, BindingShape::NamespaceObject);
+        let members: Vec<_> = ns_binding
+            .known_members
+            .iter()
+            .map(BindingName::as_str)
+            .collect();
+        assert_eq!(members, vec!["bar", "foo"]);
     }
 
     #[test]
