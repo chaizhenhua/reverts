@@ -1543,7 +1543,17 @@ impl<'a> Visit<'a> for AstFactVisitor {
                 self.read(binding);
             }
             if assignment_target_is_member(&it.left) {
-                self.constraint(binding, BindingConstraintKind::MemberWrite);
+                if let Some((direct_binding, property)) =
+                    direct_assignment_member_property(&it.left)
+                {
+                    self.member_constraint(
+                        direct_binding,
+                        BindingConstraintKind::MemberWrite,
+                        property,
+                    );
+                } else {
+                    self.constraint(binding, BindingConstraintKind::MemberWrite);
+                }
             }
         }
 
@@ -1555,7 +1565,17 @@ impl<'a> Visit<'a> for AstFactVisitor {
             self.read(binding);
             self.write(binding);
             if simple_assignment_target_is_member(&it.argument) {
-                self.constraint(binding, BindingConstraintKind::MemberWrite);
+                if let Some((direct_binding, property)) =
+                    direct_simple_assignment_member_property(&it.argument)
+                {
+                    self.member_constraint(
+                        direct_binding,
+                        BindingConstraintKind::MemberWrite,
+                        property,
+                    );
+                } else {
+                    self.constraint(binding, BindingConstraintKind::MemberWrite);
+                }
             }
         }
     }
@@ -2105,6 +2125,53 @@ fn expression_is_static_member(
     )
 }
 
+/// Extract `(binding, property)` from an assignment target when the
+/// target is `<identifier>.<prop>` or `<identifier>["<prop>"]` — i.e. the
+/// property name is recoverable AND the object is a direct identifier
+/// (paralleling `direct_member_object`). Chained writes like
+/// `ns.foo.deep = 1` resolve to `None` so `deep` never bleeds onto `ns`.
+fn direct_assignment_member_property<'a>(
+    target: &'a AssignmentTarget<'a>,
+) -> Option<(&'a str, &'a str)> {
+    match target {
+        AssignmentTarget::StaticMemberExpression(member) => {
+            let binding = direct_member_object(&member.object)?;
+            Some((binding, member.property.name.as_str()))
+        }
+        AssignmentTarget::ComputedMemberExpression(member) => {
+            let binding = direct_member_object(&member.object)?;
+            if let Expression::StringLiteral(literal) = &member.expression {
+                Some((binding, literal.value.as_str()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `SimpleAssignmentTarget` variant of [`direct_assignment_member_property`]
+/// — used by `visit_update_expression` (`++` / `--`).
+fn direct_simple_assignment_member_property<'a>(
+    target: &'a SimpleAssignmentTarget<'a>,
+) -> Option<(&'a str, &'a str)> {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            let binding = direct_member_object(&member.object)?;
+            Some((binding, member.property.name.as_str()))
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            let binding = direct_member_object(&member.object)?;
+            if let Expression::StringLiteral(literal) = &member.expression {
+                Some((binding, literal.value.as_str()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn assignment_target_is_member(target: &AssignmentTarget<'_>) -> bool {
     matches!(
         target,
@@ -2395,6 +2462,40 @@ mod tests {
         let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
         let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
         assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_property_names_on_member_write_constraints() {
+        // Symmetric to MemberRead: writing through a member access (`ns.foo
+        // = 1`, `ns["bar"] = 2`, `ns.foo++`) must record the property name
+        // so `members_accessed_on` exposes it for paper #7 downstream.
+        // Chained writes (`ns.foo.deep = 3`) must NOT attribute `deep` back
+        // to `ns` — it belongs to `ns.foo`.
+        let source = r#"
+            const ns = {};
+            ns.foo = 1;
+            ns["bar"] = 2;
+            ns.foo.deep = 3;
+            ns.qux++;
+            ns[dynamicKey] = 4;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        // `deep` belongs to ns.foo, not ns; `dynamicKey` is computed without
+        // a string-literal key, so no property name is recoverable for it.
+        assert_eq!(names, vec!["bar", "foo", "qux"]);
     }
 
     #[test]
