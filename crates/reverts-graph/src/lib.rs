@@ -1,4 +1,4 @@
-mod fingerprint;
+pub mod fingerprint;
 pub use fingerprint::{ExtractedFunction, FunctionExtractor};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
