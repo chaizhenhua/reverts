@@ -35,7 +35,7 @@ use oxc_span::SourceType;
 /// re-emits, returns the printed string. Bails if the input fails to parse.
 pub fn apply_to_source(pass: &dyn NormalizationPass, source: &str) -> Result<String, String> {
     let alloc = Allocator::default();
-    let source_type = SourceType::default().with_typescript(true);
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
     let parsed = Parser::new(&alloc, source, source_type).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return Err(format!(
