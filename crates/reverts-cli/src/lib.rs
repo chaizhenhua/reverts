@@ -12,16 +12,17 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::load_project_rows_from_connection;
 use reverts_input::{
     AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode, SourceFileInput,
 };
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_ir::{ControlFlowGraph, ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, PackageMatch, PackageSource, VersionedPackageMatchReport,
-    VersionedPackageMatcher, package_import_names_from_sources,
+    VersionedPackageMatcher, match_with_cascade, package_import_names_from_sources,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -294,6 +295,9 @@ pub struct MatchPackagesOutcome {
     pub matched_package_surfaces: usize,
     pub written_attributions: usize,
     pub written_surfaces: usize,
+    /// Number of attribution rows produced by the cascade-match pipeline
+    /// (Phase-1 parallel run alongside the legacy versioned matcher).
+    pub cascade_attributions: usize,
     pub audit: AuditReport,
 }
 
@@ -354,6 +358,11 @@ pub fn match_packages_from_connection(
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources = load_package_sources(connection, &package_names)?;
     let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+    // Phase-1: also run the cascade pipeline alongside the legacy matcher.
+    let fingerprints_by_module = fingerprints_from_rows(&rows);
+    let cascade_report = match_with_cascade(&fingerprints_by_module, &package_sources);
+
     let (written_attributions, written_surfaces) = if args.apply {
         (
             persist_package_attributions(connection, &rows, &report, &package_names)?,
@@ -362,6 +371,9 @@ pub fn match_packages_from_connection(
     } else {
         (0, 0)
     };
+
+    let mut audit = report.audit;
+    audit.extend(cascade_report.audit);
 
     Ok(MatchPackagesOutcome {
         project_id: args.project_id,
@@ -375,8 +387,28 @@ pub fn match_packages_from_connection(
         matched_package_surfaces: report.surfaces.len(),
         written_attributions,
         written_surfaces,
-        audit: report.audit,
+        cascade_attributions: cascade_report.attributions.len(),
+        audit,
     })
+}
+
+/// Builds per-module function fingerprints from raw input rows using a default
+/// (empty) control-flow graph, mirroring the approach used inside the cascade
+/// index builder for package sources.
+fn fingerprints_from_rows(
+    rows: &InputRows,
+) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
+    let cfg = ControlFlowGraph::default();
+    let mut out = BTreeMap::new();
+    for module in &rows.modules {
+        if let Some(slice) = rows.module_source_slice(module.id) {
+            let fps = FunctionExtractor::fingerprint(module.id, slice.source, &cfg);
+            if !fps.is_empty() {
+                out.insert(module.id, fps);
+            }
+        }
+    }
+    out
 }
 
 pub fn extract_assets_from_sqlite(
