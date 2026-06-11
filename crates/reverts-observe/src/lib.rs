@@ -61,6 +61,17 @@ impl AuditFinding {
     }
 
     #[must_use]
+    pub fn warning(code: FindingCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            severity: Severity::Warning,
+            module: None,
+            binding: None,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
     pub fn with_module(mut self, module: impl Into<String>) -> Self {
         self.module = Some(module.into());
         self
@@ -178,6 +189,16 @@ mod tests {
         let a = FindingCode::OverlappingFunctionAttribution;
         let b = FindingCode::LowConfidenceAttribution;
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn audit_finding_warning_constructor_yields_warning_severity() {
+        let finding = AuditFinding::warning(FindingCode::LowConfidenceAttribution, "caveat")
+            .with_module("m1");
+        assert_eq!(finding.severity, Severity::Warning);
+        assert_eq!(finding.code, FindingCode::LowConfidenceAttribution);
+        assert_eq!(finding.message, "caveat");
+        assert_eq!(finding.module.as_deref(), Some("m1"));
     }
 
     #[test]

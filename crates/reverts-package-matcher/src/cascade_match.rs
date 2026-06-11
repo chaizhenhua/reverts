@@ -74,7 +74,7 @@ pub fn match_with_cascade(
                     let cand = &function_match.candidate;
                     attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
                     audit.push(
-                        AuditFinding::error(
+                        AuditFinding::warning(
                             FindingCode::LowConfidenceAttribution,
                             "cascade function attribution accepted with low margin",
                         )
