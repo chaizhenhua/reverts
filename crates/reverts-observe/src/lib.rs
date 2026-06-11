@@ -19,7 +19,9 @@ pub enum FindingCode {
     UnparseableOutput,
     UnparseablePackageSource,
     AmbiguousPackageMatch,
+    LowConfidenceAttribution,
     MissingPackageSource,
+    OverlappingFunctionAttribution,
     UnreachableTopLevelCode,
     MissingRequiredAsset,
     /// Paper #7 downstream: a planned `NamespaceObject` binding records
@@ -169,6 +171,13 @@ mod tests {
 
         assert_eq!(report.findings().len(), 2);
         assert!(report.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn new_finding_codes_compile_and_are_distinct() {
+        let a = FindingCode::OverlappingFunctionAttribution;
+        let b = FindingCode::LowConfidenceAttribution;
+        assert_ne!(a, b);
     }
 
     #[test]
