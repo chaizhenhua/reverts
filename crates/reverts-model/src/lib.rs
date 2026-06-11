@@ -168,14 +168,16 @@ impl EnrichedProgram {
         self.binding_shapes.shape_of(module_id, original_name)
     }
 
-    /// Property names accumulated for `(module_id, original_name)` during
-    /// shape solving (paper #7 downstream). Returns an empty set when no
-    /// member accesses carried a property — older constraints without an
-    /// explicit property name do not contribute here.
+    /// Property names recorded on `(module_id, original_name)` member-access
+    /// constraints (paper #7 downstream). The def-use graph is the single
+    /// source of truth — older constraints without an explicit property name
+    /// do not contribute here.
     #[must_use]
     pub fn known_members(&self, module_id: ModuleId, original_name: &str) -> BTreeSet<BindingName> {
-        self.binding_shapes
-            .known_members_of(module_id, original_name)
+        self.model
+            .graph()
+            .def_use()
+            .members_accessed_on(module_id, original_name)
     }
 
     #[must_use]
@@ -249,42 +251,39 @@ pub enum CompilerEvidence {
 
 #[cfg(test)]
 mod tests {
-    use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SymbolInput};
-    use reverts_ir::{
-        BindingConstraint, BindingConstraintKind, BindingName, BindingShape, BindingShapeSolution,
-        ModuleId,
+    use reverts_input::{
+        InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput, SymbolInput,
     };
+    use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, ModuleId};
 
     use super::{EnrichedProgram, PackageImportDecision, ProgramModel, SemanticNameMap};
 
     #[test]
-    fn enriched_program_exposes_known_members_from_shape_solution() {
-        // Paper #7 downstream: the property names collected during shape
-        // solving must be reachable from the enriched program, so planners
-        // and emitters can rebuild a NamespaceObject's known surface without
-        // re-walking the def-use graph.
+    fn enriched_program_exposes_known_members_from_def_use_graph() {
+        // Paper #7 downstream: property names recorded by the def-use graph
+        // for member accesses on a binding must be reachable via the enriched
+        // program API. Built from real source so the graph (not a mocked
+        // solver) drives the answer — that's the single source of truth.
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-        rows.modules
-            .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts"));
-        rows.symbols.push(SymbolInput::new(ModuleId(1), "ns"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some(
+                "const ns = { foo: 1, bar: 2 };\nconst a = ns.foo;\nconst b = ns.bar;".to_string(),
+            ),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
         let model = ProgramModel::from_input(input);
-
-        let mut shapes = BindingShapeSolution::default();
-        shapes.add_constraint(
-            &BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberRead)
-                .with_property("foo"),
-        );
-        shapes.add_constraint(
-            &BindingConstraint::new(ModuleId(1), "ns", BindingConstraintKind::MemberWrite)
-                .with_property("bar"),
-        );
+        let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
 
         let program = EnrichedProgram::new(
             model,
             SemanticNameMap::default(),
             Vec::<PackageImportDecision>::new(),
-            shapes,
+            binding_shapes,
         );
 
         assert_eq!(
