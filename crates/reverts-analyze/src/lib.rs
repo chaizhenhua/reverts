@@ -280,15 +280,18 @@ fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> Audit
 }
 
 /// Surface the input-bundle pattern `X = (await fetch(...)).data.value;`
-/// followed by an unguarded `X.foo` member-read. ADR 0002 forbids
-/// repairing the input — we warn so the user knows the original bundle
-/// has a latent null deref, while keeping the emit faithful.
+/// followed by an unguarded member-read on a binding that aliases `X`.
+/// ADR 0002 forbids repairing the input — we warn so the user knows the
+/// original bundle has a latent null deref, while keeping the emit
+/// faithful.
 ///
-/// Current scope: only catches the DIRECT-access pattern (`X.foo` somewhere
-/// in the same module). Indirect exfiltration — e.g. `function get() {
-/// return X; }` then `get().foo` — is not yet detected (would require
-/// return-flow tracking that bridges identity through call results). The
-/// Claude Code `CT2 / UT2() / uH0` pattern is in this blind spot for now.
+/// The alias closure resolves direct accesses (`X.foo`) and any
+/// module-scope alias chain (`A = X; A.foo`, `A = getX(); A.foo` where
+/// `getX()` returns X and the call result is bound at module scope).
+/// Indirect access via function-local aliases (e.g. `let A` inside a
+/// function) is currently NOT caught — locals are filtered out of the
+/// fact extractor to avoid name collisions across nested functions, and
+/// proper scope-qualified binding identity is a follow-up.
 fn audit_unprotected_nullable_member_reads(model: &ProgramModel) -> AuditReport {
     use std::collections::BTreeSet;
     let mut audit = AuditReport::default();
@@ -307,21 +310,31 @@ fn audit_unprotected_nullable_member_reads(model: &ProgramModel) -> AuditReport 
             read_targets.insert((constraint.module_id, constraint.binding.clone()));
         }
     }
-    for (module_id, binding) in maybe_nullable {
-        if !read_targets.contains(&(*module_id, binding.clone())) {
-            continue;
+    // Build the reverse map: for each maybe-nullable source binding, find
+    // every binding that aliases (directly or transitively) back to it.
+    // The audit then fires when any of those aliases is member-read.
+    let mut already_reported: BTreeSet<(reverts_ir::ModuleId, reverts_ir::BindingName)> =
+        BTreeSet::new();
+    for (module_id, read_target) in &read_targets {
+        let aliases = def_use.alias_sources_of(*module_id, read_target.as_str());
+        for alias in &aliases {
+            let key = (*module_id, alias.clone());
+            if !maybe_nullable.contains(&key) || already_reported.contains(&key) {
+                continue;
+            }
+            already_reported.insert(key);
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::UnprotectedNullableMemberRead,
+                    format!(
+                        "binding '{}' is assigned from a member chain on a call/await result and later member-read without a null guard — the original bundle can crash here",
+                        alias.as_str()
+                    ),
+                )
+                .with_module(module_id.0.to_string())
+                .with_binding(alias.as_str().to_string()),
+            );
         }
-        audit.push(
-            AuditFinding::error(
-                FindingCode::UnprotectedNullableMemberRead,
-                format!(
-                    "binding '{}' is assigned from a member chain on a call/await result and later member-read without a null guard — the original bundle can crash here",
-                    binding.as_str()
-                ),
-            )
-            .with_module(module_id.0.to_string())
-            .with_binding(binding.as_str().to_string()),
-        );
     }
     audit
 }

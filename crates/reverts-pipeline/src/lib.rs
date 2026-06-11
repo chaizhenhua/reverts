@@ -1734,6 +1734,47 @@ mod tests {
     }
 
     #[test]
+    fn audit_warns_when_nullable_binding_aliased_at_module_scope_is_member_read() {
+        // Alias-closure exercise: X is written from a nullable chain, then
+        // a module-scope alias A = X picks it up, then A.foo is read. The
+        // direct `X.foo` doesn't exist, so the audit must walk the alias
+        // closure on the read target (A → X) to find the maybe-nullable
+        // source X.
+        //
+        // The p1 `CT2 / UT2() / uH0` pattern uses a function-local alias
+        // (`let A = getX()` inside `read()`); locals are currently
+        // outside the fact extractor's scope filter (to avoid name
+        // collisions across nested functions), so that exact case is not
+        // yet caught. Scope-qualified binding identity is the natural
+        // follow-up.
+        let source = concat!(
+            "var X;\n",
+            "var A;\n",
+            "async function setUp() {\n",
+            "    X = (await fetch('/x')).data.value;\n",
+            "}\n",
+            "function init() {\n",
+            "    A = X;\n",
+            "    return A.foo;\n",
+            "}\n",
+            "setUp();\n",
+            "init();\n",
+        );
+        let rows = rows_with_application_source(source);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should run");
+
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| finding.code == FindingCode::UnprotectedNullableMemberRead)
+            .expect("audit must fire on X via the alias closure A → X");
+        assert_eq!(finding.binding.as_deref(), Some("X"));
+    }
+
+    #[test]
     fn audit_does_not_warn_when_only_object_literal_writes_target_binding() {
         // Negative control: a binding only assigned from object literals
         // (no chained call/await on the RHS) must NOT trip the audit.
