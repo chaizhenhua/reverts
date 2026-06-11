@@ -27,6 +27,35 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 6] {
     ]
 }
 
+use oxc_codegen::{CodeGenerator, CodegenOptions};
+use oxc_parser::Parser;
+use oxc_span::SourceType;
+
+/// Test/debug helper. Parses TypeScript-permissive source, runs `pass`,
+/// re-emits, returns the printed string. Bails if the input fails to parse.
+pub fn apply_to_source(pass: &dyn NormalizationPass, source: &str) -> Result<String, String> {
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true);
+    let parsed = Parser::new(&alloc, source, source_type).parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return Err(format!(
+            "parse failed: {}",
+            parsed
+                .errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
+    let mut program = parsed.program;
+    pass.apply(&alloc, &mut program);
+    let printed = CodeGenerator::new()
+        .with_options(CodegenOptions::default())
+        .build(&program);
+    Ok(printed.code)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
