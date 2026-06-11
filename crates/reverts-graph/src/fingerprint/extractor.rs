@@ -1,8 +1,16 @@
+use oxc_allocator::Allocator;
 use oxc_ast::Visit;
-use oxc_ast::ast::{ArrowFunctionExpression, Function, Program};
-use oxc_span::GetSpan;
+use oxc_ast::ast::{
+    ArrowFunctionExpression, Declaration, FormalParameters, Function, FunctionBody, Program,
+    Statement,
+};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
-use reverts_ir::{ByteRange, FunctionId, ModuleId};
+use reverts_ir::{
+    AxisHashes, ByteRange, ControlFlowGraph, FunctionFingerprint, FunctionId, ModuleId,
+};
+use reverts_js::normalize::{apply_to_source, stable_passes};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedFunction {
@@ -58,6 +66,176 @@ impl<'a> Visit<'a> for FunctionExtractor {
             is_generator: false,
         });
         oxc_ast::visit::walk::walk_arrow_function_expression(self, arrow);
+    }
+}
+
+impl FunctionExtractor {
+    /// Computes per-function fingerprints with primary axes plus one alternate
+    /// per normalization pass. Returns empty if the source fails to parse.
+    #[must_use]
+    pub fn fingerprint(
+        module_id: ModuleId,
+        source: &str,
+        cfg: &ControlFlowGraph,
+    ) -> Vec<FunctionFingerprint> {
+        let alloc = Allocator::default();
+        let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+        let parsed = Parser::new(&alloc, source, source_type).parse();
+        if parsed.panicked || !parsed.errors.is_empty() {
+            return Vec::new();
+        }
+        let primary_extracts = Self::new(module_id).extract(&parsed.program);
+
+        let mut out: Vec<FunctionFingerprint> = primary_extracts
+            .iter()
+            .filter_map(|f| {
+                let (params, body) = locate_function(&parsed.program, f.id.span)?;
+                let (acc_p, acc_s) = super::access::compute(body);
+                let axes = AxisHashes {
+                    ast: super::ast::compute(body),
+                    cfg: super::cfg::compute(cfg, module_id, f.id.span),
+                    return_pattern: super::return_pattern::compute(body),
+                    effect_pattern: super::effect_pattern::compute(body),
+                    literal_anchor: super::literal_anchor::compute(body),
+                    access_pattern: acc_p,
+                    structural_anchor: super::structural_anchor::compute(params, body),
+                    literal_shape: super::literal_shape::compute(body),
+                    access_shape: acc_s,
+                    callee_set: super::callee_set::compute(body),
+                    binding_pattern: super::binding_pattern::compute(params, body),
+                    throw_set: super::throw_set::compute(body),
+                };
+                Some(FunctionFingerprint {
+                    id: f.id,
+                    param_count: f.param_count,
+                    statement_count: f.statement_count,
+                    primary: axes,
+                    alternates: Vec::new(),
+                })
+            })
+            .collect();
+
+        for pass in stable_passes() {
+            let Ok(transformed) = apply_to_source(pass.as_ref(), source) else {
+                continue;
+            };
+            let alt_alloc = Allocator::default();
+            let alt_parsed = Parser::new(&alt_alloc, &transformed, source_type).parse();
+            if alt_parsed.panicked || !alt_parsed.errors.is_empty() {
+                continue;
+            }
+            let alt_extracts = Self::new(module_id).extract(&alt_parsed.program);
+            for (i, alt_fn) in alt_extracts.iter().enumerate() {
+                let Some(fp) = out.get_mut(i) else {
+                    break;
+                };
+                if fp.param_count != alt_fn.param_count {
+                    continue;
+                }
+                let Some((params, body)) = locate_function(&alt_parsed.program, alt_fn.id.span)
+                else {
+                    continue;
+                };
+                let (acc_p, acc_s) = super::access::compute(body);
+                let axes = AxisHashes {
+                    ast: super::ast::compute(body),
+                    cfg: fp.primary.cfg,
+                    return_pattern: super::return_pattern::compute(body),
+                    effect_pattern: super::effect_pattern::compute(body),
+                    literal_anchor: super::literal_anchor::compute(body),
+                    access_pattern: acc_p,
+                    structural_anchor: super::structural_anchor::compute(params, body),
+                    literal_shape: super::literal_shape::compute(body),
+                    access_shape: acc_s,
+                    callee_set: super::callee_set::compute(body),
+                    binding_pattern: super::binding_pattern::compute(params, body),
+                    throw_set: super::throw_set::compute(body),
+                };
+                fp.alternates.push((pass.id(), axes));
+            }
+        }
+        out
+    }
+}
+
+fn locate_function<'a>(
+    program: &'a oxc_ast::ast::Program<'a>,
+    span: ByteRange,
+) -> Option<(&'a FormalParameters<'a>, &'a FunctionBody<'a>)> {
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(f) => {
+                let s = f.span();
+                if s.start == span.start && s.end == span.end {
+                    let body = f.body.as_deref()?;
+                    return Some((&f.params, body));
+                }
+            }
+            Statement::ExportNamedDeclaration(exp) => {
+                if let Some(Declaration::FunctionDeclaration(f)) = &exp.declaration {
+                    let s = f.span();
+                    if s.start == span.start && s.end == span.end {
+                        let body = f.body.as_deref()?;
+                        return Some((&f.params, body));
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(exp) => {
+                use oxc_ast::ast::ExportDefaultDeclarationKind;
+                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &exp.declaration {
+                    let s = f.span();
+                    if s.start == span.start && s.end == span.end {
+                        let body = f.body.as_deref()?;
+                        return Some((&f.params, body));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use reverts_ir::ControlFlowGraph;
+
+    #[test]
+    fn alpha_renamed_functions_share_primary_ast_hash() {
+        let src1 = "function f(a, b) { return a + b; }";
+        let src2 = "function g(x, y) { return x + y; }";
+        let cfg = ControlFlowGraph::default();
+        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1, &cfg);
+        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2, &cfg);
+        assert_eq!(fp1.len(), 1);
+        assert_eq!(fp2.len(), 1);
+        assert_eq!(fp1[0].primary.ast, fp2[0].primary.ast);
+    }
+
+    #[test]
+    fn export_keyword_collapse_lands_as_alternate() {
+        let src1 = "export function f(a) { return a; }";
+        let src2 = "function f(a) { return a; }";
+        let cfg = ControlFlowGraph::default();
+        let fp1 = FunctionExtractor::fingerprint(ModuleId(1), src1, &cfg);
+        let fp2 = FunctionExtractor::fingerprint(ModuleId(2), src2, &cfg);
+        assert!(!fp1.is_empty() && !fp2.is_empty());
+
+        let target = fp2[0].primary.ast;
+        let primary_match = fp1[0].primary.ast == target;
+        let alt_match = fp1[0].alternates.iter().any(|(_, a)| a.ast == target);
+        assert!(
+            primary_match || alt_match,
+            "expected export-normalized variant to align with plain via primary or alternate"
+        );
+    }
+
+    #[test]
+    fn fingerprint_returns_empty_on_parse_error() {
+        let cfg = ControlFlowGraph::default();
+        let fp = FunctionExtractor::fingerprint(ModuleId(1), "function f( { )", &cfg);
+        assert!(fp.is_empty());
     }
 }
 
