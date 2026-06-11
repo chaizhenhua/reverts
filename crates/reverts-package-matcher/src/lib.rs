@@ -19,6 +19,9 @@ use reverts_input::{
     InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
     PackageSurfaceInput,
 };
+use reverts_ir::hash::{
+    FNV_OFFSET_BASIS, fnv1a_hex as stable_hash, update_fnv1a as update_stable_hash,
+};
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 use reverts_js::{
     JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
@@ -1346,21 +1349,6 @@ fn normalize_source(path: &str, source: &str) -> Result<String, String> {
         .map_err(|error| parse_error_message(&error, "source could not be parsed"))
 }
 
-fn stable_hash(bytes: &[u8]) -> String {
-    let mut hash = FNV_OFFSET_BASIS;
-    update_stable_hash(&mut hash, bytes);
-    format!("{hash:016x}")
-}
-
-fn update_stable_hash(hash: &mut u64, bytes: &[u8]) {
-    for byte in bytes {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
-const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0100_0000_01b3;
 const MIN_STRING_ANCHOR_LEN: usize = 3;
 const SOURCE_HASH_WEIGHT: u32 = 10_000;
 const MODULE_MATCH_WEIGHT: u32 = 1_000;

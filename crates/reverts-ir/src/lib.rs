@@ -7,6 +7,8 @@ pub use byte_range::{ByteRange, FunctionId};
 mod fingerprint;
 pub use fingerprint::{AxisHashes, AxisKind, FunctionFingerprint, NormalizationPassId};
 
+pub mod hash;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(pub u32);
 
