@@ -763,9 +763,21 @@ mod tests {
             BindingConstraintKind::MemberRead,
         ));
 
+        // Same binding name in a different module must be isolated — both
+        // modules track their own member set against the `(ModuleId, name)`
+        // key, never bleeding across.
+        graph.constrain(
+            BindingConstraint::new(ModuleId(2), "ns", BindingConstraintKind::MemberRead)
+                .with_property("only_in_module_two"),
+        );
+
         let members = graph.members_accessed_on(ModuleId(1), "ns");
         let names: Vec<_> = members.iter().map(BindingName::as_str).collect();
         assert_eq!(names, vec!["bar", "foo"]);
+
+        let module_two_members = graph.members_accessed_on(ModuleId(2), "ns");
+        let module_two_names: Vec<_> = module_two_members.iter().map(BindingName::as_str).collect();
+        assert_eq!(module_two_names, vec!["only_in_module_two"]);
 
         // Unknown binding returns an empty set.
         assert!(graph.members_accessed_on(ModuleId(1), "absent").is_empty());
