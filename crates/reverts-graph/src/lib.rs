@@ -2398,6 +2398,37 @@ mod tests {
     }
 
     #[test]
+    fn ast_fact_extractor_stops_at_chained_access_through_parens_and_ts_wrappers() {
+        // Parenthesised and TS-cast expressions wrapping a member access
+        // should not "see through" the member to attach a deeper property
+        // back onto the original binding. The `direct_member_object` helper
+        // must accept identifier-through-wrappers but stop at member exprs.
+        let source = r#"
+            const ns = {};
+            (ns).foo.bar;
+            (ns as any).foo.baz;
+            ((ns)!).foo.qux;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let members = graph.def_use().members_accessed_on(ModuleId(1), "ns");
+        let names: Vec<&str> = members.iter().map(BindingName::as_str).collect();
+        // Only `foo` is a direct property of `ns`; `bar`, `baz`, `qux` are
+        // properties of `(ns…).foo` regardless of the wrapping form.
+        assert_eq!(names, vec!["foo"]);
+    }
+
+    #[test]
     fn ast_fact_extractor_only_records_direct_property_on_chained_member_access() {
         // Regression: `expression_identifier` recurses through nested member
         // expressions, so before this fix `ns.foo.bar` recorded `bar` as a
