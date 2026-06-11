@@ -163,4 +163,61 @@ mod tests {
         let h2 = hash_first_function("function f() { let x = 1; }");
         assert_ne!(h1, h2);
     }
+
+    // -- Sugar-strict design intent (regression locks) ------------------------
+    //
+    // Legacy `reverts/src/engine/equivalence/ast_compare.rs` treats these pairs
+    // as EQUIVALENT under its sugar rules. Our `ast` axis is intentionally
+    // strict: it hashes the syntactic AST without sugar collapsing, so each
+    // pair below must hash DIFFERENTLY. The `cfg` axis is the right place to
+    // collide on control-flow sugar — `ast` is not.
+    //
+    // These reverse assertions pin the design intent: if someone later adds
+    // sugar collapsing to `ast::compute` they will see test regressions and
+    // be forced to decide whether the change is intentional.
+
+    #[test]
+    fn ast_hash_distinguishes_ternary_return_from_if_else_return() {
+        // Legacy ast_compare.rs §"Conditional <-> If" considers these equivalent.
+        let ternary = hash_first_function("function f(x) { return x ? 1 : 2; }");
+        let if_else = hash_first_function("function f(x) { if (x) return 1; return 2; }");
+        assert_ne!(
+            ternary, if_else,
+            "ast axis must remain syntactic; sugar collapsing belongs to cfg axis"
+        );
+    }
+
+    #[test]
+    fn ast_hash_distinguishes_var_let_const_kinds() {
+        // Legacy `// Note: var/let/const kind differences are allowed with sugar rules`.
+        // Our hasher mixes `format!("{:?}", v.kind)` into the digest so each
+        // declarator kind has a distinct hash.
+        let var_decl = hash_first_function("function f() { var x = 1; return x; }");
+        let let_decl = hash_first_function("function f() { let x = 1; return x; }");
+        let const_decl = hash_first_function("function f() { const x = 1; return x; }");
+        assert_ne!(var_decl, let_decl);
+        assert_ne!(let_decl, const_decl);
+        assert_ne!(var_decl, const_decl);
+    }
+
+    #[test]
+    fn ast_hash_distinguishes_arrow_from_function_expression() {
+        // Legacy treats `() => x` and `function () { return x; }` as sugar
+        // alternatives. The orchestrator's `ClosureBoundaryAligned` pass may
+        // align some IIFE forms, but the raw `ast` axis must distinguish.
+        let arrow = hash_first_function("function f() { return () => 1; }");
+        let fn_expr = hash_first_function("function f() { return function () { return 1; }; }");
+        assert_ne!(arrow, fn_expr);
+    }
+
+    #[test]
+    fn ast_hash_distinguishes_sequence_from_last_expression() {
+        // Legacy "Sequence unwrapping" collapses `(a, b, c)` to its last
+        // element when comparing. The raw `ast` axis must keep the comma
+        // expression distinct so that bundler-introduced sequencing is
+        // visible at this level.
+        let seq = hash_first_function("function f(a, b, c) { return (a, b, c); }");
+        let last = hash_first_function("function f(a, b, c) { return c; }");
+        assert_ne!(seq, last);
+    }
 }
