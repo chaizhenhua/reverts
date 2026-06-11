@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
@@ -95,21 +95,20 @@ impl RuntimePrelude {
         bindings: impl Iterator<Item = &'a BindingName>,
     ) -> BTreeSet<BindingName> {
         let mut needed = bindings.cloned().collect::<BTreeSet<_>>();
+        let mut pending = needed.iter().cloned().collect::<VecDeque<_>>();
         let mut visited = BTreeSet::<BindingName>::new();
 
-        while let Some(binding) = needed
-            .iter()
-            .find(|binding| !visited.contains(*binding))
-            .cloned()
-        {
-            visited.insert(binding.clone());
+        while let Some(binding) = pending.pop_front() {
+            if !visited.insert(binding.clone()) {
+                continue;
+            }
             let Some(snippet) = self.snippets.get(&binding) else {
                 continue;
             };
             for identifier in identifiers_in_source(snippet.source.as_str()) {
                 let candidate = BindingName::new(identifier);
-                if self.bindings.contains_key(&candidate) && !visited.contains(&candidate) {
-                    needed.insert(candidate);
+                if self.bindings.contains_key(&candidate) && needed.insert(candidate.clone()) {
+                    pending.push_back(candidate);
                 }
             }
             for namespace_export in &self.namespace_exports {
@@ -117,8 +116,8 @@ impl RuntimePrelude {
                     continue;
                 }
                 for target in namespace_export.exports.values() {
-                    if self.bindings.contains_key(target) && !visited.contains(target) {
-                        needed.insert(target.clone());
+                    if self.bindings.contains_key(target) && needed.insert(target.clone()) {
+                        pending.push_back(target.clone());
                     }
                 }
             }

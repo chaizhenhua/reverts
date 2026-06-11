@@ -560,7 +560,6 @@ impl ImportExportPlanner {
 
             plan.push_file(file);
         }
-
         if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
             used_runtime_helper_files
                 .entry(entrypoint.source_file_id)
@@ -600,32 +599,32 @@ impl ImportExportPlanner {
                     }
                 }
             }
-            let mut source_bindings = prelude.required_bindings_for(root_bindings.iter());
-            let namespace_exports =
-                runtime_namespace_exports_for_helpers(prelude, &source_bindings);
-            for namespace_export in &namespace_exports {
-                source_bindings.extend(namespace_export.exports.values().cloned());
-            }
-            source_bindings = prelude.required_bindings_for(source_bindings.iter());
             let folded_chunks = runtime_lazy_folds
                 .chunks_by_source_file
                 .get(source_file_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let helper_source = runtime_helper_source(
-                prelude,
-                &source_bindings,
-                &namespace_exports,
-                entrypoint,
-                folded_chunks,
-            );
+            let helper_closure =
+                close_runtime_helper_source(prelude, &root_bindings, entrypoint, folded_chunks);
             let helper_imports = runtime_source_module_imports(
                 program,
-                prelude,
-                helper_source.as_str(),
+                helper_closure.source.as_str(),
+                &helper_closure.emitted_bindings,
                 &externalized_packages,
             );
             let helper_path = runtime_helpers_path(*source_file_id);
+            let unresolved = unresolved_runtime_helper_references(
+                prelude,
+                helper_closure.source.as_str(),
+                &helper_closure.emitted_bindings,
+                &helper_imports,
+            );
+            if !unresolved.is_empty() {
+                return Err(PlanError::UnresolvedRuntimeHelperReferences {
+                    path: helper_path,
+                    bindings: unresolved.into_iter().collect(),
+                });
+            }
             for (module_id, bindings) in &helper_imports {
                 ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
                 let Some(module_path) = module_output_path(program, *module_id) else {
@@ -635,7 +634,7 @@ impl ImportExportPlanner {
                     relative_import_specifier(helper_path.as_str(), module_path.as_str());
                 file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
             }
-            file.push_source(helper_source);
+            file.push_source(helper_closure.source);
             let setter_bindings = used_runtime_helper_setters
                 .get(source_file_id)
                 .cloned()
@@ -872,10 +871,9 @@ fn runtime_lazy_fold_plan(
         }
         let folded_source =
             purify_folded_lazy_initializers(folded_source.as_str(), &source.written_helpers);
-        let available_bindings = top_level_definitions_in_source(folded_source.as_str())
-            .into_iter()
-            .chain(source.written_helpers.iter().cloned())
-            .collect::<BTreeSet<_>>();
+        let mut available_bindings = program.model().graph().ast_definitions_for(module.id);
+        available_bindings.extend(program.model().graph().ast_imports_for(module.id));
+        available_bindings.extend(source.written_helpers.iter().cloned());
         let mut stub_exports = program
             .model()
             .graph()
@@ -1677,6 +1675,74 @@ fn runtime_entrypoint_root_bindings(
     source_bindings
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClosedRuntimeHelperSource {
+    emitted_bindings: BTreeSet<BindingName>,
+    source: String,
+}
+
+fn close_runtime_helper_source(
+    prelude: &RuntimePrelude,
+    root_bindings: &BTreeSet<BindingName>,
+    entrypoint: Option<&RuntimeEntrypoint>,
+    folded_chunks: &[RuntimeFoldedSourceChunk],
+) -> ClosedRuntimeHelperSource {
+    let mut source_bindings = prelude.required_bindings_for(root_bindings.iter());
+
+    loop {
+        let namespace_exports = runtime_namespace_exports_for_helpers(prelude, &source_bindings);
+        let mut roots = source_bindings.clone();
+        for namespace_export in &namespace_exports {
+            roots.extend(namespace_export.exports.values().cloned());
+        }
+
+        let source_bindings_with_namespaces = prelude.required_bindings_for(roots.iter());
+        let helper_source = runtime_helper_source(
+            prelude,
+            &source_bindings_with_namespaces,
+            &namespace_exports,
+            entrypoint,
+            folded_chunks,
+        );
+        let mut next_roots = source_bindings_with_namespaces.clone();
+        for identifier in runtime_import_identifiers_in_source(helper_source.as_str()) {
+            let binding = BindingName::new(identifier);
+            if prelude.defines(&binding) {
+                next_roots.insert(binding);
+            }
+        }
+        let next_source_bindings = prelude.required_bindings_for(next_roots.iter());
+        if next_source_bindings == source_bindings_with_namespaces {
+            let namespace_exports =
+                runtime_namespace_exports_for_helpers(prelude, &next_source_bindings);
+            let source = runtime_helper_source(
+                prelude,
+                &next_source_bindings,
+                &namespace_exports,
+                entrypoint,
+                folded_chunks,
+            );
+            return ClosedRuntimeHelperSource {
+                emitted_bindings: emitted_runtime_helper_bindings(prelude, &next_source_bindings),
+                source,
+            };
+        }
+
+        source_bindings = next_source_bindings;
+    }
+}
+
+fn emitted_runtime_helper_bindings(
+    prelude: &RuntimePrelude,
+    bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    bindings
+        .iter()
+        .filter(|binding| prelude.snippets.contains_key(*binding))
+        .cloned()
+        .collect()
+}
+
 fn runtime_helper_source(
     prelude: &RuntimePrelude,
     source_bindings: &BTreeSet<BindingName>,
@@ -1778,15 +1844,17 @@ fn compact_js_source(source: &str) -> String {
 
 fn runtime_source_module_imports(
     program: &EnrichedProgram,
-    prelude: &reverts_graph::RuntimePrelude,
     source: &str,
+    satisfied_runtime_bindings: &BTreeSet<BindingName>,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let definition_modules = unique_source_definition_modules(program, externalized_packages);
     let mut imports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-    for identifier in runtime_import_identifiers_in_source(source) {
+    let mut runtime_import_identifiers = runtime_import_identifiers_in_source(source);
+    runtime_import_identifiers.extend(call_identifiers_in_source(source));
+    for identifier in runtime_import_identifiers {
         let binding = BindingName::new(identifier);
-        if prelude.defines(&binding) {
+        if satisfied_runtime_bindings.contains(&binding) {
             continue;
         }
         let Some(Some(module_id)) = definition_modules.get(&binding) else {
@@ -1800,6 +1868,27 @@ fn runtime_source_module_imports(
     imports
 }
 
+fn unresolved_runtime_helper_references(
+    prelude: &RuntimePrelude,
+    source: &str,
+    emitted_runtime_bindings: &BTreeSet<BindingName>,
+    imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) -> BTreeSet<BindingName> {
+    let imported = imports
+        .values()
+        .flat_map(|bindings| bindings.iter().cloned())
+        .collect::<BTreeSet<_>>();
+
+    runtime_import_identifiers_in_source(source)
+        .into_iter()
+        .map(BindingName::new)
+        .filter(|binding| prelude.defines(binding))
+        .filter(|binding| !emitted_runtime_bindings.contains(binding))
+        .filter(|binding| !imported.contains(binding))
+        .filter(|binding| !binding.as_str().starts_with("__reverts_"))
+        .collect()
+}
+
 fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
     let local_bindings = local_bindings_in_source(source);
     value_identifiers_in_source(source)
@@ -1809,8 +1898,9 @@ fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
+fn call_identifiers_in_source(source: &str) -> BTreeSet<String> {
     let mut identifiers = BTreeSet::new();
+    let class_field_bindings = class_field_bindings_in_source(source);
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
@@ -1834,6 +1924,47 @@ fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
                 }
                 let identifier = &source[start..cursor];
                 if !is_js_keyword(identifier)
+                    && !is_runtime_global_identifier(identifier)
+                    && !class_field_bindings.contains_key(&start)
+                    && bytes.get(skip_ws(bytes, cursor)) == Some(&b'(')
+                    && identifier_occurrence_is_value_reference(source, start, cursor)
+                {
+                    identifiers.insert(identifier.to_string());
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    identifiers
+}
+
+fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
+    let mut identifiers = BTreeSet::new();
+    let class_field_bindings = class_field_bindings_in_source(source);
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'`' => cursor = collect_template_value_identifiers(source, cursor, &mut identifiers),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                let identifier = &source[start..cursor];
+                if !is_js_keyword(identifier)
+                    && !class_field_bindings.contains_key(&start)
                     && identifier_occurrence_is_value_reference(source, start, cursor)
                 {
                     identifiers.insert(identifier.to_string());
@@ -1881,6 +2012,9 @@ fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usi
 
     let after = skip_ws(bytes, end);
     let before = previous_non_ws(bytes, start).and_then(|index| bytes.get(index));
+    if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>') {
+        return false;
+    }
     if bytes.get(after) == Some(&b':')
         && previous_non_ws(bytes, start)
             .and_then(|index| bytes.get(index))
@@ -1904,6 +2038,150 @@ fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usi
     }
 
     true
+}
+
+fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
+    let bytes = source.as_bytes();
+    let Some(before) = previous_non_ws(bytes, open_paren) else {
+        return false;
+    };
+    let mut start = before;
+    while start > 0 && is_identifier_continue(bytes[start - 1]) {
+        start -= 1;
+    }
+    matches!(
+        &source[start..=before],
+        "if" | "while" | "switch" | "for" | "catch" | "with"
+    )
+}
+
+fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
+    let mut bindings = BTreeMap::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            _ if keyword_at(source, cursor, "class") => {
+                let Some(open) = find_class_body_open(source, cursor + "class".len()) else {
+                    cursor += "class".len();
+                    continue;
+                };
+                let Some(close) = find_matching_brace(source, open) else {
+                    cursor = bytes.len();
+                    continue;
+                };
+                collect_class_field_bindings(source, open + 1, close, &mut bindings);
+                cursor = close + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    bindings
+}
+
+fn find_class_body_open(source: &str, mut cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'{' => return Some(cursor),
+            b';' => return None,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn collect_class_field_bindings(
+    source: &str,
+    body_start: usize,
+    body_end: usize,
+    bindings: &mut BTreeMap<usize, String>,
+) {
+    let bytes = source.as_bytes();
+    let mut cursor = body_start;
+    let mut nested_braces = 0usize;
+    let mut nested_brackets = 0usize;
+    let mut nested_parens = 0usize;
+    while cursor < body_end && cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'{' => {
+                nested_braces += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                nested_braces = nested_braces.saturating_sub(1);
+                cursor += 1;
+            }
+            b'[' => {
+                nested_brackets += 1;
+                cursor += 1;
+            }
+            b']' => {
+                nested_brackets = nested_brackets.saturating_sub(1);
+                cursor += 1;
+            }
+            b'(' => {
+                nested_parens += 1;
+                cursor += 1;
+            }
+            b')' => {
+                nested_parens = nested_parens.saturating_sub(1);
+                cursor += 1;
+            }
+            byte if nested_braces == 0
+                && nested_brackets == 0
+                && nested_parens == 0
+                && is_identifier_start(byte) =>
+            {
+                let start = cursor;
+                cursor += 1;
+                while cursor < body_end
+                    && cursor < bytes.len()
+                    && is_identifier_continue(bytes[cursor])
+                {
+                    cursor += 1;
+                }
+                let after = skip_ws(bytes, cursor);
+                if bytes
+                    .get(after)
+                    .is_some_and(|byte| matches!(*byte, b';' | b'='))
+                {
+                    bindings.insert(start, source[start..cursor].to_string());
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
 }
 
 fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
@@ -1954,6 +2232,32 @@ fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
                 cursor =
                     collect_local_variable_bindings(source, cursor + "const".len(), &mut bindings);
             }
+            b'(' => {
+                let Some(close) = find_matching_paren(source, cursor) else {
+                    cursor += 1;
+                    continue;
+                };
+                let after = skip_ws(bytes, close + 1);
+                if !control_flow_keyword_before_paren(source, cursor)
+                    && (bytes.get(after) == Some(&b'{')
+                        || (bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>')))
+                {
+                    collect_binding_pattern_identifiers(&source[cursor + 1..close], &mut bindings);
+                }
+                cursor += 1;
+            }
+            byte if is_identifier_start(byte) => {
+                let start = cursor;
+                cursor += 1;
+                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                    cursor += 1;
+                }
+                if bytes.get(skip_ws(bytes, cursor)) == Some(&b'=')
+                    && bytes.get(skip_ws(bytes, cursor) + 1) == Some(&b'>')
+                {
+                    bindings.insert(source[start..cursor].to_string());
+                }
+            }
             _ => cursor += 1,
         }
     }
@@ -1998,7 +2302,20 @@ fn collect_local_variable_bindings(
                 b'/' if looks_like_regex_literal(bytes, cursor) => {
                     cursor = skip_regex_literal(bytes, cursor);
                 }
-                b'(' | b'[' | b'{' => {
+                b'(' => {
+                    if let Some(close) = find_matching_paren(source, cursor) {
+                        let after = skip_ws(bytes, close + 1);
+                        if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>') {
+                            collect_binding_pattern_identifiers(
+                                &source[cursor + 1..close],
+                                bindings,
+                            );
+                        }
+                    }
+                    nested += 1;
+                    cursor += 1;
+                }
+                b'[' | b'{' => {
                     nested += 1;
                     cursor += 1;
                 }
@@ -2014,6 +2331,17 @@ fn collect_local_variable_bindings(
                     break;
                 }
                 b';' if nested == 0 => return cursor + 1,
+                byte if is_identifier_start(byte) => {
+                    let start = cursor;
+                    cursor += 1;
+                    while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                        cursor += 1;
+                    }
+                    let after = skip_ws(bytes, cursor);
+                    if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>') {
+                        bindings.insert(source[start..cursor].to_string());
+                    }
+                }
                 _ => cursor += 1,
             }
         }
@@ -2205,6 +2533,7 @@ fn source_required_package_modules(
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
+    let exportable_bindings_by_module = source_exportable_bindings_by_module(program);
     let mut required = BTreeSet::new();
 
     loop {
@@ -2231,8 +2560,10 @@ fn source_required_package_modules(
             else {
                 continue;
             };
-            let target_bindings = source_exportable_bindings(program, target_module_id);
-            if candidate_reads.is_disjoint(&target_bindings) {
+            let Some(target_bindings) = exportable_bindings_by_module.get(&target_module_id) else {
+                continue;
+            };
+            if candidate_reads.is_disjoint(target_bindings) {
                 continue;
             }
             required.insert(target_module_id);
@@ -2258,6 +2589,7 @@ fn source_module_wiring(
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
+    let exportable_bindings_by_module = source_exportable_bindings_by_module(program);
 
     for dependency in &program.model().input().dependencies {
         let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
@@ -2280,9 +2612,11 @@ fn source_module_wiring(
         else {
             continue;
         };
-        let target_bindings = source_exportable_bindings(program, target_module_id);
+        let Some(target_bindings) = exportable_bindings_by_module.get(&target_module_id) else {
+            continue;
+        };
         let imported_bindings = candidate_reads
-            .intersection(&target_bindings)
+            .intersection(target_bindings)
             .cloned()
             .collect::<BTreeSet<_>>();
         if imported_bindings.is_empty() {
@@ -2334,6 +2668,17 @@ fn source_exportable_bindings(
     let mut bindings = source_definition_bindings(program, module_id);
     bindings.extend(program.model().graph().ast_imports_for(module_id));
     bindings
+}
+
+fn source_exportable_bindings_by_module(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, source_exportable_bindings(program, module.id)))
+        .collect()
 }
 
 fn source_definition_bindings(
@@ -2972,6 +3317,7 @@ fn implicit_global_declarations_for_module(
 fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
     let mut writes = BTreeSet::new();
     let declaration_bindings = variable_declaration_binding_starts(source);
+    let class_field_bindings = class_field_bindings_in_source(source);
     let bytes = source.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -3029,6 +3375,7 @@ fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
                         .checked_sub(1)
                         .and_then(|index| bytes.get(index))
                         .is_none_or(|byte| !matches!(*byte, b'.' | b'#'))
+                    && !class_field_bindings.contains_key(&start)
                 {
                     let after = skip_ws(bytes, cursor);
                     if (bytes.get(after) == Some(&b'=')
@@ -4132,6 +4479,10 @@ pub enum PlanError {
         path: String,
         message: String,
     },
+    UnresolvedRuntimeHelperReferences {
+        path: String,
+        bindings: Vec<BindingName>,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -4146,6 +4497,17 @@ impl fmt::Display for PlanError {
                 "module {} source {} failed normalization: {message}",
                 module_id.0, path
             ),
+            Self::UnresolvedRuntimeHelperReferences { path, bindings } => {
+                let bindings = bindings
+                    .iter()
+                    .map(BindingName::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(
+                    formatter,
+                    "runtime helper {path} has unresolved references: {bindings}"
+                )
+            }
         }
     }
 }
@@ -4154,9 +4516,9 @@ impl Error for PlanError {}
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
-    use reverts_graph::RuntimePreludeBindingKind;
+    use reverts_graph::{RuntimePrelude, RuntimePreludeBindingKind};
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, PackageAttributionStatus, PackageSurfaceInput, ProjectInput,
@@ -5337,7 +5699,8 @@ mod tests {
         let identifiers = super::runtime_import_identifiers_in_source(
             "function local() { function nested() {} }\n\
              let { isReady: localAlias } = source;\n\
-             class Transport { buffer = Buffer.alloc(0); async start() {} stop() {} }\n\
+             class Transport { buffer = Buffer.alloc(0); isBridge; async start() {} stop() {} }\n\
+             const reader = (event) => event.ready;\n\
              as.command('servers');\n\
              console.log(request.method); Promise.resolve().then(() => (packageInit(), ns));",
         );
@@ -5357,8 +5720,150 @@ mod tests {
         assert!(!identifiers.contains("nested"));
         assert!(!identifiers.contains("localAlias"));
         assert!(!identifiers.contains("buffer"));
+        assert!(!identifiers.contains("isBridge"));
+        assert!(!identifiers.contains("event"));
         assert!(!identifiers.contains("start"));
         assert!(!identifiers.contains("stop"));
+    }
+
+    #[test]
+    fn call_identifier_scan_keeps_direct_initializer_calls_with_local_name_collision() {
+        let identifiers = super::call_identifiers_in_source(
+            "const local = ({ e3 }) => e3;\n\
+             e3();\n\
+             object.e3();\n\
+             function e3Local() {}\n",
+        );
+
+        assert!(identifiers.contains("e3"));
+        assert!(!identifiers.contains("e3Local"));
+    }
+
+    #[test]
+    fn class_fields_are_not_implicit_global_writes() {
+        let writes = super::implicit_global_writes_in_source(
+            "class Transport { isBridge = false; ready; method() { this.ready = true; } }\n\
+             shared = 1;",
+        );
+
+        assert!(writes.contains(&BindingName::new("shared")));
+        assert!(!writes.contains(&BindingName::new("isBridge")));
+        assert!(!writes.contains(&BindingName::new("ready")));
+    }
+
+    #[test]
+    fn runtime_helper_closure_keeps_recursive_prelude_dependencies() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "function first() { return second(); }\n",
+            "function second() { return third(); }\n",
+            "function third() { return 3; }\n",
+        );
+        let body = "var value = first();\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(helper_source.contains("function first()"));
+        assert!(helper_source.contains("function second()"));
+        assert!(helper_source.contains("function third()"));
+        assert!(helper_source.contains("export { first };"));
+    }
+
+    #[test]
+    fn lazy_folded_source_keeps_prelude_dependencies_used_by_folded_chunk() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "function buildShared() { return 42; }\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = buildShared(); });\n",
+            "export { initShared, shared };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let helper_source = helper_file.body.join("\n");
+
+        assert!(helper_source.contains("function buildShared()"));
+        assert!(helper_source.contains("shared = buildShared();"));
+        assert!(helper_source.contains("export { initShared, shared };"));
+    }
+
+    #[test]
+    fn runtime_helper_self_audit_rejects_unresolved_references() {
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: String::new(),
+            bindings: BTreeMap::from([(
+                BindingName::new("missingHelper"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::new(),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let unresolved = super::unresolved_runtime_helper_references(
+            &prelude,
+            "function main() { return missingHelper(); }\n",
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            unresolved,
+            BTreeSet::from([BindingName::new("missingHelper")])
+        );
     }
 
     #[test]
