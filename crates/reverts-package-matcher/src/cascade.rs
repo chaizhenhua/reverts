@@ -3,6 +3,7 @@ use reverts_package_index::PackageFingerprintIndex;
 
 use crate::tier::{
     FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
+    try_structural_only,
 };
 
 #[must_use]
@@ -14,6 +15,7 @@ pub fn match_function(
         .or_else(|| try_exact_alternate(fp, index))
         .or_else(|| try_structural_anchored(fp, index))
         .or_else(|| try_feature_similarity(fp, index))
+        .or_else(|| try_structural_only(fp, index))
 }
 
 #[cfg(test)]
@@ -23,7 +25,7 @@ mod tests {
         AxisHashes, AxisKind, ByteRange, FunctionId, MatchTier, ModuleId, NormalizationPassId,
     };
     use reverts_package_index::{
-        Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId,
+        Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
     };
 
     fn sample_axes(ast: u64) -> AxisHashes {
@@ -362,5 +364,78 @@ mod tests {
         };
 
         assert!(match_function(&fp, &idx).is_none());
+    }
+
+    #[test]
+    fn structural_only_accepts_unique_low_frequency_candidate() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        idx.insert_structural(
+            StructuralKey {
+                param_count: 1,
+                structural_anchor: 77,
+            },
+            Candidate {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1".into(),
+                },
+                variant_path: "i.js".into(),
+                external_function_id: 1,
+                matched_axis: AxisKind::StructuralAnchor,
+                matched_alternate: None,
+            },
+        );
+
+        let mut axes = sample_axes(0);
+        axes.structural_anchor = 77;
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        let m = match_function(&fp, &idx).expect("structural-only match");
+        assert_eq!(m.tier, MatchTier::StructuralOnly);
+    }
+
+    #[test]
+    fn structural_only_rejects_high_frequency_hash() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        // Hit the same structural hash 51 times (limit=50) — corpus frequency > limit
+        for i in 0..51u64 {
+            idx.insert_structural(
+                StructuralKey {
+                    param_count: 1,
+                    structural_anchor: 77,
+                },
+                Candidate {
+                    package: PackageId {
+                        name: format!("p{i}"),
+                        version: "1".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_function_id: i,
+                    matched_axis: AxisKind::StructuralAnchor,
+                    matched_alternate: None,
+                },
+            );
+        }
+
+        let mut axes = sample_axes(0);
+        axes.structural_anchor = 77;
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary: axes,
+            alternates: Vec::new(),
+        };
+
+        assert!(
+            match_function(&fp, &idx).is_none(),
+            "high-frequency hash must be rejected"
+        );
     }
 }

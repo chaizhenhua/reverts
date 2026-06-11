@@ -1,5 +1,7 @@
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
-use reverts_package_index::{Candidate, CfgKey, ExactKey, FeatureKey, PackageFingerprintIndex};
+use reverts_package_index::{
+    Candidate, CfgKey, ExactKey, FeatureKey, PackageFingerprintIndex, StructuralKey,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionMatch {
@@ -233,6 +235,56 @@ fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind
         out.push((AxisKind::LiteralShape, h));
     }
     out
+}
+
+/// Tier 4: structural_anchor fallback for functions with no literal/property
+/// hooks. Rejects candidates whose structural_anchor frequency in the
+/// corpus exceeds STRUCTURAL_FREQUENCY_LIMIT — common shapes are
+/// uninformative. Requires unique winner with margin ≥ 0.3 over runner-up.
+pub const STRUCTURAL_FREQUENCY_LIMIT: u32 = 50;
+
+#[must_use]
+pub fn try_structural_only(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
+    let freq = index
+        .corpus_stats()
+        .frequency(AxisKind::StructuralAnchor, fp.primary.structural_anchor);
+    if freq > STRUCTURAL_FREQUENCY_LIMIT {
+        return None;
+    }
+
+    let key = StructuralKey {
+        param_count: fp.param_count,
+        structural_anchor: fp.primary.structural_anchor,
+    };
+    let cands = index.query_structural(key);
+    if cands.is_empty() {
+        return None;
+    }
+
+    // Distinct candidates only
+    let mut distinct = cands.clone();
+    distinct.dedup_by(|a, b| {
+        a.package == b.package && a.external_function_id == b.external_function_id
+    });
+
+    if distinct.len() == 1 {
+        let only = distinct.into_iter().next()?;
+        return Some(FunctionMatch {
+            tier: MatchTier::StructuralOnly,
+            candidate: only,
+            margin: 1.0,
+            top_score: f64::from(MatchTier::StructuralOnly.weight()),
+            runner_up_score: 0.0,
+            matched_alternate: None,
+        });
+    }
+
+    // Multiple candidates — we can't rank further with what we have here.
+    // Reject; let global assignment (Phase G) handle disambiguation.
+    None
 }
 
 pub(crate) fn pick_unique(
