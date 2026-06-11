@@ -1,7 +1,9 @@
 pub mod cascade;
 pub mod tier;
+pub mod variant;
 pub use cascade::*;
 pub use tier::*;
+pub use variant::*;
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
