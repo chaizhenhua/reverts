@@ -267,6 +267,53 @@ impl AstFact {
         }
     }
 
+    /// `target = source` identity assignment. Fed into `DefUseGraph`'s
+    /// alias closure so downstream propagation can follow renames.
+    #[must_use]
+    pub fn identity_alias(
+        module_id: ModuleId,
+        target: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(target)),
+            kind: AstFactKind::IdentityAlias,
+            property: Some(BindingName::new(source)),
+        }
+    }
+
+    /// `target = callee(...)` call-site assignment. Resolved against
+    /// `FunctionReturns` facts to compose the alias closure across calls.
+    #[must_use]
+    pub fn call_alias(
+        module_id: ModuleId,
+        target: impl Into<String>,
+        callee: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(target)),
+            kind: AstFactKind::CallAlias,
+            property: Some(BindingName::new(callee)),
+        }
+    }
+
+    /// `function F() { return X; }` — F is `function`, X is `returned`.
+    #[must_use]
+    pub fn function_returns(
+        module_id: ModuleId,
+        function: impl Into<String>,
+        returned: impl Into<String>,
+    ) -> Self {
+        Self {
+            module_id,
+            binding: Some(BindingName::new(function)),
+            kind: AstFactKind::FunctionReturns,
+            property: Some(BindingName::new(returned)),
+        }
+    }
+
     /// Construct a member-access constraint fact that records both the
     /// accessed binding and the property name observed on it. Used by the
     /// extractor to populate `BindingConstraint::property` downstream.
@@ -310,6 +357,18 @@ pub enum AstFactKind {
     /// called value (statically nullable RHS). Powers the
     /// `UnprotectedNullableMemberRead` audit.
     MaybeNullableWrite,
+    /// `target = source` — `source` is in `AstFact::property`. Feeds the
+    /// alias closure on `DefUseGraph` so downstream propagation can follow
+    /// identity assignments / renames.
+    IdentityAlias,
+    /// `target = callee(...)` — `callee` is in `AstFact::property`.
+    /// Combined with `FunctionReturns` facts, lets aliased information
+    /// flow from a function's return value into the caller binding.
+    CallAlias,
+    /// `function F() { return X; }` — `function` is in `AstFact::binding`,
+    /// `X` (the returned binding) is in `AstFact::property`. Resolves
+    /// `CallAlias` edges at closure time.
+    FunctionReturns,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -560,6 +619,25 @@ fn apply_ast_fact(
         AstFactKind::MaybeNullableWrite => {
             if let Some(binding) = &fact.binding {
                 def_use.record_maybe_nullable_write(fact.module_id, binding.as_str());
+            }
+        }
+        AstFactKind::IdentityAlias => {
+            if let (Some(target), Some(source)) = (&fact.binding, &fact.property) {
+                def_use.record_identity_alias(fact.module_id, target.as_str(), source.as_str());
+            }
+        }
+        AstFactKind::CallAlias => {
+            if let (Some(target), Some(callee)) = (&fact.binding, &fact.property) {
+                def_use.record_call_alias(fact.module_id, target.as_str(), callee.as_str());
+            }
+        }
+        AstFactKind::FunctionReturns => {
+            if let (Some(function), Some(returned)) = (&fact.binding, &fact.property) {
+                def_use.record_function_return(
+                    fact.module_id,
+                    function.as_str(),
+                    returned.as_str(),
+                );
             }
         }
     }
@@ -1285,6 +1363,7 @@ impl AstFactExtractor {
                     facts: Vec::new(),
                     function_depth: 0,
                     module_scope_bindings: collect_module_scope_bindings(&parsed.program),
+                    function_stack: Vec::new(),
                 };
                 visitor.visit_program(&parsed.program);
                 return Ok(AstExtraction {
@@ -1423,6 +1502,9 @@ struct AstFactVisitor {
     facts: Vec<AstFact>,
     function_depth: usize,
     module_scope_bindings: BTreeSet<String>,
+    /// Names of enclosing function declarations. `return X` looks at the
+    /// top of the stack to determine which function aliases `X`.
+    function_stack: Vec<String>,
 }
 
 impl<'a> Visit<'a> for AstFactVisitor {
@@ -1526,8 +1608,36 @@ impl<'a> Visit<'a> for AstFactVisitor {
                     }
                 }
             }
+            // Alias propagation — `let A = X` (identity) or `let A = F()`
+            // (call). Single-binding declarators only; destructuring would
+            // need element-wise tracking and is out of scope here.
+            if bindings.len() == 1
+                && let Some(init) = &it.init
+            {
+                self.maybe_record_alias_for_assignment(bindings[0], init);
+            }
         }
         walk_variable_declarator(self, it);
+    }
+
+    fn visit_return_statement(&mut self, it: &oxc_ast::ast::ReturnStatement<'a>) {
+        if self.function_depth >= 1
+            && let Some(argument) = &it.argument
+            && let Some(returned) = direct_identifier(argument)
+            && let Some(function_name) = self.function_stack.last()
+        {
+            // Only track when returned binding is module-scope (it has to
+            // be visible to callers' alias lookup) and we're inside a
+            // top-level function declaration.
+            if self.function_depth == 1 && self.module_scope_bindings.contains(returned) {
+                self.facts.push(AstFact::function_returns(
+                    self.module_id,
+                    function_name.as_str(),
+                    returned,
+                ));
+            }
+        }
+        oxc_ast::visit::walk::walk_return_statement(self, it);
     }
 
     fn visit_class(&mut self, it: &Class<'a>) {
@@ -1549,9 +1659,20 @@ impl<'a> Visit<'a> for AstFactVisitor {
             self.constraint(id.name.as_str(), BindingConstraintKind::Call);
         }
 
+        let pushed_function = if it.r#type == FunctionType::FunctionDeclaration
+            && let Some(id) = &it.id
+        {
+            self.function_stack.push(id.name.to_string());
+            true
+        } else {
+            false
+        };
         self.function_depth += 1;
         walk_function(self, it, flags);
         self.function_depth -= 1;
+        if pushed_function {
+            self.function_stack.pop();
+        }
     }
 
     fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
@@ -1586,6 +1707,12 @@ impl<'a> Visit<'a> for AstFactVisitor {
                 // awaited/called value: X is statically nullable from now on.
                 // Powers the `UnprotectedNullableMemberRead` audit.
                 self.maybe_nullable_write(binding);
+            }
+            // Alias propagation also picks up plain `A = X` and `A = F()`.
+            // Member-target writes (`A.foo = ...`) have no propagatable
+            // identity from the perspective of `A` itself.
+            if it.operator.is_assign() && !assignment_target_is_member(&it.left) {
+                self.maybe_record_alias_for_assignment(binding, &it.right);
             }
         }
 
@@ -1761,6 +1888,25 @@ impl AstFactVisitor {
         if self.should_emit_binding_fact(binding) {
             self.facts
                 .push(AstFact::maybe_nullable_write(self.module_id, binding));
+        }
+    }
+
+    /// Emit `IdentityAlias` for `target = source_identifier` or
+    /// `CallAlias` for `target = callee_identifier(args)`. Other RHS
+    /// shapes are left alone — they have no usable alias edge.
+    fn maybe_record_alias_for_assignment(&mut self, target: &str, init: &Expression<'_>) {
+        if let Some(source) = direct_identifier(init) {
+            if source != target {
+                self.facts
+                    .push(AstFact::identity_alias(self.module_id, target, source));
+            }
+            return;
+        }
+        if let Expression::CallExpression(call) = init
+            && let Some(callee) = direct_identifier(&call.callee)
+        {
+            self.facts
+                .push(AstFact::call_alias(self.module_id, target, callee));
         }
     }
 
@@ -1974,6 +2120,23 @@ fn chain_expression_root_is_call_like(chain: &oxc_ast::ast::ChainExpression<'_>)
             expression_chain_root_is_call_like(&inner.expression)
         }
         _ => false,
+    }
+}
+
+/// Match an expression that is *exactly* a plain identifier (after
+/// stripping parens and TS-only wrappers). Unlike `expression_identifier`,
+/// this does NOT chase through member accesses — the caller needs to know
+/// the identity is direct, not "the leftmost name of a member chain".
+fn direct_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        Expression::ParenthesizedExpression(inner) => direct_identifier(&inner.expression),
+        Expression::TSAsExpression(inner) => direct_identifier(&inner.expression),
+        Expression::TSSatisfiesExpression(inner) => direct_identifier(&inner.expression),
+        Expression::TSNonNullExpression(inner) => direct_identifier(&inner.expression),
+        Expression::TSTypeAssertion(inner) => direct_identifier(&inner.expression),
+        Expression::TSInstantiationExpression(inner) => direct_identifier(&inner.expression),
+        _ => None,
     }
 }
 
@@ -2603,6 +2766,46 @@ mod tests {
         // `bar` and `foo` are direct properties; `deep` belongs to `ns.foo`
         // (chained) and must not bleed back onto `ns`.
         assert_eq!(names, vec!["bar", "foo"]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_records_identity_alias_and_call_alias_edges() {
+        // `let A = X;` and `let B = F();` should populate the IR's alias
+        // graph so the closure can propagate shape/members/nullable info
+        // through renames and call composition.
+        let source = r#"
+            var X;
+            function F() { return X; }
+            let A = X;
+            let B = F();
+            A;
+            B;
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+
+        let aliases_of_a = graph.def_use().alias_sources_of(ModuleId(1), "A");
+        let names_a: Vec<_> = aliases_of_a.iter().map(BindingName::as_str).collect();
+        assert!(names_a.contains(&"A"));
+        assert!(names_a.contains(&"X"));
+
+        let aliases_of_b = graph.def_use().alias_sources_of(ModuleId(1), "B");
+        let names_b: Vec<_> = aliases_of_b.iter().map(BindingName::as_str).collect();
+        assert!(names_b.contains(&"B"));
+        assert!(
+            names_b.contains(&"X"),
+            "call alias should resolve via F's return to X; got {:?}",
+            names_b
+        );
     }
 
     #[test]
