@@ -27,6 +27,21 @@ pub enum BestVersionDecision {
     },
 }
 
+/// Picks the best package version per package_name from a flat list of
+/// scored variants.
+///
+/// For each package, scores every version as
+/// `variant.score × (matched_function_count / module_function_count)` —
+/// the fraction term penalises versions whose matches don't cover the
+/// bundle module. Ambiguity within ε of the best score and insufficient
+/// evidence below the threshold each get a dedicated decision variant.
+///
+/// `module_function_count` must reflect how many functions exist in the
+/// bundle module these variants were scored against. A value of zero
+/// means there is no statistical basis for ranking and every package
+/// falls to `InsufficientEvidence` (or `NoMatch` when no variants exist):
+/// the function deliberately returns final_score = 0.0 in that case
+/// rather than papering over the degenerate input with a magic floor.
 #[must_use]
 pub fn pick_versions(
     variants: Vec<VariantSelection>,
@@ -49,7 +64,7 @@ pub fn pick_versions(
             } else {
                 matched_count as f64 / module_function_count as f64
             };
-            let final_score = v.score * fraction.max(0.001); // avoid pure-zero collapse
+            let final_score = v.score * fraction;
             by_version
                 .entry(v.package.version.clone())
                 .and_modify(|(_existing, s)| {
@@ -188,5 +203,102 @@ mod tests {
             &decisions[0],
             BestVersionDecision::InsufficientEvidence { .. }
         ));
+    }
+
+    fn variant_with_score_for(
+        pkg_name: &str,
+        ver: &str,
+        n_exact_matches: usize,
+    ) -> VariantSelection {
+        let mut v = variant_with_score(ver, n_exact_matches);
+        v.package = PackageId {
+            name: pkg_name.into(),
+            version: ver.into(),
+        };
+        for fm in &mut v.function_matches {
+            fm.candidate.package = v.package.clone();
+        }
+        v
+    }
+
+    #[test]
+    fn pick_versions_returns_empty_for_empty_input() {
+        // No variants at all → no decisions to emit. Mirrors legacy's
+        // VersionSearchStrategy::new returning Err on empty registry.
+        let decisions = pick_versions(Vec::new(), 5);
+        assert!(decisions.is_empty());
+    }
+
+    #[test]
+    fn pick_versions_decides_each_package_independently() {
+        // Multi-package input: one Selected, one Ambiguous, one InsufficientEvidence
+        // — each package gets its own decision, no cross-package interference.
+        let mut variants = vec![
+            // pkg "a": clean winner at 2.0
+            variant_with_score_for("a", "1.0", 1),
+            variant_with_score_for("a", "2.0", 5),
+            // pkg "b": tied 1.0 and 2.0 → Ambiguous
+            variant_with_score_for("b", "1.0", 5),
+            variant_with_score_for("b", "2.0", 5),
+            // pkg "c": single low-tier match → InsufficientEvidence
+            variant_with_score_for("c", "1.0", 1),
+        ];
+        // Knock pkg "c"'s score below the threshold.
+        for v in &mut variants {
+            if v.package.name == "c" {
+                v.score = 50.0;
+            }
+        }
+
+        let decisions = pick_versions(variants, 5);
+        assert_eq!(decisions.len(), 3);
+
+        let by_name: std::collections::BTreeMap<&str, &BestVersionDecision> = decisions
+            .iter()
+            .map(|d| {
+                let name = match d {
+                    BestVersionDecision::Selected { package_name, .. }
+                    | BestVersionDecision::Ambiguous { package_name, .. }
+                    | BestVersionDecision::NoMatch { package_name }
+                    | BestVersionDecision::InsufficientEvidence { package_name, .. } => {
+                        package_name.as_str()
+                    }
+                };
+                (name, d)
+            })
+            .collect();
+
+        assert!(matches!(
+            by_name.get("a"),
+            Some(BestVersionDecision::Selected { package_version, .. }) if package_version == "2.0"
+        ));
+        assert!(matches!(
+            by_name.get("b"),
+            Some(BestVersionDecision::Ambiguous { .. })
+        ));
+        assert!(matches!(
+            by_name.get("c"),
+            Some(BestVersionDecision::InsufficientEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn pick_versions_with_zero_module_function_count_never_selects() {
+        // Degenerate input: the bundle module has no functions, so we have
+        // no statistical basis to rank versions. After dropping the magic
+        // `.max(0.001)` floor, all scores collapse to 0.0 and pick_versions
+        // refuses to commit (Ambiguous when ≥2 versions, InsufficientEvidence
+        // when one). Neither outcome must be `Selected`.
+        //
+        // Mirrors legacy `test_version_match_result_zero_total` checking
+        // that zero-total inputs do not produce a positive match_rate.
+        let variants = vec![variant_with_score("1.0", 5), variant_with_score("2.0", 5)];
+        let decisions = pick_versions(variants, 0);
+        assert_eq!(decisions.len(), 1);
+        assert!(
+            !matches!(&decisions[0], BestVersionDecision::Selected { .. }),
+            "zero module_function_count must not yield Selected, got {:?}",
+            decisions[0],
+        );
     }
 }
