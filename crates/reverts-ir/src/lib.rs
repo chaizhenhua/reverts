@@ -545,7 +545,66 @@ impl BindingShapeSolution {
         for constraint in graph.constraints() {
             solution.add_constraint(constraint);
         }
+        solution.propagate_shapes_through_aliases(graph);
         solution
+    }
+
+    /// Walk the alias graph (identity assignments + call/return composition)
+    /// and merge shapes bidirectionally across each edge. `A = X` aliases
+    /// the same runtime object — both bindings should observe the same
+    /// shape lattice point. Fixed-point because `BindingShape::merge =
+    /// max` is monotone over a finite lattice.
+    fn propagate_shapes_through_aliases(&mut self, graph: &DefUseGraph) {
+        loop {
+            let mut changed = false;
+            for (module_id, target, source) in &graph.identity_aliases {
+                if self.merge_pair(*module_id, target, source) {
+                    changed = true;
+                }
+            }
+            for (module_id, target, callee) in &graph.call_aliases {
+                let key = (*module_id, callee.clone());
+                let Some(returned_set) = graph.function_returns.get(&key) else {
+                    continue;
+                };
+                for returned in returned_set {
+                    if self.merge_pair(*module_id, target, returned) {
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    /// Merge shapes between two aliased bindings (bidirectional).
+    /// Returns `true` if either binding's shape changed.
+    fn merge_pair(&mut self, module_id: ModuleId, left: &BindingName, right: &BindingName) -> bool {
+        let left_key = (module_id, left.clone());
+        let right_key = (module_id, right.clone());
+        let left_shape = self
+            .shapes
+            .get(&left_key)
+            .copied()
+            .unwrap_or(BindingShape::Unknown);
+        let right_shape = self
+            .shapes
+            .get(&right_key)
+            .copied()
+            .unwrap_or(BindingShape::Unknown);
+        let merged = left_shape.merge(right_shape);
+        let mut changed = false;
+        if merged != left_shape {
+            self.shapes.insert(left_key, merged);
+            changed = true;
+        }
+        if merged != right_shape {
+            self.shapes.insert(right_key, merged);
+            changed = true;
+        }
+        changed
     }
 
     pub fn add_constraint(&mut self, constraint: &BindingConstraint) {
@@ -839,6 +898,62 @@ mod tests {
         assert_eq!(
             solution.shape_of(ModuleId(1), "Service"),
             BindingShape::ClassLike
+        );
+    }
+
+    #[test]
+    fn shape_propagates_bidirectionally_through_identity_and_call_aliases() {
+        // Identity alias: A = ns. ns starts as PlainObject (object literal
+        // declaration); A starts as NamespaceObject (member-read). After
+        // alias propagation both should settle at NamespaceObject — same
+        // underlying object, max of the lattice.
+        let mut graph = DefUseGraph::default();
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "ns",
+            BindingConstraintKind::ObjectLiteralDeclaration,
+        ));
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "A",
+            BindingConstraintKind::MemberRead,
+        ));
+        graph.record_identity_alias(ModuleId(1), "A", "ns");
+
+        let solution = BindingShapeSolution::from_def_use_graph(&graph);
+
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "A"),
+            BindingShape::NamespaceObject,
+        );
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "ns"),
+            BindingShape::NamespaceObject,
+            "ns should also be upgraded — it's the same underlying object as A",
+        );
+
+        // Call-alias chain: B = getNs(), getNs returns ns.
+        // B carries no direct constraint; propagation through the return
+        // alias should still upgrade B from Unknown to NamespaceObject.
+        let mut graph = DefUseGraph::default();
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "ns",
+            BindingConstraintKind::ObjectLiteralDeclaration,
+        ));
+        graph.constrain(BindingConstraint::new(
+            ModuleId(1),
+            "ns",
+            BindingConstraintKind::MemberRead,
+        ));
+        graph.record_call_alias(ModuleId(1), "B", "getNs");
+        graph.record_function_return(ModuleId(1), "getNs", "ns");
+
+        let solution = BindingShapeSolution::from_def_use_graph(&graph);
+        assert_eq!(
+            solution.shape_of(ModuleId(1), "B"),
+            BindingShape::NamespaceObject,
+            "B should inherit ns's shape via getNs's return alias",
         );
     }
 
