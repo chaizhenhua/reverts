@@ -122,6 +122,28 @@ impl PlannedBinding {
     }
 }
 
+/// Build a `PlannedBinding` whose `shape` and `known_members` are derived
+/// from the enriched program. Centralising this keeps every planner site
+/// that emits a real user binding consistent — the shape comes from the
+/// solver, and `known_members` are attached only for `NamespaceObject`
+/// (paper #7 downstream). Sites that synthesise runtime helpers bypass
+/// this and use `PlannedBinding::new` directly with their known shape.
+fn plan_binding_from_program(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    original: BindingName,
+    emitted: BindingName,
+    source_backed: bool,
+) -> PlannedBinding {
+    let shape = program.binding_shape(module_id, original.as_str());
+    let known_members = if shape == BindingShape::NamespaceObject {
+        program.known_members(module_id, original.as_str())
+    } else {
+        BTreeSet::new()
+    };
+    PlannedBinding::new(original, emitted, shape, source_backed).with_known_members(known_members)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannedExport {
     pub binding: BindingName,
@@ -286,10 +308,11 @@ impl ImportExportPlanner {
                     file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
                     for binding in bindings {
                         planned_bindings.insert(binding.clone());
-                        file.add_binding(PlannedBinding::new(
+                        file.add_binding(plan_binding_from_program(
+                            program,
+                            module.id,
                             binding.clone(),
                             binding.clone(),
-                            BindingShape::Unknown,
                             true,
                         ));
                     }
@@ -413,7 +436,6 @@ impl ImportExportPlanner {
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
             let source_imports = program.model().graph().ast_imports_for(module.id);
             for original in program.model().graph().definitions_for(module.id) {
-                let shape = program.binding_shape(module.id, original.as_str());
                 let source_backed = source_definitions.contains(&original);
                 let emitted = if source_backed {
                     original.clone()
@@ -425,32 +447,27 @@ impl ImportExportPlanner {
                         .unwrap_or_else(|| original.clone())
                 };
                 planned_bindings.insert(original.clone());
-                let known_members = if shape == BindingShape::NamespaceObject {
-                    program.known_members(module.id, original.as_str())
-                } else {
-                    BTreeSet::new()
-                };
-                file.add_binding(
-                    PlannedBinding::new(original, emitted, shape, source_backed)
-                        .with_known_members(known_members),
-                );
+                file.add_binding(plan_binding_from_program(
+                    program,
+                    module.id,
+                    original,
+                    emitted,
+                    source_backed,
+                ));
             }
 
             for original in &source_imports {
                 if planned_bindings.contains(original) {
                     continue;
                 }
-                let shape = program.binding_shape(module.id, original.as_str());
-                let known_members = if shape == BindingShape::NamespaceObject {
-                    program.known_members(module.id, original.as_str())
-                } else {
-                    BTreeSet::new()
-                };
                 planned_bindings.insert(original.clone());
-                file.add_binding(
-                    PlannedBinding::new(original.clone(), original.clone(), shape, true)
-                        .with_known_members(known_members),
-                );
+                file.add_binding(plan_binding_from_program(
+                    program,
+                    module.id,
+                    original.clone(),
+                    original.clone(),
+                    true,
+                ));
             }
 
             if let Some((_source_file_id, source_file_path, mut source)) = lowered_source {
@@ -3372,6 +3389,130 @@ mod tests {
             CompilerRecoveryAction::from_compiler(CompilerKind::Unknown),
             CompilerRecoveryAction::DirectModuleSource
         );
+    }
+
+    #[test]
+    fn shape_upgrade_above_namespace_object_drops_known_members_on_purpose() {
+        // Design contract: once member-access constraints get upgraded by a
+        // stronger constraint (here `Call`), the merged shape is no longer
+        // `NamespaceObject`, and the previously collected property names are
+        // no longer a reliable surface — so the planner drops them. Pinning
+        // this so we notice if a future refactor starts attaching members
+        // to shapes other than NamespaceObject.
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("function ns() { return 1; }\nconst v = ns.foo;\nns();".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let enriched = enriched_with_solved_shapes(input);
+
+        // Sanity: solver collects `foo` as a member-access property…
+        let raw_members = enriched.known_members(ModuleId(1), "ns");
+        assert_eq!(
+            raw_members
+                .iter()
+                .map(BindingName::as_str)
+                .collect::<Vec<_>>(),
+            vec!["foo"],
+        );
+        // …but the merged shape settles above NamespaceObject because of
+        // the `ns()` call.
+        let shape = enriched.binding_shape(ModuleId(1), "ns");
+        assert!(
+            shape > BindingShape::NamespaceObject,
+            "expected merged shape above NamespaceObject, got {shape:?}",
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let ns_binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "ns")
+            .expect("ns binding should be planned");
+        assert_eq!(ns_binding.shape, shape);
+        assert!(
+            ns_binding.known_members.is_empty(),
+            "known_members must be empty for non-NamespaceObject shapes, got {:?}",
+            ns_binding.known_members,
+        );
+    }
+
+    #[test]
+    fn enriched_program_attaches_known_members_to_cross_module_imported_namespaces() {
+        // Paper #7 downstream — cross-application-module path. When moduleB
+        // imports `ns` from sibling moduleA and accesses `ns.foo`, the
+        // planner's `imports_by_module` wiring runs first and previously
+        // hard-coded BindingShape::Unknown. Solver-derived shape must reach
+        // the planned binding so `known_members` stays consistent regardless
+        // of which import path emits it.
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "modules/a.ts",
+            Some("export const ns = { foo: 1, bar: 2 };".to_string()),
+        ));
+        // moduleB references `ns` without an explicit `import` statement —
+        // the kind of cross-module bundle layout the planner's
+        // `imports_by_module` wiring synthesizes a named import for.
+        // (When an explicit `import` is present, the source-imports path
+        // handles the binding; line 289 only fires for this implicit form.)
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "modules/b.ts",
+            Some("const a = ns.foo;\nconst b = ns.bar;".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "a", "modules/a.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(2), "b", "modules/b.ts").with_source_file(2));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let enriched = enriched_with_solved_shapes(input);
+
+        assert_eq!(
+            enriched.binding_shape(ModuleId(2), "ns"),
+            BindingShape::NamespaceObject,
+            "solver must see `ns` as a namespace from moduleB's perspective",
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let module_b_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/b.ts")
+            .expect("moduleB plan should exist");
+        let ns_binding = module_b_file
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "ns")
+            .expect("ns binding from cross-module import should be planned");
+        assert_eq!(
+            ns_binding.shape,
+            BindingShape::NamespaceObject,
+            "imports_by_module path must pick up solver-derived shape",
+        );
+        let members: Vec<_> = ns_binding
+            .known_members
+            .iter()
+            .map(BindingName::as_str)
+            .collect();
+        assert_eq!(members, vec!["bar", "foo"]);
     }
 
     #[test]
