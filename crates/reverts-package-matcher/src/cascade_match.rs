@@ -229,11 +229,15 @@ fn build_attribution(
     .with_confidence(confidence)
 }
 
+/// Stable opaque identifier for a `FunctionId`, used to dedupe candidates in
+/// the cascade index. FNV-1a over (module_id, span.start, span.end) bytes so
+/// every component contributes uniformly and high module ids do not alias.
 fn encode_function_id(fn_id: &FunctionId) -> u64 {
-    let m = u64::from(fn_id.module_id.0);
-    let s = u64::from(fn_id.span.start);
-    let e = u64::from(fn_id.span.end);
-    (m << 48) ^ (s << 24) ^ e
+    let mut hash = reverts_ir::hash::FNV_OFFSET_BASIS;
+    reverts_ir::hash::update_fnv1a(&mut hash, &fn_id.module_id.0.to_le_bytes());
+    reverts_ir::hash::update_fnv1a(&mut hash, &fn_id.span.start.to_le_bytes());
+    reverts_ir::hash::update_fnv1a(&mut hash, &fn_id.span.end.to_le_bytes());
+    hash
 }
 
 /// Returns the (axis, hash) pairs the function-similarity tier will look up.
@@ -340,5 +344,35 @@ mod tests {
         let report = match_with_cascade(&fps_map, &pkg_sources);
         assert!(report.attributions.is_empty());
         assert!(report.audit.has(FindingCode::UnparseablePackageSource));
+    }
+
+    #[test]
+    fn encode_function_id_does_not_alias_high_module_ids() {
+        use reverts_ir::{ByteRange, FunctionId};
+        // The previous bit-shift encoding lost bits 16-31 of module_id by
+        // shifting past the u64 boundary. Distinct module ids that share
+        // their low 16 bits used to collide; FNV-1a must keep them apart.
+        let span = ByteRange::new(0, 100);
+        let a = encode_function_id(&FunctionId::new(ModuleId(0x0001_0000), span));
+        let b = encode_function_id(&FunctionId::new(ModuleId(0x0002_0000), span));
+        let c = encode_function_id(&FunctionId::new(ModuleId(0x0001_0001), span));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn encode_function_id_distinguishes_swapped_span_endpoints() {
+        use reverts_ir::{ByteRange, FunctionId};
+        // (start=A, end=B) and (start=B, end=A) must hash distinctly; the
+        // previous XOR-based encoding made them suspicious. FNV-1a is
+        // order-sensitive so they diverge unconditionally.
+        let m = ModuleId(7);
+        let ab = encode_function_id(&FunctionId::new(m, ByteRange::new(10, 50)));
+        let small = encode_function_id(&FunctionId::new(m, ByteRange::new(10, 11)));
+        let large = encode_function_id(&FunctionId::new(m, ByteRange::new(10, 5000)));
+        assert_ne!(ab, small);
+        assert_ne!(ab, large);
+        assert_ne!(small, large);
     }
 }
