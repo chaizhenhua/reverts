@@ -23,6 +23,18 @@ fn walk_statements(hash: &mut u64, stmts: &[Statement<'_>]) {
 }
 
 fn walk_statement(hash: &mut u64, stmt: &Statement<'_>) {
+    // Minifier-stable canonicalisation: a `BlockStatement` containing
+    // exactly one inner statement is shape-equivalent to that statement
+    // alone. `terser` / `esbuild --minify` strip such braces around
+    // single-statement `if`/`while`/`for` bodies. Without this unwrap
+    // the CFG hash diverges between minified and un-minified versions
+    // of the same control-flow.
+    if let Statement::BlockStatement(b) = stmt
+        && b.body.len() == 1
+    {
+        walk_statement(hash, &b.body[0]);
+        return;
+    }
     match stmt {
         Statement::BlockStatement(b) => {
             update_fnv1a(hash, b"blk");
@@ -154,6 +166,13 @@ mod tests {
         let with_catch = hash_first("function f() { try { return 1; } catch (e) { throw e; } }");
         let with_finally = hash_first("function f() { try { return 1; } finally { return 2; } }");
         assert_ne!(with_catch, with_finally);
+    }
+
+    #[test]
+    fn cfg_unwraps_single_statement_block_for_minifier_resilience() {
+        let braced = hash_first("function f(x) { if (x) { return 1; } return 2; }");
+        let unbraced = hash_first("function f(x) { if (x) return 1; return 2; }");
+        assert_eq!(braced, unbraced, "single-stmt block must unwrap");
     }
 
     #[test]
