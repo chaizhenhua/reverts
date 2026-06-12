@@ -28,6 +28,20 @@ impl<'a> Visit<'a> for V<'_> {
                         self.s.insert("t:expr".to_string());
                     }
                 }
+                // Minifier-stable canonicalisation: `throw TypeError(m)`
+                // is the minified form of `throw new TypeError(m)` for
+                // built-in error constructors (semantically equivalent
+                // per the spec). Record it under the same `n:<name>`
+                // tag as the `new`-form so both versions collide.
+                Expression::CallExpression(c) => {
+                    if let Expression::Identifier(i) = &c.callee
+                        && is_new_optional_builtin(i.name.as_str())
+                    {
+                        self.s.insert(format!("n:{}", i.name.as_str()));
+                    } else {
+                        self.s.insert("t:expr".to_string());
+                    }
+                }
                 Expression::StringLiteral(_) | Expression::NumericLiteral(_) => {
                     self.s.insert("t:lit".to_string());
                 }
@@ -38,6 +52,20 @@ impl<'a> Visit<'a> for V<'_> {
         }
         oxc_ast::visit::walk::walk_statement(self, stmt);
     }
+}
+
+fn is_new_optional_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "URIError"
+            | "EvalError"
+            | "AggregateError"
+    )
 }
 
 #[cfg(test)]
@@ -77,5 +105,15 @@ mod tests {
         let a = hash_first("function f(e) { throw new Error('a'); }");
         let b = hash_first("function f(x) { throw new Error('b'); }");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn throw_set_canonicalises_throw_call_builtin_to_throw_new_builtin() {
+        let with_new = hash_first("function f() { throw new TypeError('x'); }");
+        let without_new = hash_first("function f() { throw TypeError('x'); }");
+        assert_eq!(
+            with_new, without_new,
+            "throw TypeError ↔ throw new TypeError must share throw_set"
+        );
     }
 }
