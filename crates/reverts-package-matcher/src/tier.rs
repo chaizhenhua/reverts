@@ -45,17 +45,17 @@ pub fn try_exact_alternate(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    for (pass_id, axes) in &fp.alternates {
+    for alt in &fp.alternates {
         let key = ExactKey {
             param_count: fp.param_count,
-            statement_count: fp.statement_count,
-            ast_hash: axes.ast,
+            statement_count: alt.statement_count,
+            ast_hash: alt.axes.ast,
         };
         let candidates = index.query_exact(key);
         if let Some(m) = pick_unique(
             candidates,
             MatchTier::ExactAlternate,
-            Some(*pass_id),
+            Some(alt.pass),
             vec![AxisKind::Ast],
         ) {
             return Some(m);

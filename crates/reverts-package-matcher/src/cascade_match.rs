@@ -173,15 +173,17 @@ fn build_index(
             );
 
             // Exact alternate keys: every alternate AST hash from normalization
-            // passes.
-            for (pass_id, alt) in &fp.alternates {
+            // passes. Each alternate carries its OWN statement_count so
+            // passes that change the count (e.g. DeclaratorSplit) are
+            // queryable under the post-pass count, not the primary one.
+            for alt in &fp.alternates {
                 let mut alt_cand = base_candidate.clone();
-                alt_cand.matched_alternate = Some(*pass_id);
+                alt_cand.matched_alternate = Some(alt.pass);
                 index.insert_exact(
                     ExactKey {
                         param_count: fp.param_count,
-                        statement_count: fp.statement_count,
-                        ast_hash: alt.ast,
+                        statement_count: alt.statement_count,
+                        ast_hash: alt.axes.ast,
                     },
                     alt_cand,
                 );

@@ -121,7 +121,11 @@ impl FunctionExtractor {
                 else {
                     continue;
                 };
-                fp.alternates.push((pass.id(), compute_axes(params, body)));
+                fp.alternates.push(reverts_ir::AlternateAxisHashes {
+                    pass: pass.id(),
+                    statement_count: alt_fn.statement_count,
+                    axes: compute_axes(params, body),
+                });
             }
         }
         out
@@ -254,7 +258,7 @@ mod fingerprint_tests {
 
         let target = fp2[0].primary.ast;
         let primary_match = fp1[0].primary.ast == target;
-        let alt_match = fp1[0].alternates.iter().any(|(_, a)| a.ast == target);
+        let alt_match = fp1[0].alternates.iter().any(|a| a.axes.ast == target);
         assert!(
             primary_match || alt_match,
             "expected export-normalized variant to align with plain via primary or alternate"

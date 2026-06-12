@@ -69,3 +69,31 @@ fn extracts_arrow_function() {
     assert_eq!(fps.len(), 1);
     assert_eq!(fps[0].param_count, 1);
 }
+
+#[test]
+fn declarator_split_pass_aligns_multi_decl_with_separate_decls() {
+    let merged = FunctionExtractor::fingerprint(
+        ModuleId(1),
+        r#"function f(x) { let a = 1, b = 2; return a + b + x; }"#,
+    );
+    let split = FunctionExtractor::fingerprint(
+        ModuleId(2),
+        r#"function f(x) { let a = 1; let b = 2; return a + b + x; }"#,
+    );
+    assert_eq!(merged.len(), 1);
+    assert_eq!(split.len(), 1);
+    // Primary stmt counts differ: 2 vs 3 (decl, decl, return).
+    assert_ne!(merged[0].statement_count, split[0].statement_count);
+    // One of the alternates on `merged` should expose a 3-stmt
+    // post-DeclaratorSplit form that matches `split`'s primary ast.
+    let split_primary_ast = split[0].primary.ast;
+    let split_primary_stmts = split[0].statement_count;
+    let aligned = merged[0]
+        .alternates
+        .iter()
+        .any(|alt| alt.axes.ast == split_primary_ast && alt.statement_count == split_primary_stmts);
+    assert!(
+        aligned,
+        "expected DeclaratorSplit alternate to align with separate-decl primary"
+    );
+}

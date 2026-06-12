@@ -104,13 +104,28 @@ impl NormalizationPassId {
     }
 }
 
+/// One alternate fingerprint for a function — produced by applying a
+/// specific normalization pass and re-extracting. Carries its own
+/// `statement_count` because passes like `DeclaratorSplit` change the
+/// number of top-level statements; without storing the post-pass count
+/// alongside the post-pass hashes, the cascade matcher's
+/// `(param_count, statement_count, ast_hash)` lookup would still use
+/// the *primary* statement_count and miss matches that the pass was
+/// designed to unlock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlternateAxisHashes {
+    pub pass: NormalizationPassId,
+    pub statement_count: u32,
+    pub axes: AxisHashes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionFingerprint {
     pub id: FunctionId,
     pub param_count: u32,
     pub statement_count: u32,
     pub primary: AxisHashes,
-    pub alternates: Vec<(NormalizationPassId, AxisHashes)>,
+    pub alternates: Vec<AlternateAxisHashes>,
 }
 
 impl FunctionFingerprint {
@@ -121,7 +136,7 @@ impl FunctionFingerprint {
         }
         self.alternates
             .iter()
-            .find_map(|(id, hashes)| (*id == pass).then_some(hashes))
+            .find_map(|alt| (alt.pass == pass).then_some(&alt.axes))
     }
 }
 

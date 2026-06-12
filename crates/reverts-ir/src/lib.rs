@@ -5,7 +5,9 @@ mod byte_range;
 pub use byte_range::{ByteRange, FunctionId};
 
 mod fingerprint;
-pub use fingerprint::{AxisHashes, AxisKind, FunctionFingerprint, NormalizationPassId};
+pub use fingerprint::{
+    AlternateAxisHashes, AxisHashes, AxisKind, FunctionFingerprint, NormalizationPassId,
+};
 
 pub mod hash;
 
