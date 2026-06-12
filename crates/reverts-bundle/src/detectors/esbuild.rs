@@ -1,0 +1,158 @@
+use oxc_ast::Visit;
+use oxc_ast::ast::{
+    Argument, CallExpression, Expression, ObjectPropertyKind, Program, PropertyKey,
+};
+use oxc_span::GetSpan;
+use reverts_ir::{ByteRange, ModuleId};
+
+use crate::inner_module::{BundlerKind, InnerModule};
+
+/// Recognise esbuild's `__commonJS({"key": (exports, module) => { … }})`
+/// registration map. Each map entry becomes one `InnerModule` whose
+/// `body_span` covers the arrow function body so the parent program
+/// can be sliced into independent compilable units.
+#[must_use]
+pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+    let mut collected = Vec::new();
+    let mut visitor = CommonJsVisitor {
+        out: &mut collected,
+        parent_module_id,
+    };
+    visitor.visit_program(program);
+    collected
+}
+
+struct CommonJsVisitor<'a> {
+    out: &'a mut Vec<InnerModule>,
+    parent_module_id: ModuleId,
+}
+
+impl<'a> Visit<'a> for CommonJsVisitor<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        // Pattern: `__commonJS({ "key": (...) => { ... }, ... })`
+        // The first argument is an object expression of property entries.
+        if let Expression::Identifier(callee) = &call.callee
+            && callee.name == "__commonJS"
+            && let Some(Argument::ObjectExpression(obj)) = call.arguments.first()
+        {
+            for prop in &obj.properties {
+                let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                    continue;
+                };
+                let key_text = match &p.key {
+                    PropertyKey::StaticIdentifier(id) => id.name.as_str().to_string(),
+                    PropertyKey::StringLiteral(s) => s.value.as_str().to_string(),
+                    _ => continue,
+                };
+                let body_span = match &p.value {
+                    Expression::ArrowFunctionExpression(a) => {
+                        let s = a.body.span();
+                        ByteRange::new(s.start, s.end)
+                    }
+                    Expression::FunctionExpression(f) => {
+                        let Some(body) = f.body.as_ref() else {
+                            continue;
+                        };
+                        let s = body.span();
+                        ByteRange::new(s.start, s.end)
+                    }
+                    _ => continue,
+                };
+                self.out.push(InnerModule {
+                    virtual_id: format!("esbuild:{}", key_text),
+                    body_span,
+                    bundler: BundlerKind::Esbuild,
+                    source_path_hint: Some(key_text),
+                    parent_module_id: self.parent_module_id,
+                });
+            }
+        }
+        oxc_ast::visit::walk::walk_call_expression(self, call);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    fn extract(src: &str) -> Vec<InnerModule> {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(&alloc, src, SourceType::default()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        detect_commonjs(&parsed.program, ModuleId(99))
+    }
+
+    #[test]
+    fn detect_commonjs_extracts_arrow_module_body() {
+        let src = r#"
+            var x = __commonJS({
+                "node_modules/lodash/index.js": (exports, module) => {
+                    module.exports = { map: function () {} };
+                }
+            });
+        "#;
+        let modules = extract(src);
+        assert_eq!(modules.len(), 1);
+        let m = &modules[0];
+        assert_eq!(m.bundler, BundlerKind::Esbuild);
+        assert_eq!(
+            m.source_path_hint.as_deref(),
+            Some("node_modules/lodash/index.js")
+        );
+        assert!(m.virtual_id.starts_with("esbuild:"));
+        assert!(m.body_span.end > m.body_span.start);
+        assert_eq!(m.parent_module_id, ModuleId(99));
+    }
+
+    #[test]
+    fn detect_commonjs_extracts_multiple_entries() {
+        let src = r#"
+            var x = __commonJS({
+                "a.js": (exports, module) => { module.exports = 1; },
+                "b.js": (exports, module) => { module.exports = 2; }
+            });
+        "#;
+        let modules = extract(src);
+        assert_eq!(modules.len(), 2);
+        let paths: Vec<_> = modules
+            .iter()
+            .filter_map(|m| m.source_path_hint.as_deref())
+            .collect();
+        assert!(paths.contains(&"a.js"));
+        assert!(paths.contains(&"b.js"));
+    }
+
+    #[test]
+    fn detect_commonjs_ignores_calls_with_wrong_callee() {
+        let src = r#"
+            var x = __notCommonJS({
+                "a.js": (exports, module) => { module.exports = 1; }
+            });
+        "#;
+        assert!(extract(src).is_empty());
+    }
+
+    #[test]
+    fn detect_commonjs_ignores_calls_with_non_object_arg() {
+        let src = r#"var x = __commonJS([]);"#;
+        assert!(extract(src).is_empty());
+    }
+
+    #[test]
+    fn detect_commonjs_returns_body_span_not_full_function_span() {
+        let src = r#"var x = __commonJS({ "a": (e, m) => { var y = 1; m.exports = y; } });"#;
+        let modules = extract(src);
+        let m = &modules[0];
+        let body_text = &src[m.body_span.start as usize..m.body_span.end as usize];
+        assert!(body_text.starts_with('{'));
+        assert!(body_text.ends_with('}'));
+        assert!(body_text.contains("var y = 1"));
+    }
+}

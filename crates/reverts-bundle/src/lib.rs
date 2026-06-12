@@ -6,6 +6,7 @@
 
 mod classification;
 pub mod classifier;
+pub mod detectors;
 mod inner_module;
 pub use classification::{BundleClassification, IifeMetadata, MarkedMetadata};
 pub use inner_module::{BundlerKind, InnerModule};
