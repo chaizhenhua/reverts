@@ -101,6 +101,7 @@ pub enum NormalizationPassId {
     VoidZeroToUndefinedGuarded,
     BooleanCallToDoubleNotGuarded,
     NumberCallToUnaryPlusGuarded,
+    NullishEqualityCompacted,
 }
 
 impl NormalizationPassId {
@@ -134,6 +135,7 @@ impl NormalizationPassId {
             Self::VoidZeroToUndefinedGuarded => "void_zero_to_undefined_guarded",
             Self::BooleanCallToDoubleNotGuarded => "boolean_call_to_double_not_guarded",
             Self::NumberCallToUnaryPlusGuarded => "number_call_to_unary_plus_guarded",
+            Self::NullishEqualityCompacted => "nullish_equality_compacted",
         }
     }
 }
