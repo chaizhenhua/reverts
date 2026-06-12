@@ -82,6 +82,7 @@ pub enum NormalizationPassId {
     ExportBoundaryNormalized,
     ClosureBoundaryAligned,
     BooleanUndefinedCanonicalised,
+    ObjectAssignExpanded,
 }
 
 impl NormalizationPassId {
@@ -96,6 +97,7 @@ impl NormalizationPassId {
             Self::ExportBoundaryNormalized => "export_boundary_normalized",
             Self::ClosureBoundaryAligned => "closure_boundary_aligned",
             Self::BooleanUndefinedCanonicalised => "boolean_undefined_canonicalised",
+            Self::ObjectAssignExpanded => "object_assign_expanded",
         }
     }
 }
