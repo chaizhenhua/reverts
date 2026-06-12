@@ -2498,7 +2498,12 @@ fn simple_assignment_target_is_member(target: &SimpleAssignmentTarget<'_>) -> bo
     )
 }
 
-fn iife_kind(expression: &Expression<'_>) -> Option<AstWrapperKind> {
+/// Recognises the three IIFE wrapper shapes the graph uses for top-level
+/// program scans: `(function () { … })()`, `(() => { … })()`, and the
+/// TypeScript-style `var X; (function (X) { … })(X || (X = {}));`
+/// initialiser. Exposed `pub` so `reverts-bundle::classifier` can reuse
+/// the same predicate and avoid a two-track implementation.
+pub fn iife_kind(expression: &Expression<'_>) -> Option<AstWrapperKind> {
     match expression {
         Expression::FunctionExpression(_) => Some(AstWrapperKind::FunctionIife),
         Expression::ArrowFunctionExpression(_) => Some(AstWrapperKind::ArrowIife),
@@ -3629,5 +3634,34 @@ mod tests {
                 .any(|import| import.binding.as_str() == "$lateRuntime")
         );
         assert!(graph.runtime_imports_for(ModuleId(1)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod iife_kind_visibility_tests {
+    use super::{AstWrapperKind, iife_kind};
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    #[test]
+    fn iife_kind_is_public_and_recognises_function_iife() {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(
+            &alloc,
+            "(function () { return 1; })()",
+            SourceType::default(),
+        )
+        .parse();
+        assert!(parsed.errors.is_empty());
+        let stmt = parsed.program.body.first().expect("at least one statement");
+        let oxc_ast::ast::Statement::ExpressionStatement(expr) = stmt else {
+            panic!("expected expression statement");
+        };
+        let oxc_ast::ast::Expression::CallExpression(call) = &expr.expression else {
+            panic!("expected call expression");
+        };
+        let kind = iife_kind(&call.callee);
+        assert_eq!(kind, Some(AstWrapperKind::FunctionIife));
     }
 }
