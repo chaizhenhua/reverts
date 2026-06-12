@@ -87,6 +87,7 @@ pub enum NormalizationPassId {
     SequenceExpressionSplit,
     LogicalShortCircuitExpanded,
     ConditionalStatementExpanded,
+    ReturnConditionalExpanded,
 }
 
 impl NormalizationPassId {
@@ -106,6 +107,7 @@ impl NormalizationPassId {
             Self::SequenceExpressionSplit => "sequence_expression_split",
             Self::LogicalShortCircuitExpanded => "logical_short_circuit_expanded",
             Self::ConditionalStatementExpanded => "conditional_statement_expanded",
+            Self::ReturnConditionalExpanded => "return_conditional_expanded",
         }
     }
 }
