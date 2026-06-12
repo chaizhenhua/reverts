@@ -90,6 +90,7 @@ pub enum NormalizationPassId {
     ComputedToStaticMember,
     ArrowBodyBlocked,
     CompoundAssignmentCanonical,
+    IfReturnElseFlattened,
 }
 
 impl NormalizationPassId {
@@ -112,6 +113,7 @@ impl NormalizationPassId {
             Self::ComputedToStaticMember => "computed_to_static_member",
             Self::ArrowBodyBlocked => "arrow_body_blocked",
             Self::CompoundAssignmentCanonical => "compound_assignment_canonical",
+            Self::IfReturnElseFlattened => "if_return_else_flattened",
         }
     }
 }
