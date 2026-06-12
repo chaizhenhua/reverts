@@ -85,6 +85,7 @@ pub enum NormalizationPassId {
     ObjectAssignExpanded,
     DeclaratorSplit,
     SequenceExpressionSplit,
+    LogicalShortCircuitExpanded,
 }
 
 impl NormalizationPassId {
@@ -102,6 +103,7 @@ impl NormalizationPassId {
             Self::ObjectAssignExpanded => "object_assign_expanded",
             Self::DeclaratorSplit => "declarator_split",
             Self::SequenceExpressionSplit => "sequence_expression_split",
+            Self::LogicalShortCircuitExpanded => "logical_short_circuit_expanded",
         }
     }
 }
