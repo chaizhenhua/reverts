@@ -78,7 +78,7 @@ commit-msg:
 pre-push:
   commands:
     validate:
-      run: cargo clippy --workspace --locked -- -D warnings && cargo test --workspace --locked
+      run: cargo clippy --workspace --locked --all-targets -- -D warnings && cargo test --workspace --locked
 
 post-rewrite:
   commands:

@@ -92,12 +92,12 @@ fn axis_ast_collides_for_only_rename_of_arg() {
     let h1 = with_first_fn!(
         a,
         "function f(arg) { let s = arg + 1; return s; }",
-        |_p, b| { ast::compute(b) }
+        |_p, b| ast::compute(b)
     );
     let h2 = with_first_fn!(
         a,
         "function g(qux) { let s = qux + 1; return s; }",
-        |_p, b| { ast::compute(b) }
+        |_p, b| ast::compute(b)
     );
     assert_eq!(h1, h2);
 }
@@ -111,12 +111,12 @@ fn axis_cfg_collides_when_only_expressions_differ() {
     let h1 = with_first_fn!(
         a1,
         "function f(x) { if (x > 0) return 1; return 2; }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     let h2 = with_first_fn!(
         a2,
         "function f(x) { if (x.foo()) return 'a'; return 'b'; }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     assert_eq!(h1, h2);
 }
@@ -126,12 +126,12 @@ fn axis_cfg_distinguishes_if_with_else_from_if_without_else() {
     let with_else = with_first_fn!(
         a1,
         "function f(x) { if (x) return 1; else return 2; }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     let no_else = with_first_fn!(
         a2,
         "function f(x) { if (x) return 1; return 2; }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     assert_ne!(with_else, no_else);
 }
@@ -152,12 +152,12 @@ fn axis_cfg_collides_under_identifier_rename() {
     let h1 = with_first_fn!(
         a1,
         "function f(a, b) { try { return a + b; } catch (err) { throw err; } }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     let h2 = with_first_fn!(
         a2,
         "function g(x, y) { try { return x + y; } catch (z) { throw z; } }",
-        |_p, b| { cfg::compute(b) }
+        |_p, b| cfg::compute(b)
     );
     assert_eq!(h1, h2);
 }
@@ -230,12 +230,12 @@ fn axis_effect_pattern_collides_under_rename() {
     let h1 = with_first_fn!(
         a,
         "function f(a) { console.log(a); throw new Error('x'); }",
-        |_p, b| { effect_pattern::compute(b) }
+        |_p, b| effect_pattern::compute(b)
     );
     let h2 = with_first_fn!(
         a,
         "function g(z) { console.log(z); throw new Error('y'); }",
-        |_p, b| { effect_pattern::compute(b) }
+        |_p, b| effect_pattern::compute(b)
     );
     assert_eq!(h1, h2);
 }
@@ -279,7 +279,7 @@ fn axis_literal_anchor_present_with_long_string() {
     let h = with_first_fn!(
         a,
         "function f() { throw new Error('something long'); }",
-        |_p, b| { literal_anchor::compute(b) }
+        |_p, b| literal_anchor::compute(b)
     );
     assert!(h.is_some());
 }
@@ -297,12 +297,12 @@ fn axis_literal_anchor_differs_for_different_long_strings() {
     let h1 = with_first_fn!(
         a,
         "function f() { throw new Error('first long anchor'); }",
-        |_p, b| { literal_anchor::compute(b) }
+        |_p, b| literal_anchor::compute(b)
     );
     let h2 = with_first_fn!(
         a,
         "function f() { throw new Error('second different anchor'); }",
-        |_p, b| { literal_anchor::compute(b) }
+        |_p, b| literal_anchor::compute(b)
     );
     assert_ne!(h1, h2);
 }
@@ -375,12 +375,12 @@ fn axis_structural_anchor_collides_after_rename() {
     let h1 = with_first_fn!(
         a,
         "function f(a) { try { return a; } catch(e) { throw e; } }",
-        |p, b| { structural_anchor::compute(p, b) }
+        |p, b| structural_anchor::compute(p, b)
     );
     let h2 = with_first_fn!(
         a,
         "function g(x) { try { return x; } catch(z) { throw z; } }",
-        |p, b| { structural_anchor::compute(p, b) }
+        |p, b| structural_anchor::compute(p, b)
     );
     assert_eq!(h1, h2);
 }
@@ -393,7 +393,7 @@ fn axis_structural_anchor_distinguishes_for_from_for_in() {
     let h2 = with_first_fn!(
         a,
         "function f(o) { for (const k of Object.keys(o)) { } }",
-        |p, b| { structural_anchor::compute(p, b) }
+        |p, b| structural_anchor::compute(p, b)
     );
     assert_ne!(h1, h2);
 }
@@ -451,7 +451,7 @@ fn axis_literal_shape_distinguishes_short_from_long_string() {
     let h2 = with_first_fn!(
         a,
         "function f() { return 'a-much-longer-string-value'; }",
-        |_p, b| { literal_shape::compute(b) }
+        |_p, b| literal_shape::compute(b)
     );
     assert_ne!(h1, h2);
 }
@@ -521,12 +521,12 @@ fn axis_binding_pattern_collides_under_rename() {
     let h1 = with_first_fn!(
         a,
         "function f(a, b) { let x = 1; return a + b + x; }",
-        |p, b| { binding_pattern::compute(p, b) }
+        |p, b| binding_pattern::compute(p, b)
     );
     let h2 = with_first_fn!(
         a,
         "function g(p, q) { let y = 1; return p + q + y; }",
-        |p, b| { binding_pattern::compute(p, b) }
+        |p, b| binding_pattern::compute(p, b)
     );
     assert_eq!(h1, h2);
 }
@@ -593,12 +593,12 @@ fn axis_throw_set_collides_same_constructor_different_message() {
     let h1 = with_first_fn!(
         a,
         "function f() { throw new RangeError('first'); }",
-        |_p, b| { throw_set::compute(b) }
+        |_p, b| throw_set::compute(b)
     );
     let h2 = with_first_fn!(
         a,
         "function g() { throw new RangeError('second'); }",
-        |_p, b| { throw_set::compute(b) }
+        |_p, b| throw_set::compute(b)
     );
     assert_eq!(h1, h2);
 }

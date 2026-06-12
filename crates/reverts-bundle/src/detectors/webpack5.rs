@@ -109,7 +109,12 @@ mod tests {
         assert_eq!(modules.len(), 2);
         for m in &modules {
             assert_eq!(m.bundler, BundlerKind::Webpack5);
-            assert!(m.source_path_hint.as_deref().unwrap().starts_with("./src/"));
+            assert!(
+                m.source_path_hint
+                    .as_deref()
+                    .expect("path hint should be present")
+                    .starts_with("./src/")
+            );
         }
     }
 

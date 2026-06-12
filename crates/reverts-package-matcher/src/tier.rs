@@ -345,6 +345,33 @@ pub fn try_structural_only(
     None
 }
 
+pub(crate) fn pick_unique(
+    mut candidates: Vec<Candidate>,
+    tier: MatchTier,
+    alt: Option<NormalizationPassId>,
+    matched_axes: Vec<AxisKind>,
+) -> Option<FunctionMatch> {
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.dedup_by(|a, b| {
+        a.package == b.package && a.external_function_id == b.external_function_id
+    });
+    if candidates.len() != 1 {
+        return None;
+    }
+    let candidate = candidates.into_iter().next()?;
+    Some(FunctionMatch {
+        tier,
+        candidate,
+        margin: 1.0,
+        top_score: f64::from(tier.weight()),
+        runner_up_score: 0.0,
+        matched_alternate: alt,
+        matched_axes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -459,31 +486,4 @@ mod tests {
         let m = try_exact(&fp, &idx).expect("exact match");
         assert_eq!(m.matched_axes, vec![AxisKind::Ast]);
     }
-}
-
-pub(crate) fn pick_unique(
-    mut candidates: Vec<Candidate>,
-    tier: MatchTier,
-    alt: Option<NormalizationPassId>,
-    matched_axes: Vec<AxisKind>,
-) -> Option<FunctionMatch> {
-    if candidates.is_empty() {
-        return None;
-    }
-    candidates.dedup_by(|a, b| {
-        a.package == b.package && a.external_function_id == b.external_function_id
-    });
-    if candidates.len() != 1 {
-        return None;
-    }
-    let candidate = candidates.into_iter().next()?;
-    Some(FunctionMatch {
-        tier,
-        candidate,
-        margin: 1.0,
-        top_score: f64::from(tier.weight()),
-        runner_up_score: 0.0,
-        matched_alternate: alt,
-        matched_axes,
-    })
 }

@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn non_iife_arrow_is_left_alone() {
         let src = "function outer() { return () => 1; }";
-        let out = apply_to_source(&ClosureBoundaryAligned, src).unwrap();
+        let out = apply_to_source(&ClosureBoundaryAligned, src).expect("normalize should succeed");
         assert!(out.contains("=>"), "got: {out}");
     }
 

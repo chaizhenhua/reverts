@@ -64,8 +64,8 @@ mod tests {
     #[test]
     fn ts_runtime_erased_is_idempotent_on_plain_js() {
         let src = "function add(a, b) { return a + b; }\n";
-        let first = apply_to_source(&TsRuntimeErased, src).unwrap();
-        let second = apply_to_source(&TsRuntimeErased, &first).unwrap();
+        let first = apply_to_source(&TsRuntimeErased, src).expect("first pass should succeed");
+        let second = apply_to_source(&TsRuntimeErased, &first).expect("second pass should succeed");
         assert_eq!(first, second);
     }
 }

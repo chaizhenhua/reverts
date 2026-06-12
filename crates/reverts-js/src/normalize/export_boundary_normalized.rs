@@ -73,7 +73,8 @@ mod tests {
     #[test]
     fn pure_reexport_drops_out_safely() {
         let src = "export { foo } from './bar';\nfunction g() {}";
-        let out = apply_to_source(&ExportBoundaryNormalized, src).unwrap();
+        let out =
+            apply_to_source(&ExportBoundaryNormalized, src).expect("normalize should succeed");
         assert!(out.contains("function g"));
     }
 

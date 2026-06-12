@@ -44,7 +44,9 @@ fn webpack5_lookalikes_are_rejected() {
         r#"var __webpack_modules__ = {"./a": 1, "./b": 2};"#
     ));
     // Function variant with no body — actually IS detected as Marked
-    assert!(classify_is_plain(r#"var __webpack_modules__ = {"./a": function(){}};"#) == false);
+    assert!(!classify_is_plain(
+        r#"var __webpack_modules__ = {"./a": function(){}};"#
+    ));
     // Empty module map
     assert!(classify_is_plain("var __webpack_modules__ = {};"));
 }

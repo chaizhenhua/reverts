@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn non_identity_helper_is_left_alone() {
         let src = "function adds(x) { return x + 1; }\nlet v = adds(2);";
-        let out = apply_to_source(&HelperIdentityInlined, src).unwrap();
+        let out = apply_to_source(&HelperIdentityInlined, src).expect("normalize should succeed");
         assert!(out.contains("adds("));
     }
 }
