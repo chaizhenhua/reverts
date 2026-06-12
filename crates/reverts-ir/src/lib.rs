@@ -1103,6 +1103,7 @@ pub enum MatchTier {
     StructuralAnchored,
     StructuralAnchoredAlternate,
     FeatureSimilarity,
+    FeatureSimilarityAlternate,
     StructuralOnly,
 }
 
@@ -1121,6 +1122,10 @@ impl MatchTier {
             // shared the same weight.
             Self::StructuralAnchoredAlternate => 500,
             Self::FeatureSimilarity => 100,
+            // Strictly below `FeatureSimilarity` so Hungarian prefers
+            // a primary feature-similarity match over an alt-source one
+            // when both compete for the same (package, fn_id).
+            Self::FeatureSimilarityAlternate => 50,
             Self::StructuralOnly => 10,
         }
     }
@@ -1133,6 +1138,7 @@ impl MatchTier {
             Self::StructuralAnchored => "structural_anchored",
             Self::StructuralAnchoredAlternate => "structural_anchored_alternate",
             Self::FeatureSimilarity => "feature_similarity",
+            Self::FeatureSimilarityAlternate => "feature_similarity_alternate",
             Self::StructuralOnly => "structural_only",
         }
     }
@@ -1150,6 +1156,7 @@ mod match_tier_tests {
             MatchTier::StructuralAnchored.weight(),
             MatchTier::StructuralAnchoredAlternate.weight(),
             MatchTier::FeatureSimilarity.weight(),
+            MatchTier::FeatureSimilarityAlternate.weight(),
             MatchTier::StructuralOnly.weight(),
         ];
         for window in weights.windows(2) {
@@ -1173,6 +1180,10 @@ mod match_tier_tests {
             "structural_anchored_alternate"
         );
         assert_eq!(MatchTier::FeatureSimilarity.as_str(), "feature_similarity");
+        assert_eq!(
+            MatchTier::FeatureSimilarityAlternate.as_str(),
+            "feature_similarity_alternate"
+        );
         assert_eq!(MatchTier::StructuralOnly.as_str(), "structural_only");
     }
 }

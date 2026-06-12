@@ -3,8 +3,9 @@ use reverts_package_index::PackageFingerprintIndex;
 
 use crate::hungarian::assign_max_weight;
 use crate::tier::{
-    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
-    try_structural_anchored_alternate, try_structural_only,
+    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity,
+    try_feature_similarity_alternate, try_structural_anchored, try_structural_anchored_alternate,
+    try_structural_only,
 };
 
 #[must_use]
@@ -17,6 +18,7 @@ pub fn match_function(
         .or_else(|| try_structural_anchored(fp, index))
         .or_else(|| try_structural_anchored_alternate(fp, index))
         .or_else(|| try_feature_similarity(fp, index))
+        .or_else(|| try_feature_similarity_alternate(fp, index))
         .or_else(|| try_structural_only(fp, index))
 }
 
@@ -48,6 +50,9 @@ pub fn cascade_candidates(
         all.push(m);
     }
     if let Some(m) = try_feature_similarity(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_feature_similarity_alternate(fp, index) {
         all.push(m);
     }
     if let Some(m) = try_structural_only(fp, index) {

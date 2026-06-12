@@ -1839,9 +1839,9 @@ fn ensure_package_function_attributions_table(
 }
 
 /// True when the existing `package_function_attributions` table was
-/// created before the `structural_anchored_alternate` tier was added,
-/// i.e. its CHECK constraint does not list that value. Detected by
-/// peeking at the persisted `sql` text in `sqlite_master`.
+/// created before any of the alt-tier names were added, i.e. its
+/// CHECK constraint does not list one of the expected values.
+/// Detected by peeking at the persisted `sql` text in `sqlite_master`.
 fn package_function_attributions_requires_alt_tier_migration(
     connection: &Connection,
 ) -> rusqlite::Result<bool> {
@@ -1854,7 +1854,10 @@ fn package_function_attributions_requires_alt_tier_migration(
         .optional()?
         .flatten();
     Ok(sql
-        .map(|s| !s.contains("structural_anchored_alternate"))
+        .map(|s| {
+            !s.contains("structural_anchored_alternate")
+                || !s.contains("feature_similarity_alternate")
+        })
         .unwrap_or(false))
 }
 
@@ -1921,6 +1924,7 @@ CREATE TABLE IF NOT EXISTS package_function_attributions (
         'structural_anchored',
         'structural_anchored_alternate',
         'feature_similarity',
+        'feature_similarity_alternate',
         'structural_only'
     )),
     CHECK (margin >= 0.0 AND margin <= 1.0)

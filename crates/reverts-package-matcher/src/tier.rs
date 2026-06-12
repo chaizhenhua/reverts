@@ -193,11 +193,51 @@ pub fn try_feature_similarity(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    // Priority: callee_set > throw_set > literal_anchor > access_pattern.
-    let (primary_axis, primary_hash) = priority_axis(&fp.primary)?;
+    feature_similarity_for_axes(
+        fp.param_count,
+        &fp.primary,
+        index,
+        MatchTier::FeatureSimilarity,
+        None,
+    )
+}
+
+/// Like [`try_feature_similarity`], but consults each alternate
+/// fingerprint. Returns matches at
+/// [`MatchTier::FeatureSimilarityAlternate`] (weight 50) so the
+/// Hungarian global assignment prefers a primary feature-similarity
+/// match when one exists, and falls back to an alternate when only
+/// the alt-source axes line up.
+#[must_use]
+pub fn try_feature_similarity_alternate(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
+    for alt in &fp.alternates {
+        if let Some(m) = feature_similarity_for_axes(
+            fp.param_count,
+            &alt.axes,
+            index,
+            MatchTier::FeatureSimilarityAlternate,
+            Some(alt.pass),
+        ) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn feature_similarity_for_axes(
+    param_count: u32,
+    axes: &AxisHashes,
+    index: &dyn PackageFingerprintIndex,
+    tier: MatchTier,
+    matched_alternate: Option<NormalizationPassId>,
+) -> Option<FunctionMatch> {
+    let (primary_axis, primary_hash) = priority_axis(axes)?;
 
     let cands = index.query_feature(FeatureKey {
-        param_count: fp.param_count,
+        param_count,
         kind: primary_axis,
         hash: primary_hash,
     });
@@ -205,23 +245,15 @@ pub fn try_feature_similarity(
         return None;
     }
 
-    // Score each candidate by Jaccard over the remaining axes available on fp.
-    // For each "remaining" axis where fp has a hash, do index.query_feature(...)
-    // and check if our specific candidate appears.
-    // The Jaccard numerator is "# remaining axes the candidate also has at this hash";
-    // the denominator is "# remaining axes fp has" (approximation — we can't enumerate
-    // candidate's full axis set without a per-candidate bag lookup).
-    let remaining = collect_remaining_axes(&fp.primary, primary_axis);
+    let remaining = collect_remaining_axes(axes, primary_axis);
 
-    // For each candidate, record the actual overlapping axes (not just a
-    // count) so the resulting FunctionMatch can carry multi-axis evidence.
     let mut scored: Vec<(Candidate, f64, Vec<AxisKind>)> = cands
         .into_iter()
         .map(|cand| {
             let mut overlap_axes = Vec::new();
             for (axis, hash) in &remaining {
                 let cand_hits = index.query_feature(FeatureKey {
-                    param_count: fp.param_count,
+                    param_count,
                     kind: *axis,
                     hash: *hash,
                 });
@@ -240,13 +272,25 @@ pub fn try_feature_similarity(
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     let best = scored.first()?;
-    if best.1 < 0.6 {
+    // Primary feature-similarity tier requires Jaccard ≥ 0.6 (high
+    // confidence); the alt-source tier (lower weight, second-class
+    // evidence) accepts ≥ 0.5 — Hungarian global assignment still
+    // prefers any primary match over an alternate one when both
+    // compete for the same (package, fn_id) pair because of the
+    // tier-weight ordering, so loosening the threshold here is a
+    // recall-only knob without precision cost on shared candidates.
+    let threshold = if tier == MatchTier::FeatureSimilarityAlternate {
+        0.5
+    } else {
+        0.6
+    };
+    if best.1 < threshold {
         return None;
     }
     if scored.len() > 1 {
         let runner_up = &scored[1];
         if (best.1 - runner_up.1).abs() < f64::EPSILON {
-            return None; // tied — reject
+            return None;
         }
     }
 
@@ -255,13 +299,12 @@ pub fn try_feature_similarity(
     matched_axes.extend(best.2.iter().copied());
 
     Some(FunctionMatch {
-        tier: MatchTier::FeatureSimilarity,
+        tier,
         candidate: best.0.clone(),
         margin: best.1 - scored.get(1).map_or(0.0, |s| s.1),
-        top_score: best.1 * f64::from(MatchTier::FeatureSimilarity.weight()),
-        runner_up_score: scored.get(1).map_or(0.0, |s| s.1)
-            * f64::from(MatchTier::FeatureSimilarity.weight()),
-        matched_alternate: None,
+        top_score: best.1 * f64::from(tier.weight()),
+        runner_up_score: scored.get(1).map_or(0.0, |s| s.1) * f64::from(tier.weight()),
+        matched_alternate,
         matched_axes,
     })
 }
