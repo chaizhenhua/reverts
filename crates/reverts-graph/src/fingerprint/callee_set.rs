@@ -3,25 +3,51 @@ use oxc_ast::ast::{CallExpression, Expression, FunctionBody, NewExpression};
 use reverts_ir::hash::fnv1a_of_string_set;
 use std::collections::BTreeSet;
 
+/// Compute the callee_set axis with **scope-aware filtering** — local
+/// binding names listed in `local_names` are dropped on the assumption
+/// that they're minifier-renamed aliases of helpers whose stable
+/// identity lives elsewhere. Builtin/method calls (`.toLocaleString`,
+/// `Object.assign`, `Number`) are always recorded.
+///
+/// Passing an empty set behaves identically to a name-blind call:
+/// every identifier callee gets recorded.
 #[must_use]
-pub fn compute(body: &FunctionBody<'_>) -> Option<u64> {
+pub fn compute_with_locals(body: &FunctionBody<'_>, local_names: &BTreeSet<&str>) -> Option<u64> {
     let mut s: BTreeSet<String> = BTreeSet::new();
-    let mut v = V { s: &mut s };
+    let mut v = V {
+        s: &mut s,
+        locals: local_names,
+    };
     for stmt in &body.statements {
         v.visit_statement(stmt);
     }
     fnv1a_of_string_set(s.iter().map(String::as_str), b"callee|")
 }
 
-struct V<'a> {
-    s: &'a mut BTreeSet<String>,
+#[must_use]
+pub fn compute(body: &FunctionBody<'_>) -> Option<u64> {
+    compute_with_locals(body, &BTreeSet::new())
 }
 
-impl<'a> Visit<'a> for V<'_> {
+struct V<'a, 'l> {
+    s: &'a mut BTreeSet<String>,
+    locals: &'l BTreeSet<&'l str>,
+}
+
+impl<'a> Visit<'a> for V<'_, '_> {
     fn visit_call_expression(&mut self, c: &CallExpression<'a>) {
         match &c.callee {
             Expression::Identifier(i) => {
-                self.s.insert(format!("c:{}", i.name.as_str()));
+                let name = i.name.as_str();
+                // Skip locally-bound callee names: in a minified
+                // bundle these are unstable aliases of helpers whose
+                // real names (`toLocaleString`, `helper`) live in the
+                // un-minified source. Recording `c:K92` vs
+                // `c:toLocaleString` would diverge the hash for what
+                // is the same call structure.
+                if !self.locals.contains(name) {
+                    self.s.insert(format!("c:{name}"));
+                }
             }
             Expression::StaticMemberExpression(m) => {
                 self.s.insert(format!("cm:.{}", m.property.name.as_str()));
@@ -41,7 +67,7 @@ impl<'a> Visit<'a> for V<'_> {
             let name = i.name.as_str();
             if is_new_optional_builtin(name) {
                 self.s.insert(format!("c:{name}"));
-            } else {
+            } else if !self.locals.contains(name) {
                 self.s.insert(format!("nc:{name}"));
             }
         }

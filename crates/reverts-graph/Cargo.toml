@@ -12,6 +12,7 @@ workspace = true
 oxc_allocator.workspace = true
 oxc_ast = "0.42"
 oxc_parser.workspace = true
+oxc_semantic = "0.42"
 oxc_span.workspace = true
 oxc_syntax = "0.42"
 reverts-input = { path = "../reverts-input" }

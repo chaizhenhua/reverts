@@ -85,6 +85,7 @@ impl FunctionExtractor {
             return Vec::new();
         }
         let primary_extracts = Self::new(module_id).extract(&parsed.program);
+        let primary_locals = collect_top_level_binding_names(&parsed.program);
 
         let mut out: Vec<FunctionFingerprint> = primary_extracts
             .iter()
@@ -94,7 +95,7 @@ impl FunctionExtractor {
                     id: f.id,
                     param_count: f.param_count,
                     statement_count: f.statement_count,
-                    primary: compute_axes(params, body),
+                    primary: compute_axes(params, body, &primary_locals),
                     alternates: Vec::new(),
                 })
             })
@@ -110,6 +111,7 @@ impl FunctionExtractor {
                 continue;
             }
             let alt_extracts = Self::new(module_id).extract(&alt_parsed.program);
+            let alt_locals = collect_top_level_binding_names(&alt_parsed.program);
             for (i, alt_fn) in alt_extracts.iter().enumerate() {
                 let Some(fp) = out.get_mut(i) else {
                     break;
@@ -124,7 +126,7 @@ impl FunctionExtractor {
                 fp.alternates.push(reverts_ir::AlternateAxisHashes {
                     pass: pass.id(),
                     statement_count: alt_fn.statement_count,
-                    axes: compute_axes(params, body),
+                    axes: compute_axes(params, body, &alt_locals),
                 });
             }
         }
@@ -164,8 +166,18 @@ fn strip_outer_block_braces(src: &str) -> &str {
     src
 }
 
-fn compute_axes<'a>(params: &FormalParameters<'a>, body: &FunctionBody<'a>) -> AxisHashes {
+fn compute_axes<'a>(
+    params: &FormalParameters<'a>,
+    body: &FunctionBody<'a>,
+    program_locals: &std::collections::BTreeSet<&str>,
+) -> AxisHashes {
     let (acc_p, acc_s) = super::access::compute(body);
+    // Per-function scope: union program-level locals with this
+    // function's params and body-level bindings. Calling a name in
+    // this combined set is a call into renameable territory and gets
+    // filtered out of callee_set.
+    let mut function_locals = program_locals.clone();
+    collect_function_scope_binding_names(params, body, &mut function_locals);
     AxisHashes {
         ast: super::ast::compute(body),
         cfg: super::cfg::compute(body),
@@ -176,10 +188,229 @@ fn compute_axes<'a>(params: &FormalParameters<'a>, body: &FunctionBody<'a>) -> A
         structural_anchor: super::structural_anchor::compute(params, body),
         literal_shape: super::literal_shape::compute(body),
         access_shape: acc_s,
-        callee_set: super::callee_set::compute(body),
+        callee_set: super::callee_set::compute_with_locals(body, &function_locals),
         binding_pattern: super::binding_pattern::compute(params, body),
         throw_set: super::throw_set::compute(body),
     }
+}
+
+/// Collect every identifier name bound anywhere within a function:
+/// formal parameters, top-level body declarations, **and block-scope
+/// let/const/var/function/class declarations inside if-bodies,
+/// loops, try-catch handlers, and nested blocks**. Nested function
+/// bodies are NOT recursed into — they have their own scope and will
+/// be processed when their own `compute_axes` runs.
+///
+/// Why include block-scope bindings? Because a minifier rewrites them
+/// the same way it rewrites function-scope locals — `if (cond) { let
+/// helper = ...; helper(); }` becomes `if (cond) { let K = ...;
+/// K(); }`. The name `K` is unstable across builds and we want to
+/// filter it out of `callee_set` for the same reason we filter
+/// function-scope locals.
+fn collect_function_scope_binding_names<'b>(
+    params: &'b FormalParameters<'_>,
+    body: &'b FunctionBody<'_>,
+    set: &mut std::collections::BTreeSet<&'b str>,
+) {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+    fn visit_pattern<'b>(
+        kind: &'b BindingPatternKind<'_>,
+        set: &mut std::collections::BTreeSet<&'b str>,
+    ) {
+        match kind {
+            BindingPatternKind::BindingIdentifier(b) => {
+                set.insert(b.name.as_str());
+            }
+            BindingPatternKind::ObjectPattern(o) => {
+                for p in &o.properties {
+                    visit_pattern(&p.value.kind, set);
+                }
+                if let Some(rest) = &o.rest {
+                    visit_pattern(&rest.argument.kind, set);
+                }
+            }
+            BindingPatternKind::ArrayPattern(a) => {
+                for e in (&a.elements).into_iter().flatten() {
+                    visit_pattern(&e.kind, set);
+                }
+                if let Some(rest) = &a.rest {
+                    visit_pattern(&rest.argument.kind, set);
+                }
+            }
+            BindingPatternKind::AssignmentPattern(a) => visit_pattern(&a.left.kind, set),
+        }
+    }
+    fn visit_stmt<'b>(stmt: &'b Statement<'_>, set: &mut std::collections::BTreeSet<&'b str>) {
+        match stmt {
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    visit_pattern(&decl.id.kind, set);
+                }
+            }
+            Statement::FunctionDeclaration(f) => {
+                if let Some(id) = &f.id {
+                    set.insert(id.name.as_str());
+                }
+            }
+            Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    set.insert(id.name.as_str());
+                }
+            }
+            Statement::BlockStatement(b) => {
+                for s in &b.body {
+                    visit_stmt(s, set);
+                }
+            }
+            Statement::IfStatement(i) => {
+                visit_stmt(&i.consequent, set);
+                if let Some(alt) = &i.alternate {
+                    visit_stmt(alt, set);
+                }
+            }
+            Statement::ForStatement(f) => {
+                use oxc_ast::ast::ForStatementInit;
+                if let Some(ForStatementInit::VariableDeclaration(v)) = &f.init {
+                    for decl in &v.declarations {
+                        visit_pattern(&decl.id.kind, set);
+                    }
+                }
+                visit_stmt(&f.body, set);
+            }
+            Statement::ForInStatement(f) => {
+                use oxc_ast::ast::ForStatementLeft;
+                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                    for decl in &v.declarations {
+                        visit_pattern(&decl.id.kind, set);
+                    }
+                }
+                visit_stmt(&f.body, set);
+            }
+            Statement::ForOfStatement(f) => {
+                use oxc_ast::ast::ForStatementLeft;
+                if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                    for decl in &v.declarations {
+                        visit_pattern(&decl.id.kind, set);
+                    }
+                }
+                visit_stmt(&f.body, set);
+            }
+            Statement::WhileStatement(w) => visit_stmt(&w.body, set),
+            Statement::DoWhileStatement(d) => visit_stmt(&d.body, set),
+            Statement::TryStatement(t) => {
+                for s in &t.block.body {
+                    visit_stmt(s, set);
+                }
+                if let Some(handler) = &t.handler {
+                    if let Some(param) = &handler.param {
+                        visit_pattern(&param.pattern.kind, set);
+                    }
+                    for s in &handler.body.body {
+                        visit_stmt(s, set);
+                    }
+                }
+                if let Some(fin) = &t.finalizer {
+                    for s in &fin.body {
+                        visit_stmt(s, set);
+                    }
+                }
+            }
+            Statement::SwitchStatement(s) => {
+                for case in &s.cases {
+                    for stmt in &case.consequent {
+                        visit_stmt(stmt, set);
+                    }
+                }
+            }
+            Statement::LabeledStatement(l) => visit_stmt(&l.body, set),
+            _ => {}
+        }
+    }
+    for p in &params.items {
+        visit_pattern(&p.pattern.kind, set);
+    }
+    for stmt in &body.statements {
+        visit_stmt(stmt, set);
+    }
+}
+
+/// Collect every identifier name bound at the program top level (and
+/// any nested function/class declaration name that's also program-
+/// scope-visible). These names are the rename targets a minifier
+/// rewrites — locally introduced and unstable across builds. Function
+/// fingerprints filter `callee_set` against this set so that calls to
+/// such helpers don't leak unstable names into the hash.
+fn collect_top_level_binding_names<'p, 'a: 'p>(
+    program: &'p oxc_ast::ast::Program<'a>,
+) -> std::collections::BTreeSet<&'p str> {
+    use oxc_ast::ast::{BindingPatternKind, Declaration, Statement};
+    let mut set = std::collections::BTreeSet::new();
+    fn visit_pattern<'p, 'a: 'p>(
+        kind: &'p BindingPatternKind<'a>,
+        set: &mut std::collections::BTreeSet<&'p str>,
+    ) {
+        match kind {
+            BindingPatternKind::BindingIdentifier(b) => {
+                set.insert(b.name.as_str());
+            }
+            BindingPatternKind::ObjectPattern(o) => {
+                for p in &o.properties {
+                    visit_pattern(&p.value.kind, set);
+                }
+                if let Some(rest) = &o.rest {
+                    visit_pattern(&rest.argument.kind, set);
+                }
+            }
+            BindingPatternKind::ArrayPattern(a) => {
+                for e in (&a.elements).into_iter().flatten() {
+                    visit_pattern(&e.kind, set);
+                }
+                if let Some(rest) = &a.rest {
+                    visit_pattern(&rest.argument.kind, set);
+                }
+            }
+            BindingPatternKind::AssignmentPattern(a) => visit_pattern(&a.left.kind, set),
+        }
+    }
+    for stmt in &program.body {
+        match stmt {
+            Statement::VariableDeclaration(v) => {
+                for decl in &v.declarations {
+                    visit_pattern(&decl.id.kind, &mut set);
+                }
+            }
+            Statement::FunctionDeclaration(f) => {
+                if let Some(id) = &f.id {
+                    set.insert(id.name.as_str());
+                }
+            }
+            Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    set.insert(id.name.as_str());
+                }
+            }
+            Statement::ExportNamedDeclaration(e) => match &e.declaration {
+                Some(Declaration::VariableDeclaration(v)) => {
+                    for decl in &v.declarations {
+                        visit_pattern(&decl.id.kind, &mut set);
+                    }
+                }
+                Some(Declaration::FunctionDeclaration(f)) => {
+                    if let Some(id) = &f.id {
+                        set.insert(id.name.as_str());
+                    }
+                }
+                Some(Declaration::ClassDeclaration(c)) => {
+                    if let Some(id) = &c.id {
+                        set.insert(id.name.as_str());
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    set
 }
 
 fn locate_function<'a>(

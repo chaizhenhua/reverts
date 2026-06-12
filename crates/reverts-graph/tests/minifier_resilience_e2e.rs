@@ -192,6 +192,179 @@ fn pipeline_aligns_computed_member_with_dot_member() {
 }
 
 #[test]
+fn scope_aware_callee_filter_aligns_renamed_local_helpers() {
+    // The whole point: when a helper at module top level is renamed
+    // by a minifier (`toLocaleString` → `K92`), call sites of the
+    // helper inside other module functions should produce the SAME
+    // callee_set hash as the un-minified version — because the
+    // renamed local is filtered out of the callee_set.
+    let renamed = r#"
+        function K92(A, Q, B) { return A.toLocaleString(Q, B); }
+        function caller(n) { return K92(n, 'en', {}); }
+    "#;
+    let original = r#"
+        function toLocaleString(A, Q, B) { return A.toLocaleString(Q, B); }
+        function caller(n) { return toLocaleString(n, 'en', {}); }
+    "#;
+    let fp_renamed = FunctionExtractor::fingerprint(ModuleId(1), renamed);
+    let fp_original = FunctionExtractor::fingerprint(ModuleId(2), original);
+    // We expect 2 functions per source (the helper + the caller).
+    assert_eq!(fp_renamed.len(), 2);
+    assert_eq!(fp_original.len(), 2);
+
+    // The `caller` function: param_count=1, stmts=1. Its callee_set
+    // hashes should match between renamed and original — the call to
+    // `K92` (a top-level local) is filtered out, leaving only the
+    // method call `.toLocaleString` which IS recorded.
+    // Wait — caller doesn't have a method call. It just calls K92.
+    // After scope filtering, callee_set is empty (None) on both
+    // sides. Same emptiness = same hash.
+    let r_caller = fp_renamed.iter().find(|f| f.param_count == 1).unwrap();
+    let o_caller = fp_original.iter().find(|f| f.param_count == 1).unwrap();
+    assert_eq!(
+        r_caller.primary.callee_set, o_caller.primary.callee_set,
+        "scope-aware callee_set should ignore renamed local helper"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_treats_param_callees_as_unstable() {
+    // `caller(K)` calls K, which is a PARAMETER (not a top-level
+    // binding). Function-scope filtering should drop `c:K` from the
+    // callee_set. Two functions with the same shape but different
+    // param names should produce the same callee_set hash.
+    let a = r#"
+        function caller(K) { K(1); K(2); }
+    "#;
+    let b = r#"
+        function caller(helper) { helper(1); helper(2); }
+    "#;
+    let fp_a = FunctionExtractor::fingerprint(ModuleId(1), a);
+    let fp_b = FunctionExtractor::fingerprint(ModuleId(2), b);
+    assert_eq!(fp_a.len(), 1);
+    assert_eq!(fp_b.len(), 1);
+    assert_eq!(
+        fp_a[0].primary.callee_set, fp_b[0].primary.callee_set,
+        "callee invoking a param identifier must not leak the param name"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_treats_let_body_local_as_unstable() {
+    let renamed = r#"
+        function caller(x) {
+            let K = makeHelper();
+            return K(x);
+        }
+    "#;
+    let original = r#"
+        function caller(x) {
+            let helper = makeHelper();
+            return helper(x);
+        }
+    "#;
+    let r = FunctionExtractor::fingerprint(ModuleId(1), renamed);
+    let o = FunctionExtractor::fingerprint(ModuleId(2), original);
+    assert_eq!(r.len(), 1);
+    assert_eq!(o.len(), 1);
+    assert_eq!(
+        r[0].primary.callee_set, o[0].primary.callee_set,
+        "callee invoking a let-bound body local must not leak the local name"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_treats_block_scope_local_as_unstable() {
+    // `let helper` declared inside an if-block is still local to the
+    // function (block-scoped). Calling it inside the same block
+    // should still be filtered out of callee_set.
+    let renamed = r#"
+        function caller(x) {
+            if (x) {
+                let K = makeHelper();
+                K(x);
+            }
+        }
+    "#;
+    let original = r#"
+        function caller(x) {
+            if (x) {
+                let helper = makeHelper();
+                helper(x);
+            }
+        }
+    "#;
+    let r = FunctionExtractor::fingerprint(ModuleId(1), renamed);
+    let o = FunctionExtractor::fingerprint(ModuleId(2), original);
+    assert_eq!(r.len(), 1);
+    assert_eq!(o.len(), 1);
+    assert_eq!(
+        r[0].primary.callee_set, o[0].primary.callee_set,
+        "callee invoking a block-scope let-bound local must not leak the local name"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_treats_catch_param_as_unstable() {
+    let renamed = r#"
+        function safe(fn) {
+            try { return fn(); } catch (E) { E.report(); }
+        }
+    "#;
+    let original = r#"
+        function safe(fn) {
+            try { return fn(); } catch (err) { err.report(); }
+        }
+    "#;
+    let r = FunctionExtractor::fingerprint(ModuleId(1), renamed);
+    let o = FunctionExtractor::fingerprint(ModuleId(2), original);
+    assert_eq!(r.len(), 1);
+    assert_eq!(o.len(), 1);
+    // The fingerprint AST + CFG must align; callee_set may also align.
+    assert_eq!(
+        r[0].primary.callee_set, o[0].primary.callee_set,
+        "catch-clause param name should not leak via callee_set"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_treats_for_of_binding_as_unstable() {
+    let renamed = r#"
+        function loop(xs) {
+            for (let K of xs) { K(); }
+        }
+    "#;
+    let original = r#"
+        function loop(xs) {
+            for (let item of xs) { item(); }
+        }
+    "#;
+    let r = FunctionExtractor::fingerprint(ModuleId(1), renamed);
+    let o = FunctionExtractor::fingerprint(ModuleId(2), original);
+    assert_eq!(r.len(), 1);
+    assert_eq!(o.len(), 1);
+    assert_eq!(
+        r[0].primary.callee_set, o[0].primary.callee_set,
+        "for-of binding identifier must be filtered as local"
+    );
+}
+
+#[test]
+fn function_scope_callee_filter_still_records_globals() {
+    // `Number.isFinite` is a global that survives minification. Even
+    // with scope filtering, it must remain in callee_set.
+    let src = r#"
+        function check(x) { return Number.isFinite(x); }
+    "#;
+    let fp = FunctionExtractor::fingerprint(ModuleId(1), src);
+    assert_eq!(fp.len(), 1);
+    assert!(
+        fp[0].primary.callee_set.is_some(),
+        "method call .isFinite must keep callee_set non-empty"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
