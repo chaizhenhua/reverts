@@ -258,13 +258,15 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} cached source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} audit finding(s)",
+        "matched packages for project {} from {} cached source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
         outcome.matched_package_surfaces,
         outcome.written_attributions,
         outcome.written_surfaces,
+        outcome.cascade_attributions,
+        outcome.written_cascade_attributions,
         outcome.audit.findings().len()
     );
     if !outcome.audit.is_clean() {
