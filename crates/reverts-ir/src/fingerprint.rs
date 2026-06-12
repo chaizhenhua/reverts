@@ -82,7 +82,6 @@ pub enum NormalizationPassId {
     ExportBoundaryNormalized,
     ClosureBoundaryAligned,
     BooleanUndefinedCanonicalised,
-    ObjectAssignExpanded,
     DeclaratorSplit,
     SequenceExpressionSplit,
     LogicalShortCircuitExpanded,
@@ -90,9 +89,7 @@ pub enum NormalizationPassId {
     ReturnConditionalExpanded,
     ComputedToStaticMember,
     ArrowBodyBlocked,
-    TypeofUndefinedCanonical,
-    BooleanCoercionCanonical,
-    NumberCoercionCanonical,
+    CompoundAssignmentCanonical,
 }
 
 impl NormalizationPassId {
@@ -107,7 +104,6 @@ impl NormalizationPassId {
             Self::ExportBoundaryNormalized => "export_boundary_normalized",
             Self::ClosureBoundaryAligned => "closure_boundary_aligned",
             Self::BooleanUndefinedCanonicalised => "boolean_undefined_canonicalised",
-            Self::ObjectAssignExpanded => "object_assign_expanded",
             Self::DeclaratorSplit => "declarator_split",
             Self::SequenceExpressionSplit => "sequence_expression_split",
             Self::LogicalShortCircuitExpanded => "logical_short_circuit_expanded",
@@ -115,9 +111,7 @@ impl NormalizationPassId {
             Self::ReturnConditionalExpanded => "return_conditional_expanded",
             Self::ComputedToStaticMember => "computed_to_static_member",
             Self::ArrowBodyBlocked => "arrow_body_blocked",
-            Self::TypeofUndefinedCanonical => "typeof_undefined_canonical",
-            Self::BooleanCoercionCanonical => "boolean_coercion_canonical",
-            Self::NumberCoercionCanonical => "number_coercion_canonical",
+            Self::CompoundAssignmentCanonical => "compound_assignment_canonical",
         }
     }
 }
