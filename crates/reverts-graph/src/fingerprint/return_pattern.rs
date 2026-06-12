@@ -35,6 +35,19 @@ pub fn compute(body: &FunctionBody<'_>) -> u64 {
 
 fn classify(expr: &Expression<'_>) -> ReturnKind {
     use Expression as E;
+    // Minifier-stable canonicalisation: `!0` / `!1` are boolean
+    // literals, `void <num>` is `undefined` (an Identifier).
+    if let E::UnaryExpression(u) = expr {
+        use oxc_syntax::operator::UnaryOperator;
+        if matches!(u.operator, UnaryOperator::LogicalNot)
+            && matches!(&u.argument, E::NumericLiteral(n) if n.value == 0.0 || n.value == 1.0)
+        {
+            return ReturnKind::Literal;
+        }
+        if matches!(u.operator, UnaryOperator::Void) {
+            return ReturnKind::Identifier;
+        }
+    }
     match expr {
         E::StringLiteral(_)
         | E::NumericLiteral(_)
@@ -106,6 +119,23 @@ mod tests {
         assert_eq!(
             hash_first("function f(a) { return a.x.y; }"),
             hash_first("function f(z) { return z.q.r; }"),
+        );
+    }
+
+    #[test]
+    fn return_pattern_treats_minifier_false_and_bang_one_as_literal() {
+        let truthy = hash_first("function f() { return true; }");
+        let bang_zero = hash_first("function f() { return !0; }");
+        assert_eq!(truthy, bang_zero, "true ↔ !0 in return must collide");
+    }
+
+    #[test]
+    fn return_pattern_treats_undefined_and_void_zero_as_identifier() {
+        let undef = hash_first("function f() { return undefined; }");
+        let void_zero = hash_first("function f() { return void 0; }");
+        assert_eq!(
+            undef, void_zero,
+            "undefined ↔ void 0 in return must collide"
         );
     }
 }
