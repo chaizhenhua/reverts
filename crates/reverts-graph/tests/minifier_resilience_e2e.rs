@@ -350,6 +350,30 @@ fn function_scope_callee_filter_treats_for_of_binding_as_unstable() {
 }
 
 #[test]
+fn pipeline_aligns_arrow_expression_form_with_block_form() {
+    let minified = "var f = (a) => a + 1;";
+    let source = "var f = (a) => { return a + 1; };";
+    let n_m = apply_all_passes(minified);
+    let n_s = apply_all_passes(source);
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &n_m);
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &n_s);
+    assert_eq!(fp_m.len(), 1);
+    assert_eq!(fp_s.len(), 1);
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "arrow expression-form and block-form must produce the same AST hash"
+    );
+    assert_eq!(
+        fp_m[0].primary.cfg, fp_s[0].primary.cfg,
+        "arrow expression-form and block-form must produce the same CFG hash"
+    );
+    assert_eq!(
+        fp_m[0].statement_count, fp_s[0].statement_count,
+        "statement_count must match (both produce 1)"
+    );
+}
+
+#[test]
 fn function_scope_callee_filter_still_records_globals() {
     // `Number.isFinite` is a global that survives minification. Even
     // with scope filtering, it must remain in callee_set.

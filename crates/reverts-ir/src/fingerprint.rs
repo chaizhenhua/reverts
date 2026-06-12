@@ -89,6 +89,7 @@ pub enum NormalizationPassId {
     ConditionalStatementExpanded,
     ReturnConditionalExpanded,
     ComputedToStaticMember,
+    ArrowBodyBlocked,
 }
 
 impl NormalizationPassId {
@@ -110,6 +111,7 @@ impl NormalizationPassId {
             Self::ConditionalStatementExpanded => "conditional_statement_expanded",
             Self::ReturnConditionalExpanded => "return_conditional_expanded",
             Self::ComputedToStaticMember => "computed_to_static_member",
+            Self::ArrowBodyBlocked => "arrow_body_blocked",
         }
     }
 }

@@ -8,6 +8,7 @@ pub trait NormalizationPass {
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>);
 }
 
+pub mod arrow_body_blocked;
 pub mod boolean_undefined_canonicalised;
 pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
@@ -24,7 +25,7 @@ pub mod sequence_expression_split;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 14] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 15] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -40,6 +41,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 14] {
         Box::new(conditional_statement_expanded::ConditionalStatementExpanded),
         Box::new(return_conditional_expanded::ReturnConditionalExpanded),
         Box::new(computed_to_static_member::ComputedToStaticMember),
+        Box::new(arrow_body_blocked::ArrowBodyBlocked),
     ]
 }
 
@@ -90,6 +92,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 14);
+        assert_eq!(ids.len(), 15);
     }
 }
