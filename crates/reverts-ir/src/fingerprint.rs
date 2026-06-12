@@ -83,6 +83,7 @@ pub enum NormalizationPassId {
     ClosureBoundaryAligned,
     BooleanUndefinedCanonicalised,
     ObjectAssignExpanded,
+    DeclaratorSplit,
 }
 
 impl NormalizationPassId {
@@ -98,6 +99,7 @@ impl NormalizationPassId {
             Self::ClosureBoundaryAligned => "closure_boundary_aligned",
             Self::BooleanUndefinedCanonicalised => "boolean_undefined_canonicalised",
             Self::ObjectAssignExpanded => "object_assign_expanded",
+            Self::DeclaratorSplit => "declarator_split",
         }
     }
 }
