@@ -1189,6 +1189,94 @@ impl<'a> Visit<'a> for ImportUsageScopeCollector<'_> {
     }
 }
 
+/// Whether every reference to a named binding in `source` is a
+/// zero-argument call (`X()`) — i.e. the call-site shape that can be
+/// mechanically rewritten to a bare reference when the binding is
+/// delazified into a direct value.
+///
+/// Cases that count as "rewritable":
+///   * `X()` — counted as `call_count` AND `total_count`.
+///
+/// Cases that count as `total_count` but NOT `call_count`, making the
+/// binding non-rewritable:
+///   * `X` as a value (passed to a function, stored, returned, used in
+///     `typeof X`, etc.).
+///   * `X(args)` — the consumer expects to call the binding with
+///     arguments; the binding is being used as a callable value
+///     directly, not as a zero-arg thunk.
+///   * `X()()`, `X().foo` — chained access on the call result still
+///     counts the outer `X()` correctly (call_count++) but only when
+///     the inner call has no args.
+///
+/// Property-key uses (`{ X: 1 }`, `obj.X`) and module-import specifier
+/// uses (`import { X } from ...`) are not classified as IdentifierReferences
+/// by the AST and so don't appear in either count.
+///
+/// Returns one entry per requested binding. A binding with zero
+/// references is `true` (vacuously safe — no consumer to break).
+#[must_use]
+pub fn verify_only_immediate_call_references(
+    source: &str,
+    binding_names: &std::collections::BTreeSet<String>,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> BTreeMap<String, bool> {
+    let mut out: BTreeMap<String, bool> = binding_names
+        .iter()
+        .map(|name| (name.clone(), true))
+        .collect();
+    if binding_names.is_empty() {
+        return out;
+    }
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        let mut collector = CallFormCollector {
+            targets: binding_names,
+            call_count: BTreeMap::new(),
+            total_count: BTreeMap::new(),
+        };
+        collector.visit_program(&parsed.program);
+        for name in binding_names {
+            let total = collector.total_count.get(name).copied().unwrap_or(0);
+            let calls = collector.call_count.get(name).copied().unwrap_or(0);
+            out.insert(name.clone(), total == 0 || total == calls);
+        }
+        return out;
+    }
+    out
+}
+
+struct CallFormCollector<'a> {
+    targets: &'a std::collections::BTreeSet<String>,
+    call_count: BTreeMap<String, u32>,
+    total_count: BTreeMap<String, u32>,
+}
+
+impl<'a> Visit<'a> for CallFormCollector<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if call.arguments.is_empty()
+            && let Expression::Identifier(callee) = &call.callee
+            && self.targets.contains(callee.name.as_str())
+        {
+            *self.call_count.entry(callee.name.to_string()).or_insert(0) += 1;
+        }
+        walk_call_expression(self, call);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        let name = identifier.name.as_str();
+        if self.targets.contains(name) {
+            *self.total_count.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+}
+
 pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
@@ -1359,6 +1447,7 @@ mod tests {
         collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
         format_source_pretty, format_source_with_module_items, normalize_source_for_pipeline,
         parse_error_message, parse_source, sanitize_identifier,
+        verify_only_immediate_call_references,
     };
     use std::collections::BTreeSet;
 
@@ -1681,6 +1770,105 @@ mod tests {
             ParseGoal::TypeScript,
         );
         assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn verifies_immediate_call_form_when_every_reference_is_x_zero_args() {
+        let source = concat!(
+            "import { foo } from './x.js';\n",
+            "console.log(foo());\n",
+            "function call() { return foo(); }\n",
+        );
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&true));
+    }
+
+    #[test]
+    fn rejects_immediate_call_form_when_binding_used_as_value() {
+        // `register(foo)` passes `foo` as a value, not invoking it.
+        let source = concat!(
+            "import { foo } from './x.js';\n",
+            "register(foo);\n",
+            "foo();\n",
+        );
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&false));
+    }
+
+    #[test]
+    fn rejects_immediate_call_form_when_called_with_arguments() {
+        // `foo(1)` is calling foo with an argument — not the zero-arg
+        // thunk-call pattern. The binding is being used as a callable
+        // value directly; eagerifying would change the call semantics.
+        let source = concat!("import { foo } from './x.js';\n", "foo();\n", "foo(1);\n",);
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&false));
+    }
+
+    #[test]
+    fn rejects_immediate_call_form_on_typeof_check() {
+        let source = concat!(
+            "import { foo } from './x.js';\n",
+            "if (typeof foo === 'function') foo();\n",
+        );
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&false));
+    }
+
+    #[test]
+    fn rejects_immediate_call_form_on_chained_call_result_use() {
+        // `foo()` is followed by `.bar` access. The first call is the
+        // expected zero-arg form, but `.bar` access on its result is
+        // still a separate operation. Identifier count: 1 (foo).
+        // Call count: 1 (foo()). Result: total == calls → true.
+        //
+        // However if there's ALSO `foo` used elsewhere as a value, the
+        // result flips to false. This test confirms the chained form
+        // alone is still treated as rewritable.
+        let source = concat!(
+            "import { foo } from './x.js';\n",
+            "const value = foo().bar;\n",
+            "console.log(foo().baz);\n",
+        );
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&true));
+    }
+
+    #[test]
+    fn vacuously_safe_when_binding_is_never_referenced() {
+        let source = "import { foo } from './x.js';\nconst y = 42;";
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&true));
     }
 
     #[test]

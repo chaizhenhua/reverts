@@ -8,7 +8,10 @@ use reverts_graph::{
 };
 use reverts_input::{ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
-use reverts_js::{ParseGoal, format_source_pretty, parse_error_message};
+use reverts_js::{
+    ImportUsageScope, ParseGoal, classify_import_usage_scope, format_source_pretty,
+    parse_error_message, verify_only_immediate_call_references,
+};
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
 
@@ -284,7 +287,9 @@ impl ImportExportPlanner {
             .copied()
             .collect::<BTreeSet<_>>();
         let source_module_wiring = source_module_wiring(program, &externalized_packages);
-        let lowered_runtime_sources = lowered_runtime_sources(program, &source_module_wiring);
+        let eager_safe_analysis = compute_eager_safe_analysis(program, &source_module_wiring);
+        let lowered_runtime_sources =
+            lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
 
@@ -862,6 +867,7 @@ struct RuntimeFoldedSourceChunk {
 fn lowered_runtime_sources(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
+    eager_safe_analysis: &EagerSafeAnalysis,
 ) -> BTreeMap<ModuleId, LoweredRuntimeModuleSource> {
     let mut sources = BTreeMap::new();
     for module in program.model().modules() {
@@ -887,6 +893,13 @@ fn lowered_runtime_sources(
         //      other module's source imports them. In bundle inputs the
         //      module rarely has a literal `export` keyword, so this is
         //      where the real cross-module surface lives.
+        //
+        // Phase 8 relaxation: bindings the cross-module eager-safe
+        // analysis cleared are SUBTRACTED from the blocked set. They've
+        // already been verified to be (a) outside any top-level
+        // evaluation cycle (singleton SCC) and (b) only referenced by
+        // consumers in zero-arg `X()` shape — i.e. mechanically
+        // rewritable via the consumer-side pass below.
         let mut exported_bindings: BTreeSet<BindingName> = program
             .model()
             .graph()
@@ -897,7 +910,26 @@ fn lowered_runtime_sources(
         if let Some(wiring_exports) = source_module_wiring.exports_by_module.get(&module.id) {
             exported_bindings.extend(wiring_exports.iter().cloned());
         }
-        let lowering = lower_runtime_helpers(source.source, &helper_kinds, &exported_bindings);
+        if let Some(eager_safe) = eager_safe_analysis
+            .eager_safe_exports_by_module
+            .get(&module.id)
+        {
+            for binding in eager_safe {
+                exported_bindings.remove(binding);
+            }
+        }
+        let mut lowering = lower_runtime_helpers(source.source, &helper_kinds, &exported_bindings);
+        // Phase 8 cross-module rewrite: bindings this module imports
+        // that the eager-safe analysis cleared no longer carry their
+        // lazy thunk in the exporting module. Their `X()` call sites
+        // in this consumer must be stripped to bare `X` so the
+        // import-binding (now a direct value) is accessed instead of
+        // attempting to invoke a non-function.
+        let eagerified_imports =
+            consumer_eagerified_imports(module.id, source_module_wiring, eager_safe_analysis);
+        if !eagerified_imports.is_empty() {
+            lowering.source = rewrite_eagerified_call_sites(&lowering.source, &eagerified_imports);
+        }
         let local_definitions = top_level_definitions_in_source(lowering.source.as_str());
         let local_writes = implicit_global_writes_in_source(lowering.source.as_str());
         let mut planned_bindings = BTreeSet::<BindingName>::new();
@@ -2728,6 +2760,411 @@ fn source_module_wiring(
     }
 
     wiring
+}
+
+/// Cross-module eager-safety analysis: for each target module's exported
+/// binding, decide whether collapsing its lazy thunk into a direct value
+/// is safe **given how every other module observes that binding**.
+///
+/// A binding `X` exported by module `M` is "eager-safe" iff:
+///   1. `M` is a singleton SCC in the top-level module-dependency graph
+///      (no cycle whose every edge is a top-level reference passes through
+///      `M` — see [`build_top_level_dep_graph`]).
+///   2. Every consumer module that imports `X` references it exclusively
+///      from inside function / arrow / method bodies (its
+///      [`ImportUsageScope`] is `NestedOnly`). Top-level use anywhere
+///      forces the lazy semantics to be observable.
+///
+/// Note: per-module body purity (literal / class / function RHS) is **not**
+/// checked here — that's the existing `delazify_pure_value_bindings` /
+/// `delazify_pure_module_bindings` filter and applies per-binding inside
+/// the lowering pass. The eager-safety analysis only adds the missing
+/// cross-module dimension.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct EagerSafeAnalysis {
+    /// For each target module, the subset of its exported bindings that
+    /// pass the cross-module eager-safety check.
+    eager_safe_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+}
+
+fn compute_eager_safe_analysis(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+) -> EagerSafeAnalysis {
+    let usage_scopes = compute_consumer_usage_scopes(program, source_module_wiring);
+    let call_forms = compute_consumer_call_forms(program, source_module_wiring);
+    let singleton_modules = singleton_scc_modules(program, source_module_wiring, &usage_scopes);
+    // Only bindings declared as `var X = <lazy_helper>(...)` in their
+    // exporting module are eagerification candidates — a regular function
+    // or value export is already "direct" and any consumer `X()` call is
+    // already calling it correctly (not invoking a thunk).
+    let thunk_wrapped_exports = compute_thunk_wrapped_exports(program);
+    let mut eager_safe_exports_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for (target_id, exported_bindings) in &source_module_wiring.exports_by_module {
+        if !singleton_modules.contains(target_id) {
+            continue;
+        }
+        let Some(thunk_wrapped) = thunk_wrapped_exports.get(target_id) else {
+            continue;
+        };
+        let mut safe = BTreeSet::<BindingName>::new();
+        'each_export: for binding in exported_bindings {
+            if !thunk_wrapped.contains(binding) {
+                continue;
+            }
+            // For every consumer that imports this binding, the consumer
+            // must reference it exclusively in the zero-arg `X()` call
+            // shape — the only pattern the cross-module rewriter knows
+            // how to mechanically convert to a bare `X` once M emits the
+            // direct value. Body-purity is checked separately inside
+            // `lower_runtime_helpers` (we never delazify an impure RHS),
+            // so call-form is the only additional gate Phase 8 introduces
+            // on top of SCC clearance.
+            for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
+                let Some(imported_from_target) = imports_by_target.get(target_id) else {
+                    continue;
+                };
+                if !imported_from_target.contains(binding) {
+                    continue;
+                }
+                let Some(consumer_call_forms) = call_forms.get(consumer_id) else {
+                    continue 'each_export;
+                };
+                if !consumer_call_forms
+                    .get(binding.as_str())
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    continue 'each_export;
+                }
+            }
+            safe.insert(binding.clone());
+        }
+        if !safe.is_empty() {
+            eager_safe_exports_by_module.insert(*target_id, safe);
+        }
+    }
+    EagerSafeAnalysis {
+        eager_safe_exports_by_module,
+    }
+}
+
+/// For each consumer module, classify every imported binding by whether
+/// its uses in that consumer are all the zero-arg call shape `X()`. A
+/// binding can be eagerified only if every consumer that references it
+/// passes this check — otherwise cross-module rewriting can't
+/// mechanically convert `X()` (returning the thunk's value) into `X`
+/// (the value directly).
+fn compute_consumer_call_forms(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+) -> BTreeMap<ModuleId, BTreeMap<String, bool>> {
+    let mut out = BTreeMap::new();
+    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
+        let Some(source_slice) = program.model().input().module_source_slice(*consumer_id) else {
+            continue;
+        };
+        let binding_names: BTreeSet<String> = imports_by_target
+            .values()
+            .flatten()
+            .map(|binding| binding.as_str().to_string())
+            .collect();
+        if binding_names.is_empty() {
+            continue;
+        }
+        let call_forms = verify_only_immediate_call_references(
+            source_slice.source,
+            &binding_names,
+            Some(std::path::Path::new(source_slice.source_file_path)),
+            ParseGoal::TypeScript,
+        );
+        out.insert(*consumer_id, call_forms);
+    }
+    out
+}
+
+/// Parse every consumer module's source slice once and classify the usage
+/// scope of every binding it imports. Returns a map keyed by consumer
+/// module id, with values keyed by the imported binding's identifier.
+fn compute_consumer_usage_scopes(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+) -> BTreeMap<ModuleId, BTreeMap<String, ImportUsageScope>> {
+    let mut out = BTreeMap::new();
+    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
+        let Some(source_slice) = program.model().input().module_source_slice(*consumer_id) else {
+            continue;
+        };
+        let binding_names: BTreeSet<String> = imports_by_target
+            .values()
+            .flatten()
+            .map(|binding| binding.as_str().to_string())
+            .collect();
+        if binding_names.is_empty() {
+            continue;
+        }
+        let scopes = classify_import_usage_scope(
+            source_slice.source,
+            &binding_names,
+            Some(std::path::Path::new(source_slice.source_file_path)),
+            ParseGoal::TypeScript,
+        );
+        out.insert(*consumer_id, scopes);
+    }
+    out
+}
+
+/// Compute the set of modules that are singleton SCCs in the
+/// top-level-only module dependency graph: edges include only the
+/// references a consumer makes at its own top-level (not the ones nested
+/// inside fn/arrow/method bodies). Modules in singleton SCCs are not part
+/// of any module-evaluation cycle and can therefore be eagerified without
+/// reordering observable side effects.
+fn singleton_scc_modules(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    usage_scopes: &BTreeMap<ModuleId, BTreeMap<String, ImportUsageScope>>,
+) -> BTreeSet<ModuleId> {
+    use petgraph::algo::tarjan_scc;
+    use petgraph::graph::{DiGraph, NodeIndex};
+    let mut graph: DiGraph<ModuleId, ()> = DiGraph::new();
+    let mut node_by_module = BTreeMap::<ModuleId, NodeIndex>::new();
+    for module in program.model().modules() {
+        let idx = graph.add_node(module.id);
+        node_by_module.insert(module.id, idx);
+    }
+    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
+        let consumer_scopes = usage_scopes.get(consumer_id);
+        let Some(&consumer_idx) = node_by_module.get(consumer_id) else {
+            continue;
+        };
+        for (target_id, bindings) in imports_by_target {
+            let Some(&target_idx) = node_by_module.get(target_id) else {
+                continue;
+            };
+            let has_top_level_use = bindings.iter().any(|binding| {
+                consumer_scopes
+                    .and_then(|scopes| scopes.get(binding.as_str()))
+                    .copied()
+                    == Some(ImportUsageScope::TopLevel)
+            });
+            if has_top_level_use {
+                graph.add_edge(consumer_idx, target_idx, ());
+            }
+        }
+    }
+    let sccs = tarjan_scc(&graph);
+    let mut singleton = BTreeSet::new();
+    for scc in &sccs {
+        if scc.len() != 1 {
+            continue;
+        }
+        let node = scc[0];
+        // Reject if there's a self-loop — that's a (trivial) cycle.
+        if graph.find_edge(node, node).is_some() {
+            continue;
+        }
+        singleton.insert(graph[node]);
+    }
+    singleton
+}
+
+/// For each module, find every top-level binding declared as
+/// `var X = HELPER(...)` where HELPER is a lazy-wrapping helper from
+/// the bundle's runtime prelude (CommonJS wrapper or lazy initializer).
+/// These are the only exports the cross-module eager-safety analysis
+/// is allowed to consider as candidates — non-thunk exports (a literal,
+/// a function declaration, a class) are already direct and their
+/// consumer call sites are not zero-arg thunk invocations.
+fn compute_thunk_wrapped_exports(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut out = BTreeMap::new();
+    for module in program.model().modules() {
+        let Some(source) = program.model().input().module_source_slice(module.id) else {
+            continue;
+        };
+        let runtime_imports = program.model().graph().runtime_imports_for(module.id);
+        let mut helper_kinds = runtime_helper_kinds(program.model().graph(), &runtime_imports);
+        helper_kinds.extend(runtime_helper_kinds_for_source(
+            program.model().graph(),
+            source.source_file_id,
+            source.source,
+        ));
+        let lazy_helpers: BTreeSet<&str> = helper_kinds
+            .iter()
+            .filter(|(_, kind)| {
+                matches!(
+                    kind,
+                    RuntimePreludeBindingKind::CommonJsWrapper
+                        | RuntimePreludeBindingKind::LazyInitializer
+                )
+            })
+            .map(|(binding, _)| binding.as_str())
+            .collect();
+        if lazy_helpers.is_empty() {
+            continue;
+        }
+        let thunk_bindings = scan_thunk_wrapped_bindings(source.source, &lazy_helpers);
+        if !thunk_bindings.is_empty() {
+            out.insert(module.id, thunk_bindings);
+        }
+    }
+    out
+}
+
+/// Scan `source` for every `var/let/const X = HELPER(...)` declaration
+/// where HELPER is one of `lazy_helpers`, and return the binding name X.
+/// The scan is byte-level (skipping quoted strings, comments, regex
+/// literals, templates) — same conventions as the existing
+/// declaration scanners in this module.
+fn scan_thunk_wrapped_bindings(
+    source: &str,
+    lazy_helpers: &BTreeSet<&str>,
+) -> BTreeSet<BindingName> {
+    let mut out = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let Some(keyword) = ["var", "let", "const"]
+            .into_iter()
+            .find(|kw| keyword_at(source, cursor, kw))
+        else {
+            cursor += 1;
+            continue;
+        };
+        let mut c = cursor + keyword.len();
+        c = skip_ws(bytes, c);
+        let Some((binding_name, after_binding)) = parse_identifier(source, c) else {
+            cursor += 1;
+            continue;
+        };
+        c = skip_ws(bytes, after_binding);
+        if bytes.get(c) != Some(&b'=') {
+            cursor = after_binding;
+            continue;
+        }
+        c = skip_ws(bytes, c + 1);
+        let Some((helper_name, after_helper)) = parse_identifier(source, c) else {
+            cursor = after_binding;
+            continue;
+        };
+        c = skip_ws(bytes, after_helper);
+        if bytes.get(c) != Some(&b'(') {
+            cursor = after_helper;
+            continue;
+        }
+        if lazy_helpers.contains(helper_name) {
+            out.insert(BindingName::new(binding_name));
+        }
+        cursor = after_helper;
+    }
+    out
+}
+
+/// For a given consumer module, gather every imported binding the
+/// cross-module eager-safety analysis cleared. These are the call sites
+/// `lowered_runtime_sources` must rewrite from `X()` to `X` so the
+/// consumer can see the import's now-direct value rather than a missing
+/// thunk function.
+fn consumer_eagerified_imports(
+    consumer_id: ModuleId,
+    source_module_wiring: &SourceModuleWiring,
+    eager_safe_analysis: &EagerSafeAnalysis,
+) -> BTreeSet<BindingName> {
+    let mut out = BTreeSet::new();
+    let Some(imports_by_target) = source_module_wiring.imports_by_module.get(&consumer_id) else {
+        return out;
+    };
+    for (target_id, bindings) in imports_by_target {
+        let Some(eager_safe) = eager_safe_analysis
+            .eager_safe_exports_by_module
+            .get(target_id)
+        else {
+            continue;
+        };
+        for binding in bindings.intersection(eager_safe) {
+            out.insert(binding.clone());
+        }
+    }
+    out
+}
+
+/// Mechanically rewrite every `X()` zero-arg call site (where `X` is one
+/// of `eagerified_imports`) to a bare `X`. The cross-module eager-safe
+/// analysis has already verified upstream that every reference to each
+/// binding is in this exact shape, so the rewrite cannot lose precision.
+/// Property-access uses (`obj.X`) and non-value occurrences (import
+/// specifiers, export specifiers) are correctly skipped via the same
+/// classifier the local delazify pass uses.
+fn rewrite_eagerified_call_sites(
+    source: &str,
+    eagerified_imports: &BTreeSet<BindingName>,
+) -> String {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    let bytes = source.as_bytes();
+    for binding in eagerified_imports {
+        let target = binding.as_str();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if let Some(next) = skip_non_code_at(source, cursor) {
+                cursor = next;
+                continue;
+            }
+            if !is_identifier_start(bytes[cursor]) {
+                cursor += 1;
+                continue;
+            }
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                cursor += 1;
+            }
+            if &source[start..cursor] != target {
+                continue;
+            }
+            // Skip property access (`obj.X` / `obj#X`).
+            if let Some(prev) = previous_non_ws(bytes, start)
+                && matches!(bytes[prev], b'.' | b'#')
+            {
+                continue;
+            }
+            // Skip non-value occurrences (import specifier, etc.).
+            if !identifier_occurrence_is_value_reference(source, start, cursor) {
+                continue;
+            }
+            // Require zero-arg call shape `X()` — verified by the
+            // eager-safe analysis to be the only shape present.
+            let after = skip_ws(bytes, cursor);
+            if bytes.get(after) != Some(&b'(') {
+                continue;
+            }
+            let inner = skip_ws(bytes, after + 1);
+            if bytes.get(inner) != Some(&b')') {
+                continue;
+            }
+            edits.push((start, inner + 1, target.to_string()));
+            cursor = inner + 1;
+        }
+    }
+    if edits.is_empty() {
+        return source.to_string();
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in &edits {
+        debug_assert!(*start >= cursor, "cross-module rewrites must not overlap");
+        output.push_str(&source[cursor..*start]);
+        output.push_str(replacement);
+        cursor = *end;
+    }
+    output.push_str(&source[cursor..]);
+    output
 }
 
 fn candidate_source_reads_by_module(
@@ -6636,6 +7073,196 @@ mod tests {
         assert!(
             !entry_source.contains("api.stringify"),
             "got: {entry_source}"
+        );
+    }
+
+    #[test]
+    fn cross_module_eager_safe_analysis_delazifies_exported_thunk_and_rewrites_consumer() {
+        let planner = ImportExportPlanner;
+        // Two-module fixture:
+        //   - source file 1 declares a CJS-wrapped binding `palette` that
+        //     `module.exports = { primary: '#abc' }`.
+        //   - source file 2 (the consumer) imports `palette` from the
+        //     first file and uses it as `palette().primary` inside a
+        //     function body (NestedOnly call form).
+        // Phase 8 SHOULD recognise:
+        //   - the producer is a singleton SCC in the top-level dep graph
+        //     (no cycle through it),
+        //   - the consumer's only reference is the zero-arg `palette()`
+        //     shape,
+        //   - the producer's binding is thunk-wrapped (lazyModule),
+        // and therefore eagerify the producer to a direct value AND
+        // mechanically rewrite the consumer's `palette()` → `palette`.
+        let producer_prelude = concat!(
+            "var $w = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+        );
+        let producer_body =
+            "var palette = $w((exports, module) => { module.exports = { primary: '#abc' }; });\n";
+        let producer_source = format!("{producer_prelude}{producer_body}");
+        let consumer_source = "function render() { return palette().primary; }\nrender();\n";
+
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "producer.js",
+            Some(producer_source.clone()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "consumer.js",
+            Some(consumer_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "producer", "modules/producer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    producer_prelude.len() as u32,
+                    producer_source.len() as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(2)
+                .with_source_span(SourceSpan::new(0, consumer_source.len() as u32)),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let producer = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/producer.ts")
+            .expect("producer file should be planned");
+        let consumer = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/consumer.ts")
+            .expect("consumer file should be planned");
+        let producer_source_out = producer.body.join("\n");
+        let consumer_source_out = consumer.body.join("\n");
+
+        // Producer: `palette` is exported AND was thunk-wrapped, but
+        // Phase 8 cleared it via the SCC + call-form analysis →
+        // delazify happens. The emitted producer carries a direct
+        // value, not a `lazyModule(...)` wrap.
+        assert!(
+            producer_source_out.contains("var palette = { primary: '#abc' };"),
+            "producer:\n{producer_source_out}"
+        );
+        assert!(
+            !producer_source_out.contains("lazyModule("),
+            "producer should not retain lazyModule wrap:\n{producer_source_out}"
+        );
+        assert!(producer_source_out.contains("export { palette };"));
+
+        // Consumer: the cross-module rewrite stripped `palette()` to
+        // bare `palette`. `palette.primary` is now property access on
+        // the directly-imported value.
+        assert!(
+            consumer_source_out.contains("return palette.primary;"),
+            "consumer:\n{consumer_source_out}"
+        );
+        assert!(
+            !consumer_source_out.contains("palette()"),
+            "consumer should not retain the zero-arg call:\n{consumer_source_out}"
+        );
+        // The consumer's bare reference `render()` at module top-level
+        // is unchanged (not imported, no rewrite).
+        assert!(consumer_source_out.contains("render();"));
+    }
+
+    #[test]
+    fn cross_module_eager_safe_analysis_keeps_lazy_when_consumer_uses_thunk_as_value() {
+        let planner = ImportExportPlanner;
+        // Same shape as above, but the consumer passes the thunk as a
+        // value (`register(palette)`) — a use Phase 8's call-form
+        // analyzer rejects. The producer must KEEP the lazy thunk:
+        // mechanically rewriting `palette` → ... would have no safe
+        // form, and even delazifying alone (without the rewrite) would
+        // break `register(palette)` semantics.
+        let producer_prelude = concat!(
+            "var $w = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+        );
+        let producer_body =
+            "var palette = $w((exports, module) => { module.exports = { primary: '#abc' }; });\n";
+        let producer_source = format!("{producer_prelude}{producer_body}");
+        // Consumer uses palette as both a value (passed to `register`)
+        // AND as a thunk call (`palette().primary`) — the value use
+        // alone disqualifies it from eagerification.
+        let consumer_source = concat!(
+            "register(palette);\n",
+            "function render() { return palette().primary; }\n",
+        );
+
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "producer.js",
+            Some(producer_source.clone()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "consumer.js",
+            Some(consumer_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "producer", "modules/producer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    producer_prelude.len() as u32,
+                    producer_source.len() as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(2)
+                .with_source_span(SourceSpan::new(0, consumer_source.len() as u32)),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let producer = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/producer.ts")
+            .expect("producer file should be planned");
+        let producer_source_out = producer.body.join("\n");
+
+        // Producer stays a lazy thunk because of the consumer's
+        // disqualifying value-use of `palette`.
+        assert!(
+            producer_source_out.contains("var palette = lazyModule("),
+            "producer:\n{producer_source_out}"
         );
     }
 
