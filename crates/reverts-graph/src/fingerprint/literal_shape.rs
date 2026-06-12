@@ -49,6 +49,25 @@ struct V<'a> {
 
 impl<'a> Visit<'a> for V<'_> {
     fn visit_expression(&mut self, e: &Expression<'a>) {
+        // Minifier-stable canonicalisation: skip the inner numeric `0`
+        // / `1` that minifiers wrap as `!0` / `!1` (the surrounding
+        // UnaryExpression has already been recognised by other axes
+        // as a BooleanLiteral). Likewise for the inner `0` in `void 0`
+        // (which stands in for `undefined` and is not a real numeric
+        // anchor). Counting these would diverge the literal_shape hash
+        // between minified and un-minified versions of the same code.
+        if let Expression::UnaryExpression(u) = e {
+            use oxc_syntax::operator::UnaryOperator;
+            let is_minifier_bool = matches!(u.operator, UnaryOperator::LogicalNot)
+                && matches!(&u.argument, Expression::NumericLiteral(n) if n.value == 0.0 || n.value == 1.0);
+            let is_minifier_undef = matches!(u.operator, UnaryOperator::Void)
+                && matches!(&u.argument, Expression::NumericLiteral(_));
+            if is_minifier_bool || is_minifier_undef {
+                // Walk past — but skip the inner numeric literal so
+                // it doesn't get counted.
+                return;
+            }
+        }
         match e {
             Expression::StringLiteral(s) => self.counts[string_bucket(s.value.len())] += 1,
             Expression::NumericLiteral(n) => self.counts[numeric_bucket(n.value)] += 1,
@@ -108,5 +127,21 @@ mod tests {
         let short = hash_first("function f() { return 'foo'; }");
         let long = hash_first("function f() { return 'a-much-longer-string'; }");
         assert_ne!(short, long);
+    }
+
+    #[test]
+    fn literal_shape_ignores_inner_zero_one_in_minifier_bang_pattern() {
+        let truthy = hash_first("function f() { return true; }");
+        let bang_zero = hash_first("function f() { return !0; }");
+        // `true` produces no literal counts; `!0` MUST also produce none
+        // (the inner NumericLiteral is the minifier-encoded boolean).
+        assert_eq!(truthy, bang_zero);
+    }
+
+    #[test]
+    fn literal_shape_ignores_inner_zero_in_void_zero() {
+        let undef = hash_first("function f() { return undefined; }");
+        let void_zero = hash_first("function f() { return void 0; }");
+        assert_eq!(undef, void_zero);
     }
 }
