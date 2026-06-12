@@ -96,6 +96,7 @@ pub enum NormalizationPassId {
     LogicalNotChainFlattened,
     TemplateNoSubstitutionLowered,
     InfiniteForToWhile,
+    ConditionalBooleanCoerced,
 }
 
 impl NormalizationPassId {
@@ -124,6 +125,7 @@ impl NormalizationPassId {
             Self::LogicalNotChainFlattened => "logical_not_chain_flattened",
             Self::TemplateNoSubstitutionLowered => "template_no_substitution_lowered",
             Self::InfiniteForToWhile => "infinite_for_to_while",
+            Self::ConditionalBooleanCoerced => "conditional_boolean_coerced",
         }
     }
 }

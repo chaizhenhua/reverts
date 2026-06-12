@@ -14,6 +14,7 @@ pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
 pub mod compound_assignment_canonical;
 pub mod computed_to_static_member;
+pub mod conditional_boolean_coerced;
 pub mod conditional_statement_expanded;
 pub mod constant_string_concat_folded;
 pub mod declarator_split;
@@ -31,7 +32,7 @@ pub mod template_no_substitution_lowered;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 21] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 22] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -54,6 +55,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 21] {
         Box::new(logical_not_chain_flattened::LogicalNotChainFlattened),
         Box::new(template_no_substitution_lowered::TemplateNoSubstitutionLowered),
         Box::new(infinite_for_to_while::InfiniteForToWhile),
+        Box::new(conditional_boolean_coerced::ConditionalBooleanCoerced),
     ]
 }
 
@@ -104,6 +106,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 21);
+        assert_eq!(ids.len(), 22);
     }
 }
