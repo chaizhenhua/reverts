@@ -503,6 +503,73 @@ fn closure_scope_filter_preserves_global_callees() {
 }
 
 #[test]
+fn pipeline_aligns_boolean_call_with_double_not_when_not_shadowed() {
+    let minified = "function f(x) { return Boolean(x); }";
+    let source = "function f(x) { return !!x; }";
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "Boolean(x) and !!x must converge after pipeline when `Boolean` is not shadowed"
+    );
+}
+
+#[test]
+fn pipeline_aligns_number_call_with_unary_plus_when_not_shadowed() {
+    let minified = "function f(x) { return Number(x); }";
+    let source = "function f(x) { return +x; }";
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "Number(x) and +x must converge after pipeline when `Number` is not shadowed"
+    );
+}
+
+#[test]
+fn pipeline_aligns_nullish_chain_with_loose_null_check() {
+    // Minified source uses the explicit `=== null || === void 0` form;
+    // hand-written source uses the compact `== null`. After the full
+    // pipeline they should reach the same canonical form.
+    let minified = "function f(a) { return a === null || a === void 0; }";
+    let source = "function f(a) { return a == null; }";
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "explicit nullish chain and `== null` must converge after pipeline"
+    );
+}
+
+#[test]
+fn pipeline_aligns_combined_guarded_rewrites() {
+    // A function that combines multiple guarded patterns. The minified
+    // form uses `void 0`, `Boolean(...)`, and the explicit nullish
+    // chain. The hand-written source uses `undefined`, `!!`, and
+    // `== null`. After the full pipeline (which only applies the
+    // guarded rewrites when `undefined`/`Boolean` are proven
+    // unshadowed) the two forms must converge.
+    let minified = r#"
+        function f(a, b) {
+            if (a === null || a === void 0) return void 0;
+            return Boolean(b);
+        }
+    "#;
+    let source = r#"
+        function f(a, b) {
+            if (a == null) return undefined;
+            return !!b;
+        }
+    "#;
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "combined guarded rewrites must converge after pipeline"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
