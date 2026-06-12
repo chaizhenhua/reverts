@@ -58,12 +58,16 @@ fn pipeline_aligns_ternary_minified_with_source() {
 }
 
 #[test]
-fn pipeline_aligns_void_zero_with_undefined() {
+fn pipeline_keeps_void_zero_distinct_from_undefined() {
+    // The pipeline policy is "never transform what is not strictly
+    // spec-equivalent". `void 0 ↔ undefined` is not equivalent under
+    // `undefined` shadowing in non-strict mode, so the two forms
+    // produce distinct AST hashes.
     let minified = "function f(x) { return x === void 0; }";
     let source = "function f(x) { return x === undefined; }";
-    let n_mini = apply_all_passes(minified);
-    let n_src = apply_all_passes(source);
-    assert_eq!(n_mini.trim(), n_src.trim());
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_ne!(fp_m[0].primary.ast, fp_s[0].primary.ast);
 }
 
 #[test]
@@ -76,12 +80,14 @@ fn pipeline_aligns_bang_zero_with_true() {
 }
 
 #[test]
-fn pipeline_aligns_throw_call_typeerror_with_throw_new_typeerror() {
+fn pipeline_keeps_throw_call_distinct_from_throw_new() {
+    // Same policy: `throw Foo()` and `throw new Foo()` differ under
+    // arrow-function shadowing of `Foo` and are kept distinct.
     let minified = "function f(x) { if (!x) throw TypeError('bad'); }";
     let source = "function f(x) { if (!x) throw new TypeError('bad'); }";
-    let n_mini = apply_all_passes(minified);
-    let n_src = apply_all_passes(source);
-    assert_eq!(n_mini.trim(), n_src.trim());
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_ne!(fp_m[0].primary.ast, fp_s[0].primary.ast);
 }
 
 #[test]
@@ -94,12 +100,15 @@ fn pipeline_aligns_multi_declarator_with_separate() {
 }
 
 #[test]
-fn pipeline_aligns_object_assign_with_spread() {
+fn pipeline_keeps_object_assign_distinct_from_spread() {
+    // `Object.assign({...}, x)` vs `{...x}` is not strictly
+    // equivalent under `Object.assign` shadowing. The pipeline keeps
+    // both forms as-is, so their AST hashes differ.
     let minified = "function f(opts) { return Object.assign({a: 1, b: 2}, opts); }";
     let source = "function f(opts) { return {a: 1, b: 2, ...opts}; }";
-    let n_mini = apply_all_passes(minified);
-    let n_src = apply_all_passes(source);
-    assert_eq!(n_mini.trim(), n_src.trim());
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_ne!(fp_m[0].primary.ast, fp_s[0].primary.ast);
 }
 
 #[test]
@@ -113,12 +122,18 @@ fn pipeline_aligns_sequence_in_stmt_with_separate_calls() {
 
 #[test]
 fn fingerprint_ast_hash_matches_after_full_pipeline_for_minified_pair() {
-    // The big one: a pretty-bytes-flavoured function with ALL the
-    // minifier rewrites in play simultaneously.
+    // A function whose minified vs source forms differ only in rewrites
+    // the pipeline applies under strict spec equivalence:
+    //   - `!1` → `false`
+    //   - `let a = b, c = d;` → `let a = b; let c = d;`
+    //   - `a && b;` → `if (a) b;`
+    //   - `return cond ? a : b;` → `if (cond) return a; return b;`
+    //
+    // Rewrites that depend on global identifiers (`undefined`,
+    // `Object.assign`, `TypeError`) are **not** applied because the
+    // identifiers are shadowable. The pair below avoids those.
     let minified = r#"
         function pb(A, Q) {
-            if (!Number.isFinite(A)) throw TypeError("bad");
-            Q = Object.assign({bits: !1, binary: !1}, Q);
             let B = Q.bits ? UnitsB : UnitsT;
             let G = A < 0, Z = G ? "-" : "";
             G && (A = -A);
@@ -127,10 +142,6 @@ fn fingerprint_ast_hash_matches_after_full_pipeline_for_minified_pair() {
     "#;
     let source = r#"
         function pb(A, Q) {
-            if (!Number.isFinite(A)) {
-                throw new TypeError("bad");
-            }
-            Q = {bits: false, binary: false, ...Q};
             let B = Q.bits ? UnitsB : UnitsT;
             let G = A < 0;
             let Z = G ? "-" : "";

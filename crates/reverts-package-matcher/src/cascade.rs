@@ -296,7 +296,11 @@ mod tests {
             param_count: 1,
             statement_count: 1,
             primary,
-            alternates: vec![(NormalizationPassId::TsRuntimeErased, alt)],
+            alternates: vec![reverts_ir::AlternateAxisHashes {
+                pass: NormalizationPassId::TsRuntimeErased,
+                statement_count: 1,
+                axes: alt,
+            }],
         };
 
         let m = match_function(&fp, &idx).expect("alternate match");

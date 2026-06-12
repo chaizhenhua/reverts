@@ -193,7 +193,11 @@ mod tests {
             param_count: 2,
             statement_count: 3,
             primary: sample_axes(),
-            alternates: vec![(NormalizationPassId::TsRuntimeErased, alt)],
+            alternates: vec![AlternateAxisHashes {
+                pass: NormalizationPassId::TsRuntimeErased,
+                statement_count: 3,
+                axes: alt,
+            }],
         };
 
         assert_eq!(

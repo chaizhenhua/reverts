@@ -49,22 +49,20 @@ struct V<'a> {
 
 impl<'a> Visit<'a> for V<'_> {
     fn visit_expression(&mut self, e: &Expression<'a>) {
-        // Minifier-stable canonicalisation: skip the inner numeric `0`
-        // / `1` that minifiers wrap as `!0` / `!1` (the surrounding
-        // UnaryExpression has already been recognised by other axes
-        // as a BooleanLiteral). Likewise for the inner `0` in `void 0`
-        // (which stands in for `undefined` and is not a real numeric
-        // anchor). Counting these would diverge the literal_shape hash
-        // between minified and un-minified versions of the same code.
+        // Spec-equivalent shorthand: skip the inner numeric `0`/`1` of
+        // `!0` / `!1`. Other axes have already canonicalised these as
+        // boolean literals, and counting their inner numeric would
+        // spuriously diverge minified vs un-minified shapes for what
+        // is literally a `true` / `false`.
+        //
+        // `void <num>` was previously skipped here too on the same
+        // grounds; the skip was removed because `void X → undefined`
+        // is not fully spec-equivalent under `undefined` shadowing.
         if let Expression::UnaryExpression(u) = e {
             use oxc_syntax::operator::UnaryOperator;
             let is_minifier_bool = matches!(u.operator, UnaryOperator::LogicalNot)
                 && matches!(&u.argument, Expression::NumericLiteral(n) if n.value == 0.0 || n.value == 1.0);
-            let is_minifier_undef = matches!(u.operator, UnaryOperator::Void)
-                && matches!(&u.argument, Expression::NumericLiteral(_));
-            if is_minifier_bool || is_minifier_undef {
-                // Walk past — but skip the inner numeric literal so
-                // it doesn't get counted.
+            if is_minifier_bool {
                 return;
             }
         }
@@ -139,9 +137,12 @@ mod tests {
     }
 
     #[test]
-    fn literal_shape_ignores_inner_zero_in_void_zero() {
+    fn literal_shape_distinguishes_undefined_from_void_zero() {
+        // The two forms are not strictly spec-equivalent (undefined is
+        // a shadowable identifier). The inner `0` of `void 0` therefore
+        // contributes a numeric count that `undefined` does not.
         let undef = hash_first("function f() { return undefined; }");
         let void_zero = hash_first("function f() { return void 0; }");
-        assert_eq!(undef, void_zero);
+        assert_ne!(undef, void_zero);
     }
 }

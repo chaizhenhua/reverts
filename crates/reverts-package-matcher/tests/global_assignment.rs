@@ -46,10 +46,11 @@ fn bundle_fp(slot: u64) -> FunctionFingerprint {
         param_count: 1,
         statement_count: 1,
         primary: zero_axes(PRIMARY_BASE + slot),
-        alternates: vec![(
-            NormalizationPassId::TsRuntimeErased,
-            zero_axes(ALT_BASE + slot),
-        )],
+        alternates: vec![reverts_ir::AlternateAxisHashes {
+            pass: NormalizationPassId::TsRuntimeErased,
+            statement_count: 1,
+            axes: zero_axes(ALT_BASE + slot),
+        }],
     }
 }
 
@@ -257,10 +258,11 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
             param_count: 1,
             statement_count: 1,
             primary: zero_axes(30_000 + slot),
-            alternates: vec![(
-                NormalizationPassId::TsRuntimeErased,
-                zero_axes(40_000 + slot),
-            )],
+            alternates: vec![reverts_ir::AlternateAxisHashes {
+                pass: NormalizationPassId::TsRuntimeErased,
+                statement_count: 1,
+                axes: zero_axes(40_000 + slot),
+            }],
         })
         .collect();
 

@@ -59,44 +59,20 @@ impl<'a> Visit<'a> for V<'_, '_> {
 
     fn visit_new_expression(&mut self, n: &NewExpression<'a>) {
         if let Expression::Identifier(i) = &n.callee {
-            // Minifier-stable canonicalisation: for built-in
-            // constructors whose `new Foo(...)` / `Foo(...)` invocations
-            // are spec-equivalent, record under the call-form tag `c:`
-            // so minified `TypeError(msg)` collides with un-minified
-            // `new TypeError(msg)`. The list mirrors `ast::is_new_optional_builtin`.
+            // Record `new Foo` under the `nc:` prefix to keep it
+            // distinct from `Foo(...)` (which lands under `c:`).
+            // Previous revisions collapsed the two forms for built-in
+            // error constructors; that collapse was removed because
+            // the builtin name is shadowable and the rewrite changes
+            // observable behaviour when shadowed (notably with arrow
+            // functions, which throw when invoked via `new`).
             let name = i.name.as_str();
-            if is_new_optional_builtin(name) {
-                self.s.insert(format!("c:{name}"));
-            } else if !self.locals.contains(name) {
+            if !self.locals.contains(name) {
                 self.s.insert(format!("nc:{name}"));
             }
         }
         oxc_ast::visit::walk::walk_new_expression(self, n);
     }
-}
-
-fn is_new_optional_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "Error"
-            | "TypeError"
-            | "RangeError"
-            | "ReferenceError"
-            | "SyntaxError"
-            | "URIError"
-            | "EvalError"
-            | "AggregateError"
-            | "Boolean"
-            | "Number"
-            | "String"
-            | "Symbol"
-            | "BigInt"
-            | "Object"
-            | "Array"
-            | "Function"
-            | "RegExp"
-            | "Date"
-    )
 }
 
 #[cfg(test)]
@@ -139,19 +115,18 @@ mod tests {
     }
 
     #[test]
-    fn callee_set_canonicalises_new_typeerror_to_call_form() {
+    fn callee_set_keeps_new_distinct_from_call_form_for_all_constructors() {
+        // The collapse `new Foo ↔ Foo` was previously applied for
+        // built-in error constructors only. It was removed because
+        // the builtin name is shadowable in arbitrary scopes, making
+        // the rewrite non-equivalent in pathological code. The two
+        // forms now hash separately for every constructor.
         let with_new = hash_first("function f() { throw new TypeError('x'); }");
         let without_new = hash_first("function f() { throw TypeError('x'); }");
-        assert_eq!(
-            with_new, without_new,
-            "new TypeError ↔ TypeError must share callee_set"
-        );
-    }
+        assert_ne!(with_new, without_new);
 
-    #[test]
-    fn callee_set_keeps_user_class_under_nc_prefix() {
-        let with_new = hash_first("function f() { return new Foo(); }");
-        let without_new = hash_first("function f() { return Foo(); }");
-        assert_ne!(with_new, without_new, "new Foo ≠ Foo for user classes");
+        let with_new_user = hash_first("function f() { return new Foo(); }");
+        let without_new_user = hash_first("function f() { return Foo(); }");
+        assert_ne!(with_new_user, without_new_user);
     }
 }

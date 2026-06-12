@@ -43,11 +43,13 @@ impl<'a> Visit<'a> for V<'_> {
         oxc_ast::visit::walk::walk_call_expression(self, c);
     }
     fn visit_new_expression(&mut self, n: &NewExpression<'a>) {
-        // Minifier-stable: `new X(...)` and `X(...)` both add one
-        // invocation-shaped effect. Without counting `new`, a minified
-        // `throw TypeError(m)` and a source `throw new TypeError(m)`
-        // diverge by one in the `call` bucket and hash differently.
-        self.counts.call += 1;
+        // `new X(...)` is intentionally NOT counted in the `call`
+        // bucket. Previously it was, on the rationale that the two
+        // forms invoke a function the same way. The collapse was
+        // reverted because `Foo(...)` and `new Foo(...)` are not
+        // strictly spec-equivalent — when `Foo` is shadowed by an
+        // arrow function, `new Foo()` throws TypeError while
+        // `Foo()` does not.
         oxc_ast::visit::walk::walk_new_expression(self, n);
     }
     fn visit_assignment_expression(&mut self, e: &AssignmentExpression<'a>) {
@@ -116,12 +118,13 @@ mod tests {
     }
 
     #[test]
-    fn effect_pattern_collides_for_new_versus_call_invocation() {
+    fn effect_pattern_distinguishes_new_versus_call_invocation() {
+        // Previously these collided on the assumption `new X` and `X`
+        // invoke the same function. The pass policy is now "no
+        // transform without full equivalence", and the two are not
+        // equivalent under arrow-function shadowing.
         let with_new = hash_first("function f() { throw new TypeError('x'); }");
         let without_new = hash_first("function f() { throw TypeError('x'); }");
-        assert_eq!(
-            with_new, without_new,
-            "new X() and X() must agree on invocation count"
-        );
+        assert_ne!(with_new, without_new);
     }
 }

@@ -28,20 +28,14 @@ impl<'a> Visit<'a> for V<'_> {
                         self.s.insert("t:expr".to_string());
                     }
                 }
-                // Minifier-stable canonicalisation: `throw TypeError(m)`
-                // is the minified form of `throw new TypeError(m)` for
-                // built-in error constructors (semantically equivalent
-                // per the spec). Record it under the same `n:<name>`
-                // tag as the `new`-form so both versions collide.
-                Expression::CallExpression(c) => {
-                    if let Expression::Identifier(i) = &c.callee
-                        && is_new_optional_builtin(i.name.as_str())
-                    {
-                        self.s.insert(format!("n:{}", i.name.as_str()));
-                    } else {
-                        self.s.insert("t:expr".to_string());
-                    }
-                }
+                // `throw Foo(...)` (call-form) stays under the
+                // generic `t:expr` bucket. Previously it was folded
+                // into `n:Foo` for built-in error constructors on the
+                // assumption that `Foo()` and `new Foo()` are
+                // equivalent for Errors; the collapse was reverted
+                // because the built-in name is shadowable and the
+                // two forms are not strictly spec-equivalent under
+                // arrow-function shadowing.
                 Expression::StringLiteral(_) | Expression::NumericLiteral(_) => {
                     self.s.insert("t:lit".to_string());
                 }
@@ -52,20 +46,6 @@ impl<'a> Visit<'a> for V<'_> {
         }
         oxc_ast::visit::walk::walk_statement(self, stmt);
     }
-}
-
-fn is_new_optional_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "Error"
-            | "TypeError"
-            | "RangeError"
-            | "ReferenceError"
-            | "SyntaxError"
-            | "URIError"
-            | "EvalError"
-            | "AggregateError"
-    )
 }
 
 #[cfg(test)]
@@ -108,12 +88,12 @@ mod tests {
     }
 
     #[test]
-    fn throw_set_canonicalises_throw_call_builtin_to_throw_new_builtin() {
+    fn throw_set_distinguishes_throw_call_builtin_from_throw_new_builtin() {
+        // `throw Foo()` (call) and `throw new Foo()` (construct) are
+        // not strictly spec-equivalent under arrow-function shadowing
+        // of `Foo`. The two forms therefore hash separately.
         let with_new = hash_first("function f() { throw new TypeError('x'); }");
         let without_new = hash_first("function f() { throw TypeError('x'); }");
-        assert_eq!(
-            with_new, without_new,
-            "throw TypeError ↔ throw new TypeError must share throw_set"
-        );
+        assert_ne!(with_new, without_new);
     }
 }

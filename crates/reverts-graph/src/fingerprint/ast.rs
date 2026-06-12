@@ -80,35 +80,6 @@ fn hash_statement(hash: &mut u64, stmt: &Statement<'_>) {
     }
 }
 
-/// Identifier names of built-in constructors that may be invoked with
-/// or without `new` while preserving observable behaviour (modulo
-/// `instanceof` checks). `new Foo()` ↔ `Foo()` is a deterministic
-/// minifier rewrite for these; treating both forms identically in the
-/// AST hash improves minified-vs-source recall.
-fn is_new_optional_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "Error"
-            | "TypeError"
-            | "RangeError"
-            | "ReferenceError"
-            | "SyntaxError"
-            | "URIError"
-            | "EvalError"
-            | "AggregateError"
-            | "Boolean"
-            | "Number"
-            | "String"
-            | "Symbol"
-            | "BigInt"
-            | "Object"
-            | "Array"
-            | "Function"
-            | "RegExp"
-            | "Date"
-    )
-}
-
 fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
     use Expression as E;
     match expr {
@@ -128,23 +99,23 @@ fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
             update_fnv1a(hash, b")");
         }
         E::UnaryExpression(u) => {
-            // Minifier-stable canonicalisation:
-            //   `!0`   → BooleanLiteral(true)   (b"bool")
-            //   `!1`   → BooleanLiteral(false)  (b"bool")
-            //   `void 0` → Identifier("undefined") (b"id")
-            // These three substitutions are deterministic minifier
-            // shortenings; without canonicalisation, the AST hash would
-            // not survive a `terser`/`esbuild --minify` pass.
+            // Spec-equivalent shorthand:
+            //   `!0` → BooleanLiteral(true)
+            //   `!1` → BooleanLiteral(false)
+            // These two rewrites involve no identifier dispatch — `!` of
+            // a numeric literal is fully determined by the literal's
+            // value per ECMA-262 §13.5.7 (`!N` == ToBoolean(N) negated).
+            //
+            // `void X → undefined` was previously canonicalised here as
+            // well; it was removed because `undefined` is a shadowable
+            // identifier in non-strict mode, making the rewrite
+            // non-equivalent in pathological code.
             use oxc_syntax::operator::UnaryOperator;
             if matches!(u.operator, UnaryOperator::LogicalNot)
                 && let E::NumericLiteral(n) = &u.argument
                 && (n.value == 0.0 || n.value == 1.0)
             {
                 update_fnv1a(hash, b"bool");
-                return;
-            }
-            if matches!(u.operator, UnaryOperator::Void) {
-                update_fnv1a(hash, b"id");
                 return;
             }
             update_fnv1a(hash, b"un(");
@@ -172,23 +143,14 @@ fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
         E::TemplateLiteral(_) => update_fnv1a(hash, b"tpl"),
         E::ThisExpression(_) => update_fnv1a(hash, b"this"),
         E::NewExpression(n) => {
-            // Minifier-stable canonicalisation: terser/esbuild drop the
-            // `new` keyword for callee identifiers that the built-in
-            // semantics treat as identical with or without `new`
-            // (Error, TypeError, Array, Object, …). Hashing the call
-            // shape identically lets minified `TypeError(msg)` collide
-            // with un-minified `new TypeError(msg)`. The list is a
-            // conservative subset of widely-known builtins where the
-            // semantic equivalence is documented.
-            if let Expression::Identifier(callee) = &n.callee
-                && is_new_optional_builtin(callee.name.as_str())
-            {
-                update_fnv1a(hash, b"call(");
-                hash_expression(hash, &n.callee);
-                update_fnv1a(hash, format!("/{}", n.arguments.len()).as_bytes());
-                update_fnv1a(hash, b")");
-                return;
-            }
+            // Previously this branch collapsed `new Foo(...)` and
+            // `Foo(...)` for built-in error constructors (per spec
+            // §20.5.5 they're identical when called as functions). The
+            // collapse was removed because the builtin name (e.g.
+            // `TypeError`) is shadowable: when shadowed by an arrow
+            // function, `new ArrowFn(...)` throws TypeError but
+            // `ArrowFn(...)` does not — so the two are NOT fully
+            // equivalent in all code.
             update_fnv1a(hash, b"new(");
             hash_expression(hash, &n.callee);
             update_fnv1a(hash, format!("/{}", n.arguments.len()).as_bytes());
@@ -312,20 +274,23 @@ mod tests {
     }
 
     #[test]
-    fn ast_hash_treats_undefined_and_void_zero_as_equal() {
+    fn ast_hash_keeps_undefined_distinct_from_void_zero() {
+        // The two forms are NOT strictly spec-equivalent: `undefined`
+        // is a shadowable identifier in non-strict mode. The hash
+        // therefore keeps them distinct.
         let undef = hash_first_function("function f(x) { return x === undefined; }");
         let void_zero = hash_first_function("function f(x) { return x === void 0; }");
-        assert_eq!(undef, void_zero, "undefined and void 0 must collide");
+        assert_ne!(undef, void_zero);
     }
 
     #[test]
-    fn ast_hash_treats_new_typeerror_and_typeerror_as_equal() {
+    fn ast_hash_keeps_new_typeerror_distinct_from_typeerror_call() {
+        // `new Foo` vs `Foo()` is NOT strictly equivalent under
+        // arrow-function shadowing of `Foo`. The hash keeps them
+        // distinct for every constructor, builtin or not.
         let with_new = hash_first_function("function f() { throw new TypeError('bad'); }");
         let without_new = hash_first_function("function f() { throw TypeError('bad'); }");
-        assert_eq!(
-            with_new, without_new,
-            "new TypeError() ↔ TypeError() must collide"
-        );
+        assert_ne!(with_new, without_new);
     }
 
     #[test]

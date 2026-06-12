@@ -35,17 +35,18 @@ pub fn compute(body: &FunctionBody<'_>) -> u64 {
 
 fn classify(expr: &Expression<'_>) -> ReturnKind {
     use Expression as E;
-    // Minifier-stable canonicalisation: `!0` / `!1` are boolean
-    // literals, `void <num>` is `undefined` (an Identifier).
+    // Spec-equivalent shorthand: `!0` is BooleanLiteral(true), `!1` is
+    // BooleanLiteral(false). Both involve no identifier dispatch, so
+    // the classification is the same as for a real boolean literal.
+    // `void X → undefined` was previously also bucketed here but was
+    // removed: `undefined` is a shadowable identifier in non-strict
+    // mode, so the two forms are not strictly equivalent.
     if let E::UnaryExpression(u) = expr {
         use oxc_syntax::operator::UnaryOperator;
         if matches!(u.operator, UnaryOperator::LogicalNot)
             && matches!(&u.argument, E::NumericLiteral(n) if n.value == 0.0 || n.value == 1.0)
         {
             return ReturnKind::Literal;
-        }
-        if matches!(u.operator, UnaryOperator::Void) {
-            return ReturnKind::Identifier;
         }
     }
     match expr {
@@ -130,12 +131,12 @@ mod tests {
     }
 
     #[test]
-    fn return_pattern_treats_undefined_and_void_zero_as_identifier() {
+    fn return_pattern_distinguishes_undefined_from_void_zero() {
+        // `undefined` is bucketed as Identifier; `void 0` falls under
+        // Other. The two are not strictly spec-equivalent (`undefined`
+        // is shadowable), so the buckets stay distinct.
         let undef = hash_first("function f() { return undefined; }");
         let void_zero = hash_first("function f() { return void 0; }");
-        assert_eq!(
-            undef, void_zero,
-            "undefined ↔ void 0 in return must collide"
-        );
+        assert_ne!(undef, void_zero);
     }
 }
