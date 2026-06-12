@@ -10,22 +10,23 @@ use std::mem;
 
 use super::NormalizationPass;
 
-/// `VoidZeroToUndefinedGuarded` rewrites the minifier idiom `void 0`
-/// (a 6-byte boolean-typed `undefined`-producer) back into the
-/// canonical identifier `undefined` — **but only when a static scope
-/// check proves that `undefined` is not shadowed anywhere in the
-/// program** (no local binding named `undefined`, and no `with`
-/// statement that could dynamically introduce one).
+/// `VoidZeroToUndefinedGuarded` rewrites the minifier idiom `void
+/// <number>` (typically `void 0`, occasionally `void 1` or other
+/// constants) back into the canonical identifier `undefined` — **but
+/// only when a static scope check proves that `undefined` is not
+/// shadowed anywhere in the program** (no local binding named
+/// `undefined`, and no `with` statement that could dynamically
+/// introduce one).
 ///
 /// Per ECMA-262 §13.5.2.1 (`UnaryExpression: void UnaryExpression`),
 /// `void X` evaluates `X` then returns the `undefined` value. When
-/// `X` is the numeric literal `0` no side effect runs and the result
-/// is literally `undefined`. Per §10.2 (`OrdinaryFunctionCreate`)
-/// and §10.2.1.4 (`OrdinaryCallEvaluateBody`), reading the global
+/// `X` is a numeric literal no side effect runs and the result is
+/// literally `undefined`. Per §10.2 (`OrdinaryFunctionCreate`) and
+/// §10.2.1.4 (`OrdinaryCallEvaluateBody`), reading the global
 /// identifier `undefined` reads the *property* `undefined` of the
 /// global object, which is non-writable since ES5 (§19.1.1.3).
 ///
-/// So `void 0` and `undefined` produce the same value **unless**
+/// So `void <num>` and `undefined` produce the same value **unless**
 /// some lexical scope introduces a binding `undefined` that shadows
 /// the global. The pass conservatively bails out whenever it sees
 /// any binding of that name anywhere in the file. With that
@@ -39,6 +40,11 @@ use super::NormalizationPass;
 /// forms hash differently across multiple axes (`ast`, `cfg`,
 /// `return_pattern`, `literal_shape`). This pass closes the gap when
 /// scope analysis can prove the rewrite safe.
+///
+/// Restricted to `void <NumericLiteral>`: numeric literals are
+/// guaranteed side-effect-free per §6.2 (Primitive Values). Other
+/// `void <expr>` forms (calls, member access, etc.) may have side
+/// effects and are conservatively left alone.
 pub struct VoidZeroToUndefinedGuarded;
 
 impl NormalizationPass for VoidZeroToUndefinedGuarded {
@@ -46,7 +52,7 @@ impl NormalizationPass for VoidZeroToUndefinedGuarded {
         NormalizationPassId::VoidZeroToUndefinedGuarded
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>) {
         if super::shadow_check::program_can_shadow(program, "undefined") {
@@ -84,7 +90,7 @@ fn matches_void_zero(expr: &Expression<'_>) -> bool {
     if !matches!(u.operator, UnaryOperator::Void) {
         return false;
     }
-    matches!(&u.argument, Expression::NumericLiteral(n) if n.value == 0.0)
+    matches!(&u.argument, Expression::NumericLiteral(_))
 }
 
 #[cfg(test)]
@@ -150,11 +156,23 @@ mod tests {
     }
 
     #[test]
-    fn leaves_void_one_alone() {
-        // Only `void 0` is rewritten — `void 1` (rare) is conservatively kept.
+    fn rewrites_void_one_too() {
+        // `void 1` is also a side-effect-free undefined-producer (the
+        // inner literal is discarded). With `undefined` not shadowed
+        // the rewrite is safe.
         let src = "function f() { return void 1; }";
         let out = apply_to_source(&VoidZeroToUndefinedGuarded, src).expect("parse");
-        assert!(out.contains("void 1"), "got: {out}");
+        assert!(out.contains("return undefined"), "got: {out}");
+        assert!(!out.contains("void 1"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_void_any_numeric_literal() {
+        // Other numeric literals (large, decimal, etc.) are still
+        // side-effect-free.
+        let src = "function f() { return void 42; }";
+        let out = apply_to_source(&VoidZeroToUndefinedGuarded, src).expect("parse");
+        assert!(out.contains("return undefined"), "got: {out}");
     }
 
     #[test]
