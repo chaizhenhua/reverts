@@ -1080,6 +1080,7 @@ dependencies = [
 name = "reverts-planner"
 version = "0.1.0"
 dependencies = [
+ "petgraph",
  "reverts-graph",
  "reverts-input",
  "reverts-ir",

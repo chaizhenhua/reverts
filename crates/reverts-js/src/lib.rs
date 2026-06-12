@@ -7,19 +7,21 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstBuilder, NONE, Visit,
     ast::{
-        Argument, BindingPatternKind, CallExpression, Declaration, ExportAllDeclaration,
-        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, IdentifierReference,
-        ImportDeclaration, ImportExpression, ImportOrExportKind, NewExpression, Program, Statement,
-        StringLiteral, VariableDeclarator,
+        Argument, ArrowFunctionExpression, BindingPatternKind, CallExpression, Declaration,
+        ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
+        Function, IdentifierReference, ImportDeclaration, ImportExpression, ImportOrExportKind,
+        NewExpression, Program, Statement, StringLiteral, VariableDeclarator,
     },
     visit::walk::{
-        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
-        walk_import_declaration, walk_import_expression, walk_new_expression, walk_string_literal,
+        walk_arrow_function_expression, walk_call_expression, walk_export_all_declaration,
+        walk_export_named_declaration, walk_function, walk_import_declaration,
+        walk_import_expression, walk_new_expression, walk_string_literal,
     },
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SPAN, SourceType, Span};
+use oxc_syntax::scope::ScopeFlags;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -1091,6 +1093,102 @@ fn classify_declarator(
     classifications.insert(name, callability);
 }
 
+/// Where in a module's source a binding is observed.
+///
+/// `TopLevel` — the reference participates in module evaluation order:
+/// it appears in a statement that runs when the module is loaded
+/// (top-level statement, expression inside a top-level statement,
+/// class field initializer, class `static {}` block).
+///
+/// `NestedOnly` — the reference appears only inside function or arrow
+/// bodies. It runs whenever the function is invoked, not when the module
+/// is loaded; the import is effectively "lazy" from the consumer's
+/// perspective and doesn't constrain the module-eval DAG.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportUsageScope {
+    TopLevel,
+    NestedOnly,
+}
+
+/// Classify every binding in `binding_names` by where it's referenced
+/// in `source`. Returns one entry per requested binding (even if the
+/// binding is never seen — those map to `NestedOnly` as a vacuously
+/// safe default: zero top-level refs means zero constraints).
+///
+/// Use this to decide whether eliminating a lazy thunk that exports a
+/// given binding is safe from a module-eval-order perspective: if every
+/// consumer's usage is `NestedOnly`, eagerifying the binding cannot
+/// reorder evaluation visibly.
+#[must_use]
+pub fn classify_import_usage_scope(
+    source: &str,
+    binding_names: &std::collections::BTreeSet<String>,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> BTreeMap<String, ImportUsageScope> {
+    let mut out: BTreeMap<String, ImportUsageScope> = binding_names
+        .iter()
+        .map(|name| (name.clone(), ImportUsageScope::NestedOnly))
+        .collect();
+    if binding_names.is_empty() {
+        return out;
+    }
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        let mut collector = ImportUsageScopeCollector {
+            fn_depth: 0,
+            targets: binding_names,
+            out: &mut out,
+        };
+        collector.visit_program(&parsed.program);
+        return out;
+    }
+    out
+}
+
+struct ImportUsageScopeCollector<'a> {
+    /// Number of enclosing function / arrow bodies. Class bodies do
+    /// NOT increment this — static-block code and class-field
+    /// initializers execute at class declaration time, which is
+    /// module-load time when the class itself is declared at the top
+    /// level. Methods carry their own `visit_function` frame.
+    fn_depth: u32,
+    targets: &'a std::collections::BTreeSet<String>,
+    out: &'a mut BTreeMap<String, ImportUsageScope>,
+}
+
+impl<'a> Visit<'a> for ImportUsageScopeCollector<'_> {
+    fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
+        self.fn_depth += 1;
+        walk_function(self, it, flags);
+        self.fn_depth -= 1;
+    }
+
+    fn visit_arrow_function_expression(&mut self, it: &ArrowFunctionExpression<'a>) {
+        self.fn_depth += 1;
+        walk_arrow_function_expression(self, it);
+        self.fn_depth -= 1;
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if self.fn_depth > 0 {
+            return;
+        }
+        let name = identifier.name.as_str();
+        if self.targets.contains(name) {
+            self.out
+                .insert(name.to_string(), ImportUsageScope::TopLevel);
+        }
+    }
+}
+
 pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
@@ -1256,12 +1354,13 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CompilerLowering, GeneratedExport, GeneratedImport, JsError, ParseGoal,
-        collect_file_url_source_location_rewrites, collect_path_builder_calls,
-        collect_static_resource_specifiers, collect_string_literals, format_source_pretty,
-        format_source_with_module_items, normalize_source_for_pipeline, parse_error_message,
-        parse_source, sanitize_identifier,
+        CompilerLowering, GeneratedExport, GeneratedImport, ImportUsageScope, JsError, ParseGoal,
+        classify_import_usage_scope, collect_file_url_source_location_rewrites,
+        collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
+        format_source_pretty, format_source_with_module_items, normalize_source_for_pipeline,
+        parse_error_message, parse_source, sanitize_identifier,
     };
+    use std::collections::BTreeSet;
 
     #[test]
     fn parses_typescript_without_external_tooling() {
@@ -1448,5 +1547,156 @@ mod tests {
         assert_eq!(sanitize_identifier("@smithy/XY7"), "_smithy_XY7");
         assert_eq!(sanitize_identifier("9patch-name"), "_9patch_name");
         assert_eq!(sanitize_identifier("class"), "_class");
+    }
+
+    fn binding_set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn classifies_top_level_reference_in_statement() {
+        let source = "import { foo } from './x.js';\nconst y = foo;";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::TopLevel));
+    }
+
+    #[test]
+    fn classifies_reference_inside_function_body_as_nested() {
+        let source = "import { foo } from './x.js';\nexport function call() { return foo(); }";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn classifies_reference_inside_arrow_body_as_nested() {
+        let source = "import { foo } from './x.js';\nconst trigger = () => foo();";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn classifies_reference_inside_method_body_as_nested() {
+        let source = "import { foo } from './x.js';\nclass S { method() { return foo; } }";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn classifies_reference_inside_class_static_block_as_top_level() {
+        // `static { ... }` runs at class-declaration time. If the class
+        // is declared at module top level, the static block code is on
+        // the module-load critical path.
+        let source = "import { foo } from './x.js';\nclass S { static { foo(); } }";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::TopLevel));
+    }
+
+    #[test]
+    fn classifies_reference_inside_class_field_initializer_as_top_level() {
+        // Class field initializers in `class C { x = foo; }` run at
+        // `new C()` time, not class-decl time. But the simple visitor
+        // can't distinguish "runs at instantiation" from "runs at decl"
+        // for instance fields — and instance fields conservatively
+        // appearing TopLevel keeps us safe (we'll keep more thunks
+        // lazy rather than fewer). Static initializers, on the other
+        // hand, run at class declaration and are correctly TopLevel.
+        let source = "import { foo } from './x.js';\nclass S { static defaultFoo = foo; }";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::TopLevel));
+    }
+
+    #[test]
+    fn unreferenced_bindings_default_to_nested_only() {
+        // No occurrence of `foo` anywhere — zero references vacuously
+        // satisfies "every reference is nested-only".
+        let source = "import { foo } from './x.js';\nconst y = 42;";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn promotes_to_top_level_on_first_top_level_occurrence() {
+        // `foo` appears both inside a function (nested) and at the top
+        // level (the expression statement `foo;`). The classification
+        // must reflect the most restrictive observation — TopLevel.
+        let source = "import { foo } from './x.js';\nfunction call() { return foo(); }\nfoo;";
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::TopLevel));
+    }
+
+    #[test]
+    fn ignores_property_keys_named_same_as_target_binding() {
+        // `obj.foo` and `{ foo: 1 }` are property-key uses, not
+        // references to a binding named `foo`. The visitor must not
+        // misclassify them.
+        let source = concat!(
+            "import { foo } from './x.js';\n",
+            "const obj = { foo: 1 };\n",
+            "console.log(obj.foo);\n",
+        );
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("foo"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn classifies_multiple_bindings_independently() {
+        let source = concat!(
+            "import { eager, lazy } from './x.js';\n",
+            "const result = eager;\n",
+            "export function trigger() { return lazy(); }\n",
+        );
+        let scope = classify_import_usage_scope(
+            source,
+            &binding_set(&["eager", "lazy"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(scope.get("eager"), Some(&ImportUsageScope::TopLevel));
+        assert_eq!(scope.get("lazy"), Some(&ImportUsageScope::NestedOnly));
     }
 }
