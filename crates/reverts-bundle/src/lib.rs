@@ -4,7 +4,9 @@
 //! and produces `InnerModule` records whose `body_span` always slices a
 //! parseable program unit. See ADR 0004 for the architectural rationale.
 
+mod classification;
 mod inner_module;
+pub use classification::{BundleClassification, IifeMetadata, MarkedMetadata};
 pub use inner_module::{BundlerKind, InnerModule};
 
 #[cfg(test)]
