@@ -1,6 +1,6 @@
 use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
-use oxc_ast::ast::{AssignmentTarget, Expression, Program, SimpleAssignmentTarget};
+use oxc_ast::ast::{AssignmentTarget, Expression, Program};
 use oxc_ast::visit::VisitMut;
 use oxc_ast::visit::walk_mut::walk_expression;
 use oxc_span::SPAN;
@@ -139,11 +139,6 @@ fn compound_op_for(op: BinaryOperator) -> Option<AssignmentOperator> {
         _ => return None,
     })
 }
-
-// Suppress the unused-import warning for SimpleAssignmentTarget; it
-// shows up via macro-expanded patterns in the OXC AST.
-#[allow(dead_code)]
-fn _force_use_simple_assignment_target<'a>(_: SimpleAssignmentTarget<'a>) {}
 
 #[cfg(test)]
 mod tests {

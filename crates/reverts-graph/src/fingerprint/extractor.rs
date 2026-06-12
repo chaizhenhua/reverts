@@ -334,88 +334,9 @@ fn collect_function_scope_binding_names<'b>(
     }
 }
 
-/// Collect every identifier name bound at the program top level. Kept
-/// as a primitive for callers that want only the module-scope
-/// renameable set; production fingerprinting uses
-/// [`collect_universal_renamable_bindings`] which is a strict superset.
-#[allow(dead_code)]
-fn collect_top_level_binding_names<'p, 'a: 'p>(
-    program: &'p oxc_ast::ast::Program<'a>,
-) -> std::collections::BTreeSet<&'p str> {
-    use oxc_ast::ast::{BindingPatternKind, Declaration, Statement};
-    let mut set = std::collections::BTreeSet::new();
-    fn visit_pattern<'p, 'a: 'p>(
-        kind: &'p BindingPatternKind<'a>,
-        set: &mut std::collections::BTreeSet<&'p str>,
-    ) {
-        match kind {
-            BindingPatternKind::BindingIdentifier(b) => {
-                set.insert(b.name.as_str());
-            }
-            BindingPatternKind::ObjectPattern(o) => {
-                for p in &o.properties {
-                    visit_pattern(&p.value.kind, set);
-                }
-                if let Some(rest) = &o.rest {
-                    visit_pattern(&rest.argument.kind, set);
-                }
-            }
-            BindingPatternKind::ArrayPattern(a) => {
-                for e in (&a.elements).into_iter().flatten() {
-                    visit_pattern(&e.kind, set);
-                }
-                if let Some(rest) = &a.rest {
-                    visit_pattern(&rest.argument.kind, set);
-                }
-            }
-            BindingPatternKind::AssignmentPattern(a) => visit_pattern(&a.left.kind, set),
-        }
-    }
-    for stmt in &program.body {
-        match stmt {
-            Statement::VariableDeclaration(v) => {
-                for decl in &v.declarations {
-                    visit_pattern(&decl.id.kind, &mut set);
-                }
-            }
-            Statement::FunctionDeclaration(f) => {
-                if let Some(id) = &f.id {
-                    set.insert(id.name.as_str());
-                }
-            }
-            Statement::ClassDeclaration(c) => {
-                if let Some(id) = &c.id {
-                    set.insert(id.name.as_str());
-                }
-            }
-            Statement::ExportNamedDeclaration(e) => match &e.declaration {
-                Some(Declaration::VariableDeclaration(v)) => {
-                    for decl in &v.declarations {
-                        visit_pattern(&decl.id.kind, &mut set);
-                    }
-                }
-                Some(Declaration::FunctionDeclaration(f)) => {
-                    if let Some(id) = &f.id {
-                        set.insert(id.name.as_str());
-                    }
-                }
-                Some(Declaration::ClassDeclaration(c)) => {
-                    if let Some(id) = &c.id {
-                        set.insert(id.name.as_str());
-                    }
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-    set
-}
-
 /// Collect **every** identifier name bound anywhere in the program —
 /// at module scope AND inside every nested function/method/arrow/class
-/// body. Returns a superset of [`collect_top_level_binding_names`] that
-/// also includes formal parameters and local bindings of every inner
+/// body. Includes formal parameters and local bindings of every inner
 /// function expression, declaration, arrow, class, catch handler, and
 /// loop binding.
 ///
