@@ -190,7 +190,7 @@ fn compute_axes<'a>(
         access_shape: acc_s,
         callee_set: super::callee_set::compute_with_locals(body, &function_locals),
         binding_pattern: super::binding_pattern::compute(params, body),
-        throw_set: super::throw_set::compute(body),
+        throw_set: super::throw_set::compute_with_locals(body, &function_locals),
     }
 }
 
