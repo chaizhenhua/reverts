@@ -8,7 +8,11 @@ use reverts_analyze::{
     ROLLUP_RUNTIME_IDENTIFIERS, WEBPACK_RUNTIME_IDENTIFIERS,
 };
 
-use crate::classification::BundleClassification;
+use crate::classification::{BundleClassification, MarkedMetadata};
+use crate::inner_module::{BundlerKind, InnerModule};
+
+type DetectorFn =
+    for<'p> fn(&'p oxc_ast::ast::Program<'p>, reverts_ir::ModuleId) -> Vec<InnerModule>;
 
 /// Detect which bundler runtime fingerprint dominates a source file.
 /// Returns `CompilerKind::Unknown` when no runtime identifier matches —
@@ -29,28 +33,63 @@ pub fn detect_kind_from_source(source: &str) -> CompilerKind {
     }
 }
 
-/// Classify a single source file. Phase α: returns `Plain` for everything
-/// — detector dispatch is wired in Task 11.
+/// Classify a single source file. Invokes detectors in priority order
+/// based on the detected `CompilerKind`; the first non-empty result wins.
 ///
 /// `_path` is reserved for future path-heuristic gating (vendored
 /// directories, `.bundle.js` markers).
 #[must_use]
 pub fn classify(_path: &Path, source: &str) -> BundleClassification {
-    let _kind = detect_kind_from_source(source);
     let alloc = Allocator::default();
     let parsed = Parser::new(&alloc, source, SourceType::default()).parse();
     if parsed.panicked || !parsed.errors.is_empty() {
         return BundleClassification::Plain;
     }
-    // Detector dispatch lands in Task 11; until then everything is Plain.
+
+    let kind = detect_kind_from_source(source);
+    let parent = reverts_ir::ModuleId(0);
+
+    // Priority order: prefer detectors aligned with the detected kind.
+    let runs: &[(BundlerKind, DetectorFn)] = match kind {
+        CompilerKind::Esbuild => &[
+            (
+                BundlerKind::Esbuild,
+                crate::detectors::esbuild::detect_commonjs,
+            ),
+            (BundlerKind::Esbuild, crate::detectors::esbuild::detect_esm),
+        ],
+        CompilerKind::Webpack => &[(BundlerKind::Webpack5, crate::detectors::webpack5::detect)],
+        CompilerKind::Rollup => &[(BundlerKind::RollupCjs, crate::detectors::rollup_cjs::detect)],
+        // No-match kinds: still try every detector defensively so an
+        // unannotated bundle that happens to use a recognisable shape
+        // is still classified. Unknown kind here means "no runtime
+        // identifier found"; the file may still register modules.
+        _ => &[
+            (
+                BundlerKind::Esbuild,
+                crate::detectors::esbuild::detect_commonjs,
+            ),
+            (BundlerKind::Esbuild, crate::detectors::esbuild::detect_esm),
+            (BundlerKind::Webpack5, crate::detectors::webpack5::detect),
+            (BundlerKind::RollupCjs, crate::detectors::rollup_cjs::detect),
+        ],
+    };
+
+    for (bundler, detector) in runs {
+        let inner_modules = detector(&parsed.program, parent);
+        if !inner_modules.is_empty() {
+            return BundleClassification::Marked(MarkedMetadata {
+                inner_modules,
+                detected_by: *bundler,
+            });
+        }
+    }
     BundleClassification::Plain
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classification::MarkedMetadata;
-    use crate::inner_module::BundlerKind;
 
     #[test]
     fn detect_kind_recognises_webpack_runtime() {
@@ -71,23 +110,58 @@ mod tests {
     }
 
     #[test]
-    fn classify_returns_plain_for_phase_alpha_baseline() {
-        let src = "var x = __toESM(require('mod'));";
-        let result = classify(Path::new("bundle.js"), src);
-        assert_eq!(result, BundleClassification::Plain);
-        // Marker test — proves dispatch will route via CompilerKind
-        // (use `_kind` binding in classify() above).
-        let _ = MarkedMetadata {
-            inner_modules: vec![],
-            detected_by: BundlerKind::Esbuild,
-        };
-    }
-
-    #[test]
     fn classify_returns_plain_when_parse_fails() {
         let src = "function bad( { )";
         assert_eq!(
             classify(Path::new("bundle.js"), src),
+            BundleClassification::Plain
+        );
+    }
+
+    #[test]
+    fn classify_routes_esbuild_commonjs_to_marked() {
+        let src = r#"
+            var x = __commonJS({
+                "node_modules/lodash/index.js": (e, m) => { m.exports = 1; }
+            });
+        "#;
+        let result = classify(Path::new("bundle.js"), src);
+        match result {
+            BundleClassification::Marked(meta) => {
+                assert_eq!(meta.detected_by, BundlerKind::Esbuild);
+                assert_eq!(meta.inner_modules.len(), 1);
+                assert_eq!(
+                    meta.inner_modules[0].source_path_hint.as_deref(),
+                    Some("node_modules/lodash/index.js")
+                );
+            }
+            other => panic!("expected Marked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_routes_webpack5_module_map_to_marked() {
+        let src = r#"
+            var __webpack_modules__ = {
+                "./src/foo.js": (m, e, r) => { e.x = 1; }
+            };
+            __webpack_require__("./src/foo.js");
+        "#;
+        let result = classify(Path::new("bundle.js"), src);
+        match result {
+            BundleClassification::Marked(meta) => {
+                assert_eq!(meta.detected_by, BundlerKind::Webpack5);
+                assert_eq!(meta.inner_modules.len(), 1);
+            }
+            other => panic!("expected Marked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_falls_through_to_plain_when_no_detector_matches() {
+        let src = "function plain() { return 1; }";
+        assert_eq!(
+            classify(Path::new("plain.js"), src),
             BundleClassification::Plain
         );
     }
