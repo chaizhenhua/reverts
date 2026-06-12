@@ -1277,6 +1277,371 @@ impl<'a> Visit<'a> for CallFormCollector<'_> {
     }
 }
 
+/// AST-level body classifier for `lazyModule((exports, module) => { BODY })`
+/// and `lazyValue(() => { BODY })` wrappers. Returns the source text of an
+/// eager-safe value when the body matches a recognized shape (possibly
+/// nested through `(function(){...}).call(...)` / `(()=>{...})()` IIFE
+/// wrappers, and tolerating harmless `var`/`let`/`const` declarations
+/// alongside the actual exports write):
+///   * `module.exports = PURE_EXPR`
+///   * `module.exports = A = B = PURE_EXPR` (chain — rightmost pure wins)
+///   * `exports.k = PURE_EXPR_k` series → collapsed to `{ k1: v1, ... }`
+///   * `Object.defineProperty(exports, "k", { value: PURE_EXPR })`
+///   * `return PURE_EXPR;` (for `lazyValue` bodies)
+///
+/// Returns `None` for any unrecognized statement — wrong rewrites break
+/// the runtime, missed rewrites are harmless (the existing lazy stays).
+/// The body is wrapped in `function __lazy() { BODY }` for parsing so it
+/// can contain `return` statements.
+#[must_use]
+pub fn extract_lazy_module_eager_value(
+    body: &str,
+    exports_param: &str,
+    module_param: Option<&str>,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Option<String> {
+    let allocator = Allocator::default();
+    let wrapped = format!("function __lazy_body_classifier_wrapper() {{\n{body}\n}}");
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, &wrapped, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        let Some(function_body) = parsed.program.body.first().and_then(|stmt| match stmt {
+            Statement::FunctionDeclaration(function) => function.body.as_deref(),
+            _ => None,
+        }) else {
+            continue;
+        };
+        return analyze_lazy_body_statements(
+            &function_body.statements,
+            &wrapped,
+            exports_param,
+            module_param,
+        );
+    }
+    None
+}
+
+fn analyze_lazy_body_statements(
+    statements: &oxc_allocator::Vec<'_, Statement<'_>>,
+    source: &str,
+    exports_param: &str,
+    module_param: Option<&str>,
+) -> Option<String> {
+    let mut captured_value: Option<String> = None;
+    let mut property_writes: BTreeMap<String, String> = BTreeMap::new();
+    for stmt in statements {
+        match stmt {
+            Statement::VariableDeclaration(decl) => {
+                if !is_harmless_variable_declaration(decl, source) {
+                    return None;
+                }
+            }
+            Statement::EmptyStatement(_) => {}
+            Statement::ExpressionStatement(expr_stmt) => {
+                let mut chain = &expr_stmt.expression;
+                while let Expression::ParenthesizedExpression(inner) = chain {
+                    chain = &inner.expression;
+                }
+                if let Some(inner_body) = iife_block_body(chain) {
+                    let recurse = analyze_lazy_body_statements(
+                        &inner_body.statements,
+                        source,
+                        exports_param,
+                        module_param,
+                    )?;
+                    if captured_value.is_some() || !property_writes.is_empty() {
+                        return None;
+                    }
+                    captured_value = Some(recurse);
+                    continue;
+                }
+                if let Expression::AssignmentExpression(assign) = chain {
+                    if let Some(module_name) = module_param
+                        && is_module_exports_target(&assign.left, module_name)
+                    {
+                        let final_value = unwrap_assignment_chain(&assign.right);
+                        if !is_pure_eager_expression(final_value, source) {
+                            return None;
+                        }
+                        if captured_value.is_some() || !property_writes.is_empty() {
+                            return None;
+                        }
+                        captured_value = Some(span_text(final_value, source).to_string());
+                        continue;
+                    }
+                    if let Some((key, value)) =
+                        match_exports_key_assignment(assign, exports_param, source)
+                    {
+                        if captured_value.is_some() {
+                            return None;
+                        }
+                        if property_writes.insert(key, value).is_some() {
+                            return None;
+                        }
+                        continue;
+                    }
+                    return None;
+                }
+                if let Expression::CallExpression(call) = chain
+                    && let Some((key, value)) =
+                        match_object_define_property(call, exports_param, source)
+                {
+                    if captured_value.is_some() {
+                        return None;
+                    }
+                    if property_writes.insert(key, value).is_some() {
+                        return None;
+                    }
+                    continue;
+                }
+                return None;
+            }
+            Statement::ReturnStatement(ret) => {
+                let Some(arg) = &ret.argument else {
+                    return None;
+                };
+                let final_value = unwrap_assignment_chain(arg);
+                if !is_pure_eager_expression(final_value, source) {
+                    return None;
+                }
+                if captured_value.is_some() || !property_writes.is_empty() {
+                    return None;
+                }
+                captured_value = Some(span_text(final_value, source).to_string());
+            }
+            _ => return None,
+        }
+    }
+    if let Some(value) = captured_value {
+        return Some(value);
+    }
+    if property_writes.is_empty() {
+        return None;
+    }
+    let formatted = property_writes
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{{ {formatted} }}"))
+}
+
+fn is_harmless_variable_declaration(
+    decl: &oxc_ast::ast::VariableDeclaration<'_>,
+    source: &str,
+) -> bool {
+    decl.declarations
+        .iter()
+        .all(|declarator| match &declarator.init {
+            None => true,
+            Some(init) => is_pure_eager_expression(init, source),
+        })
+}
+
+fn iife_block_body<'a>(expr: &'a Expression<'a>) -> Option<&'a oxc_ast::ast::FunctionBody<'a>> {
+    let Expression::CallExpression(call) = expr else {
+        return None;
+    };
+    if let Some(body) = function_body_of_invokable(&call.callee) {
+        return Some(body);
+    }
+    if let Expression::StaticMemberExpression(member) = &call.callee {
+        let prop = member.property.name.as_str();
+        if (prop == "call" || prop == "apply")
+            && let Some(body) = function_body_of_invokable(&member.object)
+        {
+            return Some(body);
+        }
+    }
+    None
+}
+
+fn function_body_of_invokable<'a>(
+    expr: &'a Expression<'a>,
+) -> Option<&'a oxc_ast::ast::FunctionBody<'a>> {
+    match expr {
+        Expression::ParenthesizedExpression(inner) => function_body_of_invokable(&inner.expression),
+        Expression::FunctionExpression(function) => function.body.as_deref(),
+        Expression::ArrowFunctionExpression(arrow) if !arrow.expression => Some(&arrow.body),
+        _ => None,
+    }
+}
+
+fn is_module_exports_target(
+    target: &oxc_ast::ast::AssignmentTarget<'_>,
+    module_param: &str,
+) -> bool {
+    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = target else {
+        return false;
+    };
+    let Expression::Identifier(object) = &member.object else {
+        return false;
+    };
+    object.name.as_str() == module_param && member.property.name.as_str() == "exports"
+}
+
+fn match_exports_key_assignment(
+    assign: &oxc_ast::ast::AssignmentExpression<'_>,
+    exports_param: &str,
+    source: &str,
+) -> Option<(String, String)> {
+    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = &assign.left else {
+        return None;
+    };
+    let Expression::Identifier(object) = &member.object else {
+        return None;
+    };
+    if object.name.as_str() != exports_param {
+        return None;
+    }
+    let key = member.property.name.as_str().to_string();
+    let final_value = unwrap_assignment_chain(&assign.right);
+    if !is_pure_eager_expression(final_value, source) {
+        return None;
+    }
+    Some((key, span_text(final_value, source).to_string()))
+}
+
+fn match_object_define_property(
+    call: &oxc_ast::ast::CallExpression<'_>,
+    exports_param: &str,
+    source: &str,
+) -> Option<(String, String)> {
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return None;
+    };
+    let Expression::Identifier(object_name) = &callee.object else {
+        return None;
+    };
+    if object_name.name.as_str() != "Object" || callee.property.name.as_str() != "defineProperty" {
+        return None;
+    }
+    if call.arguments.len() < 3 {
+        return None;
+    }
+    let Argument::Identifier(target) = &call.arguments[0] else {
+        return None;
+    };
+    if target.name.as_str() != exports_param {
+        return None;
+    }
+    let key = match &call.arguments[1] {
+        Argument::StringLiteral(s) => s.value.as_str().to_string(),
+        _ => return None,
+    };
+    let Argument::ObjectExpression(descriptor) = &call.arguments[2] else {
+        return None;
+    };
+    let mut value_text: Option<String> = None;
+    for prop in &descriptor.properties {
+        let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = prop else {
+            return None;
+        };
+        let oxc_ast::ast::PropertyKey::StaticIdentifier(prop_name) = &property.key else {
+            return None;
+        };
+        match prop_name.name.as_str() {
+            "value" => {
+                if !is_pure_eager_expression(&property.value, source) {
+                    return None;
+                }
+                value_text = Some(span_text(&property.value, source).to_string());
+            }
+            "writable" | "configurable" | "enumerable" => {}
+            _ => return None,
+        }
+    }
+    Some((key, value_text?))
+}
+
+fn unwrap_assignment_chain<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::AssignmentExpression(assign) => unwrap_assignment_chain(&assign.right),
+        Expression::ParenthesizedExpression(inner) => unwrap_assignment_chain(&inner.expression),
+        _ => expr,
+    }
+}
+
+fn is_pure_eager_expression(expr: &Expression<'_>, source: &str) -> bool {
+    match expr {
+        Expression::NumericLiteral(_)
+        | Expression::StringLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::NullLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::RegExpLiteral(_)
+        | Expression::TemplateLiteral(_)
+        | Expression::FunctionExpression(_)
+        | Expression::ArrowFunctionExpression(_)
+        | Expression::ClassExpression(_) => true,
+        Expression::ObjectExpression(obj) => is_pure_object_expression(obj, source),
+        Expression::ArrayExpression(arr) => arr.elements.iter().all(is_pure_array_element),
+        Expression::ParenthesizedExpression(inner) => {
+            is_pure_eager_expression(&inner.expression, source)
+        }
+        Expression::UnaryExpression(unary) => {
+            matches!(
+                unary.operator,
+                oxc_syntax::operator::UnaryOperator::LogicalNot
+                    | oxc_syntax::operator::UnaryOperator::UnaryNegation
+                    | oxc_syntax::operator::UnaryOperator::UnaryPlus
+                    | oxc_syntax::operator::UnaryOperator::BitwiseNot
+                    | oxc_syntax::operator::UnaryOperator::Void
+            ) && is_pure_eager_expression(&unary.argument, source)
+        }
+        _ => false,
+    }
+}
+
+fn is_pure_object_expression(obj: &oxc_ast::ast::ObjectExpression<'_>, source: &str) -> bool {
+    for prop in &obj.properties {
+        match prop {
+            oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) => {
+                if p.computed {
+                    return false;
+                }
+                if !is_pure_eager_expression(&p.value, source) {
+                    return false;
+                }
+            }
+            oxc_ast::ast::ObjectPropertyKind::SpreadProperty(_) => return false,
+        }
+    }
+    true
+}
+
+fn is_pure_array_element(elem: &oxc_ast::ast::ArrayExpressionElement<'_>) -> bool {
+    // We deliberately keep this list narrow: only literal-shape elements
+    // are accepted. Nested object/array/function inside an array is
+    // technically pure too, but the recursive case here would require
+    // converting an `ArrayExpressionElement` to a borrowed `Expression`
+    // (which oxc doesn't expose) — and array-of-non-literal exports is
+    // a rare pattern in practice. Eagerifying is opt-in: missing a case
+    // just leaves the lazy thunk alone, which is safe.
+    use oxc_ast::ast::ArrayExpressionElement as A;
+    matches!(
+        elem,
+        A::Elision(_)
+            | A::NumericLiteral(_)
+            | A::StringLiteral(_)
+            | A::BooleanLiteral(_)
+            | A::NullLiteral(_)
+            | A::BigIntLiteral(_)
+            | A::RegExpLiteral(_)
+            | A::TemplateLiteral(_)
+    )
+}
+
+fn span_text<'a>(node: &impl oxc_span::GetSpan, source: &'a str) -> &'a str {
+    let span = node.span();
+    &source[span.start as usize..span.end as usize]
+}
+
 pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
@@ -1445,8 +1810,8 @@ mod tests {
         CompilerLowering, GeneratedExport, GeneratedImport, ImportUsageScope, JsError, ParseGoal,
         classify_import_usage_scope, collect_file_url_source_location_rewrites,
         collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
-        format_source_pretty, format_source_with_module_items, normalize_source_for_pipeline,
-        parse_error_message, parse_source, sanitize_identifier,
+        extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
+        normalize_source_for_pipeline, parse_error_message, parse_source, sanitize_identifier,
         verify_only_immediate_call_references,
     };
     use std::collections::BTreeSet;
@@ -1869,6 +2234,172 @@ mod tests {
             ParseGoal::TypeScript,
         );
         assert_eq!(result.get("foo"), Some(&true));
+    }
+
+    #[test]
+    fn lazy_body_classifier_extracts_direct_module_exports_value() {
+        let value = extract_lazy_module_eager_value(
+            "module.exports = 42;",
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_extracts_chain_assignment_rightmost_value() {
+        // The chain `module.exports = A = class Foo {}` writes the
+        // class expression to both the local `A` and `module.exports`.
+        // The classifier extracts the rightmost pure expression; the
+        // intermediate locals are discarded with their `var` declaration.
+        let value = extract_lazy_module_eager_value(
+            "var A;\nmodule.exports = A = class Foo { constructor() {} };",
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("class Foo { constructor() {} }"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_unwraps_iife_call_wrapper() {
+        // The pattern `(function() { body }).call(this)` is a common
+        // CJS shape that hides a simple `module.exports = X`
+        // assignment behind an IIFE. The classifier recursively
+        // descends into the IIFE body.
+        let body = "(function() { var A; module.exports = A = class { hello() { return 1; } }; }).call(exports);";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("class { hello() { return 1; } }"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_unwraps_arrow_iife_wrapper() {
+        let body = "(() => { module.exports = { ok: true }; })();";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("{ ok: true }"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_handles_object_define_property_with_pure_value() {
+        let body = "Object.defineProperty(exports, \"value\", { value: 99, configurable: true });";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("{ value: 99 }"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_accepts_return_for_lazy_value_shape() {
+        // `lazyValue(() => { return PURE; })` — for lazy-value
+        // (no `module` parameter), the body is a `return` of a pure
+        // expression.
+        let value = extract_lazy_module_eager_value(
+            "return { primary: '#abc', secondary: '#def' };",
+            "",
+            None,
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(
+            value.as_deref(),
+            Some("{ primary: '#abc', secondary: '#def' }")
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_function_call_in_body() {
+        // The body has a top-level call to `initSetup()` — could have
+        // any side effect, can't hoist to module load.
+        let body = "initSetup();\nmodule.exports = 42;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_assignment_to_other_target() {
+        // Assignment to a non-`module.exports`/`exports.k` target — could
+        // have side effects on globals or other observable state.
+        let body = "globalThis.config = 99;\nmodule.exports = 42;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_multiple_module_exports_assignments() {
+        // Two separate `module.exports = ...` writes — the final value
+        // would depend on evaluation order, which conservative
+        // classification refuses to pick from.
+        let body = "module.exports = 1; module.exports = 2;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn lazy_body_classifier_collapses_multi_key_exports_to_object_literal() {
+        let body = "exports.parse = function(s) { return s; };\nexports.stringify = function(o) { return o; };";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(
+            value.as_deref(),
+            Some("{ parse: function(s) { return s; }, stringify: function(o) { return o; } }")
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_impure_chain_value() {
+        // `module.exports = A = computeStuff()` — the final value is
+        // a function call, which can have side effects. Reject.
+        let body = "var A;\nmodule.exports = A = computeStuff();";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
     }
 
     #[test]

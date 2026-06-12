@@ -3525,7 +3525,20 @@ fn try_parse_lazy_value_declaration(
     }
     let body_end = find_matching_brace(source, cursor)?;
     let body = &source[cursor + 1..body_end];
-    let value_expr = extract_pure_return_expression(body)?;
+    // Fast path: byte-level scanner for `return PURE_EXPR;`. Falls
+    // back to the OXC-AST classifier when the body is wrapped in an
+    // IIFE, contains intermediate `var X;` declarations, or uses
+    // assignment chains the byte path doesn't recognize.
+    let value_expr = match extract_pure_return_expression(body) {
+        Some(expr) => expr,
+        None => reverts_js::extract_lazy_module_eager_value(
+            body,
+            "",
+            None,
+            None,
+            ParseGoal::TypeScript,
+        )?,
+    };
     let after_body = skip_ws(bytes, body_end + 1);
     if bytes.get(after_body) != Some(&b')') {
         return None;
@@ -3605,12 +3618,29 @@ fn try_parse_lazy_module_declaration(
     }
     let body_end = find_matching_brace(source, cursor)?;
     let body = &source[cursor + 1..body_end];
+    // Body extraction has three fallback layers, tried in order of
+    // cost. The byte-level scanners (1) and (2) cover the bulk of
+    // simple shapes the bundler emits directly. Only when both fail
+    // do we reach for the OXC-AST classifier (3), which adds support
+    // for IIFE wrappers, assignment chains, harmless interleaved
+    // declarations, and `Object.defineProperty(exports, ...)` patterns
+    // — at the cost of an extra parse per declaration.
     let value_expr = if let Some(module_name) = module_param
         && let Some(expr) = extract_module_exports_assignment(body, module_name)
     {
         expr
+    } else if let Some(expr) = extract_exports_properties_as_object_literal(body, exports_param) {
+        expr
+    } else if let Some(expr) = reverts_js::extract_lazy_module_eager_value(
+        body,
+        exports_param,
+        module_param,
+        None,
+        ParseGoal::TypeScript,
+    ) {
+        expr
     } else {
-        extract_exports_properties_as_object_literal(body, exports_param)?
+        return None;
     };
     let after_body = skip_ws(bytes, body_end + 1);
     if bytes.get(after_body) != Some(&b')') {
