@@ -1,6 +1,6 @@
 use oxc_ast::Visit;
 use oxc_ast::ast::{Expression, FunctionBody, TemplateElement};
-use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};
+use reverts_ir::hash::fnv1a_of_string_set;
 use std::collections::BTreeSet;
 
 #[must_use]
@@ -12,16 +12,7 @@ pub fn compute(body: &FunctionBody<'_>) -> Option<u64> {
     for s in &body.statements {
         v.visit_statement(s);
     }
-    if anchors.is_empty() {
-        return None;
-    }
-    let mut hash = FNV_OFFSET_BASIS;
-    update_fnv1a(&mut hash, b"lit_anchor|");
-    for a in &anchors {
-        update_fnv1a(&mut hash, a.as_bytes());
-        update_fnv1a(&mut hash, b"|");
-    }
-    Some(hash)
+    fnv1a_of_string_set(anchors.iter().map(String::as_str), b"lit_anchor|")
 }
 
 struct V<'a> {

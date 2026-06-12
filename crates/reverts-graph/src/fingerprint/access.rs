@@ -1,6 +1,6 @@
 use oxc_ast::Visit;
 use oxc_ast::ast::{Expression, FunctionBody};
-use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};
+use reverts_ir::hash::fnv1a_of_string_set;
 use std::collections::BTreeSet;
 
 #[derive(Debug, Default)]
@@ -17,22 +17,9 @@ pub fn compute(body: &FunctionBody<'_>) -> (Option<u64>, Option<u64>) {
         v.visit_statement(s);
     }
     (
-        hash_set(&c.pattern, b"acc_pat|"),
-        hash_set(&c.shape, b"acc_shape|"),
+        fnv1a_of_string_set(c.pattern.iter().map(String::as_str), b"acc_pat|"),
+        fnv1a_of_string_set(c.shape.iter().map(String::as_str), b"acc_shape|"),
     )
-}
-
-fn hash_set(set: &BTreeSet<String>, tag: &[u8]) -> Option<u64> {
-    if set.is_empty() {
-        return None;
-    }
-    let mut hash = FNV_OFFSET_BASIS;
-    update_fnv1a(&mut hash, tag);
-    for k in set {
-        update_fnv1a(&mut hash, k.as_bytes());
-        update_fnv1a(&mut hash, b"|");
-    }
-    Some(hash)
 }
 
 struct V<'a> {
