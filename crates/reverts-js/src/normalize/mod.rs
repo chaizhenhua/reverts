@@ -16,10 +16,11 @@ pub mod export_boundary_normalized;
 pub mod helper_identity_inlined;
 pub mod jsx_runtime_normalized;
 pub mod object_assign_expanded;
+pub mod sequence_expression_split;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 9] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 10] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -30,6 +31,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 9] {
         Box::new(boolean_undefined_canonicalised::BooleanUndefinedCanonicalised),
         Box::new(object_assign_expanded::ObjectAssignExpanded),
         Box::new(declarator_split::DeclaratorSplit),
+        Box::new(sequence_expression_split::SequenceExpressionSplit),
     ]
 }
 
@@ -80,6 +82,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 9);
+        assert_eq!(ids.len(), 10);
     }
 }

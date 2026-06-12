@@ -84,6 +84,7 @@ pub enum NormalizationPassId {
     BooleanUndefinedCanonicalised,
     ObjectAssignExpanded,
     DeclaratorSplit,
+    SequenceExpressionSplit,
 }
 
 impl NormalizationPassId {
@@ -100,6 +101,7 @@ impl NormalizationPassId {
             Self::BooleanUndefinedCanonicalised => "boolean_undefined_canonicalised",
             Self::ObjectAssignExpanded => "object_assign_expanded",
             Self::DeclaratorSplit => "declarator_split",
+            Self::SequenceExpressionSplit => "sequence_expression_split",
         }
     }
 }
