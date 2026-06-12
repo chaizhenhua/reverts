@@ -7,8 +7,9 @@ use reverts_ir::{
     ControlFlowNodeKind, FunctionFingerprint, ModuleId,
 };
 use reverts_js::sanitize_identifier;
+pub use reverts_model::CompilerKind;
 use reverts_model::{
-    CompilerEvidence, CompilerKind, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
+    CompilerEvidence, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
     PackageImportDecision, ProgramModel, SemanticNameMap,
 };
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -577,7 +578,7 @@ fn looks_minified(source: &str) -> bool {
         || (average_line_len >= 160 && whitespace_ratio <= 0.12)
 }
 
-const WEBPACK_RUNTIME_IDENTIFIERS: &[&str] = &[
+pub const WEBPACK_RUNTIME_IDENTIFIERS: &[&str] = &[
     "__webpack_require__",
     "__webpack_exports__",
     "__webpack_modules__",
@@ -586,7 +587,7 @@ const WEBPACK_RUNTIME_IDENTIFIERS: &[&str] = &[
     "webpackJsonp",
 ];
 
-const ESBUILD_RUNTIME_IDENTIFIERS: &[&str] = &[
+pub const ESBUILD_RUNTIME_IDENTIFIERS: &[&str] = &[
     "__defProp",
     "__export",
     "__copyProps",
@@ -596,7 +597,7 @@ const ESBUILD_RUNTIME_IDENTIFIERS: &[&str] = &[
     "__require",
 ];
 
-const ROLLUP_RUNTIME_IDENTIFIERS: &[&str] = &[
+pub const ROLLUP_RUNTIME_IDENTIFIERS: &[&str] = &[
     "commonjsGlobal",
     "getDefaultExportFromCjs",
     "getAugmentedNamespace",
@@ -607,7 +608,7 @@ const ROLLUP_RUNTIME_IDENTIFIERS: &[&str] = &[
 
 const ROLLUP_SOURCE_PATTERNS: &[&str] = &["Object.freeze"];
 
-const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
+pub const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "_interopRequireDefault",
     "_interopRequireWildcard",
     "_classCallCheck",

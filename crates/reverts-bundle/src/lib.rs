@@ -5,6 +5,7 @@
 //! parseable program unit. See ADR 0004 for the architectural rationale.
 
 mod classification;
+pub mod classifier;
 mod inner_module;
 pub use classification::{BundleClassification, IifeMetadata, MarkedMetadata};
 pub use inner_module::{BundlerKind, InnerModule};
