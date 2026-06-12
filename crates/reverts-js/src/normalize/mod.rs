@@ -9,6 +9,7 @@ pub trait NormalizationPass {
 }
 
 pub mod arrow_body_blocked;
+pub mod boolean_coercion_canonical;
 pub mod boolean_undefined_canonicalised;
 pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
@@ -19,6 +20,7 @@ pub mod export_boundary_normalized;
 pub mod helper_identity_inlined;
 pub mod jsx_runtime_normalized;
 pub mod logical_short_circuit_expanded;
+pub mod number_coercion_canonical;
 pub mod object_assign_expanded;
 pub mod return_conditional_expanded;
 pub mod sequence_expression_split;
@@ -26,7 +28,7 @@ pub mod ts_runtime_erased;
 pub mod typeof_undefined_canonical;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 16] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 18] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -44,6 +46,8 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 16] {
         Box::new(computed_to_static_member::ComputedToStaticMember),
         Box::new(arrow_body_blocked::ArrowBodyBlocked),
         Box::new(typeof_undefined_canonical::TypeofUndefinedCanonical),
+        Box::new(boolean_coercion_canonical::BooleanCoercionCanonical),
+        Box::new(number_coercion_canonical::NumberCoercionCanonical),
     ]
 }
 
@@ -94,6 +98,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 18);
     }
 }

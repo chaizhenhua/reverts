@@ -91,6 +91,8 @@ pub enum NormalizationPassId {
     ComputedToStaticMember,
     ArrowBodyBlocked,
     TypeofUndefinedCanonical,
+    BooleanCoercionCanonical,
+    NumberCoercionCanonical,
 }
 
 impl NormalizationPassId {
@@ -114,6 +116,8 @@ impl NormalizationPassId {
             Self::ComputedToStaticMember => "computed_to_static_member",
             Self::ArrowBodyBlocked => "arrow_body_blocked",
             Self::TypeofUndefinedCanonical => "typeof_undefined_canonical",
+            Self::BooleanCoercionCanonical => "boolean_coercion_canonical",
+            Self::NumberCoercionCanonical => "number_coercion_canonical",
         }
     }
 }
