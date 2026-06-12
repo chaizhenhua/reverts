@@ -81,6 +81,7 @@ pub enum NormalizationPassId {
     HelperIdentityInlined,
     ExportBoundaryNormalized,
     ClosureBoundaryAligned,
+    BooleanUndefinedCanonicalised,
 }
 
 impl NormalizationPassId {
@@ -94,6 +95,7 @@ impl NormalizationPassId {
             Self::HelperIdentityInlined => "helper_identity_inlined",
             Self::ExportBoundaryNormalized => "export_boundary_normalized",
             Self::ClosureBoundaryAligned => "closure_boundary_aligned",
+            Self::BooleanUndefinedCanonicalised => "boolean_undefined_canonicalised",
         }
     }
 }
