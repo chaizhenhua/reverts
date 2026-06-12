@@ -13,26 +13,45 @@ use crate::inner_module::{BundlerKind, InnerModule};
 /// can be sliced into independent compilable units.
 #[must_use]
 pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+    detect_by_callee_name(program, parent_module_id, "__commonJS")
+}
+
+/// Recognise esbuild's `__esm({"key": () => { … }})` registration map
+/// for ESM modules. Behaves identically to [`detect_commonjs`] but
+/// matches the `__esm` callee name.
+#[must_use]
+pub fn detect_esm(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+    detect_by_callee_name(program, parent_module_id, "__esm")
+}
+
+/// Shared implementation: walk the program, find every CallExpression
+/// whose callee is the named identifier and whose first argument is an
+/// object literal of `"path": (...) => { ... }` registrations.
+fn detect_by_callee_name(
+    program: &Program<'_>,
+    parent_module_id: ModuleId,
+    callee_name: &'static str,
+) -> Vec<InnerModule> {
     let mut collected = Vec::new();
-    let mut visitor = CommonJsVisitor {
+    let mut visitor = NamedRegistryVisitor {
         out: &mut collected,
         parent_module_id,
+        callee_name,
     };
     visitor.visit_program(program);
     collected
 }
 
-struct CommonJsVisitor<'a> {
+struct NamedRegistryVisitor<'a> {
     out: &'a mut Vec<InnerModule>,
     parent_module_id: ModuleId,
+    callee_name: &'static str,
 }
 
-impl<'a> Visit<'a> for CommonJsVisitor<'_> {
+impl<'a> Visit<'a> for NamedRegistryVisitor<'_> {
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        // Pattern: `__commonJS({ "key": (...) => { ... }, ... })`
-        // The first argument is an object expression of property entries.
         if let Expression::Identifier(callee) = &call.callee
-            && callee.name == "__commonJS"
+            && callee.name == self.callee_name
             && let Some(Argument::ObjectExpression(obj)) = call.arguments.first()
         {
             for prop in &obj.properties {
@@ -154,5 +173,39 @@ mod tests {
         assert!(body_text.starts_with('{'));
         assert!(body_text.ends_with('}'));
         assert!(body_text.contains("var y = 1"));
+    }
+
+    #[test]
+    fn detect_esm_extracts_zero_arg_arrow_body() {
+        let src = r#"
+        var x = __esm({
+            "lib/foo.js": () => {
+                init_lib();
+                foo = 1;
+            }
+        });
+    "#;
+        let modules = extract_esm(src);
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].bundler, BundlerKind::Esbuild);
+        assert_eq!(modules[0].source_path_hint.as_deref(), Some("lib/foo.js"));
+        assert!(modules[0].virtual_id.starts_with("esbuild:"));
+    }
+
+    #[test]
+    fn detect_esm_ignores_non_esm_calls() {
+        let src = r#"var x = __notEsm({ "a": () => {} });"#;
+        assert!(extract_esm(src).is_empty());
+    }
+
+    fn extract_esm(src: &str) -> Vec<InnerModule> {
+        let alloc = Allocator::default();
+        let parsed = Parser::new(&alloc, src, SourceType::default()).parse();
+        assert!(
+            parsed.errors.is_empty(),
+            "parse errors: {:?}",
+            parsed.errors
+        );
+        detect_esm(&parsed.program, ModuleId(99))
     }
 }
