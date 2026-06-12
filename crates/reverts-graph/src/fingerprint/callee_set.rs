@@ -33,10 +33,44 @@ impl<'a> Visit<'a> for V<'_> {
 
     fn visit_new_expression(&mut self, n: &NewExpression<'a>) {
         if let Expression::Identifier(i) = &n.callee {
-            self.s.insert(format!("nc:{}", i.name.as_str()));
+            // Minifier-stable canonicalisation: for built-in
+            // constructors whose `new Foo(...)` / `Foo(...)` invocations
+            // are spec-equivalent, record under the call-form tag `c:`
+            // so minified `TypeError(msg)` collides with un-minified
+            // `new TypeError(msg)`. The list mirrors `ast::is_new_optional_builtin`.
+            let name = i.name.as_str();
+            if is_new_optional_builtin(name) {
+                self.s.insert(format!("c:{name}"));
+            } else {
+                self.s.insert(format!("nc:{name}"));
+            }
         }
         oxc_ast::visit::walk::walk_new_expression(self, n);
     }
+}
+
+fn is_new_optional_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "URIError"
+            | "EvalError"
+            | "AggregateError"
+            | "Boolean"
+            | "Number"
+            | "String"
+            | "Symbol"
+            | "BigInt"
+            | "Object"
+            | "Array"
+            | "Function"
+            | "RegExp"
+            | "Date"
+    )
 }
 
 #[cfg(test)]
@@ -76,5 +110,22 @@ mod tests {
         let a = hash_first("function f(o) { o.push(1); }");
         let b = hash_first("function f(x) { x.push(1); }");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn callee_set_canonicalises_new_typeerror_to_call_form() {
+        let with_new = hash_first("function f() { throw new TypeError('x'); }");
+        let without_new = hash_first("function f() { throw TypeError('x'); }");
+        assert_eq!(
+            with_new, without_new,
+            "new TypeError ↔ TypeError must share callee_set"
+        );
+    }
+
+    #[test]
+    fn callee_set_keeps_user_class_under_nc_prefix() {
+        let with_new = hash_first("function f() { return new Foo(); }");
+        let without_new = hash_first("function f() { return Foo(); }");
+        assert_ne!(with_new, without_new, "new Foo ≠ Foo for user classes");
     }
 }
