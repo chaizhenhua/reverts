@@ -1,8 +1,8 @@
 use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
-use oxc_ast::ast::{Expression, Program};
+use oxc_ast::ast::{Expression, Program, SimpleAssignmentTarget};
 use oxc_ast::visit::VisitMut;
-use oxc_ast::visit::walk_mut::walk_expression;
+use oxc_ast::visit::walk_mut::{walk_expression, walk_simple_assignment_target};
 use oxc_span::SPAN;
 use reverts_ir::NormalizationPassId;
 use std::mem;
@@ -32,7 +32,7 @@ impl NormalizationPass for ComputedToStaticMember {
         NormalizationPassId::ComputedToStaticMember
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>) {
         let mut visitor = Rewriter {
@@ -50,7 +50,7 @@ impl<'a> VisitMut<'a> for Rewriter<'a> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
         // Descend bottom-up so nested expressions normalise first.
         walk_expression(self, expr);
-        if !is_rewritable(expr) {
+        if !is_rewritable_expr(expr) {
             return;
         }
         let placeholder = self.builder.expression_null_literal(SPAN);
@@ -61,7 +61,7 @@ impl<'a> VisitMut<'a> for Rewriter<'a> {
         let cme = cme_box.unbox();
         let key = match cme.expression {
             Expression::StringLiteral(s) => s,
-            _ => unreachable!("is_rewritable already verified key is a StringLiteral"),
+            _ => unreachable!("is_rewritable_expr already verified key is a StringLiteral"),
         };
         let ident_name = self.builder.identifier_name(SPAN, key.value.as_str());
         *expr = Expression::StaticMemberExpression(
@@ -73,10 +73,48 @@ impl<'a> VisitMut<'a> for Rewriter<'a> {
             )),
         );
     }
+
+    fn visit_simple_assignment_target(&mut self, t: &mut SimpleAssignmentTarget<'a>) {
+        walk_simple_assignment_target(self, t);
+        if !is_rewritable_target(t) {
+            return;
+        }
+        let placeholder = self
+            .builder
+            .simple_assignment_target_identifier_reference(SPAN, "__cme_placeholder__");
+        let owned = mem::replace(t, placeholder);
+        let SimpleAssignmentTarget::ComputedMemberExpression(cme_box) = owned else {
+            unreachable!()
+        };
+        let cme = cme_box.unbox();
+        let key = match cme.expression {
+            Expression::StringLiteral(s) => s,
+            _ => unreachable!("is_rewritable_target already verified key is a StringLiteral"),
+        };
+        let ident_name = self.builder.identifier_name(SPAN, key.value.as_str());
+        *t = SimpleAssignmentTarget::StaticMemberExpression(
+            self.builder.alloc(self.builder.static_member_expression(
+                SPAN,
+                cme.object,
+                ident_name,
+                cme.optional,
+            )),
+        );
+    }
 }
 
-fn is_rewritable(expr: &Expression<'_>) -> bool {
+fn is_rewritable_expr(expr: &Expression<'_>) -> bool {
     let Expression::ComputedMemberExpression(cme) = expr else {
+        return false;
+    };
+    let Expression::StringLiteral(s) = &cme.expression else {
+        return false;
+    };
+    is_valid_identifier_name(s.value.as_str())
+}
+
+fn is_rewritable_target(t: &SimpleAssignmentTarget<'_>) -> bool {
+    let SimpleAssignmentTarget::ComputedMemberExpression(cme) = t else {
         return false;
     };
     let Expression::StringLiteral(s) = &cme.expression else {
@@ -245,6 +283,42 @@ mod tests {
         let src = r#"function f(o, k) { return o[k]; }"#;
         let out = apply_to_source(&ComputedToStaticMember, src).expect("parse");
         assert!(out.contains("o[k]"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_assignment_target_bracket_to_dot() {
+        let out = apply_to_source(
+            &ComputedToStaticMember,
+            r#"function f(obj) { obj["foo"] = 1; }"#,
+        )
+        .expect("parse");
+        assert!(out.contains("obj.foo = 1"), "got: {out}");
+        assert!(!out.contains("\"foo\""), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_compound_assignment_target() {
+        let out = apply_to_source(
+            &ComputedToStaticMember,
+            r#"function f(obj) { obj["count"] += 1; }"#,
+        )
+        .expect("parse");
+        assert!(out.contains("obj.count"), "got: {out}");
+        assert!(!out.contains("\"count\""), "got: {out}");
+    }
+
+    #[test]
+    fn leaves_dynamic_assignment_target_alone() {
+        let src = r#"function f(obj, k) { obj[k] = 1; }"#;
+        let out = apply_to_source(&ComputedToStaticMember, src).expect("parse");
+        assert!(out.contains("obj[k]"), "got: {out}");
+    }
+
+    #[test]
+    fn leaves_non_identifier_key_assignment_alone() {
+        let src = r#"function f(obj) { obj["with-dash"] = 1; }"#;
+        let out = apply_to_source(&ComputedToStaticMember, src).expect("parse");
+        assert!(out.contains("\"with-dash\""), "got: {out}");
     }
 
     #[test]
