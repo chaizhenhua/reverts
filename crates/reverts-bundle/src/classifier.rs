@@ -75,14 +75,25 @@ pub fn classify(_path: &Path, source: &str) -> BundleClassification {
         ],
     };
 
+    // Run every detector in the schedule and accumulate matches by
+    // bundler. A single bundle can register modules through more than
+    // one mechanism (esbuild emits both `__commonJS` and `__esm`
+    // registrations in the same file), so we MUST NOT return after the
+    // first non-empty detector. The winning bundler is the one that
+    // produced the largest set of inner modules.
+    let mut groups: std::collections::BTreeMap<BundlerKind, Vec<InnerModule>> =
+        std::collections::BTreeMap::new();
     for (bundler, detector) in runs {
         let inner_modules = detector(&parsed.program, parent);
         if !inner_modules.is_empty() {
-            return BundleClassification::Marked(MarkedMetadata {
-                inner_modules,
-                detected_by: *bundler,
-            });
+            groups.entry(*bundler).or_default().extend(inner_modules);
         }
+    }
+    if let Some((bundler, inner_modules)) = groups.into_iter().max_by_key(|(_, m)| m.len()) {
+        return BundleClassification::Marked(MarkedMetadata {
+            inner_modules,
+            detected_by: bundler,
+        });
     }
     BundleClassification::Plain
 }
