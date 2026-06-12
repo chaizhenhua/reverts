@@ -97,6 +97,7 @@ pub enum NormalizationPassId {
     TemplateNoSubstitutionLowered,
     InfiniteForToWhile,
     ConditionalBooleanCoerced,
+    TrailingReturnVoidRemoved,
 }
 
 impl NormalizationPassId {
@@ -126,6 +127,7 @@ impl NormalizationPassId {
             Self::TemplateNoSubstitutionLowered => "template_no_substitution_lowered",
             Self::InfiniteForToWhile => "infinite_for_to_while",
             Self::ConditionalBooleanCoerced => "conditional_boolean_coerced",
+            Self::TrailingReturnVoidRemoved => "trailing_return_void_removed",
         }
     }
 }
