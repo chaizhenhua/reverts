@@ -80,6 +80,35 @@ fn hash_statement(hash: &mut u64, stmt: &Statement<'_>) {
     }
 }
 
+/// Identifier names of built-in constructors that may be invoked with
+/// or without `new` while preserving observable behaviour (modulo
+/// `instanceof` checks). `new Foo()` ↔ `Foo()` is a deterministic
+/// minifier rewrite for these; treating both forms identically in the
+/// AST hash improves minified-vs-source recall.
+fn is_new_optional_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "URIError"
+            | "EvalError"
+            | "AggregateError"
+            | "Boolean"
+            | "Number"
+            | "String"
+            | "Symbol"
+            | "BigInt"
+            | "Object"
+            | "Array"
+            | "Function"
+            | "RegExp"
+            | "Date"
+    )
+}
+
 fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
     use Expression as E;
     match expr {
@@ -143,6 +172,23 @@ fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
         E::TemplateLiteral(_) => update_fnv1a(hash, b"tpl"),
         E::ThisExpression(_) => update_fnv1a(hash, b"this"),
         E::NewExpression(n) => {
+            // Minifier-stable canonicalisation: terser/esbuild drop the
+            // `new` keyword for callee identifiers that the built-in
+            // semantics treat as identical with or without `new`
+            // (Error, TypeError, Array, Object, …). Hashing the call
+            // shape identically lets minified `TypeError(msg)` collide
+            // with un-minified `new TypeError(msg)`. The list is a
+            // conservative subset of widely-known builtins where the
+            // semantic equivalence is documented.
+            if let Expression::Identifier(callee) = &n.callee
+                && is_new_optional_builtin(callee.name.as_str())
+            {
+                update_fnv1a(hash, b"call(");
+                hash_expression(hash, &n.callee);
+                update_fnv1a(hash, format!("/{}", n.arguments.len()).as_bytes());
+                update_fnv1a(hash, b")");
+                return;
+            }
             update_fnv1a(hash, b"new(");
             hash_expression(hash, &n.callee);
             update_fnv1a(hash, format!("/{}", n.arguments.len()).as_bytes());
@@ -270,6 +316,27 @@ mod tests {
         let undef = hash_first_function("function f(x) { return x === undefined; }");
         let void_zero = hash_first_function("function f(x) { return x === void 0; }");
         assert_eq!(undef, void_zero, "undefined and void 0 must collide");
+    }
+
+    #[test]
+    fn ast_hash_treats_new_typeerror_and_typeerror_as_equal() {
+        let with_new = hash_first_function("function f() { throw new TypeError('bad'); }");
+        let without_new = hash_first_function("function f() { throw TypeError('bad'); }");
+        assert_eq!(
+            with_new, without_new,
+            "new TypeError() ↔ TypeError() must collide"
+        );
+    }
+
+    #[test]
+    fn ast_hash_keeps_new_distinct_for_user_class() {
+        // Generic user class still distinguishes `new Foo()` from `Foo()`
+        let with_new = hash_first_function("function f() { return new Foo(1); }");
+        let without_new = hash_first_function("function f() { return Foo(1); }");
+        assert_ne!(
+            with_new, without_new,
+            "new Foo() must stay distinct from Foo()"
+        );
     }
 
     #[test]
