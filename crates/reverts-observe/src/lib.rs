@@ -16,11 +16,15 @@ pub enum FindingCode {
     SyntheticReferenceWithoutDeclaration,
     AstFactExtractionFailed,
     AmbiguousBindingShape,
+    BundleDetectorAmbiguous,
+    BundlerKindUnrecognised,
     UnparseableOutput,
     UnparseablePackageSource,
     AmbiguousPackageMatch,
+    IifeClusterDegenerate,
     LowConfidenceAttribution,
     MissingPackageSource,
+    MissingParseableBody,
     OverlappingFunctionAttribution,
     UnreachableTopLevelCode,
     MissingRequiredAsset,
@@ -210,5 +214,22 @@ mod tests {
         assert_eq!(event.event, "parse");
         assert_eq!(event.detail.as_deref(), Some("src/index.ts"));
         assert_eq!(event.duration, Some(Duration::from_millis(7)));
+    }
+
+    #[test]
+    fn bundle_extraction_finding_codes_are_distinct() {
+        let codes = [
+            FindingCode::BundlerKindUnrecognised,
+            FindingCode::BundleDetectorAmbiguous,
+            FindingCode::MissingParseableBody,
+            FindingCode::IifeClusterDegenerate,
+        ];
+        for (i, a) in codes.iter().enumerate() {
+            for (j, b) in codes.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b);
+                }
+            }
+        }
     }
 }
