@@ -356,8 +356,14 @@ pub fn match_packages_from_connection(
     connection: &mut Connection,
     args: &MatchPackagesArgs,
 ) -> Result<MatchPackagesOutcome, MatchPackagesError> {
-    let rows = load_project_rows_from_connection(connection, args.project_id)
+    let mut rows = load_project_rows_from_connection(connection, args.project_id)
         .map_err(MatchPackagesError::LoadInput)?;
+
+    // Bundle-aware module extraction (Phase α): split recognised bundle
+    // wrappers into per-module rows before the matcher sees them.
+    let extraction = reverts_bundle::extract(&rows);
+    extraction.merge_into(&mut rows);
+
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources = load_package_sources(connection, &package_names)?;
     let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
@@ -2190,6 +2196,47 @@ mod tests {
                 .mode();
             assert_ne!(mode & 0o111, 0);
         }
+    }
+
+    #[test]
+    fn match_packages_runs_bundle_extraction_before_matcher() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let bundle_path = tempdir.path().join("bundle.js");
+        let bundle_src = r#"
+            var lib = __commonJS({
+                "node_modules/example/index.js": (exports, module) => {
+                    function add(a, b) { return a + b; }
+                    module.exports = { add };
+                }
+            });
+        "#;
+        let mut connection = package_match_connection(bundle_path.clone(), bundle_src, &[]);
+        // Replace the default seeded module (id=10, package kind) with an
+        // application-kind module that carries no package_name. Bundle
+        // extraction will discover the `node_modules/example/index.js` inner
+        // module and inject a new package-kind row, bumping
+        // loaded_package_modules to >= 1.
+        connection
+            .execute_batch(
+                "DELETE FROM modules WHERE id = 10;
+                 INSERT INTO modules (id, file_id, original_name, semantic_name, module_category,
+                                      package_name, package_version, byte_start, byte_end)
+                 VALUES (10, 1, 'lib', 'bundle/lib', 'application', NULL, NULL, 0, 0);",
+            )
+            .expect("seed module");
+
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: Vec::new(),
+        };
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+        assert!(
+            outcome.loaded_package_modules >= 1,
+            "extraction should have produced at least one package module: {outcome:?}"
+        );
     }
 
     #[test]
