@@ -92,6 +92,7 @@ pub enum NormalizationPassId {
     CompoundAssignmentCanonical,
     IfReturnElseFlattened,
     EqualityNegationFlattened,
+    ConstantStringConcatFolded,
 }
 
 impl NormalizationPassId {
@@ -116,6 +117,7 @@ impl NormalizationPassId {
             Self::CompoundAssignmentCanonical => "compound_assignment_canonical",
             Self::IfReturnElseFlattened => "if_return_else_flattened",
             Self::EqualityNegationFlattened => "equality_negation_flattened",
+            Self::ConstantStringConcatFolded => "constant_string_concat_folded",
         }
     }
 }
