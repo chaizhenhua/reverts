@@ -88,6 +88,7 @@ pub enum NormalizationPassId {
     LogicalShortCircuitExpanded,
     ConditionalStatementExpanded,
     ReturnConditionalExpanded,
+    ComputedToStaticMember,
 }
 
 impl NormalizationPassId {
@@ -108,6 +109,7 @@ impl NormalizationPassId {
             Self::LogicalShortCircuitExpanded => "logical_short_circuit_expanded",
             Self::ConditionalStatementExpanded => "conditional_statement_expanded",
             Self::ReturnConditionalExpanded => "return_conditional_expanded",
+            Self::ComputedToStaticMember => "computed_to_static_member",
         }
     }
 }

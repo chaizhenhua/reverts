@@ -168,6 +168,30 @@ fn fingerprint_ast_hash_matches_after_full_pipeline_for_minified_pair() {
 }
 
 #[test]
+fn pipeline_aligns_computed_member_with_dot_member() {
+    let bracketed = r#"function f(o) { return o["push"](o["length"]); }"#;
+    let dotted = r#"function f(o) { return o.push(o.length); }"#;
+    let n_b = apply_all_passes(bracketed);
+    let n_d = apply_all_passes(dotted);
+    let fp_b = FunctionExtractor::fingerprint(ModuleId(1), &n_b);
+    let fp_d = FunctionExtractor::fingerprint(ModuleId(2), &n_d);
+    assert_eq!(fp_b.len(), 1);
+    assert_eq!(fp_d.len(), 1);
+    assert_eq!(
+        fp_b[0].primary.ast, fp_d[0].primary.ast,
+        "computed and dot access must produce the same AST hash"
+    );
+    // The callee_set axis was the actual blocker — it tags
+    // `cm:.push` for static-member calls but loses the name for
+    // computed-member calls. After this pass both forms produce the
+    // same callee_set.
+    assert_eq!(
+        fp_b[0].primary.callee_set, fp_d[0].primary.callee_set,
+        "callee_set must agree after computed→static rewrite"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
