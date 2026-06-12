@@ -61,7 +61,15 @@ pub fn extract(input: &InputRows) -> BundleExtraction {
     let mut new_modules = Vec::new();
     let mut updated_modules = Vec::new();
     let mut audit = AuditReport::default();
-    let mut next_synthetic_id: u32 = 0;
+
+    // Synthetic module IDs must not collide with any real upstream ID.
+    // Start at one past the largest real ID and increment for each new
+    // row produced by `merge_classification`. Overflowing a `u32` here
+    // would require > 4 billion modules — astronomically out of range
+    // for any real bundle, but we still saturate-checked-add below so a
+    // pathological input fails loudly rather than silently aliasing.
+    let max_real_id = input.modules.iter().map(|m| m.id.0).max().unwrap_or(0);
+    let mut next_synthetic_id = max_real_id.saturating_add(1);
 
     for source_file in &input.source_files {
         let Some(source) = source_file.source.as_deref() else {
@@ -74,12 +82,11 @@ pub fn extract(input: &InputRows) -> BundleExtraction {
             &classification,
             next_synthetic_id,
         );
-        // clippy::cast_possible_truncation: new_modules count is bounded by the number of inner
-        // modules in a single source file, which is always far below u32::MAX in practice.
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            next_synthetic_id += merge_output.new_modules.len() as u32;
-        }
+        let added = u32::try_from(merge_output.new_modules.len())
+            .expect("new_modules per source file fit in u32");
+        next_synthetic_id = next_synthetic_id
+            .checked_add(added)
+            .expect("synthetic ModuleId space exhausted");
         for m in &merge_output.updated_modules {
             // Only collect modules that differ from upstream.
             if let Some(orig) = input.modules.iter().find(|u| u.id == m.id)

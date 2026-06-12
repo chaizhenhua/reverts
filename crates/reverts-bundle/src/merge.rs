@@ -172,7 +172,7 @@ fn push_new_from_inner(
         .clone()
         .unwrap_or_else(|| inner.virtual_id.clone());
     let mut row = ModuleInput {
-        id: ModuleId(synthetic_id | 0x8000_0000),
+        id: ModuleId(synthetic_id),
         kind,
         original_name,
         semantic_path,
@@ -299,7 +299,7 @@ mod tests {
         let result = merge_classification(1, &upstream, &classification, 5000);
         assert_eq!(result.new_modules.len(), 1);
         let m = &result.new_modules[0];
-        assert!(m.id.0 & 0x8000_0000 != 0, "synthetic id high-bit set");
+        assert_eq!(m.id.0, 5000, "synthetic id uses provided base");
         assert_eq!(m.kind, ModuleKind::Package);
         assert_eq!(m.package_name.as_deref(), Some("lodash"));
         assert_eq!(
