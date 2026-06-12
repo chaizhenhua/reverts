@@ -1,9 +1,6 @@
 use oxc_allocator::Allocator;
 use oxc_ast::Visit;
-use oxc_ast::ast::{
-    ArrowFunctionExpression, Declaration, FormalParameters, Function, FunctionBody, Program,
-    Statement,
-};
+use oxc_ast::ast::{ArrowFunctionExpression, FormalParameters, Function, FunctionBody, Program};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
@@ -70,8 +67,17 @@ impl<'a> Visit<'a> for FunctionExtractor {
 impl FunctionExtractor {
     /// Computes per-function fingerprints with primary axes plus one alternate
     /// per normalization pass. Returns empty if the source fails to parse.
+    ///
+    /// Bundle-extracted module bodies arrive here as `{ stmt; stmt; }` —
+    /// the braces are the original arrow-function body delimiters. OXC
+    /// parses such input as a top-level `BlockStatement`, and the default
+    /// `Visit` walker does NOT descend into block-nested
+    /// `FunctionDeclaration`s the same way it descends into program-level
+    /// ones. To keep the extractor blind to this packaging detail, we
+    /// strip a single pair of outer braces before parsing.
     #[must_use]
     pub fn fingerprint(module_id: ModuleId, source: &str) -> Vec<FunctionFingerprint> {
+        let source = strip_outer_block_braces(source);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
         let parsed = Parser::new(&alloc, source, source_type).parse();
@@ -122,6 +128,38 @@ impl FunctionExtractor {
     }
 }
 
+/// If `src` is exactly one outer pair of `{ ... }` (with only whitespace
+/// before the opening brace and after the closing one), return the inner
+/// slice. Otherwise return `src` unchanged. This unwraps block-statement
+/// module sources produced by the bundle extractor so the OXC parser
+/// sees a normal program-level sequence of statements.
+fn strip_outer_block_braces(src: &str) -> &str {
+    let trimmed = src.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') && trimmed.len() >= 2 {
+        // Ensure the outer braces actually match (no early-close that
+        // would make the inner slice invalid). Cheap parity check: scan
+        // brace depth and confirm the first `{` only closes at the end.
+        let bytes = trimmed.as_bytes();
+        let mut depth: i32 = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 && i != bytes.len() - 1 {
+                        return src;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 {
+            return &trimmed[1..trimmed.len() - 1];
+        }
+    }
+    src
+}
+
 fn compute_axes<'a>(params: &FormalParameters<'a>, body: &FunctionBody<'a>) -> AxisHashes {
     let (acc_p, acc_s) = super::access::compute(body);
     AxisHashes {
@@ -144,38 +182,51 @@ fn locate_function<'a>(
     program: &'a oxc_ast::ast::Program<'a>,
     span: ByteRange,
 ) -> Option<(&'a FormalParameters<'a>, &'a FunctionBody<'a>)> {
-    for stmt in &program.body {
-        match stmt {
-            Statement::FunctionDeclaration(f) => {
-                let s = f.span();
-                if s.start == span.start && s.end == span.end {
-                    let body = f.body.as_deref()?;
-                    return Some((&f.params, body));
-                }
+    struct Locator<'a> {
+        target: ByteRange,
+        found: Option<(&'a FormalParameters<'a>, &'a FunctionBody<'a>)>,
+    }
+    impl<'a> Visit<'a> for Locator<'a> {
+        fn visit_function(&mut self, f: &Function<'a>, flags: ScopeFlags) {
+            if self.found.is_some() {
+                return;
             }
-            Statement::ExportNamedDeclaration(exp) => {
-                if let Some(Declaration::FunctionDeclaration(f)) = &exp.declaration {
-                    let s = f.span();
-                    if s.start == span.start && s.end == span.end {
-                        let body = f.body.as_deref()?;
-                        return Some((&f.params, body));
-                    }
-                }
+            let s = f.span();
+            if s.start == self.target.start
+                && s.end == self.target.end
+                && let Some(body) = f.body.as_deref()
+            {
+                // The visit signature gives us &'_ Function<'a>; we
+                // need &'a references. `self.alloc` provided by the
+                // Visit trait performs the lifetime extension (it is
+                // the same trick oxc's generated walkers use).
+                let params: &'a FormalParameters<'a> = self.alloc(&*f.params);
+                let body: &'a FunctionBody<'a> = self.alloc(body);
+                self.found = Some((params, body));
+                return;
             }
-            Statement::ExportDefaultDeclaration(exp) => {
-                use oxc_ast::ast::ExportDefaultDeclarationKind;
-                if let ExportDefaultDeclarationKind::FunctionDeclaration(f) = &exp.declaration {
-                    let s = f.span();
-                    if s.start == span.start && s.end == span.end {
-                        let body = f.body.as_deref()?;
-                        return Some((&f.params, body));
-                    }
-                }
+            oxc_ast::visit::walk::walk_function(self, f, flags);
+        }
+        fn visit_arrow_function_expression(&mut self, a: &ArrowFunctionExpression<'a>) {
+            if self.found.is_some() {
+                return;
             }
-            _ => {}
+            let s = a.span();
+            if s.start == self.target.start && s.end == self.target.end {
+                let params: &'a FormalParameters<'a> = self.alloc(&*a.params);
+                let body: &'a FunctionBody<'a> = self.alloc(&*a.body);
+                self.found = Some((params, body));
+                return;
+            }
+            oxc_ast::visit::walk::walk_arrow_function_expression(self, a);
         }
     }
-    None
+    let mut loc = Locator {
+        target: span,
+        found: None,
+    };
+    loc.visit_program(program);
+    loc.found
 }
 
 #[cfg(test)]
