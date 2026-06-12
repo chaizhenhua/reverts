@@ -94,6 +94,7 @@ pub enum NormalizationPassId {
     EqualityNegationFlattened,
     ConstantStringConcatFolded,
     LogicalNotChainFlattened,
+    TemplateNoSubstitutionLowered,
 }
 
 impl NormalizationPassId {
@@ -120,6 +121,7 @@ impl NormalizationPassId {
             Self::EqualityNegationFlattened => "equality_negation_flattened",
             Self::ConstantStringConcatFolded => "constant_string_concat_folded",
             Self::LogicalNotChainFlattened => "logical_not_chain_flattened",
+            Self::TemplateNoSubstitutionLowered => "template_no_substitution_lowered",
         }
     }
 }
