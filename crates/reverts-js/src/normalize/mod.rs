@@ -21,6 +21,7 @@ pub mod equality_negation_flattened;
 pub mod export_boundary_normalized;
 pub mod helper_identity_inlined;
 pub mod if_return_else_flattened;
+pub mod infinite_for_to_while;
 pub mod jsx_runtime_normalized;
 pub mod logical_not_chain_flattened;
 pub mod logical_short_circuit_expanded;
@@ -30,7 +31,7 @@ pub mod template_no_substitution_lowered;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 20] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 21] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -52,6 +53,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 20] {
         Box::new(constant_string_concat_folded::ConstantStringConcatFolded),
         Box::new(logical_not_chain_flattened::LogicalNotChainFlattened),
         Box::new(template_no_substitution_lowered::TemplateNoSubstitutionLowered),
+        Box::new(infinite_for_to_while::InfiniteForToWhile),
     ]
 }
 
@@ -102,6 +104,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 20);
+        assert_eq!(ids.len(), 21);
     }
 }

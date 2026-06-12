@@ -95,6 +95,7 @@ pub enum NormalizationPassId {
     ConstantStringConcatFolded,
     LogicalNotChainFlattened,
     TemplateNoSubstitutionLowered,
+    InfiniteForToWhile,
 }
 
 impl NormalizationPassId {
@@ -122,6 +123,7 @@ impl NormalizationPassId {
             Self::ConstantStringConcatFolded => "constant_string_concat_folded",
             Self::LogicalNotChainFlattened => "logical_not_chain_flattened",
             Self::TemplateNoSubstitutionLowered => "template_no_substitution_lowered",
+            Self::InfiniteForToWhile => "infinite_for_to_while",
         }
     }
 }
