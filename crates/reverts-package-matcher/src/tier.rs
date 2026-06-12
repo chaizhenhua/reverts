@@ -69,34 +69,71 @@ pub fn try_structural_anchored(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
+    structural_anchored_for_axes(
+        fp.param_count,
+        &fp.primary,
+        index,
+        MatchTier::StructuralAnchored,
+        None,
+    )
+}
+
+/// Like [`try_structural_anchored`], but consults each alternate
+/// fingerprint produced by a normalization pass. Returns matches at
+/// [`MatchTier::StructuralAnchoredAlternate`] (weight 500, strictly
+/// below the primary structural tier) so the Hungarian global
+/// assignment prefers a primary structural match over an alternate
+/// one when both compete — and falls back to the alternate when only
+/// it has evidence.
+#[must_use]
+pub fn try_structural_anchored_alternate(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
+    for alt in &fp.alternates {
+        if let Some(m) = structural_anchored_for_axes(
+            fp.param_count,
+            &alt.axes,
+            index,
+            MatchTier::StructuralAnchoredAlternate,
+            Some(alt.pass),
+        ) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn structural_anchored_for_axes(
+    param_count: u32,
+    axes: &AxisHashes,
+    index: &dyn PackageFingerprintIndex,
+    tier: MatchTier,
+    matched_alternate: Option<NormalizationPassId>,
+) -> Option<FunctionMatch> {
     let cfg_key = CfgKey {
-        param_count: fp.param_count,
-        cfg_hash: fp.primary.cfg,
+        param_count,
+        cfg_hash: axes.cfg,
     };
     let cfg_candidates = index.query_cfg(cfg_key);
     if cfg_candidates.is_empty() {
         return None;
     }
 
-    // Gather anchor (axis, hash) tuples that are present on the function side.
     let mut fp_anchors: Vec<(AxisKind, u64)> = Vec::new();
-    if let Some(h) = fp.primary.literal_anchor {
+    if let Some(h) = axes.literal_anchor {
         fp_anchors.push((AxisKind::LiteralAnchor, h));
     }
-    if let Some(h) = fp.primary.callee_set {
+    if let Some(h) = axes.callee_set {
         fp_anchors.push((AxisKind::CalleeSet, h));
     }
-    if let Some(h) = fp.primary.throw_set {
+    if let Some(h) = axes.throw_set {
         fp_anchors.push((AxisKind::ThrowSet, h));
     }
     if fp_anchors.is_empty() {
         return None;
     }
 
-    // Pair each cfg candidate with the anchor axes that actually overlap;
-    // drop candidates with zero overlap. Tracking the overlap set (rather
-    // than a boolean) lets us record real multi-axis evidence on the
-    // resulting FunctionMatch.
     let surviving: Vec<(Candidate, Vec<AxisKind>)> = cfg_candidates
         .into_iter()
         .filter_map(|c| {
@@ -105,7 +142,7 @@ pub fn try_structural_anchored(
                 .filter(|(axis, h)| {
                     index
                         .query_feature(FeatureKey {
-                            param_count: fp.param_count,
+                            param_count,
                             kind: *axis,
                             hash: *h,
                         })
@@ -138,12 +175,12 @@ pub fn try_structural_anchored(
     matched_axes.extend(overlap_axes);
 
     Some(FunctionMatch {
-        tier: MatchTier::StructuralAnchored,
+        tier,
         candidate,
         margin: 1.0,
-        top_score: f64::from(MatchTier::StructuralAnchored.weight()),
+        top_score: f64::from(tier.weight()),
         runner_up_score: 0.0,
-        matched_alternate: None,
+        matched_alternate,
         matched_axes,
     })
 }
@@ -465,6 +502,79 @@ mod tests {
         assert!(m.matched_axes.contains(&AxisKind::LiteralAnchor));
         assert!(m.matched_axes.contains(&AxisKind::CalleeSet));
         assert!(!m.matched_axes.contains(&AxisKind::ThrowSet));
+    }
+
+    #[test]
+    fn structural_anchored_alternate_uses_alt_axes_when_primary_misses() {
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1.0".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 1,
+            matched_axis: AxisKind::Cfg,
+            matched_alternate: None,
+        };
+        idx.insert_cfg(
+            CfgKey {
+                param_count: 1,
+                cfg_hash: 555,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::CalleeSet,
+                hash: 777,
+            },
+            cand.clone(),
+        );
+
+        // Primary fp has UNRELATED cfg/callee_set values that won't match.
+        let mut primary = sample_axes();
+        primary.cfg = 1;
+        primary.callee_set = Some(2);
+
+        // An alternate produced by a normalization pass exposes the
+        // cfg=555 + callee_set=777 shape — same as the indexed candidate.
+        let mut alt_axes = sample_axes();
+        alt_axes.cfg = 555;
+        alt_axes.callee_set = Some(777);
+        alt_axes.literal_anchor = None;
+        alt_axes.throw_set = None;
+
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary,
+            alternates: vec![reverts_ir::AlternateAxisHashes {
+                pass: NormalizationPassId::ComputedToStaticMember,
+                statement_count: 1,
+                axes: alt_axes,
+            }],
+        };
+
+        // Primary doesn't match.
+        assert!(try_structural_anchored(&fp, &idx).is_none());
+
+        // Alternate-tier finds it at the new, lower-weight tier and
+        // records the source pass.
+        let m = try_structural_anchored_alternate(&fp, &idx).expect("alternate structural match");
+        assert_eq!(m.tier, MatchTier::StructuralAnchoredAlternate);
+        assert!(
+            m.tier.weight() < MatchTier::StructuralAnchored.weight(),
+            "alternate tier weight must be strictly below primary structural tier"
+        );
+        assert_eq!(
+            m.matched_alternate,
+            Some(NormalizationPassId::ComputedToStaticMember)
+        );
+        assert!(m.matched_axes.contains(&AxisKind::Cfg));
+        assert!(m.matched_axes.contains(&AxisKind::CalleeSet));
     }
 
     #[test]

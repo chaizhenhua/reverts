@@ -1101,6 +1101,7 @@ pub enum MatchTier {
     Exact,
     ExactAlternate,
     StructuralAnchored,
+    StructuralAnchoredAlternate,
     FeatureSimilarity,
     StructuralOnly,
 }
@@ -1112,6 +1113,13 @@ impl MatchTier {
             Self::Exact => 10_000,
             Self::ExactAlternate => 5_000,
             Self::StructuralAnchored => 1_000,
+            // Strictly below `StructuralAnchored` so that when both
+            // primary and alternate fingerprints offer competing
+            // matches for the same (package, fn_id) pair, the
+            // Hungarian global assignment prefers the primary one
+            // and avoids the ambiguity we observed when both
+            // shared the same weight.
+            Self::StructuralAnchoredAlternate => 500,
             Self::FeatureSimilarity => 100,
             Self::StructuralOnly => 10,
         }
@@ -1123,6 +1131,7 @@ impl MatchTier {
             Self::Exact => "exact",
             Self::ExactAlternate => "exact_alternate",
             Self::StructuralAnchored => "structural_anchored",
+            Self::StructuralAnchoredAlternate => "structural_anchored_alternate",
             Self::FeatureSimilarity => "feature_similarity",
             Self::StructuralOnly => "structural_only",
         }
@@ -1139,6 +1148,7 @@ mod match_tier_tests {
             MatchTier::Exact.weight(),
             MatchTier::ExactAlternate.weight(),
             MatchTier::StructuralAnchored.weight(),
+            MatchTier::StructuralAnchoredAlternate.weight(),
             MatchTier::FeatureSimilarity.weight(),
             MatchTier::StructuralOnly.weight(),
         ];
@@ -1157,6 +1167,10 @@ mod match_tier_tests {
         assert_eq!(
             MatchTier::StructuralAnchored.as_str(),
             "structural_anchored"
+        );
+        assert_eq!(
+            MatchTier::StructuralAnchoredAlternate.as_str(),
+            "structural_anchored_alternate"
         );
         assert_eq!(MatchTier::FeatureSimilarity.as_str(), "feature_similarity");
         assert_eq!(MatchTier::StructuralOnly.as_str(), "structural_only");

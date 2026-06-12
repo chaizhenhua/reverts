@@ -1827,8 +1827,65 @@ fn ensure_package_function_attributions_table(
     connection
         .execute_batch(PACKAGE_FUNCTION_ATTRIBUTIONS_CREATE_SQL)
         .map_err(MatchPackagesError::WriteAttribution)?;
+    if package_function_attributions_requires_alt_tier_migration(connection)
+        .map_err(MatchPackagesError::WriteAttribution)?
+    {
+        migrate_package_function_attributions_alt_tier(connection)?;
+    }
     connection
         .execute_batch(PACKAGE_FUNCTION_ATTRIBUTIONS_INDEX_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
+}
+
+/// True when the existing `package_function_attributions` table was
+/// created before the `structural_anchored_alternate` tier was added,
+/// i.e. its CHECK constraint does not list that value. Detected by
+/// peeking at the persisted `sql` text in `sqlite_master`.
+fn package_function_attributions_requires_alt_tier_migration(
+    connection: &Connection,
+) -> rusqlite::Result<bool> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='package_function_attributions'",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(sql
+        .map(|s| !s.contains("structural_anchored_alternate"))
+        .unwrap_or(false))
+}
+
+fn migrate_package_function_attributions_alt_tier(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(
+            r"
+            ALTER TABLE package_function_attributions
+                RENAME TO package_function_attributions__reverts_old;
+            ",
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(PACKAGE_FUNCTION_ATTRIBUTIONS_CREATE_SQL)
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .execute_batch(
+            r"
+            INSERT INTO package_function_attributions
+            SELECT * FROM package_function_attributions__reverts_old;
+            DROP TABLE package_function_attributions__reverts_old;
+            ",
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    transaction
+        .commit()
         .map_err(MatchPackagesError::WriteAttribution)?;
     Ok(())
 }
@@ -1862,6 +1919,7 @@ CREATE TABLE IF NOT EXISTS package_function_attributions (
         'exact',
         'exact_alternate',
         'structural_anchored',
+        'structural_anchored_alternate',
         'feature_similarity',
         'structural_only'
     )),
