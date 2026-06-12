@@ -1461,7 +1461,8 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.is_clean());
-        assert_eq!(run.project.files.len(), 1);
+        // Entry module plus the per-source runtime helper file holding lazyModule/lazyValue.
+        assert_eq!(run.project.files.len(), 2);
         let entry = run
             .project
             .files
@@ -1470,8 +1471,21 @@ mod tests {
             .expect("entry file should be emitted");
         assert!(!entry.source.contains("$wrap7"));
         assert!(!entry.source.contains("_lazy9"));
-        assert!(entry.source.contains("__reverts_cached_module"));
-        assert!(entry.source.contains("__reverts_initialized"));
+        assert!(entry.source.contains("lazyModule("));
+        assert!(entry.source.contains("lazyValue("));
+        // The synthetic temps live only inside the helper file, never in the business module.
+        assert!(!entry.source.contains("_$cached"));
+        assert!(!entry.source.contains("_$init"));
+        let helper = run
+            .project
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be emitted");
+        assert!(helper.source.contains("function lazyModule(factory) {"));
+        assert!(helper.source.contains("function lazyValue(factory) {"));
+        assert!(helper.source.contains("_$cached"));
+        assert!(helper.source.contains("_$init"));
     }
 
     #[test]

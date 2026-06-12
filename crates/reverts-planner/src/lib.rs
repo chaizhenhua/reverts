@@ -134,8 +134,14 @@ fn plan_binding_from_program(
     original: BindingName,
     emitted: BindingName,
     source_backed: bool,
+    shape_override: Option<BindingShape>,
 ) -> PlannedBinding {
-    let shape = program.binding_shape(module_id, original.as_str());
+    // When delazify or namespace decomposition has reshaped a binding's
+    // emitted RHS, the IR-derived shape (computed against the pre-lowering
+    // lazy thunk) no longer matches reality — pass `Unknown` so the audit
+    // doesn't fire on a stale "Callable" classification.
+    let shape =
+        shape_override.unwrap_or_else(|| program.binding_shape(module_id, original.as_str()));
     let known_members = if shape == BindingShape::NamespaceObject {
         program.known_members(module_id, original.as_str())
     } else {
@@ -268,6 +274,8 @@ impl ImportExportPlanner {
         let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut required_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        let mut used_lazy_module = BTreeSet::<u32>::new();
+        let mut used_lazy_value = BTreeSet::<u32>::new();
         let accepted_externalized_packages = externalized_package_modules(program);
         let source_required_packages =
             source_required_package_modules(program, &accepted_externalized_packages);
@@ -279,6 +287,22 @@ impl ImportExportPlanner {
         let lowered_runtime_sources = lowered_runtime_sources(program, &source_module_wiring);
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+
+        // When a lazy binding is folded into its helper module, the consumer no
+        // longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
+        // helper file does. Detect that case here so the helper file declares
+        // and exports `lazyValue`/`lazyModule` even though no consumer needs to
+        // import them.
+        for (source_file_id, chunks) in &runtime_lazy_folds.chunks_by_source_file {
+            for chunk in chunks {
+                if chunk.source.contains("lazyModule(") {
+                    used_lazy_module.insert(*source_file_id);
+                }
+                if chunk.source.contains("lazyValue(") {
+                    used_lazy_value.insert(*source_file_id);
+                }
+            }
+        }
 
         for module in program.model().modules() {
             if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
@@ -348,6 +372,7 @@ impl ImportExportPlanner {
                             binding.clone(),
                             binding.clone(),
                             true,
+                            None,
                         ));
                     }
                 }
@@ -374,8 +399,11 @@ impl ImportExportPlanner {
                 .unwrap_or_default();
 
             let runtime_import_groups = group_runtime_imports(runtime_imports);
+            let lazy_helper_names = lowered_source
+                .map(lazy_helper_import_names_for_source)
+                .unwrap_or_default();
             if let Some(lowered_source) = lowered_source
-                && !remaining_runtime_helpers.is_empty()
+                && (!remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty())
             {
                 used_runtime_helper_files
                     .entry(lowered_source.source_file_id)
@@ -391,6 +419,12 @@ impl ImportExportPlanner {
                         .or_default()
                         .extend(written_runtime_helpers.iter().cloned());
                 }
+                if lowered_source.uses_lazy_module {
+                    used_lazy_module.insert(lowered_source.source_file_id);
+                }
+                if lowered_source.uses_lazy_value {
+                    used_lazy_value.insert(lowered_source.source_file_id);
+                }
                 let specifier = relative_import_specifier(
                     path,
                     runtime_helpers_path(lowered_source.source_file_id).as_str(),
@@ -398,6 +432,7 @@ impl ImportExportPlanner {
                 file.push_source(runtime_helper_import_statement(
                     &remaining_runtime_helpers,
                     &written_runtime_helpers,
+                    &lazy_helper_names,
                     specifier.as_str(),
                 ));
                 for binding in &remaining_runtime_helpers {
@@ -411,6 +446,7 @@ impl ImportExportPlanner {
                         binding.clone(),
                         binding.clone(),
                         true,
+                        None,
                     ));
                 }
             }
@@ -440,6 +476,7 @@ impl ImportExportPlanner {
                 file.push_source(runtime_helper_import_statement(
                     &bindings,
                     &BTreeSet::new(),
+                    &[],
                     specifier.as_str(),
                 ));
                 for binding in bindings {
@@ -453,12 +490,16 @@ impl ImportExportPlanner {
                         binding.clone(),
                         binding,
                         true,
+                        None,
                     ));
                 }
             }
 
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
             let source_imports = program.model().graph().ast_imports_for(module.id);
+            let reshaped_bindings = lowered_source
+                .map(|src| src.reshaped_bindings.clone())
+                .unwrap_or_default();
             for original in program.model().graph().definitions_for(module.id) {
                 let source_backed = source_definitions.contains(&original);
                 let emitted = if source_backed {
@@ -470,6 +511,11 @@ impl ImportExportPlanner {
                         .cloned()
                         .unwrap_or_else(|| original.clone())
                 };
+                let shape_override = if reshaped_bindings.contains(&original) {
+                    Some(BindingShape::Unknown)
+                } else {
+                    None
+                };
                 planned_bindings.insert(original.clone());
                 file.add_binding(plan_binding_from_program(
                     program,
@@ -477,6 +523,7 @@ impl ImportExportPlanner {
                     original,
                     emitted,
                     source_backed,
+                    shape_override,
                 ));
             }
 
@@ -491,6 +538,7 @@ impl ImportExportPlanner {
                     original.clone(),
                     original.clone(),
                     true,
+                    None,
                 ));
             }
 
@@ -642,12 +690,26 @@ impl ImportExportPlanner {
             for binding in &setter_bindings {
                 file.push_source(runtime_helper_setter_declaration(binding));
             }
+            let emits_lazy_module = used_lazy_module.contains(source_file_id);
+            let emits_lazy_value = used_lazy_value.contains(source_file_id);
+            if emits_lazy_module {
+                file.push_source(lazy_module_helper_source());
+            }
+            if emits_lazy_value {
+                file.push_source(lazy_value_helper_source());
+            }
             let mut exported_bindings = helper_bindings.clone();
             exported_bindings.extend(
                 setter_bindings
                     .iter()
                     .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
             );
+            if emits_lazy_module {
+                exported_bindings.insert(BindingName::new("lazyModule"));
+            }
+            if emits_lazy_value {
+                exported_bindings.insert(BindingName::new("lazyValue"));
+            }
             file.push_source(named_export_statement(exported_bindings.iter()));
             for binding in helper_bindings.iter().cloned() {
                 file.add_binding(PlannedBinding::new(
@@ -669,6 +731,22 @@ impl ImportExportPlanner {
                     true,
                 ));
                 file.add_export_with_source_backed(setter, true);
+            }
+            for lazy_name in [
+                emits_lazy_module.then_some("lazyModule"),
+                emits_lazy_value.then_some("lazyValue"),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let binding = BindingName::new(lazy_name);
+                file.add_binding(PlannedBinding::new(
+                    binding.clone(),
+                    binding.clone(),
+                    BindingShape::Callable,
+                    true,
+                ));
+                file.add_export_with_source_backed(binding, true);
             }
             plan.push_file(file);
         }
@@ -753,6 +831,13 @@ struct LoweredRuntimeModuleSource {
     local_definitions: BTreeSet<BindingName>,
     local_writes: BTreeSet<BindingName>,
     written_helpers: BTreeSet<BindingName>,
+    uses_lazy_module: bool,
+    uses_lazy_value: bool,
+    /// Bindings whose shape was rewritten by delazify / namespace decomposition.
+    /// The planner must override the IR-derived shape (which assumed the
+    /// pre-lowering lazy thunk) to keep the audit consistent with what was
+    /// actually emitted.
+    reshaped_bindings: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -790,7 +875,29 @@ fn lowered_runtime_sources(
             source.source_file_id,
             source.source,
         ));
-        let lowering = lower_runtime_helpers(source.source, &helper_kinds);
+        // Cross-module export set: any binding this module exports stays
+        // observable from other modules' call sites. Pass them to the
+        // lowering pass so delazify / namespace decomposition refuse to
+        // collapse bindings that external consumers still call as thunks.
+        // Two sources of "this module's binding is observed externally":
+        //   1. `import_export().exports_for(m)` — bindings the graph marked
+        //      as explicit ESM exports.
+        //   2. `source_module_wiring.exports_by_module[m]` — bindings the
+        //      planner is about to emit `export { X }` for because some
+        //      other module's source imports them. In bundle inputs the
+        //      module rarely has a literal `export` keyword, so this is
+        //      where the real cross-module surface lives.
+        let mut exported_bindings: BTreeSet<BindingName> = program
+            .model()
+            .graph()
+            .import_export()
+            .exports_for(module.id)
+            .into_iter()
+            .collect();
+        if let Some(wiring_exports) = source_module_wiring.exports_by_module.get(&module.id) {
+            exported_bindings.extend(wiring_exports.iter().cloned());
+        }
+        let lowering = lower_runtime_helpers(source.source, &helper_kinds, &exported_bindings);
         let local_definitions = top_level_definitions_in_source(lowering.source.as_str());
         let local_writes = implicit_global_writes_in_source(lowering.source.as_str());
         let mut planned_bindings = BTreeSet::<BindingName>::new();
@@ -822,6 +929,9 @@ fn lowered_runtime_sources(
                 local_definitions,
                 local_writes,
                 written_helpers,
+                uses_lazy_module: lowering.uses_lazy_module,
+                uses_lazy_value: lowering.uses_lazy_value,
+                reshaped_bindings: lowering.reshaped_bindings,
             },
         );
     }
@@ -1112,21 +1222,13 @@ fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
     if !looks_like_lowered_lazy_initializer(initializer) {
         return None;
     }
-    let marker = "__reverts_value";
-    let mut search_from = 0usize;
-    let equals = loop {
-        let marker_start = initializer[search_from..].find(marker)? + search_from;
-        let equals = skip_ws(initializer.as_bytes(), marker_start + marker.len());
-        if initializer.as_bytes().get(equals) == Some(&b'=') {
-            break equals;
-        }
-        search_from = marker_start + marker.len();
-    };
-    let mut cursor = skip_ws(initializer.as_bytes(), equals + 1);
-    if initializer.as_bytes().get(cursor) != Some(&b'(') {
+    // Expected shape: `lazyValue(() => { BODY })`.
+    let prefix = "lazyValue(";
+    if !initializer.starts_with(prefix) {
         return None;
     }
-    cursor = skip_ws(initializer.as_bytes(), cursor + 1);
+    let mut cursor = prefix.len();
+    cursor = skip_ws(initializer.as_bytes(), cursor);
     if initializer.as_bytes().get(cursor) != Some(&b'(') {
         return None;
     }
@@ -1143,15 +1245,6 @@ fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
     let body_end = find_matching_brace(initializer, cursor)?;
     let after_body = skip_ws(initializer.as_bytes(), body_end + 1);
     if initializer.as_bytes().get(after_body) != Some(&b')') {
-        return None;
-    }
-    let call_start = skip_ws(initializer.as_bytes(), after_body + 1);
-    if initializer.as_bytes().get(call_start) != Some(&b'(')
-        || initializer
-            .as_bytes()
-            .get(skip_ws(initializer.as_bytes(), call_start + 1))
-            != Some(&b')')
-    {
         return None;
     }
     Some(initializer[cursor + 1..body_end].trim())
@@ -1584,9 +1677,7 @@ fn declaration_keyword_at_start(source: &str) -> Option<(&'static str, usize)> {
 
 fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
     let compact = compact_js_source(initializer);
-    compact.starts_with(
-        "(()=>{let__reverts_initialized=false;let__reverts_value;return()=>{if(!__reverts_initialized){__reverts_initialized=true;__reverts_value=(()=>{",
-    ) && compact.contains("})();}return__reverts_value;};})()")
+    compact.starts_with("lazyValue(()=>{") && compact.ends_with("})")
 }
 
 fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
@@ -1885,7 +1976,7 @@ fn unresolved_runtime_helper_references(
         .filter(|binding| prelude.defines(binding))
         .filter(|binding| !emitted_runtime_bindings.contains(binding))
         .filter(|binding| !imported.contains(binding))
-        .filter(|binding| !binding.as_str().starts_with("__reverts_"))
+        .filter(|binding| !is_planner_synthetic_binding(binding.as_str()))
         .collect()
 }
 
@@ -2784,14 +2875,26 @@ struct RuntimeHelperLowering {
     source: String,
     lowered_helpers: BTreeSet<BindingName>,
     remaining_helpers: BTreeSet<BindingName>,
+    uses_lazy_module: bool,
+    uses_lazy_value: bool,
+    /// Top-level bindings whose shape changed during delazify / namespace
+    /// decomposition. The IR-derived `BindingShape` from the pre-lowering
+    /// solution no longer matches the emitted RHS (e.g. a binding that was
+    /// `Callable` because it wrapped `lazyValue(...)` is now a plain value
+    /// literal), so the planner must downgrade these bindings' shape to
+    /// `Unknown` to keep the audit consistent.
+    reshaped_bindings: BTreeSet<BindingName>,
 }
 
 fn lower_runtime_helpers(
     source: &str,
     helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
+    exported_bindings: &BTreeSet<BindingName>,
 ) -> RuntimeHelperLowering {
     let mut lowered = source.to_string();
     let mut lowered_helpers = BTreeSet::new();
+    let mut uses_lazy_module = false;
+    let mut uses_lazy_value = false;
     for (helper, kind) in helper_kinds {
         let result = match kind {
             RuntimePreludeBindingKind::CommonJsWrapper => {
@@ -2807,6 +2910,11 @@ fn lower_runtime_helpers(
             lowered = next;
             if helper_removed {
                 lowered_helpers.insert(helper.clone());
+            }
+            match kind {
+                RuntimePreludeBindingKind::CommonJsWrapper => uses_lazy_module = true,
+                RuntimePreludeBindingKind::LazyInitializer => uses_lazy_value = true,
+                RuntimePreludeBindingKind::SourceBacked => {}
             }
         }
     }
@@ -2824,10 +2932,39 @@ fn lower_runtime_helpers(
         .map(|(helper, _kind)| helper)
         .cloned()
         .collect();
+    // Final pass: collapse trivial `var X = lazyValue(() => { return EXPR; })`
+    // and `var X = lazyModule((e, m) => { m.exports = EXPR; })` back to
+    // `var X = EXPR;` when EXPR is pure and X is only used as an immediate
+    // call `X()`. This unwinds the bundler's lazy memoization for values
+    // that never needed it, so the emitted code reads like the pre-bundle
+    // source instead of a lazy thunk wrap.
+    let mut reshaped_bindings = BTreeSet::<BindingName>::new();
+    if uses_lazy_value || uses_lazy_module {
+        let (next, delazified) = delazify_pure_value_bindings(&lowered, exported_bindings);
+        lowered = next;
+        reshaped_bindings.extend(delazified);
+        // After delazify produced `var X = { fn1, fn2, ... };` for CommonJS
+        // modules whose body was `exports.fn1 = ...; exports.fn2 = ...;`,
+        // explode the namespace object back into individual top-level
+        // bindings — restoring the `export function ...` shape consumers
+        // would have written in ESM. Safe only for objects whose every value
+        // is a function/class/arrow expression (API surfaces), and whose
+        // binding is accessed exclusively via `X.<key>` member access.
+        let (next, decomposed) = decompose_function_namespace_objects(&lowered, exported_bindings);
+        lowered = next;
+        reshaped_bindings.extend(decomposed);
+        // Re-derive the flags from the post-rewrite source: if every lazy
+        // thunk collapsed, the helper module no longer needs the helper.
+        uses_lazy_value = source_contains_top_level_call(&lowered, "lazyValue");
+        uses_lazy_module = source_contains_top_level_call(&lowered, "lazyModule");
+    }
     RuntimeHelperLowering {
         source: lowered,
         lowered_helpers,
         remaining_helpers,
+        uses_lazy_module,
+        uses_lazy_value,
+        reshaped_bindings,
     }
 }
 
@@ -2837,6 +2974,930 @@ fn lower_commonjs_wrapper_helper(source: &str, helper: &str) -> Option<String> {
 
 fn lower_lazy_initializer_helper(source: &str, helper: &str) -> Option<String> {
     lower_helper_declarations(source, helper, HelperDeclarationKind::LazyInitializer)
+}
+
+#[derive(Debug, Clone)]
+struct DelazifyCandidate {
+    binding: BindingName,
+    /// Byte range covering the full `var X = lazyValue(() => { ... });` statement.
+    declaration_span: (usize, usize),
+    /// The pure expression extracted from the lazy body's `return EXPR;`.
+    value_expr: String,
+    /// Spans of every `X()` call site whose `(` `)` get dropped when X is delazified.
+    call_sites: Vec<(usize, usize)>,
+}
+
+/// Replace `var X = lazyValue(() => { return EXPR; });` with `var X = EXPR;`
+/// — and rewrite every `X()` call site to plain `X` — whenever the binding is
+/// used only as an immediate-call thunk and EXPR is a pure literal-shape
+/// expression (literal, object literal, array literal, class expression, or
+/// function expression). Returns the rewritten source unchanged when no
+/// candidates qualify, so callers can apply the pass unconditionally.
+fn delazify_pure_value_bindings(
+    source: &str,
+    exported_bindings: &BTreeSet<BindingName>,
+) -> (String, BTreeSet<BindingName>) {
+    let mut candidates = collect_delazify_candidates(source);
+    // Cross-module gate: any binding listed in `exported_bindings` is
+    // observed by some other module that still calls `X()` against the
+    // unlowered surface. Collapsing it to a value here would crash those
+    // call sites. The local `collect_safe_call_sites` check only sees uses
+    // within this module's bundle slice — explicit export plumbing is the
+    // only signal that catches cross-module usage.
+    candidates.retain(|cand| !exported_bindings.contains(&cand.binding));
+    if candidates.is_empty() {
+        return (source.to_string(), BTreeSet::new());
+    }
+    let changed = candidates.iter().map(|cand| cand.binding.clone()).collect();
+    (apply_delazify_rewrites(source, &candidates), changed)
+}
+
+fn collect_delazify_candidates(source: &str) -> Vec<DelazifyCandidate> {
+    let bytes = source.as_bytes();
+    let mut candidates = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let parsed = try_parse_lazy_value_declaration(source, cursor)
+            .or_else(|| try_parse_lazy_module_declaration(source, cursor));
+        let Some((declaration, after)) = parsed else {
+            cursor += 1;
+            continue;
+        };
+        // Verify the binding is referenced only as immediate `X()` calls; any
+        // other reference shape (used as value, exported, passed as argument,
+        // typeof, etc.) makes delazification unsafe.
+        if let Some(call_sites) =
+            collect_safe_call_sites(source, declaration.binding.as_str(), declaration.span)
+        {
+            candidates.push(DelazifyCandidate {
+                binding: declaration.binding,
+                declaration_span: declaration.span,
+                value_expr: declaration.value_expr,
+                call_sites,
+            });
+        }
+        cursor = after;
+    }
+    candidates
+}
+
+struct ParsedDelazifiableDeclaration {
+    binding: BindingName,
+    span: (usize, usize),
+    value_expr: String,
+}
+
+fn try_parse_lazy_value_declaration(
+    source: &str,
+    start: usize,
+) -> Option<(ParsedDelazifiableDeclaration, usize)> {
+    let bytes = source.as_bytes();
+    let keyword = ["var", "let", "const"]
+        .into_iter()
+        .find(|kw| keyword_at(source, start, kw))?;
+    let mut cursor = start + keyword.len();
+    cursor = skip_ws(bytes, cursor);
+    let (binding_name, after_binding) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    let prefix = "lazyValue(";
+    if !source[cursor..].starts_with(prefix) {
+        return None;
+    }
+    cursor += prefix.len();
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'(') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    if bytes.get(cursor) != Some(&b')') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    cursor = expect_arrow(bytes, cursor)?;
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'{') {
+        return None;
+    }
+    let body_end = find_matching_brace(source, cursor)?;
+    let body = &source[cursor + 1..body_end];
+    let value_expr = extract_pure_return_expression(body)?;
+    let after_body = skip_ws(bytes, body_end + 1);
+    if bytes.get(after_body) != Some(&b')') {
+        return None;
+    }
+    let after_paren = skip_ws(bytes, after_body + 1);
+    if bytes.get(after_paren) != Some(&b';') {
+        return None;
+    }
+    let stmt_end = after_paren + 1;
+    Some((
+        ParsedDelazifiableDeclaration {
+            binding: BindingName::new(binding_name),
+            span: (start, stmt_end),
+            value_expr,
+        },
+        stmt_end,
+    ))
+}
+
+/// Match `var X = lazyModule((EXPORTS, MODULE?) => { ... });` and return the
+/// pure value the binding can collapse to. Supports two body shapes:
+///   1. Single statement `MODULE.exports = PURE_EXPR;` — covers a CommonJS
+///      module that re-exports a single pure value (literal, object/array,
+///      class, function).
+///   2. Series of `EXPORTS.k = PURE_EXPR_k;` statements — translated to an
+///      inline object literal `{ k1: expr1, k2: expr2, ... }`. Covers the
+///      `module.exports.foo = ...; module.exports.bar = ...;` style of
+///      CommonJS multi-key exports.
+///
+/// Any other body shape (mixed assignments, control flow, `require` calls,
+/// helper declarations) leaves the lazy module intact for a later, more
+/// invasive pass to extract to a sibling file.
+fn try_parse_lazy_module_declaration(
+    source: &str,
+    start: usize,
+) -> Option<(ParsedDelazifiableDeclaration, usize)> {
+    let bytes = source.as_bytes();
+    let keyword = ["var", "let", "const"]
+        .into_iter()
+        .find(|kw| keyword_at(source, start, kw))?;
+    let mut cursor = start + keyword.len();
+    cursor = skip_ws(bytes, cursor);
+    let (binding_name, after_binding) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    let prefix = "lazyModule(";
+    if !source[cursor..].starts_with(prefix) {
+        return None;
+    }
+    cursor += prefix.len();
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'(') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    let (exports_param, after_first) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_first);
+    let module_param = if bytes.get(cursor) == Some(&b',') {
+        cursor = skip_ws(bytes, cursor + 1);
+        let (name, after) = parse_identifier(source, cursor)?;
+        cursor = skip_ws(bytes, after);
+        Some(name)
+    } else {
+        None
+    };
+    if bytes.get(cursor) != Some(&b')') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    cursor = expect_arrow(bytes, cursor)?;
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'{') {
+        return None;
+    }
+    let body_end = find_matching_brace(source, cursor)?;
+    let body = &source[cursor + 1..body_end];
+    let value_expr = if let Some(module_name) = module_param
+        && let Some(expr) = extract_module_exports_assignment(body, module_name)
+    {
+        expr
+    } else {
+        extract_exports_properties_as_object_literal(body, exports_param)?
+    };
+    let after_body = skip_ws(bytes, body_end + 1);
+    if bytes.get(after_body) != Some(&b')') {
+        return None;
+    }
+    let after_paren = skip_ws(bytes, after_body + 1);
+    if bytes.get(after_paren) != Some(&b';') {
+        return None;
+    }
+    let stmt_end = after_paren + 1;
+    Some((
+        ParsedDelazifiableDeclaration {
+            binding: BindingName::new(binding_name),
+            span: (start, stmt_end),
+            value_expr,
+        },
+        stmt_end,
+    ))
+}
+
+/// Match a body that is one or more `<exports_param>.<key> = PURE_EXPR;`
+/// statements (and nothing else) and build the equivalent object literal
+/// `{ key1: expr1, key2: expr2, ... }`. Property insertion order is preserved
+/// so the rewritten value matches the CommonJS exports object's own-key
+/// iteration order. Rejects duplicate keys, non-pure expressions, anything
+/// other than `IDENT` keys (no `exports['foo']`), and any non-property
+/// statement.
+fn extract_exports_properties_as_object_literal(body: &str, exports_param: &str) -> Option<String> {
+    let statements: Vec<&str> = top_level_statement_slices(body)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if statements.is_empty() {
+        return None;
+    }
+    let prefix = format!("{exports_param}.");
+    let mut properties: Vec<(String, String)> = Vec::new();
+    let mut seen_keys = BTreeSet::new();
+    for stmt_text in &statements {
+        let stmt = stmt_text.trim_end_matches(';').trim();
+        let rest = stmt.strip_prefix(&prefix)?;
+        let key_bytes = rest.as_bytes();
+        if key_bytes.is_empty() || !is_identifier_start(key_bytes[0]) {
+            return None;
+        }
+        let mut key_end = 1;
+        while key_end < key_bytes.len() && is_identifier_continue(key_bytes[key_end]) {
+            key_end += 1;
+        }
+        let key = &rest[..key_end];
+        if !seen_keys.insert(key.to_string()) {
+            return None;
+        }
+        let after_key = rest[key_end..].trim_start();
+        let after_eq = after_key.strip_prefix('=')?;
+        // Reject `==`, `===`, `=>` — these aren't assignments.
+        if after_eq.starts_with('=') || after_eq.starts_with('>') {
+            return None;
+        }
+        let value = after_eq.trim();
+        if value.is_empty() {
+            return None;
+        }
+        if !is_pure_initializer_expression(value) {
+            return None;
+        }
+        properties.push((key.to_string(), value.to_string()));
+    }
+    if properties.is_empty() {
+        return None;
+    }
+    let formatted = properties
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("{{ {formatted} }}"))
+}
+
+/// Match a body that is exactly `<module_param>.exports = PURE_EXPR;` and
+/// return the pure expression on the right-hand side. The check rejects bodies
+/// with other statements, with non-pure expressions, or with assignments
+/// targeting anything other than `<module_param>.exports`.
+fn extract_module_exports_assignment(body: &str, module_param: &str) -> Option<String> {
+    let statements: Vec<&str> = top_level_statement_slices(body)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if statements.len() != 1 {
+        return None;
+    }
+    let stmt = statements[0].trim_end_matches(';').trim();
+    let prefix = format!("{module_param}.exports");
+    let rest = stmt.strip_prefix(&prefix)?;
+    // After the prefix, the next non-identifier-continue byte must be `=`,
+    // otherwise we matched `module.exportsCache` or similar.
+    let rest = rest.trim_start();
+    let mut chars = rest.chars();
+    let first = chars.next()?;
+    if first != '=' {
+        return None;
+    }
+    let second = chars.next();
+    // Reject `==`, `===`, `=>`.
+    if matches!(second, Some('=') | Some('>')) {
+        return None;
+    }
+    let expr = rest[1..].trim();
+    if expr.is_empty() {
+        return None;
+    }
+    if !is_pure_initializer_expression(expr) {
+        return None;
+    }
+    Some(expr.to_string())
+}
+
+fn extract_pure_return_expression(body: &str) -> Option<String> {
+    let statements: Vec<&str> = top_level_statement_slices(body)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if statements.len() != 1 {
+        return None;
+    }
+    let stmt = statements[0].trim_end_matches(';').trim();
+    if !stmt.starts_with("return") {
+        return None;
+    }
+    // Reject "returnable" / "returns" etc. — the `return` keyword must be
+    // followed by whitespace or an opening paren, not an identifier continue.
+    let rest = &stmt["return".len()..];
+    match rest.as_bytes().first() {
+        None => return None,
+        Some(byte) if is_identifier_continue(*byte) => return None,
+        _ => {}
+    }
+    let expr = rest.trim();
+    if expr.is_empty() {
+        return None;
+    }
+    if !is_pure_initializer_expression(expr) {
+        return None;
+    }
+    Some(expr.to_string())
+}
+
+/// Walk `source` looking for every identifier reference that equals `binding`,
+/// excluding the byte range `exclude_span` (which covers the declaration we are
+/// considering rewriting). Each reference must be an immediate-call thunk
+/// invocation `X()` — anything else (used as a value, exported, passed as an
+/// argument, captured in a closure, etc.) is unsafe to rewrite. Returns
+/// `Some(call_sites)` when every reference qualifies; otherwise `None`.
+fn collect_safe_call_sites(
+    source: &str,
+    binding: &str,
+    exclude_span: (usize, usize),
+) -> Option<Vec<(usize, usize)>> {
+    let bytes = source.as_bytes();
+    let mut call_sites = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        let ident = &source[start..cursor];
+        if ident != binding {
+            continue;
+        }
+        // Skip occurrences inside the declaration being rewritten.
+        if start >= exclude_span.0 && cursor <= exclude_span.1 {
+            continue;
+        }
+        // Property access `obj.X` / `obj#X` — `X` is a key, not a reference to
+        // our binding. Safe to ignore.
+        if let Some(prev) = previous_non_ws(bytes, start)
+            && matches!(bytes[prev], b'.' | b'#')
+        {
+            continue;
+        }
+        // Any other context where `X` is not a value reference (object property
+        // key, parameter declaration, assignment target on lhs) makes
+        // delazification unsafe.
+        if !identifier_occurrence_is_value_reference(source, start, cursor) {
+            return None;
+        }
+        // The reference must be immediately followed by `()` and nothing else
+        // that captures `X` as a function (e.g., `X.bind`, `X(arg)` is also
+        // unsafe — the lazy thunk takes no args).
+        let after = skip_ws(bytes, cursor);
+        if bytes.get(after) != Some(&b'(') {
+            return None;
+        }
+        let inner = skip_ws(bytes, after + 1);
+        if bytes.get(inner) != Some(&b')') {
+            return None;
+        }
+        call_sites.push((start, inner + 1));
+        cursor = inner + 1;
+    }
+    Some(call_sites)
+}
+
+fn apply_delazify_rewrites(source: &str, candidates: &[DelazifyCandidate]) -> String {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for candidate in candidates {
+        edits.push((
+            candidate.declaration_span.0,
+            candidate.declaration_span.1,
+            format!(
+                "var {} = {};",
+                candidate.binding.as_str(),
+                candidate.value_expr
+            ),
+        ));
+        for (start, end) in &candidate.call_sites {
+            edits.push((*start, *end, candidate.binding.as_str().to_string()));
+        }
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in &edits {
+        debug_assert!(*start >= cursor, "delazify edits must be non-overlapping");
+        output.push_str(&source[cursor..*start]);
+        output.push_str(replacement);
+        cursor = *end;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+/// Skip any non-code prefix at `cursor`: quoted strings, template literals,
+/// line/block comments, or regex literals. Returns the byte position just past
+/// the non-code span when something was skipped, or `None` when the current
+/// byte begins a code token.
+fn skip_non_code_at(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let byte = *bytes.get(cursor)?;
+    match byte {
+        b'\'' | b'"' => Some(skip_quoted(bytes, cursor, byte)),
+        b'`' => Some(skip_template_literal(bytes, cursor)),
+        b'/' if bytes.get(cursor + 1) == Some(&b'/') => Some(skip_line_comment(bytes, cursor + 2)),
+        b'/' if bytes.get(cursor + 1) == Some(&b'*') => Some(skip_block_comment(bytes, cursor + 2)),
+        b'/' if looks_like_regex_literal(bytes, cursor) => Some(skip_regex_literal(bytes, cursor)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DecomposeCandidate {
+    /// Byte range covering the full `var X = { ... };` declaration.
+    declaration_span: (usize, usize),
+    /// Object properties, in their source order. Every value is guaranteed
+    /// to be a function expression, arrow expression, or class expression.
+    properties: Vec<(String, String)>,
+    /// Byte spans of every `X.<key>` access site, with the key that's
+    /// being accessed. The full span (from the start of `X` to the end of
+    /// the key identifier) gets replaced by the bare key.
+    access_sites: Vec<(usize, usize, String)>,
+}
+
+/// Decompose `var X = { K1: FN1, K2: FN2, ... };` (where every value is a
+/// function/class/arrow expression and X is accessed only as `X.<Ki>`) into
+/// individual top-level bindings `var K1 = FN1; var K2 = FN2; ...` and
+/// rewrite each `X.Ki` to bare `Ki`. This restores the ESM `export function`
+/// shape that a CommonJS module of the form `exports.foo = fn; exports.bar = fn;`
+/// would have been written as in idiomatic TypeScript.
+///
+/// Restricted to value bindings whose entries are *all* function-shape (so the
+/// object is really an API namespace rather than a data record); primitive- or
+/// mixed-valued objects keep their grouped form because the grouping is the
+/// pre-bundle programmer's intent.
+fn decompose_function_namespace_objects(
+    source: &str,
+    exported_bindings: &BTreeSet<BindingName>,
+) -> (String, BTreeSet<BindingName>) {
+    let mut raw = scan_function_namespace_declarations(source);
+    // Cross-module gate (same reasoning as delazify): if the namespace object
+    // binding is exported, consumers in other modules still address it as
+    // `X.foo` against the pre-lowering namespace shape. Decomposing here
+    // would orphan those consumers.
+    raw.retain(|cand| !exported_bindings.contains(&cand.binding));
+    if raw.is_empty() {
+        return (source.to_string(), BTreeSet::new());
+    }
+    let existing_top_level = top_level_definitions_in_source(source);
+    let candidates = filter_decompose_candidates(source, raw, &existing_top_level);
+    if candidates.is_empty() {
+        return (source.to_string(), BTreeSet::new());
+    }
+    let mut changed = BTreeSet::<BindingName>::new();
+    for cand in &candidates {
+        // The namespace object's binding is being removed entirely; its shape
+        // changes from "Callable thunk" (IR view) to "doesn't exist".
+        // Downstream callers treat the binding as reshaped to clear its
+        // IR-inferred shape.
+        for (key, _) in &cand.properties {
+            changed.insert(BindingName::new(key));
+        }
+    }
+    (apply_decompose_rewrites(source, &candidates), changed)
+}
+
+#[derive(Debug, Clone)]
+struct RawDecomposeCandidate {
+    binding: BindingName,
+    declaration_span: (usize, usize),
+    properties: Vec<(String, String)>,
+}
+
+/// Walk the source at module top level (depth-tracked so we don't pick up
+/// `var X = { ... }` declarations nested inside functions or blocks) and
+/// collect every `var X = { ... };` whose object literal has only
+/// function-shape values.
+fn scan_function_namespace_declarations(source: &str) -> Vec<RawDecomposeCandidate> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut cursor = 0;
+    let mut brace_depth: i32 = 0;
+    let mut paren_depth: i32 = 0;
+    let mut bracket_depth: i32 = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        match bytes[cursor] {
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+                continue;
+            }
+            b'}' => {
+                brace_depth -= 1;
+                cursor += 1;
+                continue;
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+                continue;
+            }
+            b')' => {
+                paren_depth -= 1;
+                cursor += 1;
+                continue;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+                continue;
+            }
+            b']' => {
+                bracket_depth -= 1;
+                cursor += 1;
+                continue;
+            }
+            _ => {}
+        }
+        if brace_depth > 0 || paren_depth > 0 || bracket_depth > 0 {
+            cursor += 1;
+            continue;
+        }
+        if let Some((cand, after)) = try_parse_function_namespace_declaration(source, cursor) {
+            out.push(cand);
+            cursor = after;
+        } else {
+            cursor += 1;
+        }
+    }
+    out
+}
+
+fn try_parse_function_namespace_declaration(
+    source: &str,
+    start: usize,
+) -> Option<(RawDecomposeCandidate, usize)> {
+    let bytes = source.as_bytes();
+    let keyword = ["var", "let", "const"]
+        .into_iter()
+        .find(|kw| keyword_at(source, start, kw))?;
+    let mut cursor = start + keyword.len();
+    cursor = skip_ws(bytes, cursor);
+    let (binding_name, after_binding) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    if bytes.get(cursor) != Some(&b'{') {
+        return None;
+    }
+    let object_open = cursor;
+    let object_close = find_matching_brace(source, object_open)?;
+    let inner = &source[object_open + 1..object_close];
+    let after_object = skip_ws(bytes, object_close + 1);
+    if bytes.get(after_object) != Some(&b';') {
+        return None;
+    }
+    let stmt_end = after_object + 1;
+
+    let properties = parse_function_namespace_properties(inner)?;
+    Some((
+        RawDecomposeCandidate {
+            binding: BindingName::new(binding_name),
+            declaration_span: (start, stmt_end),
+            properties,
+        },
+        stmt_end,
+    ))
+}
+
+/// Parse the inside of an object literal into a list of `(key, value)` pairs
+/// — but only succeed when every entry is a `KEY: FUNCTION_SHAPE` pair with a
+/// bare identifier key. Rejects:
+///   * computed keys (`['x']: ...`),
+///   * shorthand (`{ x }`),
+///   * spread elements,
+///   * primitive or other non-function values,
+///   * any value that is not a function/class/arrow expression.
+fn parse_function_namespace_properties(inner: &str) -> Option<Vec<(String, String)>> {
+    let entries = split_top_level_commas(inner);
+    let mut properties = Vec::new();
+    let mut seen = BTreeSet::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let entry_bytes = entry.as_bytes();
+        if !is_identifier_start(entry_bytes[0]) {
+            return None;
+        }
+        let mut key_end = 1;
+        while key_end < entry_bytes.len() && is_identifier_continue(entry_bytes[key_end]) {
+            key_end += 1;
+        }
+        let key = &entry[..key_end];
+        if !seen.insert(key.to_string()) {
+            return None;
+        }
+        let after_key = entry[key_end..].trim_start();
+        let after_colon = after_key.strip_prefix(':')?;
+        let value = after_colon.trim();
+        if value.is_empty() || !is_function_or_class_value(value) {
+            return None;
+        }
+        properties.push((key.to_string(), value.to_string()));
+    }
+    if properties.is_empty() {
+        return None;
+    }
+    Some(properties)
+}
+
+/// True iff `source` (after trimming) is a function expression, class
+/// expression, or arrow function expression. Used to detect "API surface"
+/// values for the namespace decomposition pass — only those decompose.
+fn is_function_or_class_value(source: &str) -> bool {
+    let trimmed = source.trim();
+    if keyword_at(trimmed, 0, "class") {
+        return pure_class_expression(trimmed);
+    }
+    if keyword_at(trimmed, 0, "function") {
+        return true;
+    }
+    looks_like_arrow_function_expression(trimmed)
+}
+
+/// Split `source` on top-level `,` separators (those not nested inside
+/// `(...)`, `[...]`, `{...}`, strings, templates, regex, or comments).
+fn split_top_level_commas(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut cursor = 0;
+    let mut paren: i32 = 0;
+    let mut bracket: i32 = 0;
+    let mut brace: i32 = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        match bytes[cursor] {
+            b'(' => {
+                paren += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren -= 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket += 1;
+                cursor += 1;
+            }
+            b']' => {
+                bracket -= 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace += 1;
+                cursor += 1;
+            }
+            b'}' => {
+                brace -= 1;
+                cursor += 1;
+            }
+            b',' if paren == 0 && bracket == 0 && brace == 0 => {
+                parts.push(&source[start..cursor]);
+                cursor += 1;
+                start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    parts.push(&source[start..]);
+    parts
+}
+
+/// Filter raw candidates by the two cross-cutting safety checks:
+///   * X must be referenced only as `X.<known_key>` (no other usage shape).
+///   * None of the property keys may collide with an existing top-level
+///     binding (other than the X about to be removed) or with a key already
+///     introduced by a prior accepted candidate.
+fn filter_decompose_candidates(
+    source: &str,
+    raw: Vec<RawDecomposeCandidate>,
+    existing_top_level: &BTreeSet<BindingName>,
+) -> Vec<DecomposeCandidate> {
+    let mut introduced = BTreeSet::<BindingName>::new();
+    let mut accepted = Vec::new();
+    for cand in raw {
+        let mut would_introduce = Vec::new();
+        let mut safe = true;
+        for (key, _) in &cand.properties {
+            let key_binding = BindingName::new(key);
+            // The binding X disappears after rewrite, so a key matching X is
+            // harmless on its own — but skip it to keep things simple.
+            if key_binding == cand.binding {
+                continue;
+            }
+            if existing_top_level.contains(&key_binding) || introduced.contains(&key_binding) {
+                safe = false;
+                break;
+            }
+            would_introduce.push(key_binding);
+        }
+        if !safe {
+            continue;
+        }
+        let Some(access_sites) = collect_member_access_only(
+            source,
+            cand.binding.as_str(),
+            cand.declaration_span,
+            &cand.properties,
+        ) else {
+            continue;
+        };
+        // Refuse no-op decompositions: if X is declared but never accessed,
+        // dropping the declaration would discard the function/class
+        // definitions entirely (they might still be observable through
+        // side effects if the binding is exported, but the export check
+        // happens via `collect_member_access_only` returning None for any
+        // non-`X.<key>` reference, including export specifiers).
+        if access_sites.is_empty() {
+            continue;
+        }
+        introduced.extend(would_introduce);
+        accepted.push(DecomposeCandidate {
+            declaration_span: cand.declaration_span,
+            properties: cand.properties,
+            access_sites,
+        });
+    }
+    accepted
+}
+
+/// Walk `source` and verify every reference to `binding` (outside the
+/// candidate's own declaration span) is a `binding.<key>` member access whose
+/// key is one of `properties`' keys. Returns the list of access-site spans
+/// when every reference qualifies, or `None` when any reference is unsafe
+/// (export specifier, value passed as argument, used as `typeof`, accessed
+/// with a different key, etc.).
+fn collect_member_access_only(
+    source: &str,
+    binding: &str,
+    exclude_span: (usize, usize),
+    properties: &[(String, String)],
+) -> Option<Vec<(usize, usize, String)>> {
+    let valid_keys: BTreeSet<&str> = properties.iter().map(|(k, _)| k.as_str()).collect();
+    let bytes = source.as_bytes();
+    let mut sites = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        let ident = &source[start..cursor];
+        if ident != binding {
+            continue;
+        }
+        if start >= exclude_span.0 && cursor <= exclude_span.1 {
+            continue;
+        }
+        // Property access `obj.X` / `obj#X` — X here is a property key, not
+        // our binding. Skip.
+        if let Some(prev) = previous_non_ws(bytes, start)
+            && matches!(bytes[prev], b'.' | b'#')
+        {
+            continue;
+        }
+        if !identifier_occurrence_is_value_reference(source, start, cursor) {
+            return None;
+        }
+        let after = skip_ws(bytes, cursor);
+        if bytes.get(after) != Some(&b'.') {
+            return None;
+        }
+        let key_start = skip_ws(bytes, after + 1);
+        if key_start >= bytes.len() || !is_identifier_start(bytes[key_start]) {
+            return None;
+        }
+        let mut key_end = key_start + 1;
+        while key_end < bytes.len() && is_identifier_continue(bytes[key_end]) {
+            key_end += 1;
+        }
+        let accessed_key = &source[key_start..key_end];
+        if !valid_keys.contains(accessed_key) {
+            return None;
+        }
+        sites.push((start, key_end, accessed_key.to_string()));
+        cursor = key_end;
+    }
+    Some(sites)
+}
+
+fn apply_decompose_rewrites(source: &str, candidates: &[DecomposeCandidate]) -> String {
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for candidate in candidates {
+        let mut new_decl = String::new();
+        for (i, (key, value)) in candidate.properties.iter().enumerate() {
+            if i > 0 {
+                new_decl.push('\n');
+            }
+            new_decl.push_str(&format!("var {key} = {value};"));
+        }
+        edits.push((
+            candidate.declaration_span.0,
+            candidate.declaration_span.1,
+            new_decl,
+        ));
+        for (start, end, key) in &candidate.access_sites {
+            edits.push((*start, *end, key.clone()));
+        }
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in &edits {
+        debug_assert!(*start >= cursor, "decompose edits must not overlap");
+        output.push_str(&source[cursor..*start]);
+        output.push_str(replacement);
+        cursor = *end;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
+/// Whether `source` contains an immediate-call reference `<name>(...)` that
+/// isn't inside a string, comment, template, or regex literal. Used to
+/// determine whether the helper module still needs to export a runtime helper
+/// after the delazify pass has had a chance to remove lazy thunks.
+fn source_contains_top_level_call(source: &str, name: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        if &source[start..cursor] != name {
+            continue;
+        }
+        let after = skip_ws(bytes, cursor);
+        if bytes.get(after) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2960,13 +4021,12 @@ fn parse_commonjs_wrapper_replacement(
     let end = parse_helper_call_end(bytes, body_end + 1)?;
     let exports = params[0];
     let module_alias = params.get(1).copied();
-    let module_binding = module_alias
-        .map(|module| format!("var {module} = __reverts_current_module;\n"))
-        .unwrap_or_default();
+    let parameter_list = match module_alias {
+        Some(module) => format!("({exports}, {module})"),
+        None => format!("({exports})"),
+    };
     Some((
-        format!(
-            "var {binding} = (() => {{\nlet __reverts_cached_module;\nreturn () => {{\nif (__reverts_cached_module) return __reverts_cached_module.exports;\nvar __reverts_current_module = __reverts_cached_module = {{ exports: {{}} }};\nvar {exports} = __reverts_current_module.exports;\n{module_binding}(() => {{\n{body}\n}})();\nreturn __reverts_current_module.exports;\n}};\n}})();"
-        ),
+        format!("var {binding} = lazyModule({parameter_list} => {{\n{body}\n}});"),
         end,
     ))
 }
@@ -2995,9 +4055,7 @@ fn parse_lazy_initializer_replacement(
     let body = source[cursor + 1..body_end].trim();
     let end = parse_helper_call_end(bytes, body_end + 1)?;
     Some((
-        format!(
-            "var {binding} = (() => {{\nlet __reverts_initialized = false;\nlet __reverts_value;\nreturn () => {{\nif (!__reverts_initialized) {{\n__reverts_initialized = true;\n__reverts_value = (() => {{\n{body}\n}})();\n}}\nreturn __reverts_value;\n}};\n}})();"
-        ),
+        format!("var {binding} = lazyValue(() => {{\n{body}\n}});"),
         end,
     ))
 }
@@ -3310,8 +4368,18 @@ fn implicit_global_declarations_for_module(
         .filter(|binding| !source_definitions.contains(binding))
         .filter(|binding| !source_imports.contains(binding))
         .filter(|binding| !planned_bindings.contains(binding))
-        .filter(|binding| !binding.as_str().starts_with("__reverts_"))
+        .filter(|binding| !is_planner_synthetic_binding(binding.as_str()))
         .collect()
+}
+
+/// Identifies binding names that the planner emits as synthetic scaffolding
+/// (lazy wrap temporaries, cross-module setters, createRequire alias). Such
+/// names must never be treated as user-defined bindings during import or
+/// implicit-write analysis. `__reverts_*` covers module-scope synthetics
+/// (setters, createRequire alias); `_$*` covers closure-local temporaries
+/// inside lazy wraps and update/destructure lowerings.
+fn is_planner_synthetic_binding(name: &str) -> bool {
+    name.starts_with("__reverts_") || name.starts_with("_$")
 }
 
 fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
@@ -3617,7 +4685,7 @@ fn rewrite_object_destructuring_helper_writes(
         .into_iter()
         .map(|(key, binding)| {
             format!(
-                "{}(__reverts_destructure{})",
+                "{}(_$t{})",
                 runtime_helper_setter_name(&binding),
                 property_access_source(key.as_str())
             )
@@ -3626,9 +4694,7 @@ fn rewrite_object_destructuring_helper_writes(
         .join("; ");
     Some((
         rhs_end,
-        format!(
-            "(() => {{ const __reverts_destructure = {rhs}; {assignments}; return __reverts_destructure; }})()"
-        ),
+        format!("(() => {{ const _$t = {rhs}; {assignments}; return _$t; }})()"),
     ))
 }
 
@@ -3660,19 +4726,12 @@ fn rewrite_array_destructuring_helper_writes(
     let rhs = &source[rhs_start..rhs_end];
     let assignments = setters
         .into_iter()
-        .map(|(index, binding)| {
-            format!(
-                "{}(__reverts_destructure[{index}])",
-                runtime_helper_setter_name(&binding)
-            )
-        })
+        .map(|(index, binding)| format!("{}(_$t[{index}])", runtime_helper_setter_name(&binding)))
         .collect::<Vec<_>>()
         .join("; ");
     Some((
         rhs_end,
-        format!(
-            "(() => {{ const __reverts_destructure = {rhs}; {assignments}; return __reverts_destructure; }})()"
-        ),
+        format!("(() => {{ const _$t = {rhs}; {assignments}; return _$t; }})()"),
     ))
 }
 
@@ -3990,11 +5049,11 @@ fn runtime_helper_update_expression(
     let setter = runtime_helper_setter_name(binding);
     match position {
         UpdatePosition::Prefix => format!(
-            "(() => {{ let __reverts_update = {binding_name}; let __reverts_next = {operator}__reverts_update; {setter}(__reverts_update); return __reverts_next; }})()",
+            "(() => {{ let _$u = {binding_name}; let _$n = {operator}_$u; {setter}(_$u); return _$n; }})()",
             operator = operator.source()
         ),
         UpdatePosition::Postfix => format!(
-            "(() => {{ let __reverts_update = {binding_name}; let __reverts_previous = __reverts_update{operator}; {setter}(__reverts_update); return __reverts_previous; }})()",
+            "(() => {{ let _$u = {binding_name}; let _$p = _$u{operator}; {setter}(_$u); return _$p; }})()",
             operator = operator.source()
         ),
     }
@@ -4336,6 +5395,7 @@ fn named_import_statement<'a>(
 fn runtime_helper_import_statement(
     bindings: &BTreeSet<BindingName>,
     setter_bindings: &BTreeSet<BindingName>,
+    lazy_helper_names: &[&'static str],
     specifier: &str,
 ) -> String {
     let mut names = bindings
@@ -4343,7 +5403,45 @@ fn runtime_helper_import_statement(
         .map(|binding| binding.as_str().to_string())
         .collect::<Vec<_>>();
     names.extend(setter_bindings.iter().map(runtime_helper_setter_name));
+    names.extend(lazy_helper_names.iter().map(|name| (*name).to_string()));
     format!("import {{ {} }} from '{specifier}';", names.join(", "))
+}
+
+fn lazy_helper_import_names_for_source(source: &LoweredRuntimeModuleSource) -> Vec<&'static str> {
+    let mut names = Vec::new();
+    if source.uses_lazy_module {
+        names.push("lazyModule");
+    }
+    if source.uses_lazy_value {
+        names.push("lazyValue");
+    }
+    names
+}
+
+fn lazy_module_helper_source() -> &'static str {
+    "function lazyModule(factory) {\n  \
+        let _$cached;\n  \
+        return () => {\n    \
+            if (_$cached) return _$cached.exports;\n    \
+            var _$module = _$cached = { exports: {} };\n    \
+            factory(_$module.exports, _$module);\n    \
+            return _$module.exports;\n  \
+        };\n\
+    }"
+}
+
+fn lazy_value_helper_source() -> &'static str {
+    "function lazyValue(factory) {\n  \
+        let _$init = false;\n  \
+        let _$val;\n  \
+        return () => {\n    \
+            if (!_$init) {\n      \
+                _$init = true;\n      \
+                _$val = factory();\n    \
+            }\n    \
+            return _$val;\n  \
+        };\n\
+    }"
 }
 
 fn runtime_helper_setter_name(binding: &BindingName) -> String {
@@ -4393,7 +5491,8 @@ fn property_key_source(key: &str) -> String {
 }
 
 fn node_require_prelude_statement() -> String {
-    "import { createRequire as __reverts_createRequire } from 'node:module';\nvar require = __reverts_createRequire(import.meta.url);".to_string()
+    "import { createRequire } from 'node:module';\nvar require = createRequire(import.meta.url);"
+        .to_string()
 }
 
 fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
@@ -4587,16 +5686,1021 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds);
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
 
-        assert!(lowered.source.contains("__reverts_cached_module"));
+        assert!(lowered.source.contains("var hFA = lazyModule((uO) => {"));
+        assert!(lowered.source.contains("var U = 1; uO.value = U;"));
+        assert!(!lowered.source.contains("hFA = U("));
+        assert!(lowered.uses_lazy_module);
+        assert!(lowered.lowered_helpers.contains(&BindingName::new("U")));
+    }
+
+    #[test]
+    fn end_to_end_lowering_chain_recovers_idiomatic_esm_from_real_bundle_shape() {
+        // A realistic esbuild-style bundle that exercises every recovery
+        // pass in one go:
+        //   - `require_const` — single-value CJS `module.exports = 42` →
+        //     Phase 6a collapses to a direct number binding.
+        //   - `require_config` — multi-primitive `exports.K = primitive` →
+        //     Phase 6b collapses to a grouped object literal (config record).
+        //   - `require_api` — multi-function `exports.K = function/arrow` →
+        //     Phase 6b collapses to an object literal, then Phase 7 explodes
+        //     it into three top-level function bindings (API namespace).
+        //   - `get_palette` — pure `__lazy(() => { return { ... }; })` →
+        //     Phase 5 collapses to a direct object binding.
+        let source = concat!(
+            "var require_const = $wrap((exports, module) => { module.exports = 42; });\n",
+            "var require_config = $wrap((exports, module) => { exports.port = 8080; exports.host = \"localhost\"; });\n",
+            "var require_api = $wrap((exports, module) => { exports.parse = function(s) { return JSON.parse(s); }; exports.stringify = function(o) { return JSON.stringify(o); }; exports.identity = function(x) { return x; }; });\n",
+            "var get_palette = $lazy(() => { return { primary: \"#abc\", secondary: \"#def\" }; });\n",
+            "console.log(\"const:\", require_const());\n",
+            "console.log(\"port:\", require_config().port);\n",
+            "console.log(\"host:\", require_config().host);\n",
+            "console.log(\"parsed:\", require_api().parse('{\"x\":1}').x);\n",
+            "console.log(\"stringified:\", require_api().stringify({ ok: true }));\n",
+            "console.log(\"identity:\", require_api().identity(99));\n",
+            "console.log(\"primary:\", get_palette().primary);\n",
+            "console.log(\"secondary:\", get_palette().secondary);\n",
+        );
+        let helper_kinds = BTreeMap::from([
+            (
+                BindingName::new("$wrap"),
+                RuntimePreludeBindingKind::CommonJsWrapper,
+            ),
+            (
+                BindingName::new("$lazy"),
+                RuntimePreludeBindingKind::LazyInitializer,
+            ),
+        ]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Phase 6a: pure-value module.exports collapsed.
+        assert!(lowered.source.contains("var require_const = 42;"));
+        // Phase 6b: primitive-valued namespace stays grouped.
         assert!(
             lowered
                 .source
-                .contains("var uO = __reverts_current_module.exports;")
+                .contains("var require_config = { port: 8080, host: \"localhost\" };")
         );
-        assert!(!lowered.source.contains("hFA = U("));
-        assert!(lowered.lowered_helpers.contains(&BindingName::new("U")));
+        // Phase 7: function-valued namespace decomposed into bare bindings.
+        assert!(!lowered.source.contains("var require_api"));
+        assert!(
+            lowered
+                .source
+                .contains("var parse = function(s) { return JSON.parse(s); };")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("var stringify = function(o) { return JSON.stringify(o); };")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("var identity = function(x) { return x; };")
+        );
+        // Phase 5: lazy value with pure object body collapsed.
+        assert!(
+            lowered
+                .source
+                .contains("var get_palette = { primary: \"#abc\", secondary: \"#def\" };")
+        );
+
+        // Every consumer call site dropped the dead `()` invocation, attaching
+        // member access (or argument lists) directly to the bare identifier.
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"const:\", require_const);")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"port:\", require_config.port);")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"parsed:\", parse('{\"x\":1}').x);")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"stringified:\", stringify({ ok: true }));")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"identity:\", identity(99));")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("console.log(\"primary:\", get_palette.primary);")
+        );
+
+        // No synthetic scaffolding survives in the lowered source.
+        assert!(!lowered.source.contains("lazyModule("));
+        assert!(!lowered.source.contains("lazyValue("));
+        assert!(!lowered.source.contains("_$"));
+        assert!(!lowered.source.contains("__reverts_"));
+        // Every reshape was tracked so the planner can downgrade the
+        // IR-inferred shape before the audit checks declaration callability.
+        for name in [
+            "require_const",
+            "require_config",
+            "get_palette",
+            "parse",
+            "stringify",
+            "identity",
+        ] {
+            assert!(
+                lowered.reshaped_bindings.contains(&BindingName::new(name)),
+                "reshaped_bindings missing {name}; got {:?}",
+                lowered.reshaped_bindings
+            );
+        }
+    }
+
+    #[test]
+    fn delazify_collapses_pure_object_literal_lazy_value() {
+        let source = concat!(
+            "var palette = L(() => { return { primary: '#abc', secondary: '#def' }; });\n",
+            "console.log(palette().primary);\n",
+            "use(palette().secondary);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Declaration collapsed back to a direct value, callers stripped of `()`.
+        assert!(
+            lowered
+                .source
+                .contains("var palette = { primary: '#abc', secondary: '#def' };")
+        );
+        assert!(lowered.source.contains("console.log(palette.primary);"));
+        assert!(lowered.source.contains("use(palette.secondary);"));
+        assert!(!lowered.source.contains("lazyValue("));
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_value_used_as_first_class_function() {
+        let source = concat!(
+            "var thunk = L(() => { return 42; });\n",
+            // `thunk` captured as value — not safe to inline because the
+            // resulting binding has a different identity (a value vs a
+            // function returning the value).
+            "register(thunk);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
+        assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_skips_exported_lazy_value() {
+        let source = concat!(
+            "var settings = L(() => { return { ready: true }; });\n",
+            "if (settings().ready) {}\n",
+            "export { settings };\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // `export { settings };` references `settings` as a value, not a call —
+        // delazifying would change consumer semantics across the module
+        // boundary. Keep the lazy thunk until cross-module rewriting lands.
+        assert!(lowered.source.contains("var settings = lazyValue(() => {"));
+        assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_value_with_side_effect_body() {
+        let source = concat!("var init = L(() => { setup(); });\n", "init();\n",);
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Body has a side-effect call but no `return EXPR;` — collapsing to
+        // `var init = ...` would evaluate the side effect at module load.
+        // Keep the lazy thunk.
+        assert!(lowered.source.contains("var init = lazyValue(() => {"));
+        assert!(lowered.source.contains("setup();"));
+        assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_value_with_impure_returned_expression() {
+        let source = concat!(
+            "var lazy = L(() => { return loadConfig(); });\n",
+            "use(lazy());\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // `loadConfig()` is a function call — could have side effects or
+        // depend on later state. Don't change evaluation timing.
+        assert!(lowered.source.contains("var lazy = lazyValue(() => {"));
+        assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_value_called_with_arguments() {
+        let source = concat!(
+            "var thunk = L(() => { return [1, 2, 3]; });\n",
+            // Calling the thunk with an argument is meaningless under lazy
+            // semantics (the factory takes no args), but our delazify pass
+            // shouldn't touch it — the binding shape is wrong for inlining.
+            "thunk(0);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
+        assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_preserves_member_access_after_collapsed_call_site() {
+        let source = concat!(
+            "var theme = L(() => { return { color: 'red' }; });\n",
+            "render(theme().color, theme()['palette']);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // After delazify both `theme()` call sites collapse and member access
+        // continues to work naturally — `.color` and `['palette']` attach to
+        // the bare identifier.
+        assert!(lowered.source.contains("var theme = { color: 'red' };"));
+        assert!(
+            lowered
+                .source
+                .contains("render(theme.color, theme['palette']);")
+        );
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_collapses_function_expression_value() {
+        let source = concat!(
+            "var handler = L(() => { return function(req) { return req.path; }; });\n",
+            "register(handler());\n",
+            // handler() returns a function; consumers do `handler()(arg)` to
+            // call the returned function. After delazify: `handler` IS the
+            // function, `handler(arg)` calls it directly.
+            "var result = handler()(req);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            lowered
+                .source
+                .contains("var handler = function(req) { return req.path; };")
+        );
+        // `register(handler())` collapses to `register(handler)` because the
+        // consumer was using the lazy-returned function as a value.
+        assert!(lowered.source.contains("register(handler);"));
+        // `handler()(req)` collapses to `handler(req)` — the chained call
+        // attaches naturally to the now-bare identifier.
+        assert!(lowered.source.contains("var result = handler(req);"));
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_single_value_export() {
+        let source = concat!(
+            "var entry = U((exports, module) => { module.exports = 42; });\n",
+            "console.log(entry());\n",
+            "use(entry());\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var entry = 42;"));
+        assert!(lowered.source.contains("console.log(entry);"));
+        assert!(lowered.source.contains("use(entry);"));
+        assert!(!lowered.source.contains("lazyModule("));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_object_literal_export() {
+        let source = concat!(
+            "var config = U((exports, module) => { module.exports = { port: 8080, host: 'localhost' }; });\n",
+            "listen(config().port, config().host);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            lowered
+                .source
+                .contains("var config = { port: 8080, host: 'localhost' };")
+        );
+        assert!(lowered.source.contains("listen(config.port, config.host);"));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_class_export() {
+        let source = concat!(
+            "var Foo = U((exports, module) => { module.exports = class Foo { constructor() {} }; });\n",
+            "new (Foo())();\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            lowered
+                .source
+                .contains("var Foo = class Foo { constructor() {} };")
+        );
+        assert!(lowered.source.contains("new (Foo)();"));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_multiple_exports_assignments() {
+        let source = concat!(
+            "var api = U((exports, module) => { exports.foo = 1; exports.bar = 2; });\n",
+            "use(api().foo, api().bar);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Multi-property `exports.foo = ...; exports.bar = ...;` collapses
+        // back to an inline object literal — same observable surface to
+        // consumers (member access on the binding) without the lazy thunk.
+        assert!(lowered.source.contains("var api = { foo: 1, bar: 2 };"));
+        assert!(lowered.source.contains("use(api.foo, api.bar);"));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_single_param_property_exports() {
+        let source = concat!(
+            // Single-param form `(exports) =>` with property assignments only —
+            // this is the common minified shape when the bundler doesn't use
+            // `module`. The collapse uses the exports param name to detect
+            // the property targets.
+            "var bag = U((uO) => { uO.value = 1; uO.flag = true; });\n",
+            "use(bag().value);\n",
+            "check(bag().flag);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            lowered
+                .source
+                .contains("var bag = { value: 1, flag: true };")
+        );
+        assert!(lowered.source.contains("use(bag.value);"));
+        assert!(lowered.source.contains("check(bag.flag);"));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_module_with_mixed_property_assignment_and_statement() {
+        let source = concat!(
+            "var bag = U((exports, module) => { var helper = 1; exports.foo = helper; });\n",
+            "use(bag().foo);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // The local `var helper = 1` would have to be hoisted to the
+        // consumer or inlined; the current pass refuses anything other
+        // than a pure series of `exports.K = PURE_EXPR;` statements.
+        assert!(lowered.source.contains("var bag = lazyModule("));
+        assert!(lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_module_with_bracket_indexed_exports() {
+        let source = concat!(
+            // `exports['default']` is computed-key access; out of scope —
+            // we only recover bare-identifier keys.
+            "var api = U((exports, module) => { exports['default'] = 1; });\n",
+            "use(api().default);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var api = lazyModule("));
+        assert!(lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_skips_lazy_module_when_body_does_function_call() {
+        let source = concat!(
+            "var cached = U((exports, module) => { module.exports = computeHeavy(); });\n",
+            "use(cached());\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // `computeHeavy()` is impure — collapsing would change evaluation
+        // timing (module load vs. first access). Keep the lazy wrapper.
+        assert!(lowered.source.contains("var cached = lazyModule("));
+        assert!(lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_collapses_lazy_module_with_single_property_single_param() {
+        let source = concat!(
+            "var bag = U((uO) => { uO.value = 1; });\n",
+            "use(bag().value);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Single-param `(exports) =>` with a single `exports.key = pure;`
+        // statement is the simplest property-export shape — collapses to
+        // an inline single-key object literal.
+        assert!(lowered.source.contains("var bag = { value: 1 };"));
+        assert!(lowered.source.contains("use(bag.value);"));
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_skips_exported_lazy_module() {
+        let source = concat!(
+            "var sharedConst = U((exports, module) => { module.exports = 100; });\n",
+            "console.log(sharedConst());\n",
+            "export { sharedConst };\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Exported binding — cross-module callers would still do
+        // `sharedConst()` after we inline. Until the named-import rewriter
+        // lands, keep the lazy wrap so the export shape stays a function.
+        assert!(lowered.source.contains("var sharedConst = lazyModule("));
+        assert!(lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn delazify_mixes_lazy_value_and_lazy_module_in_one_pass() {
+        let source = concat!(
+            "var port = L(() => { return 3000; });\n",
+            "var host = U((exports, module) => { module.exports = 'localhost'; });\n",
+            "listen(host(), port());\n",
+        );
+        let helper_kinds = BTreeMap::from([
+            (
+                BindingName::new("L"),
+                RuntimePreludeBindingKind::LazyInitializer,
+            ),
+            (
+                BindingName::new("U"),
+                RuntimePreludeBindingKind::CommonJsWrapper,
+            ),
+        ]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var port = 3000;"));
+        assert!(lowered.source.contains("var host = 'localhost';"));
+        assert!(lowered.source.contains("listen(host, port);"));
+        assert!(!lowered.uses_lazy_value);
+        assert!(!lowered.uses_lazy_module);
+    }
+
+    #[test]
+    fn decompose_function_namespace_explodes_api_object_into_top_level_bindings() {
+        // Bundle-shape input: consumers call the thunk `api()` then access
+        // the property. The intermediate Phase 6b object literal explodes
+        // back into two top-level bindings whose call sites lose the
+        // namespace prefix.
+        let source = concat!(
+            "var api = U((exports, module) => { exports.parse = function(s) { return s; }; ",
+            "exports.stringify = function(o) { return o; }; });\n",
+            "api().parse('x');\n",
+            "api().stringify({});\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            !lowered.source.contains("var api ="),
+            "got: {}",
+            lowered.source
+        );
+        assert!(
+            lowered
+                .source
+                .contains("var parse = function(s) { return s; };")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("var stringify = function(o) { return o; };")
+        );
+        // Call sites: bundle's `api().parse(x)` → `api.parse(x)` after Phase
+        // 6b's `()` drop → `parse(x)` after Phase 7's namespace decomposition.
+        assert!(lowered.source.contains("parse('x');"));
+        assert!(lowered.source.contains("stringify({});"));
+        assert!(!lowered.source.contains("api."));
+    }
+
+    #[test]
+    fn decompose_function_namespace_keeps_primitive_record_grouped() {
+        let source = concat!(
+            "var config = U((exports, module) => { exports.port = 8080; exports.host = 'localhost'; });\n",
+            "listen(config().port, config().host);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Primitive values describe a data record (config-like). The object
+        // stays grouped — splitting would scatter "port" / "host" / "name"
+        // / "value" sort of generic identifiers into the module scope and
+        // risk both readability loss and collisions.
+        assert!(
+            lowered
+                .source
+                .contains("var config = { port: 8080, host: 'localhost' };")
+        );
+        assert!(lowered.source.contains("listen(config.port, config.host);"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_keeps_mixed_function_and_primitive_grouped() {
+        let source = concat!(
+            "var bag = U((exports, module) => { exports.fn = function() { return 1; }; exports.flag = true; });\n",
+            "bag().fn();\n",
+            "check(bag().flag);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Mixed function + primitive object — splitting would only partially
+        // restore "named exports" semantics and is harder for a reader to
+        // reason about. Conservative: keep grouped.
+        assert!(lowered.source.contains("var bag = {"));
+        assert!(lowered.source.contains("fn: function()"));
+        assert!(lowered.source.contains("flag: true"));
+        assert!(lowered.source.contains("bag.fn();"));
+        assert!(lowered.source.contains("check(bag.flag);"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_skips_when_binding_passed_as_value() {
+        // Mixed access pattern: some `api().method()` (member call), some
+        // `api()` alone treated as a value passed to `register`. The bare
+        // `api()` collapse to `api` (Phase 6b) makes `register(api)` a
+        // namespace handoff — decomposing would break the consumer.
+        let source = concat!(
+            "var api = U((exports, module) => { exports.run = function() {}; exports.stop = function() {}; });\n",
+            "register(api());\n",
+            "api().run();\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var api = {"));
+        assert!(lowered.source.contains("register(api);"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_skips_when_exported() {
+        let source = concat!(
+            "var api = U((exports, module) => { exports.parse = function(s) { return s; }; exports.stringify = function(o) { return o; }; });\n",
+            "api().parse('x');\n",
+            "export { api };\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // `export { api };` references the binding by value — cross-module
+        // consumers see `api`, not `parse` / `stringify` individually. The
+        // upstream Phase 6b refuses to inline the lazy thunk in this case,
+        // so Phase 7 has nothing to decompose either.
+        assert!(lowered.source.contains("var api = lazyModule("));
+        assert!(lowered.source.contains("export { api };"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_skips_when_key_collides_with_existing_binding() {
+        let source = concat!(
+            "var parse = 'pre-existing';\n",
+            "var api = U((exports, module) => { exports.parse = function(s) { return s; }; exports.stringify = function(o) { return o; }; });\n",
+            "api().parse('x');\n",
+            "api().stringify({});\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // The top-level `var parse = 'pre-existing'` would conflict with the
+        // decomposed `var parse = function(s)`. Skip the decomposition; the
+        // user must rename one of them by hand if they want the cleaner form.
+        assert!(lowered.source.contains("var api = {"));
+        assert!(lowered.source.contains("api.parse"));
+        assert!(lowered.source.contains("api.stringify"));
+        assert!(lowered.source.contains("var parse = 'pre-existing';"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_skips_unknown_key_access() {
+        let source = concat!(
+            "var api = U((exports, module) => { exports.parse = function() {}; exports.stringify = function() {}; });\n",
+            // `api.unknown` is not a key in the object — could be a typo
+            // bug in the bundle, or a dynamically-added property elsewhere.
+            // Decomposing would silently lose the access; keep grouped.
+            "api().unknown();\n",
+            "api().parse();\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var api = {"));
+        assert!(lowered.source.contains("api.unknown()"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_explodes_class_values() {
+        let source = concat!(
+            "var lib = U((exports, module) => { ",
+            "exports.Service = class Service { constructor() {} }; ",
+            "exports.Worker = class Worker { run() {} }; ",
+            "});\n",
+            "new (lib().Service)();\n",
+            "new (lib().Worker)();\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Class expressions count as "function-shape" values for the namespace
+        // decomposition — they're API surfaces, not data.
+        assert!(!lowered.source.contains("var lib ="));
+        assert!(
+            lowered
+                .source
+                .contains("var Service = class Service { constructor() {} };")
+        );
+        assert!(
+            lowered
+                .source
+                .contains("var Worker = class Worker { run() {} };")
+        );
+        assert!(lowered.source.contains("new (Service)();"));
+        assert!(lowered.source.contains("new (Worker)();"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_explodes_arrow_function_values() {
+        let source = concat!(
+            "var fns = U((exports, module) => { exports.add = (a, b) => a + b; exports.sub = (a, b) => a - b; });\n",
+            "fns().add(1, 2);\n",
+            "fns().sub(3, 4);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        // Arrow function expressions also count.
+        assert!(!lowered.source.contains("var fns ="));
+        assert!(lowered.source.contains("var add = (a, b) => a + b;"));
+        assert!(lowered.source.contains("var sub = (a, b) => a - b;"));
+        assert!(lowered.source.contains("add(1, 2);"));
+        assert!(lowered.source.contains("sub(3, 4);"));
+    }
+
+    #[test]
+    fn decompose_function_namespace_skips_when_no_access_sites() {
+        // Bundle source has the lazyModule definition but the consumer never
+        // calls `unused()`. Phase 6b still inlines the literal (the "all uses
+        // are X()" check is vacuously satisfied when there are zero uses),
+        // but Phase 7 then has nothing to decompose — decomposing into bare
+        // `var parse = ...; var stringify = ...;` would inject unreferenced
+        // top-level bindings that look authored. Keep the grouped form so
+        // the dead code stays visibly grouped under its original name.
+        let source = concat!(
+            "var unused = U((exports, module) => { exports.parse = function() {}; exports.stringify = function() {}; });\n",
+            "other();\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("U"),
+            RuntimePreludeBindingKind::CommonJsWrapper,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(lowered.source.contains("var unused = {"));
+        assert!(lowered.source.contains("parse: function()"));
+        assert!(lowered.source.contains("stringify: function()"));
+        // Not decomposed:
+        assert!(!lowered.source.contains("var parse ="));
+        assert!(!lowered.source.contains("var stringify ="));
+    }
+
+    #[test]
+    fn delazify_ignores_binding_reference_inside_string_or_comment() {
+        let source = concat!(
+            "var palette = L(() => { return { primary: '#abc' }; });\n",
+            // String literal that mentions the binding name as text — must
+            // not be flagged as a "value reference" of the binding.
+            "log('palette is great');\n",
+            // Comment that mentions the binding name — same.
+            "// palette is also documented here\n",
+            "use(palette().primary);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+
+        assert!(
+            lowered
+                .source
+                .contains("var palette = { primary: '#abc' };")
+        );
+        assert!(lowered.source.contains("use(palette.primary);"));
+        // The string content and the comment remain verbatim.
+        assert!(lowered.source.contains("'palette is great'"));
+        assert!(
+            lowered
+                .source
+                .contains("// palette is also documented here")
+        );
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn end_to_end_planner_delazifies_pure_lazy_bindings_and_omits_helper_file() {
+        let planner = ImportExportPlanner;
+        // A bundle whose runtime prelude defines a `__commonJS`-style wrapper
+        // (`$w`) and a `__lazy`-style initializer (`$l`). The body uses them
+        // around pure values that should fully delazify back to direct
+        // bindings — and the helper module should NOT be emitted, since no
+        // module ends up importing `lazyModule` / `lazyValue`.
+        let prelude = concat!(
+            "var $w = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var $l = (init, cache) => () => (init && (cache = init(init = 0)), cache);\n",
+        );
+        let body = concat!(
+            "var config = $w((exports, module) => { module.exports = { port: 8080, host: 'localhost' }; });\n",
+            "var palette = $l(() => { return { primary: '#abc' }; });\n",
+            "var api = $w((exports, module) => { exports.parse = function(s) { return s; }; exports.stringify = function(o) { return o; }; });\n",
+            "console.log(config().port);\n",
+            "render(palette().primary);\n",
+            "api().parse('x');\n",
+            "api().stringify({});\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        // No runtime helper file should be emitted — neither `lazyModule` nor
+        // `lazyValue` is referenced after delazify.
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.path != "modules/runtime/source-1-helpers.ts")
+        );
+        let entry = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry.body.join("\n");
+
+        // Every lazy thunk collapsed to a direct binding; no helper imports.
+        assert!(!entry_source.contains("lazyModule("));
+        assert!(!entry_source.contains("lazyValue("));
+        assert!(!entry_source.contains("from './runtime/"));
+
+        // Primitive-valued namespaces stay grouped — `config` and `palette`
+        // are data records, not API surfaces.
+        assert!(
+            entry_source.contains("var config = {"),
+            "got: {entry_source}"
+        );
+        assert!(entry_source.contains("port: 8080"));
+        assert!(entry_source.contains("host: 'localhost'"));
+        assert!(entry_source.contains("var palette = { primary: '#abc' };"));
+
+        // Function-valued namespace `api` decomposes back to individual
+        // top-level bindings — restoring the `export function parse / stringify`
+        // shape the user would have written in ESM. Helper imports for
+        // `lazyModule` / `lazyValue` are gone since nothing references them.
+        assert!(!entry_source.contains("var api = "), "got: {entry_source}");
+        assert!(entry_source.contains("var parse = function(s)"));
+        assert!(entry_source.contains("var stringify = function(o)"));
+
+        // Consumer call sites: member access on data records keeps `X.field`;
+        // function-namespace access drops the namespace prefix entirely.
+        assert!(entry_source.contains("console.log(config.port);"));
+        assert!(entry_source.contains("render(palette.primary);"));
+        assert!(entry_source.contains("parse('x');"), "got: {entry_source}");
+        assert!(
+            entry_source.contains("stringify({});"),
+            "got: {entry_source}"
+        );
+        // And the obsolete namespace form must not survive.
+        assert!(!entry_source.contains("api.parse"), "got: {entry_source}");
+        assert!(
+            !entry_source.contains("api.stringify"),
+            "got: {entry_source}"
+        );
+    }
+
+    #[test]
+    fn end_to_end_planner_keeps_lazy_thunk_when_export_or_side_effect_blocks_delazify() {
+        let planner = ImportExportPlanner;
+        // Same prelude. This time the bindings either get exported (forcing
+        // the lazy thunk to stay so the cross-module surface remains a
+        // function) or have side-effect bodies that can't be safely hoisted
+        // to module-load time.
+        let prelude = concat!(
+            "var $w = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var $l = (init, cache) => () => (init && (cache = init(init = 0)), cache);\n",
+        );
+        let body = concat!(
+            "var entry = $w((exports, module) => { module.exports = 1; });\n",
+            "var init = $l(() => { entry(); });\n",
+            "init();\n",
+            "export { entry };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+
+        let entry = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let helper = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
+            .expect("runtime helper file should be planned");
+        let entry_source = entry.body.join("\n");
+        let helper_source = helper.body.join("\n");
+
+        // `entry` is exported — delazifying would change cross-module
+        // semantics. Stays a lazy thunk and pulls in `lazyModule`.
+        assert!(entry_source.contains("var entry = lazyModule("));
+        // `init` body is `entry();` (side effect, no return). Can't
+        // hoist to module load time. Stays as a lazy thunk.
+        assert!(entry_source.contains("var init = lazyValue("));
+        // Helper file declares the helpers consumers still need.
+        assert!(helper_source.contains("function lazyModule(factory)"));
+        assert!(helper_source.contains("function lazyValue(factory)"));
     }
 
     #[test]
@@ -4610,7 +6714,7 @@ mod tests {
             RuntimePreludeBindingKind::SourceBacked,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds);
+        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
 
         assert_eq!(lowered.source, source);
         assert!(lowered.lowered_helpers.is_empty());
@@ -5199,8 +7303,13 @@ mod tests {
         let module_source = module_file.body.join("\n");
         assert!(!module_source.contains("$wrap7"));
         assert!(!module_source.contains("_lazy9"));
-        assert!(module_source.contains("__reverts_cached_module"));
-        assert!(module_source.contains("__reverts_initialized"));
+        assert!(module_source.contains("lazyModule("));
+        assert!(module_source.contains("lazyValue("));
+        // _$* names only live inside the helper file, never the business module.
+        assert!(!module_source.contains("_$cached"));
+        assert!(!module_source.contains("_$init"));
+        assert!(!module_source.contains("_$val"));
+        assert!(!module_source.contains("_$module"));
     }
 
     #[test]
@@ -5836,7 +7945,8 @@ mod tests {
 
         assert!(helper_source.contains("function buildShared()"));
         assert!(helper_source.contains("shared = buildShared();"));
-        assert!(helper_source.contains("export { initShared, shared };"));
+        assert!(helper_source.contains("function lazyValue(factory) {"));
+        assert!(helper_source.contains("export { initShared, lazyValue, shared };"));
     }
 
     #[test]
@@ -6175,8 +8285,8 @@ mod tests {
                 .contains("Custom = class Custom extends Error { constructor(A) { super(A); } };")
         );
         assert!(helper_source.contains("var initShared = () => {};"));
-        assert!(!helper_source.contains("__reverts_initialized"));
-        assert!(!helper_source.contains("__reverts_value"));
+        assert!(!helper_source.contains("_$init"));
+        assert!(!helper_source.contains("_$val"));
         assert!(!helper_source.contains("var initShared = (() => {"));
         assert!(!helper_source.contains("__reverts_set_shared"));
         assert!(helper_source.contains("export { Custom, initShared, shared };"));
@@ -6231,11 +8341,11 @@ mod tests {
             entry_source
                 .contains("export { initShared, shared } from './runtime/source-1-helpers.js';")
         );
-        assert!(helper_source.contains("var initShared = (() => {"));
-        assert!(helper_source.contains("__reverts_initialized"));
+        assert!(helper_source.contains("var initShared = lazyValue(() => {"));
+        assert!(helper_source.contains("function lazyValue(factory) {"));
         assert!(helper_source.contains("shared = Date.now()"));
         assert!(!helper_source.contains("__reverts_set_shared"));
-        assert!(helper_source.contains("export { initShared, shared };"));
+        assert!(helper_source.contains("export { initShared, lazyValue, shared };"));
     }
 
     #[test]
@@ -6399,9 +8509,9 @@ mod tests {
             "import { counter, result, __reverts_set_counter, __reverts_set_result } from './runtime/source-1-helpers.js';"
         ));
         assert!(entry_source.contains("__reverts_set_result((() => {"));
-        assert!(entry_source.contains("let __reverts_previous = __reverts_update--;"));
-        assert!(entry_source.contains("let __reverts_next = ++__reverts_update;"));
-        assert!(entry_source.contains("__reverts_set_counter(__reverts_update);"));
+        assert!(entry_source.contains("let _$p = _$u--;"));
+        assert!(entry_source.contains("let _$n = ++_$u;"));
+        assert!(entry_source.contains("__reverts_set_counter(_$u);"));
         assert!(!entry_source.contains("counter--"));
         assert!(!entry_source.contains("++counter"));
     }
@@ -6505,8 +8615,8 @@ mod tests {
         assert!(entry_source.contains(
             "import { left, right, __reverts_set_left, __reverts_set_right } from './runtime/source-1-helpers.js';"
         ));
-        assert!(entry_source.contains("__reverts_set_left(__reverts_destructure[0]);"));
-        assert!(entry_source.contains("__reverts_set_right(__reverts_destructure[1]);"));
+        assert!(entry_source.contains("__reverts_set_left(_$t[0]);"));
+        assert!(entry_source.contains("__reverts_set_right(_$t[1]);"));
         assert!(!entry_source.contains("[left, right] ="));
     }
 
@@ -6682,12 +8792,8 @@ mod tests {
             .expect("fixture should normalize");
         let entry_source = plan.files[0].body.join("\n");
 
-        assert!(
-            entry_source.contains(
-                "import { createRequire as __reverts_createRequire } from 'node:module';"
-            )
-        );
-        assert!(entry_source.contains("var require = __reverts_createRequire(import.meta.url);"));
+        assert!(entry_source.contains("import { createRequire } from 'node:module';"));
+        assert!(entry_source.contains("var require = createRequire(import.meta.url);"));
         assert!(entry_source.contains("require('crypto')"));
     }
 
@@ -6717,7 +8823,7 @@ mod tests {
             .expect("fixture should normalize");
         let entry_source = plan.files[0].body.join("\n");
 
-        assert!(entry_source.contains("var require = __reverts_createRequire(import.meta.url);"));
+        assert!(entry_source.contains("var require = createRequire(import.meta.url);"));
         assert!(!entry_source.contains("const require ="));
         assert!(!entry_source.contains("var require;\n"));
     }
