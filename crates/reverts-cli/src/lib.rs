@@ -365,6 +365,10 @@ pub fn match_packages_from_connection(
     // wrappers into per-module rows before the matcher sees them.
     let extraction = reverts_bundle::extract(&rows);
     let extraction_audit = extraction.audit.clone();
+    // Snapshot new_modules before merge_into consumes the extraction —
+    // we need them later to persist synthetic rows into the SQLite
+    // modules table so cascade attributions can FK them.
+    let synthetic_modules: Vec<reverts_input::ModuleInput> = extraction.new_modules.clone();
     extraction.merge_into(&mut rows);
 
     let package_names = package_source_filter(&rows, &args.package_names);
@@ -376,10 +380,42 @@ pub fn match_packages_from_connection(
     let cascade_report = match_with_cascade(&fingerprints_by_module, &package_sources);
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
+        // Persist synthetic modules first so the FK from
+        // package_attributions.module_id and
+        // package_function_attributions.module_id resolves.
+        persist_synthetic_modules(connection, &synthetic_modules)?;
+        // A few synthetic modules may have been skipped by `INSERT OR
+        // IGNORE` due to `UNIQUE(file_id, original_name)` collisions
+        // with pre-existing legacy rows. Build the set of module ids
+        // that actually live in the SQLite `modules` table now, and
+        // filter cascade attributions to only those — the alternative
+        // is a foreign-key violation that aborts the whole apply.
+        let mut persisted_ids = std::collections::BTreeSet::new();
+        {
+            let mut stmt = connection
+                .prepare("SELECT id FROM modules")
+                .map_err(MatchPackagesError::WriteAttribution)?;
+            let mut rs = stmt
+                .query([])
+                .map_err(MatchPackagesError::WriteAttribution)?;
+            while let Some(row) = rs.next().map_err(MatchPackagesError::WriteAttribution)? {
+                let id: u32 = row.get(0).map_err(MatchPackagesError::WriteAttribution)?;
+                persisted_ids.insert(reverts_ir::ModuleId(id));
+            }
+        }
+        let cascade_report_filtered = reverts_package_matcher::CascadeMatchReport {
+            attributions: cascade_report
+                .attributions
+                .iter()
+                .filter(|a| persisted_ids.contains(&a.module_id))
+                .cloned()
+                .collect(),
+            audit: cascade_report.audit.clone(),
+        };
         (
             persist_package_attributions(connection, &rows, &report, &package_names)?,
             persist_package_surfaces(connection, &rows, &report)?,
-            persist_cascade_attributions(connection, &rows, &cascade_report)?,
+            persist_cascade_attributions(connection, &rows, &cascade_report_filtered)?,
         )
     } else {
         (0, 0, 0)
@@ -1609,6 +1645,66 @@ fn persist_rejected_package_attribution(
         )
         .map_err(MatchPackagesError::WriteAttribution)?;
     Ok(())
+}
+
+/// Persist bundle-extraction synthetic modules into the SQLite `modules`
+/// table. Required when `apply: true` so that cascade attribution rows
+/// can satisfy their `module_id REFERENCES modules(id)` foreign key.
+///
+/// Uses `INSERT OR IGNORE` to allow idempotent re-runs: if a previous
+/// run already wrote a row with the same `(file_id, original_name)`,
+/// the duplicate is silently skipped. Synthetic-id collisions across
+/// runs are avoided by `reverts_bundle::extract`'s allocator starting
+/// past the max real module id at load time.
+fn persist_synthetic_modules(
+    connection: &mut Connection,
+    synthetic_modules: &[reverts_input::ModuleInput],
+) -> Result<usize, MatchPackagesError> {
+    if synthetic_modules.is_empty() {
+        return Ok(0);
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    let mut written = 0usize;
+    for module in synthetic_modules {
+        let Some(span) = module.source_span else {
+            continue;
+        };
+        let kind_str = match module.kind {
+            ModuleKind::Application => "application",
+            ModuleKind::Package => "package",
+            ModuleKind::Builtin => "builtin",
+        };
+        let n = transaction
+            .execute(
+                r"
+                INSERT OR IGNORE INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end,
+                     created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                        datetime('now'), datetime('now'))
+                ",
+                params![
+                    module.id.0,
+                    module.source_file_id,
+                    module.original_name,
+                    module.semantic_path,
+                    kind_str,
+                    module.package_name,
+                    module.package_version,
+                    span.byte_start,
+                    span.byte_end,
+                ],
+            )
+            .map_err(MatchPackagesError::WriteAttribution)?;
+        written += n;
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(written)
 }
 
 fn persist_cascade_attributions(
