@@ -12,6 +12,18 @@ pub fn compute(body: &FunctionBody<'_>) -> u64 {
 }
 
 fn hash_statement(hash: &mut u64, stmt: &Statement<'_>) {
+    // Minifier-stable canonicalisation: a `BlockStatement` containing
+    // exactly one statement is equivalent to that statement alone — the
+    // braces are syntactic sugar that `terser`/`esbuild --minify` strip
+    // around single-statement `if`/`while`/`for` bodies. Without this
+    // unwrap the AST hash diverges between minified and un-minified
+    // versions of the same code.
+    if let Statement::BlockStatement(b) = stmt
+        && b.body.len() == 1
+    {
+        hash_statement(hash, &b.body[0]);
+        return;
+    }
     update_fnv1a(hash, b"|stmt:");
     match stmt {
         Statement::BlockStatement(b) => {
@@ -87,6 +99,25 @@ fn hash_expression(hash: &mut u64, expr: &Expression<'_>) {
             update_fnv1a(hash, b")");
         }
         E::UnaryExpression(u) => {
+            // Minifier-stable canonicalisation:
+            //   `!0`   → BooleanLiteral(true)   (b"bool")
+            //   `!1`   → BooleanLiteral(false)  (b"bool")
+            //   `void 0` → Identifier("undefined") (b"id")
+            // These three substitutions are deterministic minifier
+            // shortenings; without canonicalisation, the AST hash would
+            // not survive a `terser`/`esbuild --minify` pass.
+            use oxc_syntax::operator::UnaryOperator;
+            if matches!(u.operator, UnaryOperator::LogicalNot)
+                && let E::NumericLiteral(n) = &u.argument
+                && (n.value == 0.0 || n.value == 1.0)
+            {
+                update_fnv1a(hash, b"bool");
+                return;
+            }
+            if matches!(u.operator, UnaryOperator::Void) {
+                update_fnv1a(hash, b"id");
+                return;
+            }
             update_fnv1a(hash, b"un(");
             update_fnv1a(hash, format!("{:?}", u.operator).as_bytes());
             update_fnv1a(hash, b",");
@@ -219,5 +250,34 @@ mod tests {
         let seq = hash_first_function("function f(a, b, c) { return (a, b, c); }");
         let last = hash_first_function("function f(a, b, c) { return c; }");
         assert_ne!(seq, last);
+    }
+
+    #[test]
+    fn ast_hash_treats_true_and_logical_not_zero_as_equal() {
+        // The standard minifier rewrite `true → !0` must not change the
+        // hash; otherwise minified vs un-minified versions of the same
+        // function would mismatch.
+        let truthy = hash_first_function("function f(x) { return x === true; }");
+        let bang_zero = hash_first_function("function f(x) { return x === !0; }");
+        assert_eq!(truthy, bang_zero, "true and !0 must collide");
+        let falsy = hash_first_function("function f(x) { return x === false; }");
+        let bang_one = hash_first_function("function f(x) { return x === !1; }");
+        assert_eq!(falsy, bang_one, "false and !1 must collide");
+    }
+
+    #[test]
+    fn ast_hash_treats_undefined_and_void_zero_as_equal() {
+        let undef = hash_first_function("function f(x) { return x === undefined; }");
+        let void_zero = hash_first_function("function f(x) { return x === void 0; }");
+        assert_eq!(undef, void_zero, "undefined and void 0 must collide");
+    }
+
+    #[test]
+    fn ast_hash_unwraps_single_statement_block_in_if_body() {
+        // Minifiers strip braces around single-statement `if` bodies. The
+        // hash must remain stable across this rewrite.
+        let braced = hash_first_function("function f(x) { if (x) { return 1; } return 2; }");
+        let unbraced = hash_first_function("function f(x) { if (x) return 1; return 2; }");
+        assert_eq!(braced, unbraced, "single-stmt block must unwrap");
     }
 }
