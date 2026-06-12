@@ -99,28 +99,33 @@ pub fn assign_globally(
         })
         .collect();
 
-    // Right-side global candidate dictionary: (PackageId, external_function_id) -> column idx.
-    // IMPORTANT: len() is captured before or_insert so that each new key gets
-    // a unique sequential index equal to the count at insertion time.
+    // Right-side global candidate index. `col_index` maps key → column for
+    // O(log n) forward lookup during cost-matrix population; `col_keys`
+    // mirrors the keys indexed by column for O(1) reverse lookup when we
+    // decode the Hungarian assignment. Without the parallel vec this loop
+    // would be O(n²) in the function count.
     let mut col_index: std::collections::BTreeMap<(PackageId, u64), usize> =
         std::collections::BTreeMap::new();
+    let mut col_keys: Vec<(PackageId, u64)> = Vec::new();
     for assignment in &out {
         for cand in &assignment.candidates {
             let key = (
                 cand.candidate.package.clone(),
                 cand.candidate.external_function_id,
             );
-            let next = col_index.len();
-            col_index.entry(key).or_insert(next);
+            col_index.entry(key.clone()).or_insert_with(|| {
+                col_keys.push(key);
+                col_keys.len() - 1
+            });
         }
     }
 
-    if col_index.is_empty() {
+    if col_keys.is_empty() {
         return out;
     }
 
     let n_rows = out.len();
-    let n_cols = col_index.len();
+    let n_cols = col_keys.len();
 
     // Build cost matrix (max-weight).
     let mut cost = vec![vec![0.0_f64; n_cols]; n_rows];
@@ -150,14 +155,7 @@ pub fn assign_globally(
         if cost[row][col] <= 0.0 {
             continue; // zero weight = unmatched (padding column)
         }
-        // Reverse-lookup: find the (PackageId, external_function_id) for this column.
-        let Some(key_pair) = col_index
-            .iter()
-            .find(|(_, v)| **v == col)
-            .map(|(k, _)| k.clone())
-        else {
-            continue;
-        };
+        let key_pair = &col_keys[col];
         let chosen = out[row]
             .candidates
             .iter()
