@@ -64,6 +64,14 @@ impl<'a> Visit<'a> for V<'_> {
         }
         oxc_ast::visit::walk::walk_statement(self, s);
     }
+    fn visit_catch_parameter(&mut self, c: &oxc_ast::ast::CatchParameter<'a>) {
+        // Catch parameters introduce a binding scope just like `var`/`let`
+        // declarators do. Recording the pattern shape (identifier vs
+        // destructure) here keeps two functions with structurally
+        // different catch parameters from colliding.
+        self.tokens.insert(pattern_token(&c.pattern, 'c'));
+        oxc_ast::visit::walk::walk_catch_parameter(self, c);
+    }
 }
 
 fn declarator_token(d: &VariableDeclarator<'_>) -> String {
@@ -107,5 +115,27 @@ mod tests {
         let flat = hash_first("function f(a) { return a; }");
         let obj = hash_first("function f({ a, b }) { return a + b; }");
         assert_ne!(flat, obj);
+    }
+
+    #[test]
+    fn binding_pattern_records_catch_parameter() {
+        // Two functions with the same body shape but different catch
+        // parameters MUST hash differently (identifier vs object
+        // destructure).
+        let ident_catch =
+            hash_first("function f() { try { dangerous(); } catch (e) { handle(e); } }");
+        let destruct_catch = hash_first(
+            "function f() { try { dangerous(); } catch ({ message }) { handle(message); } }",
+        );
+        assert_ne!(ident_catch, destruct_catch);
+    }
+
+    #[test]
+    fn binding_pattern_collides_for_renamed_catch_identifier() {
+        // The pattern token is identifier-blind (`c:i`), so renaming
+        // the catch binding doesn't change the hash.
+        let a = hash_first("function f() { try {} catch (e) { handle(e); } }");
+        let b = hash_first("function g() { try {} catch (z) { handle(z); } }");
+        assert_eq!(a, b);
     }
 }
