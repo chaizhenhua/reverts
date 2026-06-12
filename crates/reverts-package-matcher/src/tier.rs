@@ -354,8 +354,23 @@ pub(crate) fn pick_unique(
     if candidates.is_empty() {
         return None;
     }
+    // Sort by (package name, version) so duplicates are adjacent.
+    candidates.sort_by(|a, b| {
+        a.package
+            .name
+            .cmp(&b.package.name)
+            .then_with(|| a.package.version.cmp(&b.package.version))
+            .then_with(|| a.external_function_id.cmp(&b.external_function_id))
+    });
+    // Dedupe by (package NAME, external_function_id) — different versions
+    // of the same package indexing the same function (e.g. pretty-bytes
+    // 6.1.0 and 6.1.1 with identical helper code) are not ambiguous;
+    // they are the same library. Later phases (version-narrowing,
+    // package-attribution Hungarian) resolve which specific version
+    // wins, so the cascade tier should treat the package as uniquely
+    // identified.
     candidates.dedup_by(|a, b| {
-        a.package == b.package && a.external_function_id == b.external_function_id
+        a.package.name == b.package.name && a.external_function_id == b.external_function_id
     });
     if candidates.len() != 1 {
         return None;
