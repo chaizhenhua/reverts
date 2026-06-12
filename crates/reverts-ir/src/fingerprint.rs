@@ -93,6 +93,7 @@ pub enum NormalizationPassId {
     IfReturnElseFlattened,
     EqualityNegationFlattened,
     ConstantStringConcatFolded,
+    LogicalNotChainFlattened,
 }
 
 impl NormalizationPassId {
@@ -118,6 +119,7 @@ impl NormalizationPassId {
             Self::IfReturnElseFlattened => "if_return_else_flattened",
             Self::EqualityNegationFlattened => "equality_negation_flattened",
             Self::ConstantStringConcatFolded => "constant_string_concat_folded",
+            Self::LogicalNotChainFlattened => "logical_not_chain_flattened",
         }
     }
 }
