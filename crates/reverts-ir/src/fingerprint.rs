@@ -90,6 +90,7 @@ pub enum NormalizationPassId {
     ReturnConditionalExpanded,
     ComputedToStaticMember,
     ArrowBodyBlocked,
+    TypeofUndefinedCanonical,
 }
 
 impl NormalizationPassId {
@@ -112,6 +113,7 @@ impl NormalizationPassId {
             Self::ReturnConditionalExpanded => "return_conditional_expanded",
             Self::ComputedToStaticMember => "computed_to_static_member",
             Self::ArrowBodyBlocked => "arrow_body_blocked",
+            Self::TypeofUndefinedCanonical => "typeof_undefined_canonical",
         }
     }
 }

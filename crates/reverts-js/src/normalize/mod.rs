@@ -23,9 +23,10 @@ pub mod object_assign_expanded;
 pub mod return_conditional_expanded;
 pub mod sequence_expression_split;
 pub mod ts_runtime_erased;
+pub mod typeof_undefined_canonical;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 15] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 16] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -42,6 +43,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 15] {
         Box::new(return_conditional_expanded::ReturnConditionalExpanded),
         Box::new(computed_to_static_member::ComputedToStaticMember),
         Box::new(arrow_body_blocked::ArrowBodyBlocked),
+        Box::new(typeof_undefined_canonical::TypeofUndefinedCanonical),
     ]
 }
 
@@ -92,6 +94,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 15);
+        assert_eq!(ids.len(), 16);
     }
 }
