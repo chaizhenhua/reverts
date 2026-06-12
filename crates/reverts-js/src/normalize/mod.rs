@@ -9,6 +9,7 @@ pub trait NormalizationPass {
 }
 
 pub mod arrow_body_blocked;
+pub mod boolean_call_to_double_not_guarded;
 pub mod boolean_undefined_canonicalised;
 pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
@@ -26,15 +27,17 @@ pub mod infinite_for_to_while;
 pub mod jsx_runtime_normalized;
 pub mod logical_not_chain_flattened;
 pub mod logical_short_circuit_expanded;
+pub mod number_call_to_unary_plus_guarded;
 pub mod return_conditional_expanded;
 pub mod sequence_expression_split;
+pub mod shadow_check;
 pub mod template_no_substitution_lowered;
 pub mod trailing_return_void_removed;
 pub mod ts_runtime_erased;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 24] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 26] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -60,6 +63,8 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 24] {
         Box::new(conditional_boolean_coerced::ConditionalBooleanCoerced),
         Box::new(trailing_return_void_removed::TrailingReturnVoidRemoved),
         Box::new(void_zero_to_undefined_guarded::VoidZeroToUndefinedGuarded),
+        Box::new(boolean_call_to_double_not_guarded::BooleanCallToDoubleNotGuarded),
+        Box::new(number_call_to_unary_plus_guarded::NumberCallToUnaryPlusGuarded),
     ]
 }
 
@@ -110,6 +115,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 24);
+        assert_eq!(ids.len(), 26);
     }
 }

@@ -1,6 +1,5 @@
 use oxc_allocator::Allocator;
 use oxc_ast::AstBuilder;
-use oxc_ast::Visit;
 use oxc_ast::ast::{Expression, Program};
 use oxc_ast::visit::VisitMut;
 use oxc_ast::visit::walk_mut::walk_expression;
@@ -50,7 +49,7 @@ impl NormalizationPass for VoidZeroToUndefinedGuarded {
         1
     }
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>) {
-        if program_can_shadow_undefined(program) {
+        if super::shadow_check::program_can_shadow(program, "undefined") {
             return;
         }
         let mut visitor = Rewriter {
@@ -58,32 +57,6 @@ impl NormalizationPass for VoidZeroToUndefinedGuarded {
         };
         visitor.visit_program(program);
     }
-}
-
-/// Returns true if any lexical/var binding in the program is named
-/// `undefined`, OR any `with` statement is present (which can
-/// dynamically introduce one). When either is the case the rewrite is
-/// **not** safe and the pass must be a no-op.
-fn program_can_shadow_undefined(program: &Program<'_>) -> bool {
-    struct Checker {
-        found: bool,
-    }
-    impl<'a> Visit<'a> for Checker {
-        fn visit_binding_identifier(&mut self, b: &oxc_ast::ast::BindingIdentifier<'a>) {
-            if b.name.as_str() == "undefined" {
-                self.found = true;
-            }
-        }
-        fn visit_with_statement(&mut self, _: &oxc_ast::ast::WithStatement<'a>) {
-            // `with (o) { ... }` makes `o.undefined` an in-scope read,
-            // so any `undefined` inside the body would resolve to a
-            // potentially-non-undefined value.
-            self.found = true;
-        }
-    }
-    let mut c = Checker { found: false };
-    c.visit_program(program);
-    c.found
 }
 
 struct Rewriter<'a> {
