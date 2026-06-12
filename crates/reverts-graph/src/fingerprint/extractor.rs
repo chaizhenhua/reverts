@@ -85,7 +85,7 @@ impl FunctionExtractor {
             return Vec::new();
         }
         let primary_extracts = Self::new(module_id).extract(&parsed.program);
-        let primary_locals = collect_top_level_binding_names(&parsed.program);
+        let primary_locals = collect_universal_renamable_bindings(&parsed.program);
 
         let mut out: Vec<FunctionFingerprint> = primary_extracts
             .iter()
@@ -111,7 +111,7 @@ impl FunctionExtractor {
                 continue;
             }
             let alt_extracts = Self::new(module_id).extract(&alt_parsed.program);
-            let alt_locals = collect_top_level_binding_names(&alt_parsed.program);
+            let alt_locals = collect_universal_renamable_bindings(&alt_parsed.program);
             for (i, alt_fn) in alt_extracts.iter().enumerate() {
                 let Some(fp) = out.get_mut(i) else {
                     break;
@@ -334,12 +334,11 @@ fn collect_function_scope_binding_names<'b>(
     }
 }
 
-/// Collect every identifier name bound at the program top level (and
-/// any nested function/class declaration name that's also program-
-/// scope-visible). These names are the rename targets a minifier
-/// rewrites — locally introduced and unstable across builds. Function
-/// fingerprints filter `callee_set` against this set so that calls to
-/// such helpers don't leak unstable names into the hash.
+/// Collect every identifier name bound at the program top level. Kept
+/// as a primitive for callers that want only the module-scope
+/// renameable set; production fingerprinting uses
+/// [`collect_universal_renamable_bindings`] which is a strict superset.
+#[allow(dead_code)]
 fn collect_top_level_binding_names<'p, 'a: 'p>(
     program: &'p oxc_ast::ast::Program<'a>,
 ) -> std::collections::BTreeSet<&'p str> {
@@ -411,6 +410,397 @@ fn collect_top_level_binding_names<'p, 'a: 'p>(
         }
     }
     set
+}
+
+/// Collect **every** identifier name bound anywhere in the program —
+/// at module scope AND inside every nested function/method/arrow/class
+/// body. Returns a superset of [`collect_top_level_binding_names`] that
+/// also includes formal parameters and local bindings of every inner
+/// function expression, declaration, arrow, class, catch handler, and
+/// loop binding.
+///
+/// The motivation is closure-scope minifier resilience. A function
+/// fingerprint's `callee_set` filters identifier-callees against the
+/// "known local" set. If function `f` calls `helper` where `helper` is
+/// bound in an *enclosing* function (not `f`'s own scope, and not the
+/// module's top-level), then under the per-function filter `helper`
+/// survives — but the minifier renames `helper` to a short alias, so
+/// the un-minified fingerprint records `c:helper` while the bundle
+/// records `c:K`. The hashes diverge.
+///
+/// Universal collection closes that gap: every binding name introduced
+/// anywhere in the file is in the filter set, so identifier-callees
+/// that name an in-file binding drop out of `callee_set` regardless of
+/// which function they happen to be referenced from. Built-in globals
+/// (`fetch`, `Promise`, `console`, ...) are never bound in normal
+/// source and remain visible.
+fn collect_universal_renamable_bindings<'p, 'a: 'p>(
+    program: &'p oxc_ast::ast::Program<'a>,
+) -> std::collections::BTreeSet<&'p str> {
+    let mut set = std::collections::BTreeSet::new();
+    for stmt in &program.body {
+        walk_stmt_bindings(stmt, &mut set);
+    }
+    set
+}
+
+fn walk_pattern_bindings<'p, 'a: 'p>(
+    kind: &'p oxc_ast::ast::BindingPatternKind<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    use oxc_ast::ast::BindingPatternKind;
+    match kind {
+        BindingPatternKind::BindingIdentifier(b) => {
+            set.insert(b.name.as_str());
+        }
+        BindingPatternKind::ObjectPattern(o) => {
+            for p in &o.properties {
+                walk_pattern_bindings(&p.value.kind, set);
+                walk_expr_bindings_in_object_property(p, set);
+            }
+            if let Some(rest) = &o.rest {
+                walk_pattern_bindings(&rest.argument.kind, set);
+            }
+        }
+        BindingPatternKind::ArrayPattern(a) => {
+            for e in (&a.elements).into_iter().flatten() {
+                walk_pattern_bindings(&e.kind, set);
+            }
+            if let Some(rest) = &a.rest {
+                walk_pattern_bindings(&rest.argument.kind, set);
+            }
+        }
+        BindingPatternKind::AssignmentPattern(a) => {
+            walk_pattern_bindings(&a.left.kind, set);
+            walk_expr_bindings(&a.right, set);
+        }
+    }
+}
+
+fn walk_expr_bindings_in_object_property<'p, 'a: 'p>(
+    p: &'p oxc_ast::ast::BindingProperty<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    use oxc_ast::ast::PropertyKey;
+    if let PropertyKey::StaticIdentifier(_) = &p.key {
+        // No binding inside the key; skip.
+    } else if let PropertyKey::PrivateIdentifier(_) = &p.key {
+        // No binding.
+    } else if let Some(expr) = p.key.as_expression() {
+        walk_expr_bindings(expr, set);
+    }
+}
+
+fn walk_stmt_bindings<'p, 'a: 'p>(
+    stmt: &'p oxc_ast::ast::Statement<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    use oxc_ast::ast::{Declaration, ForStatementInit, ForStatementLeft, Statement};
+    match stmt {
+        Statement::VariableDeclaration(v) => {
+            for decl in &v.declarations {
+                walk_pattern_bindings(&decl.id.kind, set);
+                if let Some(init) = &decl.init {
+                    walk_expr_bindings(init, set);
+                }
+            }
+        }
+        Statement::FunctionDeclaration(f) => walk_function_bindings(f, set),
+        Statement::ClassDeclaration(c) => walk_class_bindings(c, set),
+        Statement::BlockStatement(b) => {
+            for s in &b.body {
+                walk_stmt_bindings(s, set);
+            }
+        }
+        Statement::IfStatement(i) => {
+            walk_expr_bindings(&i.test, set);
+            walk_stmt_bindings(&i.consequent, set);
+            if let Some(alt) = &i.alternate {
+                walk_stmt_bindings(alt, set);
+            }
+        }
+        Statement::ForStatement(f) => {
+            if let Some(init) = &f.init {
+                match init {
+                    ForStatementInit::VariableDeclaration(v) => {
+                        for decl in &v.declarations {
+                            walk_pattern_bindings(&decl.id.kind, set);
+                            if let Some(init) = &decl.init {
+                                walk_expr_bindings(init, set);
+                            }
+                        }
+                    }
+                    _ => {
+                        if let Some(expr) = init.as_expression() {
+                            walk_expr_bindings(expr, set);
+                        }
+                    }
+                }
+            }
+            if let Some(test) = &f.test {
+                walk_expr_bindings(test, set);
+            }
+            if let Some(update) = &f.update {
+                walk_expr_bindings(update, set);
+            }
+            walk_stmt_bindings(&f.body, set);
+        }
+        Statement::ForInStatement(f) => {
+            if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                for decl in &v.declarations {
+                    walk_pattern_bindings(&decl.id.kind, set);
+                }
+            }
+            walk_expr_bindings(&f.right, set);
+            walk_stmt_bindings(&f.body, set);
+        }
+        Statement::ForOfStatement(f) => {
+            if let ForStatementLeft::VariableDeclaration(v) = &f.left {
+                for decl in &v.declarations {
+                    walk_pattern_bindings(&decl.id.kind, set);
+                }
+            }
+            walk_expr_bindings(&f.right, set);
+            walk_stmt_bindings(&f.body, set);
+        }
+        Statement::WhileStatement(w) => {
+            walk_expr_bindings(&w.test, set);
+            walk_stmt_bindings(&w.body, set);
+        }
+        Statement::DoWhileStatement(d) => {
+            walk_expr_bindings(&d.test, set);
+            walk_stmt_bindings(&d.body, set);
+        }
+        Statement::TryStatement(t) => {
+            for s in &t.block.body {
+                walk_stmt_bindings(s, set);
+            }
+            if let Some(handler) = &t.handler {
+                if let Some(param) = &handler.param {
+                    walk_pattern_bindings(&param.pattern.kind, set);
+                }
+                for s in &handler.body.body {
+                    walk_stmt_bindings(s, set);
+                }
+            }
+            if let Some(fin) = &t.finalizer {
+                for s in &fin.body {
+                    walk_stmt_bindings(s, set);
+                }
+            }
+        }
+        Statement::SwitchStatement(s) => {
+            walk_expr_bindings(&s.discriminant, set);
+            for case in &s.cases {
+                if let Some(test) = &case.test {
+                    walk_expr_bindings(test, set);
+                }
+                for stmt in &case.consequent {
+                    walk_stmt_bindings(stmt, set);
+                }
+            }
+        }
+        Statement::LabeledStatement(l) => walk_stmt_bindings(&l.body, set),
+        Statement::ExpressionStatement(e) => walk_expr_bindings(&e.expression, set),
+        Statement::ReturnStatement(r) => {
+            if let Some(arg) = &r.argument {
+                walk_expr_bindings(arg, set);
+            }
+        }
+        Statement::ThrowStatement(t) => walk_expr_bindings(&t.argument, set),
+        Statement::ExportNamedDeclaration(e) => {
+            if let Some(decl) = &e.declaration {
+                match decl {
+                    Declaration::VariableDeclaration(v) => {
+                        for d in &v.declarations {
+                            walk_pattern_bindings(&d.id.kind, set);
+                            if let Some(init) = &d.init {
+                                walk_expr_bindings(init, set);
+                            }
+                        }
+                    }
+                    Declaration::FunctionDeclaration(f) => walk_function_bindings(f, set),
+                    Declaration::ClassDeclaration(c) => walk_class_bindings(c, set),
+                    _ => {}
+                }
+            }
+        }
+        Statement::ExportDefaultDeclaration(d) => {
+            use oxc_ast::ast::ExportDefaultDeclarationKind;
+            match &d.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    walk_function_bindings(f, set);
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                    walk_class_bindings(c, set);
+                }
+                _ => {
+                    if let Some(expr) = d.declaration.as_expression() {
+                        walk_expr_bindings(expr, set);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn walk_function_bindings<'p, 'a: 'p>(
+    f: &'p oxc_ast::ast::Function<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    if let Some(id) = &f.id {
+        set.insert(id.name.as_str());
+    }
+    for p in &f.params.items {
+        walk_pattern_bindings(&p.pattern.kind, set);
+    }
+    if let Some(body) = &f.body {
+        for stmt in &body.statements {
+            walk_stmt_bindings(stmt, set);
+        }
+    }
+}
+
+fn walk_class_bindings<'p, 'a: 'p>(
+    c: &'p oxc_ast::ast::Class<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    if let Some(id) = &c.id {
+        set.insert(id.name.as_str());
+    }
+    use oxc_ast::ast::ClassElement;
+    for elem in &c.body.body {
+        match elem {
+            ClassElement::MethodDefinition(m) => {
+                walk_function_bindings(&m.value, set);
+            }
+            ClassElement::PropertyDefinition(p) => {
+                if let Some(val) = &p.value {
+                    walk_expr_bindings(val, set);
+                }
+            }
+            ClassElement::StaticBlock(s) => {
+                for stmt in &s.body {
+                    walk_stmt_bindings(stmt, set);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn walk_expr_bindings<'p, 'a: 'p>(
+    expr: &'p oxc_ast::ast::Expression<'a>,
+    set: &mut std::collections::BTreeSet<&'p str>,
+) {
+    use oxc_ast::ast::Expression as E;
+    match expr {
+        E::FunctionExpression(f) => walk_function_bindings(f, set),
+        E::ArrowFunctionExpression(a) => {
+            for p in &a.params.items {
+                walk_pattern_bindings(&p.pattern.kind, set);
+            }
+            for stmt in &a.body.statements {
+                walk_stmt_bindings(stmt, set);
+            }
+        }
+        E::ClassExpression(c) => walk_class_bindings(c, set),
+        E::AssignmentExpression(a) => walk_expr_bindings(&a.right, set),
+        E::ArrayExpression(arr) => {
+            for el in &arr.elements {
+                if let Some(expr) = el.as_expression() {
+                    walk_expr_bindings(expr, set);
+                }
+            }
+        }
+        E::ObjectExpression(o) => {
+            use oxc_ast::ast::ObjectPropertyKind;
+            for prop in &o.properties {
+                if let ObjectPropertyKind::ObjectProperty(p) = prop {
+                    walk_expr_bindings(&p.value, set);
+                }
+            }
+        }
+        E::CallExpression(c) => {
+            walk_expr_bindings(&c.callee, set);
+            for arg in &c.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    walk_expr_bindings(expr, set);
+                }
+            }
+        }
+        E::NewExpression(n) => {
+            walk_expr_bindings(&n.callee, set);
+            for arg in &n.arguments {
+                if let Some(expr) = arg.as_expression() {
+                    walk_expr_bindings(expr, set);
+                }
+            }
+        }
+        E::BinaryExpression(b) => {
+            walk_expr_bindings(&b.left, set);
+            walk_expr_bindings(&b.right, set);
+        }
+        E::LogicalExpression(l) => {
+            walk_expr_bindings(&l.left, set);
+            walk_expr_bindings(&l.right, set);
+        }
+        E::UnaryExpression(u) => walk_expr_bindings(&u.argument, set),
+        E::ConditionalExpression(c) => {
+            walk_expr_bindings(&c.test, set);
+            walk_expr_bindings(&c.consequent, set);
+            walk_expr_bindings(&c.alternate, set);
+        }
+        E::SequenceExpression(s) => {
+            for e in &s.expressions {
+                walk_expr_bindings(e, set);
+            }
+        }
+        E::ParenthesizedExpression(p) => walk_expr_bindings(&p.expression, set),
+        E::AwaitExpression(a) => walk_expr_bindings(&a.argument, set),
+        E::YieldExpression(y) => {
+            if let Some(arg) = &y.argument {
+                walk_expr_bindings(arg, set);
+            }
+        }
+        E::TemplateLiteral(t) => {
+            for e in &t.expressions {
+                walk_expr_bindings(e, set);
+            }
+        }
+        E::TaggedTemplateExpression(t) => {
+            walk_expr_bindings(&t.tag, set);
+            for e in &t.quasi.expressions {
+                walk_expr_bindings(e, set);
+            }
+        }
+        E::StaticMemberExpression(m) => walk_expr_bindings(&m.object, set),
+        E::ComputedMemberExpression(m) => {
+            walk_expr_bindings(&m.object, set);
+            walk_expr_bindings(&m.expression, set);
+        }
+        E::ChainExpression(c) => {
+            use oxc_ast::ast::ChainElement;
+            match &c.expression {
+                ChainElement::CallExpression(call) => {
+                    walk_expr_bindings(&call.callee, set);
+                    for arg in &call.arguments {
+                        if let Some(expr) = arg.as_expression() {
+                            walk_expr_bindings(expr, set);
+                        }
+                    }
+                }
+                ChainElement::ComputedMemberExpression(m) => {
+                    walk_expr_bindings(&m.object, set);
+                    walk_expr_bindings(&m.expression, set);
+                }
+                ChainElement::StaticMemberExpression(m) => walk_expr_bindings(&m.object, set),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
 }
 
 fn locate_function<'a>(

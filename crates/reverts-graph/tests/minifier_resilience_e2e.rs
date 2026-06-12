@@ -412,17 +412,26 @@ fn closure_scope_filter_aligns_renamed_enclosing_helper() {
     // renames `helper` to `K`. Under closure-scope filtering both
     // names are in the universal-locals set and dropped from
     // `inner`'s callee_set — the two fingerprints converge.
+    //
+    // `inner` is given two statements so we can uniquely identify it
+    // by `statement_count == 2` (helper has 1, outer has 3).
     let minified = r#"
         function outer() {
             function K(arg) { return K + arg; }
-            function inner(x) { return K(x); }
+            function inner(x) {
+                const y = x + 1;
+                return K(y);
+            }
             return inner;
         }
     "#;
     let source = r#"
         function outer() {
             function helper(arg) { return helper + arg; }
-            function inner(x) { return helper(x); }
+            function inner(x) {
+                const y = x + 1;
+                return helper(y);
+            }
             return inner;
         }
     "#;
@@ -430,12 +439,15 @@ fn closure_scope_filter_aligns_renamed_enclosing_helper() {
     let fp_s = FunctionExtractor::fingerprint(ModuleId(2), source);
     let inner_m = fp_m
         .iter()
-        .find(|f| f.statement_count == 1)
+        .find(|f| f.statement_count == 2)
         .expect("minified inner");
     let inner_s = fp_s
         .iter()
-        .find(|f| f.statement_count == 1)
+        .find(|f| f.statement_count == 2)
         .expect("source inner");
+    // Both inners call into an enclosing-scope helper. Without
+    // closure-scope filtering the minified inner would record `c:K`
+    // and the source inner `c:helper`, diverging.
     assert_eq!(
         inner_m.primary.callee_set, inner_s.primary.callee_set,
         "closure-renamed helper must collapse the callee_set hash"
