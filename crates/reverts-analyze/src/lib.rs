@@ -618,6 +618,18 @@ const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "regeneratorRuntime",
 ];
 
+/// esbuild output wrapper function names. These are emitted by the esbuild
+/// runtime around imported CJS modules, exported namespaces, and helper
+/// inits; `reverts-js::normalize::BundlerWrapperUnwrapped` strips them for
+/// `ast_hash` collision, `reverts-bundle::detectors::esbuild` recognises
+/// them as module boundaries.
+///
+/// The definition lives in
+/// [`reverts_js::normalize::bundler_wrapper_unwrapped::ESBUILD_WRAPPER_NAMES`]
+/// and is re-exported here as the single stable public surface for callers
+/// outside `reverts-js`.
+pub use reverts_js::normalize::bundler_wrapper_unwrapped::ESBUILD_WRAPPER_NAMES;
+
 /// Source-level fingerprints that mark Babel-emitted CJS/JSX output without
 /// requiring a runtime helper identifier to be present. These patterns are
 /// intentionally checked *after* webpack/esbuild/rollup runtime identifiers
@@ -1329,6 +1341,26 @@ NativeModuleType();
 
     fn identifiers<const N: usize>(values: [&str; N]) -> BTreeSet<String> {
         values.into_iter().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn esbuild_wrapper_names_list_covers_known_wrappers() {
+        let names: std::collections::BTreeSet<&'static str> =
+            super::ESBUILD_WRAPPER_NAMES.iter().copied().collect();
+        for name in [
+            "__toESM",
+            "__toCommonJS",
+            "__commonJS",
+            "__esm",
+            "__defProp",
+            "__defProps",
+            "__export",
+            "__exportStar",
+            "__reExport",
+            "__copyProps",
+        ] {
+            assert!(names.contains(name), "missing wrapper name {name}");
+        }
     }
 
     #[test]
