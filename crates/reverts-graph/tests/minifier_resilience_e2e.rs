@@ -58,16 +58,45 @@ fn pipeline_aligns_ternary_minified_with_source() {
 }
 
 #[test]
-fn pipeline_keeps_void_zero_distinct_from_undefined() {
-    // The pipeline policy is "never transform what is not strictly
-    // spec-equivalent". `void 0 ↔ undefined` is not equivalent under
-    // `undefined` shadowing in non-strict mode, so the two forms
-    // produce distinct AST hashes.
+fn pipeline_aligns_void_zero_with_undefined_when_not_shadowed() {
+    // The `void_zero_to_undefined_guarded` pass rewrites `void 0` to
+    // `undefined` only after verifying the program does not bind a
+    // local `undefined` and contains no `with` statement. In the
+    // common case (neither condition triggers) the rewrite is
+    // strictly spec-equivalent and the two forms converge.
     let minified = "function f(x) { return x === void 0; }";
     let source = "function f(x) { return x === undefined; }";
     let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
     let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
-    assert_ne!(fp_m[0].primary.ast, fp_s[0].primary.ast);
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "void 0 ↔ undefined must converge after pipeline when undefined is not shadowed"
+    );
+}
+
+#[test]
+fn pipeline_keeps_void_zero_distinct_when_undefined_is_shadowed() {
+    // When the program binds a local `undefined`, the guarded pass
+    // bails out and `void 0` stays as `void 0`. The two forms then
+    // remain distinct, as they semantically differ.
+    let minified = r#"
+        function f(x) {
+            let undefined = 1;
+            return x === void 0;
+        }
+    "#;
+    let source = r#"
+        function f(x) {
+            let undefined = 1;
+            return x === undefined;
+        }
+    "#;
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_ne!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "guarded pass must NOT collapse void 0 when `undefined` is shadowed"
+    );
 }
 
 #[test]

@@ -98,6 +98,7 @@ pub enum NormalizationPassId {
     InfiniteForToWhile,
     ConditionalBooleanCoerced,
     TrailingReturnVoidRemoved,
+    VoidZeroToUndefinedGuarded,
 }
 
 impl NormalizationPassId {
@@ -128,6 +129,7 @@ impl NormalizationPassId {
             Self::InfiniteForToWhile => "infinite_for_to_while",
             Self::ConditionalBooleanCoerced => "conditional_boolean_coerced",
             Self::TrailingReturnVoidRemoved => "trailing_return_void_removed",
+            Self::VoidZeroToUndefinedGuarded => "void_zero_to_undefined_guarded",
         }
     }
 }
