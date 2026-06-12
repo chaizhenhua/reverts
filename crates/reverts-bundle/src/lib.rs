@@ -8,8 +8,11 @@ mod classification;
 pub mod classifier;
 pub mod detectors;
 mod inner_module;
+pub mod merge;
+
 pub use classification::{BundleClassification, IifeMetadata, MarkedMetadata};
 pub use inner_module::{BundlerKind, InnerModule};
+pub use merge::{MergeOutput, merge_classification};
 
 #[cfg(test)]
 mod tests {
