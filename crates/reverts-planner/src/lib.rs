@@ -2799,6 +2799,14 @@ fn compute_eager_safe_analysis(
     // or value export is already "direct" and any consumer `X()` call is
     // already calling it correctly (not invoking a thunk).
     let thunk_wrapped_exports = compute_thunk_wrapped_exports(program);
+    // Additional gate: only bindings whose BODY actually passes the
+    // delazify-extraction check qualify for eagerification. Producer
+    // body-purity is non-trivial (init helpers, IIFE wraps, chain
+    // assignments…), and we must not strip a consumer's `X()` call
+    // unless the producer is going to emit a direct value. Otherwise
+    // the consumer hits the thunk-as-non-function and crashes at
+    // runtime.
+    let delazifiable_exports = predict_delazifiable_exports(program);
     let mut eager_safe_exports_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     for (target_id, exported_bindings) in &source_module_wiring.exports_by_module {
         if !singleton_modules.contains(target_id) {
@@ -2807,9 +2815,15 @@ fn compute_eager_safe_analysis(
         let Some(thunk_wrapped) = thunk_wrapped_exports.get(target_id) else {
             continue;
         };
+        let Some(delazifiable) = delazifiable_exports.get(target_id) else {
+            continue;
+        };
         let mut safe = BTreeSet::<BindingName>::new();
         'each_export: for binding in exported_bindings {
             if !thunk_wrapped.contains(binding) {
+                continue;
+            }
+            if !delazifiable.contains(binding) {
                 continue;
             }
             // For every consumer that imports this binding, the consumer
@@ -3064,6 +3078,200 @@ fn scan_thunk_wrapped_bindings(
         cursor = after_helper;
     }
     out
+}
+
+/// For each module, predict the subset of its thunk-wrapped exports
+/// whose body would actually delazify. This is the "would the producer
+/// emit a direct value or keep the lazy thunk" gate — strictly necessary
+/// for cross-module rewriting to be sound. If we promise the consumer
+/// it can drop `X()` to `X` but the producer's body is impure (so the
+/// thunk survives), the consumer hits a non-callable value at runtime.
+///
+/// Scans each module's source for `var X = HELPER((params) => { BODY })`
+/// shapes, dispatches the BODY through the same extractors that
+/// `lower_runtime_helpers` uses (byte-level direct / multi-property /
+/// pure-return, and the OXC AST fallback). A `Some(_)` return from any
+/// extractor means the binding would survive the body-purity gate.
+fn predict_delazifiable_exports(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut out = BTreeMap::new();
+    for module in program.model().modules() {
+        let Some(source) = program.model().input().module_source_slice(module.id) else {
+            continue;
+        };
+        let runtime_imports = program.model().graph().runtime_imports_for(module.id);
+        let mut helper_kinds = runtime_helper_kinds(program.model().graph(), &runtime_imports);
+        helper_kinds.extend(runtime_helper_kinds_for_source(
+            program.model().graph(),
+            source.source_file_id,
+            source.source,
+        ));
+        let module_helpers: BTreeSet<&str> = helper_kinds
+            .iter()
+            .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::CommonJsWrapper))
+            .map(|(binding, _)| binding.as_str())
+            .collect();
+        let value_helpers: BTreeSet<&str> = helper_kinds
+            .iter()
+            .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::LazyInitializer))
+            .map(|(binding, _)| binding.as_str())
+            .collect();
+        if module_helpers.is_empty() && value_helpers.is_empty() {
+            continue;
+        }
+        let mut delazifiable = BTreeSet::<BindingName>::new();
+        scan_predict_delazifiable_bindings(
+            source.source,
+            &module_helpers,
+            &value_helpers,
+            &mut delazifiable,
+        );
+        if !delazifiable.is_empty() {
+            out.insert(module.id, delazifiable);
+        }
+    }
+    out
+}
+
+/// Walk `source` for every top-level `var X = HELPER((params) => { BODY })`
+/// declaration whose `HELPER` is a lazy-wrapping helper. For each one,
+/// run the same body extractors the lowering pass uses and add `X` to
+/// `out` when at least one extractor returns a value.
+fn scan_predict_delazifiable_bindings(
+    source: &str,
+    commonjs_helpers: &BTreeSet<&str>,
+    lazy_value_helpers: &BTreeSet<&str>,
+    out: &mut BTreeSet<BindingName>,
+) {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let Some(keyword) = ["var", "let", "const"]
+            .into_iter()
+            .find(|kw| keyword_at(source, cursor, kw))
+        else {
+            cursor += 1;
+            continue;
+        };
+        let mut c = cursor + keyword.len();
+        c = skip_ws(bytes, c);
+        let Some((binding_name, after_binding)) = parse_identifier(source, c) else {
+            cursor += 1;
+            continue;
+        };
+        c = skip_ws(bytes, after_binding);
+        if bytes.get(c) != Some(&b'=') {
+            cursor = after_binding;
+            continue;
+        }
+        c = skip_ws(bytes, c + 1);
+        let Some((helper_name, after_helper)) = parse_identifier(source, c) else {
+            cursor = after_binding;
+            continue;
+        };
+        c = skip_ws(bytes, after_helper);
+        if bytes.get(c) != Some(&b'(') {
+            cursor = after_helper;
+            continue;
+        }
+        let is_commonjs = commonjs_helpers.contains(helper_name);
+        let is_lazy_value = lazy_value_helpers.contains(helper_name);
+        if !is_commonjs && !is_lazy_value {
+            cursor = after_helper;
+            continue;
+        }
+        // Parse `((params) => { BODY })` inside the helper call.
+        c = skip_ws(bytes, c + 1);
+        let (exports_param, module_param, body_start, body_end) =
+            match parse_lazy_factory_signature(source, c, is_commonjs) {
+                Some(parts) => parts,
+                None => {
+                    cursor = after_helper;
+                    continue;
+                }
+            };
+        let body = &source[body_start..body_end];
+        let delazifies = if is_commonjs {
+            extract_module_exports_assignment(body, module_param.unwrap_or("")).is_some()
+                || extract_exports_properties_as_object_literal(body, exports_param).is_some()
+                || reverts_js::extract_lazy_module_eager_value(
+                    body,
+                    exports_param,
+                    module_param,
+                    None,
+                    ParseGoal::TypeScript,
+                )
+                .is_some()
+        } else {
+            extract_pure_return_expression(body).is_some()
+                || reverts_js::extract_lazy_module_eager_value(
+                    body,
+                    "",
+                    None,
+                    None,
+                    ParseGoal::TypeScript,
+                )
+                .is_some()
+        };
+        if delazifies {
+            out.insert(BindingName::new(binding_name));
+        }
+        cursor = body_end;
+    }
+}
+
+/// Parse the `((exports[, module]) => { body })` signature inside a
+/// lazy-helper call, starting from the byte right after the helper's
+/// opening `(`. Returns the parameter names and the byte range of the
+/// arrow body (exclusive of the surrounding braces).
+fn parse_lazy_factory_signature(
+    source: &str,
+    open_paren_after_helper: usize,
+    expect_two_params: bool,
+) -> Option<(&str, Option<&str>, usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut c = open_paren_after_helper;
+    if bytes.get(c) != Some(&b'(') {
+        return None;
+    }
+    c = skip_ws(bytes, c + 1);
+    let (exports_param, after_exports) = if expect_two_params {
+        let (name, after) = parse_identifier(source, c)?;
+        c = skip_ws(bytes, after);
+        (name, after)
+    } else {
+        // lazyValue arrow: `() => { ... }`. Allow empty parameter list.
+        if bytes.get(c) == Some(&b')') {
+            ("", c)
+        } else {
+            return None;
+        }
+    };
+    let _ = after_exports;
+    let module_param = if expect_two_params && bytes.get(c) == Some(&b',') {
+        c = skip_ws(bytes, c + 1);
+        let (name, after) = parse_identifier(source, c)?;
+        c = skip_ws(bytes, after);
+        Some(name)
+    } else {
+        None
+    };
+    if bytes.get(c) != Some(&b')') {
+        return None;
+    }
+    c = skip_ws(bytes, c + 1);
+    let arrow_end = expect_arrow(bytes, c)?;
+    c = skip_ws(bytes, arrow_end);
+    if bytes.get(c) != Some(&b'{') {
+        return None;
+    }
+    let body_end = find_matching_brace(source, c)?;
+    Some((exports_param, module_param, c + 1, body_end))
 }
 
 /// For a given consumer module, gather every imported binding the
