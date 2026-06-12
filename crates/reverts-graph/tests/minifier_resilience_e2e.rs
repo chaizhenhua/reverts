@@ -230,8 +230,14 @@ fn scope_aware_callee_filter_aligns_renamed_local_helpers() {
     // Wait — caller doesn't have a method call. It just calls K92.
     // After scope filtering, callee_set is empty (None) on both
     // sides. Same emptiness = same hash.
-    let r_caller = fp_renamed.iter().find(|f| f.param_count == 1).unwrap();
-    let o_caller = fp_original.iter().find(|f| f.param_count == 1).unwrap();
+    let r_caller = fp_renamed
+        .iter()
+        .find(|f| f.param_count == 1)
+        .expect("renamed fingerprint should contain a 1-param function");
+    let o_caller = fp_original
+        .iter()
+        .find(|f| f.param_count == 1)
+        .expect("original fingerprint should contain a 1-param function");
     assert_eq!(
         r_caller.primary.callee_set, o_caller.primary.callee_set,
         "scope-aware callee_set should ignore renamed local helper"
@@ -396,6 +402,62 @@ fn function_scope_callee_filter_still_records_globals() {
     assert!(
         fp[0].primary.callee_set.is_some(),
         "method call .isFinite must keep callee_set non-empty"
+    );
+}
+
+#[test]
+fn closure_scope_filter_aligns_renamed_enclosing_helper() {
+    // `inner` calls `helper`, a name bound in the *enclosing* function
+    // (`outer`'s scope), not in `inner`'s own scope. The minifier
+    // renames `helper` to `K`. Under closure-scope filtering both
+    // names are in the universal-locals set and dropped from
+    // `inner`'s callee_set — the two fingerprints converge.
+    let minified = r#"
+        function outer() {
+            function K(arg) { return K + arg; }
+            function inner(x) { return K(x); }
+            return inner;
+        }
+    "#;
+    let source = r#"
+        function outer() {
+            function helper(arg) { return helper + arg; }
+            function inner(x) { return helper(x); }
+            return inner;
+        }
+    "#;
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), minified);
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), source);
+    let inner_m = fp_m
+        .iter()
+        .find(|f| f.statement_count == 1)
+        .expect("minified inner");
+    let inner_s = fp_s
+        .iter()
+        .find(|f| f.statement_count == 1)
+        .expect("source inner");
+    assert_eq!(
+        inner_m.primary.callee_set, inner_s.primary.callee_set,
+        "closure-renamed helper must collapse the callee_set hash"
+    );
+}
+
+#[test]
+fn closure_scope_filter_preserves_global_callees() {
+    // `console` is not bound anywhere in the file, so closure-scope
+    // collection must NOT touch it. The fingerprint records the
+    // global.
+    let src = r#"
+        function outer() {
+            function inner() { console.log('hi'); }
+            return inner;
+        }
+    "#;
+    let fp = FunctionExtractor::fingerprint(ModuleId(1), src);
+    let inner = fp.iter().find(|f| f.statement_count == 1).expect("inner");
+    assert!(
+        inner.primary.callee_set.is_some(),
+        "`console.log` is a global method-call and must survive closure filtering"
     );
 }
 
