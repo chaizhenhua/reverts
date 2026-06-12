@@ -16,6 +16,7 @@ pub mod compound_assignment_canonical;
 pub mod computed_to_static_member;
 pub mod conditional_statement_expanded;
 pub mod declarator_split;
+pub mod equality_negation_flattened;
 pub mod export_boundary_normalized;
 pub mod helper_identity_inlined;
 pub mod if_return_else_flattened;
@@ -26,7 +27,7 @@ pub mod sequence_expression_split;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 16] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 17] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -44,6 +45,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 16] {
         Box::new(arrow_body_blocked::ArrowBodyBlocked),
         Box::new(compound_assignment_canonical::CompoundAssignmentCanonical),
         Box::new(if_return_else_flattened::IfReturnElseFlattened),
+        Box::new(equality_negation_flattened::EqualityNegationFlattened),
     ]
 }
 
@@ -94,6 +96,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 16);
+        assert_eq!(ids.len(), 17);
     }
 }

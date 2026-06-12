@@ -91,6 +91,7 @@ pub enum NormalizationPassId {
     ArrowBodyBlocked,
     CompoundAssignmentCanonical,
     IfReturnElseFlattened,
+    EqualityNegationFlattened,
 }
 
 impl NormalizationPassId {
@@ -114,6 +115,7 @@ impl NormalizationPassId {
             Self::ArrowBodyBlocked => "arrow_body_blocked",
             Self::CompoundAssignmentCanonical => "compound_assignment_canonical",
             Self::IfReturnElseFlattened => "if_return_else_flattened",
+            Self::EqualityNegationFlattened => "equality_negation_flattened",
         }
     }
 }
