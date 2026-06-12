@@ -484,6 +484,43 @@ fn closure_scope_filter_aligns_renamed_enclosing_helper() {
 }
 
 #[test]
+fn closure_scope_filter_includes_imported_bindings() {
+    // Imports introduce renameable bindings the same way `let`/`function`
+    // do. When the source uses an imported helper that the bundle
+    // inlines under a renamed local symbol, the universal-locals filter
+    // must drop both `helper` (the imported name) and `K` (the bundle's
+    // renamed name), so their callee_sets converge.
+    let source = r#"
+        import { helper } from './lib';
+        function inner(x) {
+            const y = x + 1;
+            return helper(y);
+        }
+    "#;
+    let bundle = r#"
+        function K(arg) { return arg + 1; }
+        function inner(x) {
+            const y = x + 1;
+            return K(y);
+        }
+    "#;
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(1), source);
+    let fp_b = FunctionExtractor::fingerprint(ModuleId(2), bundle);
+    let inner_s = fp_s
+        .iter()
+        .find(|f| f.statement_count == 2)
+        .expect("source inner");
+    let inner_b = fp_b
+        .iter()
+        .find(|f| f.statement_count == 2)
+        .expect("bundle inner");
+    assert_eq!(
+        inner_s.primary.callee_set, inner_b.primary.callee_set,
+        "import-bound helper must be filtered from callee_set the same way bundle-local helpers are"
+    );
+}
+
+#[test]
 fn closure_scope_filter_preserves_global_callees() {
     // `console` is not bound anywhere in the file, so closure-scope
     // collection must NOT touch it. The fingerprint records the

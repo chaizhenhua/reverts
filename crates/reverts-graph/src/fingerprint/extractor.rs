@@ -641,6 +641,29 @@ fn walk_stmt_bindings<'p, 'a: 'p>(
                 }
             }
         }
+        Statement::ImportDeclaration(i) => {
+            // Imports introduce renameable bindings the same way `let`s
+            // and `function`s do. Bundlers re-write the bound name when
+            // they inline the dependency, so any callee inside this
+            // module that names an imported symbol diverges between
+            // bundle and source. Collecting them here closes that gap.
+            use oxc_ast::ast::ImportDeclarationSpecifier;
+            if let Some(specs) = &i.specifiers {
+                for spec in specs {
+                    match spec {
+                        ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                            set.insert(s.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                            set.insert(s.local.name.as_str());
+                        }
+                        ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
+                            set.insert(s.local.name.as_str());
+                        }
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
