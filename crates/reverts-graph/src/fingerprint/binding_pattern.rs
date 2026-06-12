@@ -1,7 +1,6 @@
 use oxc_ast::Visit;
 use oxc_ast::ast::{
-    BindingPattern, BindingPatternKind, FormalParameters, FunctionBody, Statement,
-    VariableDeclarator,
+    BindingPattern, BindingPatternKind, FormalParameters, FunctionBody, VariableDeclarator,
 };
 use reverts_ir::hash::{FNV_OFFSET_BASIS, update_fnv1a};
 use std::collections::BTreeSet;
@@ -56,13 +55,13 @@ struct V<'a> {
 }
 
 impl<'a> Visit<'a> for V<'_> {
-    fn visit_statement(&mut self, s: &Statement<'a>) {
-        if let Statement::VariableDeclaration(v) = s {
-            for d in &v.declarations {
-                self.tokens.insert(declarator_token(d));
-            }
-        }
-        oxc_ast::visit::walk::walk_statement(self, s);
+    fn visit_variable_declarator(&mut self, d: &VariableDeclarator<'a>) {
+        // Catches `let x = …`, `var x = …`, and `for (let x of …)` /
+        // `for (let x in …)` alike — the for-loop binding declarations
+        // wrap a `VariableDeclaration` inside `ForStatementLeft` which
+        // the statement-level visit hook misses.
+        self.tokens.insert(declarator_token(d));
+        oxc_ast::visit::walk::walk_variable_declarator(self, d);
     }
     fn visit_catch_parameter(&mut self, c: &oxc_ast::ast::CatchParameter<'a>) {
         // Catch parameters introduce a binding scope just like `var`/`let`
@@ -136,6 +135,33 @@ mod tests {
         // the catch binding doesn't change the hash.
         let a = hash_first("function f() { try {} catch (e) { handle(e); } }");
         let b = hash_first("function g() { try {} catch (z) { handle(z); } }");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn binding_pattern_handles_optional_catch_binding() {
+        // ES2019 `try {} catch {}` (no binding) must produce a
+        // *different* hash than `catch (e) {}` — one has a catch
+        // binding token, the other doesn't.
+        let with_binding = hash_first("function f() { try {} catch (e) { handle(e); } }");
+        let without = hash_first("function f() { try {} catch { handle(); } }");
+        assert_ne!(with_binding, without);
+    }
+
+    #[test]
+    fn binding_pattern_records_for_of_binding_shape() {
+        // `for (let x of arr)` introduces a let binding `x`. The shape
+        // should be recorded so `for (let { code } of arr)` and
+        // `for (let x of arr)` hash differently.
+        let ident = hash_first("function f(arr) { for (let x of arr) handle(x); }");
+        let destruct = hash_first("function f(arr) { for (let { code } of arr) handle(code); }");
+        assert_ne!(ident, destruct);
+    }
+
+    #[test]
+    fn binding_pattern_collides_for_renamed_for_of_binding() {
+        let a = hash_first("function f(arr) { for (let x of arr) handle(x); }");
+        let b = hash_first("function g(arr) { for (let k of arr) handle(k); }");
         assert_eq!(a, b);
     }
 }
