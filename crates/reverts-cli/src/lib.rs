@@ -362,6 +362,7 @@ pub fn match_packages_from_connection(
     // Bundle-aware module extraction (Phase α): split recognised bundle
     // wrappers into per-module rows before the matcher sees them.
     let extraction = reverts_bundle::extract(&rows);
+    let extraction_audit = extraction.audit.clone();
     extraction.merge_into(&mut rows);
 
     let package_names = package_source_filter(&rows, &args.package_names);
@@ -382,7 +383,8 @@ pub fn match_packages_from_connection(
         (0, 0, 0)
     };
 
-    let mut audit = report.audit;
+    let mut audit = extraction_audit;
+    audit.extend(report.audit);
     audit.extend(cascade_report.audit);
 
     Ok(MatchPackagesOutcome {
