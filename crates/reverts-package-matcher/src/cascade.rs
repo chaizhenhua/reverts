@@ -63,6 +63,19 @@ pub struct GlobalAssignment {
     pub chosen: Option<FunctionMatch>,
 }
 
+impl GlobalAssignment {
+    /// The package name of the Hungarian-chosen candidate, if any. Equivalent
+    /// to `self.chosen.as_ref().map(|m| m.candidate.package.name.as_str())`
+    /// but reads as a fact rather than a chain — call sites use this to
+    /// filter assignments by package.
+    #[must_use]
+    pub fn chosen_package_name(&self) -> Option<&str> {
+        self.chosen
+            .as_ref()
+            .map(|m| m.candidate.package.name.as_str())
+    }
+}
+
 /// Assign bundle functions to package candidates globally using the Hungarian
 /// algorithm, resolving cross-package collisions optimally instead of greedily.
 ///
@@ -735,11 +748,11 @@ mod tests {
 
         let count_a = assignments
             .iter()
-            .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("a"))
+            .filter(|a| a.chosen_package_name() == Some("a"))
             .count();
         let count_b = assignments
             .iter()
-            .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("b"))
+            .filter(|a| a.chosen_package_name() == Some("b"))
             .count();
         assert_eq!(count_a, 5);
         assert_eq!(count_b, 5);
@@ -818,10 +831,10 @@ mod tests {
 
         let assigned_a = assignments
             .iter()
-            .find(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("pa"));
+            .find(|a| a.chosen_package_name() == Some("pa"));
         let assigned_b = assignments
             .iter()
-            .find(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("pb"));
+            .find(|a| a.chosen_package_name() == Some("pb"));
         assert!(assigned_a.is_some(), "fp[0] should be assigned to pkg_a");
         assert!(assigned_b.is_some(), "fp[1] should be assigned to pkg_b");
     }

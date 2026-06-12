@@ -166,11 +166,11 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
 
     let count_a = assignments
         .iter()
-        .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("a"))
+        .filter(|a| a.chosen_package_name() == Some("a"))
         .count();
     let count_b = assignments
         .iter()
-        .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("b"))
+        .filter(|a| a.chosen_package_name() == Some("b"))
         .count();
 
     assert_eq!(count_a + count_b, 10, "all assignments must land in a or b");
@@ -278,11 +278,11 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
     );
     let count_a = assignments
         .iter()
-        .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("x"))
+        .filter(|a| a.chosen_package_name() == Some("x"))
         .count();
     let count_b = assignments
         .iter()
-        .filter(|a| a.chosen.as_ref().map(|m| m.candidate.package.name.as_str()) == Some("y"))
+        .filter(|a| a.chosen_package_name() == Some("y"))
         .count();
     assert_eq!(count_a + count_b, 10);
     assert!(count_a >= 1, "pkg_x must receive at least one match");
