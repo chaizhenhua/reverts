@@ -11,6 +11,7 @@ pub trait NormalizationPass {
 pub mod boolean_undefined_canonicalised;
 pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
+pub mod conditional_statement_expanded;
 pub mod declarator_split;
 pub mod export_boundary_normalized;
 pub mod helper_identity_inlined;
@@ -21,7 +22,7 @@ pub mod sequence_expression_split;
 pub mod ts_runtime_erased;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 11] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 12] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -34,6 +35,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 11] {
         Box::new(declarator_split::DeclaratorSplit),
         Box::new(sequence_expression_split::SequenceExpressionSplit),
         Box::new(logical_short_circuit_expanded::LogicalShortCircuitExpanded),
+        Box::new(conditional_statement_expanded::ConditionalStatementExpanded),
     ]
 }
 
@@ -84,6 +86,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 11);
+        assert_eq!(ids.len(), 12);
     }
 }
