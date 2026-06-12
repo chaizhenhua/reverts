@@ -918,6 +918,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "reverts-bundle"
+version = "0.1.0"
+dependencies = [
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
+ "reverts-analyze",
+ "reverts-graph",
+ "reverts-input",
+ "reverts-ir",
+ "reverts-js",
+ "reverts-observe",
+ "serde_json",
+]
+
+[[package]]
 name = "reverts-cli"
 version = "0.1.0"
 dependencies = [

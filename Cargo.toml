@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/reverts-analyze",
+    "crates/reverts-bundle",
     "crates/reverts-cli",
     "crates/reverts-emitter",
     "crates/reverts-fixtures",
