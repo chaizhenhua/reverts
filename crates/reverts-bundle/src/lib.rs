@@ -4,6 +4,9 @@
 //! and produces `InnerModule` records whose `body_span` always slices a
 //! parseable program unit. See ADR 0004 for the architectural rationale.
 
+mod inner_module;
+pub use inner_module::{BundlerKind, InnerModule};
+
 #[cfg(test)]
 mod tests {
     #[test]
