@@ -6,20 +6,23 @@ use oxc_ast::visit::walk_mut::walk_expression;
 use oxc_span::SPAN;
 use oxc_syntax::operator::UnaryOperator;
 use reverts_ir::NormalizationPassId;
+use std::mem;
 
 use super::NormalizationPass;
 
-/// `BooleanUndefinedCanonicalised` expands the three universal minifier
+/// `BooleanUndefinedCanonicalised` expands the universal minifier
 /// shortenings back to their human-readable forms so fingerprints
 /// computed on minified output match fingerprints computed on the
-/// original source:
+/// original source. The single direction of rewriting is "from
+/// minified shortcut → expanded form":
 ///
 /// * `!0`     → `true`
 /// * `!1`     → `false`
-/// * `void X` → `undefined` (for any expression X; the spec guarantees
-///   `void X` evaluates X for side effects and yields `undefined`, and
-///   minifiers only emit this form when X is a numeric literal with no
-///   side effects — typically `void 0`)
+/// * `void X` → `undefined` (for literal X with no side effects;
+///   minifiers only emit `void 0` for this purpose)
+/// * `Foo(...)` → `new Foo(...)` when `Foo` is a built-in constructor
+///   (`Error`, `TypeError`, `RangeError`, …) whose `new`-prefixed form
+///   is spec-equivalent and is what un-minified source typically uses.
 ///
 /// Each rewrite is local and lossless for fingerprinting purposes:
 /// the rewritten AST evaluates to the same value as the original at
@@ -47,13 +50,49 @@ struct Canonicaliser<'a> {
 
 impl<'a> VisitMut<'a> for Canonicaliser<'a> {
     fn visit_expression(&mut self, expr: &mut Expression<'a>) {
-        // Recurse first so nested `!0`/`void X` inside larger
-        // expressions are rewritten bottom-up.
+        // Recurse first so nested patterns inside larger expressions
+        // are rewritten bottom-up.
         walk_expression(self, expr);
         if let Some(replacement) = canonicalise(&self.builder, expr) {
             *expr = replacement;
+            return;
+        }
+        // Promote `Foo(args)` → `new Foo(args)` for built-in
+        // constructors. We need to take ownership of the arguments,
+        // so swap-and-replace via a Null sentinel.
+        if let Expression::CallExpression(c) = expr
+            && let Expression::Identifier(callee) = &c.callee
+            && is_new_optional_builtin(callee.name.as_str())
+        {
+            // Take ownership of the CallExpression.
+            let placeholder = self.builder.expression_null_literal(SPAN);
+            let owned = mem::replace(expr, placeholder);
+            let Expression::CallExpression(call_box) = owned else {
+                unreachable!()
+            };
+            let call = call_box.unbox();
+            *expr = self.builder.expression_new(
+                SPAN,
+                call.callee,
+                call.arguments,
+                Option::<oxc_allocator::Box<oxc_ast::ast::TSTypeParameterInstantiation>>::None,
+            );
         }
     }
+}
+
+fn is_new_optional_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "ReferenceError"
+            | "SyntaxError"
+            | "URIError"
+            | "EvalError"
+            | "AggregateError"
+    )
 }
 
 fn canonicalise<'a>(builder: &AstBuilder<'a>, expr: &Expression<'a>) -> Option<Expression<'a>> {
@@ -164,6 +203,36 @@ mod tests {
         )
         .expect("parse");
         assert!(out.contains("!2"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_typeerror_to_new_typeerror() {
+        let out = apply_to_source(
+            &BooleanUndefinedCanonicalised,
+            "function f() { throw TypeError('bad'); }",
+        )
+        .expect("parse");
+        assert!(out.contains("new TypeError"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_rangeerror_to_new_rangeerror() {
+        let out = apply_to_source(
+            &BooleanUndefinedCanonicalised,
+            "function f() { throw RangeError('bad'); }",
+        )
+        .expect("parse");
+        assert!(out.contains("new RangeError"), "got: {out}");
+    }
+
+    #[test]
+    fn leaves_user_class_call_alone() {
+        let out = apply_to_source(
+            &BooleanUndefinedCanonicalised,
+            "function f() { return myFactory(1); }",
+        )
+        .expect("parse");
+        assert!(!out.contains("new myFactory"), "got: {out}");
     }
 
     #[test]
