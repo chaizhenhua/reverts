@@ -5,12 +5,12 @@ use std::path::Path;
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    AstBuilder, NONE, Visit,
+    AstBuilder, NONE, Visit, VisitMut,
     ast::{
-        Argument, ArrowFunctionExpression, BindingPatternKind, CallExpression, Declaration,
-        ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-        Function, IdentifierReference, ImportDeclaration, ImportExpression, ImportOrExportKind,
-        NewExpression, Program, Statement, StringLiteral, VariableDeclarator,
+        Argument, ArrowFunctionExpression, BindingIdentifier, BindingPatternKind, CallExpression,
+        Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
+        Expression, Function, IdentifierReference, ImportDeclaration, ImportExpression,
+        ImportOrExportKind, NewExpression, Program, Statement, StringLiteral, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_export_all_declaration,
@@ -20,8 +20,9 @@ use oxc_ast::{
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
+use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SPAN, SourceType, Span};
-use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::{reference::ReferenceId, scope::ScopeFlags, symbol::SymbolId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -68,6 +69,22 @@ impl GeneratedExport {
     pub fn new(binding: impl Into<String>) -> Self {
         Self {
             binding: binding.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedRename {
+    pub original: String,
+    pub renamed: String,
+}
+
+impl GeneratedRename {
+    #[must_use]
+    pub fn new(original: impl Into<String>, renamed: impl Into<String>) -> Self {
+        Self {
+            original: original.into(),
+            renamed: renamed.into(),
         }
     }
 }
@@ -524,6 +541,26 @@ pub fn format_source_with_module_items(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> Result<String> {
+    format_source_with_module_items_and_renames(
+        body_source,
+        generated_imports,
+        generated_exports,
+        &[],
+        path_hint,
+        goal,
+        lowering,
+    )
+}
+
+pub fn format_source_with_module_items_and_renames(
+    body_source: &str,
+    generated_imports: &[GeneratedImport],
+    generated_exports: &[GeneratedExport],
+    readability_renames: &[GeneratedRename],
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    lowering: CompilerLowering,
+) -> Result<String> {
     // Source-level pre-rewrites: applied before the main parse/codegen path so
     // that subsequent steps (audit, codegen) see the lowered form. The
     // rewriter parses once, collects span-aware edits, and returns the
@@ -594,6 +631,7 @@ pub fn format_source_with_module_items(
                 .body
                 .push(generated_export_statement(&builder, generated_export));
         }
+        apply_readability_renames(&allocator, &mut parsed.program, readability_renames);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -609,6 +647,118 @@ pub fn format_source_with_module_items(
     }
 
     Err(JsError::ParseFailed(errors))
+}
+
+fn apply_readability_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    readability_renames: &[GeneratedRename],
+) {
+    let requested = readability_renames
+        .iter()
+        .filter_map(|rename| {
+            let original = rename.original.trim();
+            let renamed = rename.renamed.trim();
+            if original.is_empty() || original == renamed || sanitize_identifier(renamed) != renamed
+            {
+                return None;
+            }
+            Some((original.to_string(), renamed.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if requested.is_empty() {
+        return;
+    }
+
+    let (symbol_renames, reference_renames) = {
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let symbols = semantic.symbols();
+        let root_scope_id = semantic.scopes().root_scope_id();
+        let unresolved_root_names = semantic
+            .scopes()
+            .root_unresolved_references()
+            .keys()
+            .map(|name| name.as_str().to_string())
+            .collect::<BTreeSet<_>>();
+        let root_symbols = symbols
+            .symbol_ids()
+            .filter(|symbol_id| symbols.get_scope_id(*symbol_id) == root_scope_id)
+            .collect::<Vec<_>>();
+
+        let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
+        for (original, renamed) in &requested {
+            // If the desired name is already used as a free global reference,
+            // introducing a module-scope binding with that name would change
+            // resolution for nested reads. Leave the original name intact.
+            if unresolved_root_names.contains(renamed) {
+                continue;
+            }
+            let targets = root_symbols
+                .iter()
+                .copied()
+                .filter(|symbol_id| symbols.get_name(*symbol_id) == original)
+                .collect::<Vec<_>>();
+            if targets.len() != 1 {
+                continue;
+            }
+            let target = targets[0];
+            let collides = root_symbols.iter().copied().any(|symbol_id| {
+                symbol_id != target && symbols.get_name(symbol_id) == renamed.as_str()
+            });
+            if collides || symbol_renames.values().any(|value| value == renamed) {
+                continue;
+            }
+            symbol_renames.insert(target, renamed.clone());
+        }
+
+        let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
+        for (symbol_id, renamed) in &symbol_renames {
+            for reference_id in symbols.get_resolved_reference_ids(*symbol_id) {
+                reference_renames.insert(*reference_id, renamed.clone());
+            }
+        }
+
+        (symbol_renames, reference_renames)
+    };
+
+    if symbol_renames.is_empty() && reference_renames.is_empty() {
+        return;
+    }
+
+    let mut renamer = ReadabilityRenamer {
+        builder: AstBuilder::new(allocator),
+        symbol_renames,
+        reference_renames,
+    };
+    renamer.visit_program(program);
+}
+
+struct ReadabilityRenamer<'a> {
+    builder: AstBuilder<'a>,
+    symbol_renames: BTreeMap<SymbolId, String>,
+    reference_renames: BTreeMap<ReferenceId, String>,
+}
+
+impl<'a> VisitMut<'a> for ReadabilityRenamer<'a> {
+    fn visit_binding_identifier(&mut self, identifier: &mut BindingIdentifier<'a>) {
+        let Some(symbol_id) = identifier.symbol_id.get() else {
+            return;
+        };
+        let Some(renamed) = self.symbol_renames.get(&symbol_id) else {
+            return;
+        };
+        identifier.name = self.builder.atom(renamed);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &mut IdentifierReference<'a>) {
+        let Some(reference_id) = identifier.reference_id.get() else {
+            return;
+        };
+        let Some(renamed) = self.reference_renames.get(&reference_id) else {
+            return;
+        };
+        identifier.name = self.builder.atom(renamed);
+    }
 }
 
 /// Catalog of Babel CJS interop helpers we know how to lower. Each entry
@@ -2107,12 +2257,13 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CompilerLowering, GeneratedExport, GeneratedImport, ImportUsageScope, JsError,
-        LazyBodyClassification, ParseGoal, classify_import_usage_scope, classify_lazy_module_body,
-        collect_file_url_source_location_rewrites, collect_path_builder_calls,
-        collect_static_resource_specifiers, collect_string_literals,
+        CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename, ImportUsageScope,
+        JsError, LazyBodyClassification, ParseGoal, classify_import_usage_scope,
+        classify_lazy_module_body, collect_file_url_source_location_rewrites,
+        collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
         extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
-        normalize_source_for_pipeline, parse_error_message, parse_source, sanitize_identifier,
+        format_source_with_module_items_and_renames, normalize_source_for_pipeline,
+        parse_error_message, parse_source, sanitize_identifier,
         verify_only_immediate_call_references,
     };
     use std::collections::BTreeSet;
@@ -2284,6 +2435,118 @@ mod tests {
         .expect("empty module should format");
 
         assert_eq!(formatted.trim(), "export {};");
+    }
+
+    #[test]
+    fn readability_renames_source_backed_binding_before_codegen() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var $F1 = 1; console.log($F1); export { $F1 };",
+            &[],
+            &[],
+            &[GeneratedRename::new("$F1", "lodashGlobalObjectInit")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var lodashGlobalObjectInit = 1;"));
+        assert!(formatted.contains("console.log(lodashGlobalObjectInit);"));
+        assert!(formatted.contains("export { lodashGlobalObjectInit as $F1 };"));
+    }
+
+    #[test]
+    fn readability_renames_every_resolved_reference_but_not_shadowed_text() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var $F1 = 1; function outer() { console.log($F1); function inner($F1) { return $F1; } return inner; } var obj = {}; obj.$F1 = \"$F1\";",
+            &[],
+            &[],
+            &[GeneratedRename::new("$F1", "readableValue")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var readableValue = 1;"));
+        assert!(formatted.contains("console.log(readableValue);"));
+        assert!(formatted.contains("function inner($F1)"));
+        assert!(formatted.contains("return $F1;"));
+        assert!(formatted.contains("obj.$F1 = '$F1';"));
+    }
+
+    #[test]
+    fn readability_renames_skip_root_scope_collisions() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var a = 1; var settings = 2; console.log(a, settings);",
+            &[],
+            &[],
+            &[GeneratedRename::new("a", "settings")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var a = 1;"));
+        assert!(formatted.contains("var settings = 2;"));
+        assert!(formatted.contains("console.log(a, settings);"));
+    }
+
+    #[test]
+    fn readability_renames_skip_generated_import_collisions() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var a = 1; console.log(a);",
+            &[GeneratedImport::new("settings", "pkg")],
+            &[],
+            &[GeneratedRename::new("a", "settings")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as settings from 'pkg';"));
+        assert!(formatted.contains("var a = 1;"));
+        assert!(formatted.contains("console.log(a);"));
+    }
+
+    #[test]
+    fn readability_renames_skip_duplicate_targets() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var a = 1; var b = 2; console.log(a, b);",
+            &[],
+            &[],
+            &[
+                GeneratedRename::new("a", "settings"),
+                GeneratedRename::new("b", "settings"),
+            ],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var settings = 1;"));
+        assert!(formatted.contains("var b = 2;"));
+        assert!(formatted.contains("console.log(settings, b);"));
+    }
+
+    #[test]
+    fn readability_renames_skip_names_that_would_capture_globals() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var a = 1; function f() { return settings; }",
+            &[],
+            &[],
+            &[GeneratedRename::new("a", "settings")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var a = 1;"));
+        assert!(formatted.contains("return settings;"));
     }
 
     #[test]

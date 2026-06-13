@@ -3,8 +3,8 @@ use std::fmt;
 
 use reverts_ir::BindingName;
 use reverts_js::{
-    CompilerLowering, GeneratedExport, GeneratedImport, format_source_with_module_items,
-    parse_error_message, sanitize_identifier,
+    CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename,
+    format_source_with_module_items_and_renames, parse_error_message, sanitize_identifier,
 };
 use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
 
@@ -51,11 +51,22 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         }
         generated_exports.push(GeneratedExport::new(emit_binding_name(&export.binding)));
     }
+    let generated_renames = file
+        .readability_renames
+        .iter()
+        .map(|rename| {
+            GeneratedRename::new(
+                emit_binding_name(&rename.original),
+                emit_binding_name(&rename.renamed),
+            )
+        })
+        .collect::<Vec<_>>();
 
-    let formatted = format_source_with_module_items(
+    let formatted = format_source_with_module_items_and_renames(
         &body_source,
         &generated_imports,
         &generated_exports,
+        &generated_renames,
         file.source_strategy().path_hint(file.path.as_str()),
         file.source_strategy().parse_goal(),
         compiler_lowering(file.compiler_recovery.action),

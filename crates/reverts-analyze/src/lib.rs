@@ -375,6 +375,7 @@ fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
     let mut semantic_names = SemanticNameMap::default();
     let mut used_by_module: BTreeMap<ModuleId, BTreeSet<String>> = BTreeMap::new();
     let mut mapped_originals = BTreeSet::<(ModuleId, String)>::new();
+    let mut direct_names = BTreeMap::<(ModuleId, BindingName), String>::new();
 
     for module in model.modules() {
         semantic_names.insert_module_path(module.id, module.semantic_path.clone());
@@ -392,9 +393,51 @@ fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
         let base = sanitize_identifier(naming_hint);
         let semantic = reserve_unique_name(&mut used_by_module, symbol.module_id, &base);
         semantic_names.insert_binding(symbol.module_id, symbol.name.clone(), semantic);
+        direct_names.insert(
+            (symbol.module_id, BindingName::new(symbol.name.clone())),
+            semantic_names
+                .binding_name(symbol.module_id, symbol.name.as_str())
+                .expect("semantic name was just inserted")
+                .as_str()
+                .to_string(),
+        );
+    }
+
+    // Alias-derived names are lower-priority readability hints. They are
+    // deliberately added after direct symbol/export names and get a suffix so
+    // `source` and `alias` do not collapse into the same emitted identifier.
+    for module in model.modules() {
+        for original in model.graph().definitions_for(module.id) {
+            if mapped_originals.contains(&(module.id, original.as_str().to_string())) {
+                continue;
+            }
+            let aliases = model
+                .graph()
+                .def_use()
+                .alias_sources_of(module.id, original.as_str());
+            let Some(source_name) = aliases
+                .iter()
+                .filter(|alias| alias.as_str() != original.as_str())
+                .find_map(|alias| direct_names.get(&(module.id, alias.clone())))
+            else {
+                continue;
+            };
+            let base = sanitize_identifier(alias_semantic_name(source_name).as_str());
+            let semantic = reserve_unique_name(&mut used_by_module, module.id, &base);
+            semantic_names.insert_binding(module.id, original.as_str(), semantic);
+            mapped_originals.insert((module.id, original.as_str().to_string()));
+        }
     }
 
     semantic_names
+}
+
+fn alias_semantic_name(source_name: &str) -> String {
+    if source_name.ends_with("Alias") {
+        source_name.to_string()
+    } else {
+        format!("{source_name}Alias")
+    }
 }
 
 fn reserve_unique_name(
@@ -721,6 +764,18 @@ mod tests {
         rows
     }
 
+    fn rows_with_application_source(source: &str) -> InputRows {
+        let mut rows = valid_rows();
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules[0] =
+            ModuleInput::application(ModuleId(1), "app", "src/index.ts").with_source_file(1);
+        rows
+    }
+
     #[test]
     fn accepted_attribution_resolves_package_dependency() {
         let mut rows = valid_rows();
@@ -822,6 +877,53 @@ mod tests {
                 .semantic_names()
                 .binding_name(ModuleId(1), "lodashGlobalObjectInit")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn semantic_naming_propagates_direct_hint_to_aliases() {
+        let mut rows = rows_with_application_source("var a = 1; var b = a; console.log(a, b);");
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "a").with_semantic_name("settings"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+        let names = output.program.semantic_names();
+
+        assert_eq!(
+            names
+                .binding_name(ModuleId(1), "a")
+                .expect("direct semantic name should exist")
+                .as_str(),
+            "settings"
+        );
+        assert_eq!(
+            names
+                .binding_name(ModuleId(1), "b")
+                .expect("alias semantic name should exist")
+                .as_str(),
+            "settingsAlias"
+        );
+    }
+
+    #[test]
+    fn semantic_naming_direct_alias_hint_wins_over_propagated_hint() {
+        let mut rows = rows_with_application_source("var a = 1; var b = a; console.log(a, b);");
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "a").with_semantic_name("settings"));
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "b").with_semantic_name("preferredAlias"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+        let names = output.program.semantic_names();
+
+        assert_eq!(
+            names
+                .binding_name(ModuleId(1), "b")
+                .expect("direct semantic name should exist")
+                .as_str(),
+            "preferredAlias"
         );
     }
 

@@ -32,6 +32,11 @@ pub struct PlannedFile {
     pub imports: Vec<PlannedImport>,
     pub bindings: Vec<PlannedBinding>,
     pub exports: Vec<PlannedExport>,
+    /// Late, readability-only binding renames. These are applied by the
+    /// emitter after all source recovery/lowering is complete but before
+    /// final codegen and parse audit, so graph/planner facts stay keyed by
+    /// original recovered names.
+    pub readability_renames: Vec<PlannedRename>,
     pub body: Vec<String>,
     pub compiler_recovery: CompilerRecoveryDecision,
 }
@@ -44,6 +49,7 @@ impl PlannedFile {
             imports: Vec::new(),
             bindings: Vec::new(),
             exports: Vec::new(),
+            readability_renames: Vec::new(),
             body: Vec::new(),
             compiler_recovery: CompilerRecoveryDecision::default(),
         }
@@ -72,6 +78,10 @@ impl PlannedFile {
         self.body.push(source.into());
     }
 
+    pub fn add_readability_rename(&mut self, rename: PlannedRename) {
+        self.readability_renames.push(rename);
+    }
+
     pub fn set_compiler_recovery(&mut self, compiler_recovery: CompilerRecoveryDecision) {
         self.compiler_recovery = compiler_recovery;
     }
@@ -87,6 +97,19 @@ pub struct PlannedImport {
     pub namespace: BindingName,
     pub resolution: PackageResolution,
     pub source_backed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedRename {
+    pub original: BindingName,
+    pub renamed: BindingName,
+}
+
+impl PlannedRename {
+    #[must_use]
+    pub fn new(original: BindingName, renamed: BindingName) -> Self {
+        Self { original, renamed }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,15 +553,17 @@ impl ImportExportPlanner {
                 .unwrap_or_default();
             for original in program.model().graph().definitions_for(module.id) {
                 let source_backed = source_definitions.contains(&original);
-                let emitted = if source_backed {
-                    original.clone()
-                } else {
-                    program
-                        .semantic_names()
-                        .binding_name(module.id, original.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| original.clone())
-                };
+                let emitted = program
+                    .semantic_names()
+                    .binding_name(module.id, original.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| original.clone());
+                if source_backed && emitted != original {
+                    file.add_readability_rename(PlannedRename::new(
+                        original.clone(),
+                        emitted.clone(),
+                    ));
+                }
                 let shape_override = if reshaped_bindings.contains(&original) {
                     Some(BindingShape::Unknown)
                 } else {
@@ -8917,7 +8942,7 @@ mod tests {
     }
 
     #[test]
-    fn source_backed_symbol_keeps_original_emitted_binding_until_ast_rewrite_exists() {
+    fn source_backed_symbol_plans_late_readability_rename() {
         let planner = ImportExportPlanner;
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
@@ -8933,9 +8958,11 @@ mod tests {
         );
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
         let model = ProgramModel::from_input(input);
+        let mut semantic_names = reverts_model::SemanticNameMap::default();
+        semantic_names.insert_binding(ModuleId(1), "$F1", "lodashGlobalObjectInit");
         let enriched = reverts_model::EnrichedProgram::new(
             model,
-            reverts_model::SemanticNameMap::default(),
+            semantic_names,
             Vec::new(),
             reverts_ir::BindingShapeSolution::default(),
         );
@@ -8950,8 +8977,17 @@ mod tests {
             .expect("source binding should be planned");
 
         assert!(binding.source_backed);
-        assert_eq!(binding.emitted.as_str(), "$F1");
+        assert_eq!(binding.emitted.as_str(), "lodashGlobalObjectInit");
         assert_eq!(plan.files[0].exports[0].binding.as_str(), "$F1");
+        assert_eq!(plan.files[0].readability_renames.len(), 1);
+        assert_eq!(
+            plan.files[0].readability_renames[0].original.as_str(),
+            "$F1"
+        );
+        assert_eq!(
+            plan.files[0].readability_renames[0].renamed.as_str(),
+            "lodashGlobalObjectInit"
+        );
     }
 
     #[test]

@@ -1282,6 +1282,62 @@ mod tests {
     }
 
     #[test]
+    fn source_backed_semantic_name_is_renamed_late_before_emit() {
+        let mut rows =
+            rows_with_application_source("var $F1 = 1; console.log($F1); export { $F1 };");
+        rows.symbols.push(
+            SymbolInput::new(ModuleId(1), "$F1").with_semantic_name("lodashGlobalObjectInit"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("var lodashGlobalObjectInit = 1;"));
+        assert!(source.contains("console.log(lodashGlobalObjectInit);"));
+        assert!(source.contains("export { lodashGlobalObjectInit as $F1 };"));
+        assert!(!source.contains("console.log($F1);"));
+    }
+
+    #[test]
+    fn alias_semantic_name_hint_is_renamed_late_before_emit() {
+        let mut rows =
+            rows_with_application_source("var a = 1; var b = a; console.log(b); export { b };");
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "a").with_semantic_name("settings"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("var settings = 1;"));
+        assert!(source.contains("var settingsAlias = settings;"));
+        assert!(source.contains("console.log(settingsAlias);"));
+        assert!(source.contains("export { settingsAlias as b };"));
+    }
+
+    #[test]
+    fn late_readability_rename_skips_colliding_source_binding() {
+        let mut rows = rows_with_application_source(
+            "var a = 1; var settings = 2; console.log(a, settings); export { a };",
+        );
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "a").with_semantic_name("settings"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("var a = 1;"));
+        assert!(source.contains("var settings = 2;"));
+        assert!(source.contains("console.log(a, settings);"));
+        assert!(source.contains("export { a };"));
+    }
+
+    #[test]
     fn commonjs_require_package_import_uses_surface_attribution_without_synthetic_import() {
         let mut rows = rows_with_application_source(
             "const add = require('pkg/add'); export const total = add(1, 2);",
