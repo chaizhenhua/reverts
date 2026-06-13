@@ -103,6 +103,7 @@ pub enum NormalizationPassId {
     NumberCallToUnaryPlusGuarded,
     NullishEqualityCompacted,
     ForToWhileFiniteCanonical,
+    TypeofLocalUndefinedGuarded,
 }
 
 impl NormalizationPassId {
@@ -138,6 +139,7 @@ impl NormalizationPassId {
             Self::NumberCallToUnaryPlusGuarded => "number_call_to_unary_plus_guarded",
             Self::NullishEqualityCompacted => "nullish_equality_compacted",
             Self::ForToWhileFiniteCanonical => "for_to_while_finite_canonical",
+            Self::TypeofLocalUndefinedGuarded => "typeof_local_undefined_guarded",
         }
     }
 }
