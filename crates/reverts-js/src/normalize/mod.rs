@@ -21,6 +21,7 @@ pub mod constant_string_concat_folded;
 pub mod declarator_split;
 pub mod equality_negation_flattened;
 pub mod export_boundary_normalized;
+pub mod for_to_while_finite;
 pub mod helper_identity_inlined;
 pub mod if_return_else_flattened;
 pub mod infinite_for_to_while;
@@ -38,7 +39,7 @@ pub mod ts_runtime_erased;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 27] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 28] {
     [
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
@@ -61,6 +62,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 27] {
         Box::new(logical_not_chain_flattened::LogicalNotChainFlattened),
         Box::new(template_no_substitution_lowered::TemplateNoSubstitutionLowered),
         Box::new(infinite_for_to_while::InfiniteForToWhile),
+        Box::new(for_to_while_finite::ForToWhileFiniteCanonical),
         Box::new(conditional_boolean_coerced::ConditionalBooleanCoerced),
         Box::new(trailing_return_void_removed::TrailingReturnVoidRemoved),
         Box::new(void_zero_to_undefined_guarded::VoidZeroToUndefinedGuarded),
@@ -117,6 +119,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 27);
+        assert_eq!(ids.len(), 28);
     }
 }

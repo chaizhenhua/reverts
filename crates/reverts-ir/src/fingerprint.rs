@@ -102,6 +102,7 @@ pub enum NormalizationPassId {
     BooleanCallToDoubleNotGuarded,
     NumberCallToUnaryPlusGuarded,
     NullishEqualityCompacted,
+    ForToWhileFiniteCanonical,
 }
 
 impl NormalizationPassId {
@@ -136,6 +137,7 @@ impl NormalizationPassId {
             Self::BooleanCallToDoubleNotGuarded => "boolean_call_to_double_not_guarded",
             Self::NumberCallToUnaryPlusGuarded => "number_call_to_unary_plus_guarded",
             Self::NullishEqualityCompacted => "nullish_equality_compacted",
+            Self::ForToWhileFiniteCanonical => "for_to_while_finite_canonical",
         }
     }
 }
