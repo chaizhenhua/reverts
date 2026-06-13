@@ -292,6 +292,11 @@ impl ImportExportPlanner {
             lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+        let runtime_var_migrations = compute_runtime_var_migration_plan(
+            program,
+            &lowered_runtime_sources,
+            &runtime_lazy_folds,
+        );
 
         // When a lazy binding is folded into its helper module, the consumer no
         // longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
@@ -402,6 +407,24 @@ impl ImportExportPlanner {
             let written_runtime_helpers = lowered_source
                 .map(|source| source.written_helpers.clone())
                 .unwrap_or_default();
+            // Phase 10b: bindings the migration plan reassigned to this
+            // module. They're declared locally below (rather than imported
+            // from the runtime), and their `X = value` writes stay as
+            // direct same-module assignments instead of being rewritten
+            // to setter calls.
+            let migrated_locally: BTreeSet<BindingName> = runtime_var_migrations
+                .migrations_by_owner
+                .get(&module.id)
+                .cloned()
+                .unwrap_or_default();
+            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
+                .difference(&migrated_locally)
+                .cloned()
+                .collect();
+            let written_runtime_helpers: BTreeSet<BindingName> = written_runtime_helpers
+                .difference(&migrated_locally)
+                .cloned()
+                .collect();
 
             let runtime_import_groups = group_runtime_imports(runtime_imports);
             let lazy_helper_names = lowered_source
@@ -560,6 +583,22 @@ impl ImportExportPlanner {
                     file.push_source(node_require_prelude_statement());
                     planned_bindings.insert(BindingName::new("require"));
                 }
+                // Phase 10b: register migrated bindings as planned BEFORE
+                // computing implicit globals — otherwise the implicit-
+                // globals scan picks the same bindings up as undeclared
+                // writes and emits a redundant `var X;` line alongside
+                // the migration's own declaration.
+                for binding in &migrated_locally {
+                    planned_bindings.insert(binding.clone());
+                    file.add_binding(plan_binding_from_program(
+                        program,
+                        module.id,
+                        binding.clone(),
+                        binding.clone(),
+                        true,
+                        Some(BindingShape::Unknown),
+                    ));
+                }
                 let implicit_globals = implicit_global_declarations_for_module(
                     source.as_str(),
                     &source_definitions,
@@ -568,6 +607,16 @@ impl ImportExportPlanner {
                 );
                 if !implicit_globals.is_empty() {
                     file.push_source(variable_declaration_statement(implicit_globals.iter()));
+                }
+                // Declare the bindings the runtime helpers module no
+                // longer hosts. Their `X = value` writes (left
+                // unrewritten above because we excluded them from
+                // `written_runtime_helpers`) now bind to the same-module
+                // `var X;` slot. The runtime helpers file re-exports
+                // these from this module, so cross-module readers keep
+                // resolving them transparently.
+                if !migrated_locally.is_empty() {
+                    file.push_source(variable_declaration_statement(migrated_locally.iter()));
                 }
                 let normalized = normalize_source_for_emit(
                     module.id,
@@ -585,6 +634,38 @@ impl ImportExportPlanner {
                 .exports_for(module.id)
             {
                 file.add_export_with_source_backed(export, true);
+            }
+            // Phase 10b: bindings this module now owns must be exported so
+            // the runtime helpers file (which re-exports from here) and
+            // every consumer importing from runtime continue to resolve
+            // through the live binding. Skip any binding that is already
+            // exported through the module's regular AST or wiring path
+            // to avoid duplicate-export audit failures.
+            if !migrated_locally.is_empty() {
+                let already_exported: BTreeSet<BindingName> = program
+                    .model()
+                    .graph()
+                    .import_export()
+                    .exports_for(module.id)
+                    .into_iter()
+                    .chain(
+                        source_module_wiring
+                            .exports_by_module
+                            .get(&module.id)
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                    .collect();
+                let new_exports: BTreeSet<BindingName> = migrated_locally
+                    .difference(&already_exported)
+                    .cloned()
+                    .collect();
+                if !new_exports.is_empty() {
+                    file.push_source(named_export_statement(new_exports.iter()));
+                    for binding in &new_exports {
+                        file.add_export_with_source_backed(binding.clone(), true);
+                    }
+                }
             }
             let extra_exports = extra_exports_for_module(
                 program,
@@ -668,6 +749,24 @@ impl ImportExportPlanner {
             // (which can't legally assign through their read-only ESM
             // imports) keep their existing call form unchanged.
             helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
+            // Phase 10b: bindings the migration plan reassigned out of
+            // this runtime helpers file no longer have their `var X;`
+            // declaration here. The writer module re-declares them
+            // locally and exports them; below we emit `export { X } from
+            // '<owner>';` re-exports so existing consumer imports keep
+            // working unchanged.
+            let migrations_for_source: BTreeMap<BindingName, ModuleId> = runtime_var_migrations
+                .migrations_by_binding
+                .iter()
+                .filter(|(_, migration)| migration.source_file_id == *source_file_id)
+                .map(|(binding, migration)| (binding.clone(), migration.owner_module))
+                .collect();
+            if !migrations_for_source.is_empty() {
+                helper_closure.source = strip_runtime_var_declarations(
+                    helper_closure.source.as_str(),
+                    migrations_for_source.keys(),
+                );
+            }
             let helper_imports = runtime_source_module_imports(
                 program,
                 helper_closure.source.as_str(),
@@ -701,6 +800,17 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .cloned()
                 .unwrap_or_default();
+            // Phase 10b: skip setter functions for migrated bindings;
+            // the writer module now mutates them via direct assignment.
+            let setter_bindings: BTreeSet<BindingName> = setter_bindings
+                .difference(
+                    &migrations_for_source
+                        .keys()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                )
+                .cloned()
+                .collect();
             for binding in &setter_bindings {
                 file.push_source(runtime_helper_setter_declaration(binding));
             }
@@ -718,6 +828,13 @@ impl ImportExportPlanner {
                     .iter()
                     .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
             );
+            // Phase 10b: drop migrated bindings from the runtime helper's
+            // own named export — they're re-exported below from their
+            // new owner module so the consumer's `import { X } from
+            // runtime` still resolves to a live binding.
+            for binding in migrations_for_source.keys() {
+                exported_bindings.remove(binding);
+            }
             if emits_lazy_module {
                 exported_bindings.insert(BindingName::new("lazyModule"));
             }
@@ -725,7 +842,40 @@ impl ImportExportPlanner {
                 exported_bindings.insert(BindingName::new("lazyValue"));
             }
             file.push_source(named_export_statement(exported_bindings.iter()));
-            for binding in helper_bindings.iter().cloned() {
+            // Phase 10b: per-owner re-exports for migrated bindings.
+            // Grouping by owner emits one re-export statement per owner
+            // module instead of one per binding, keeping the runtime
+            // helper file's tail readable.
+            let mut migrations_by_owner_path: BTreeMap<String, BTreeSet<BindingName>> =
+                BTreeMap::new();
+            for (binding, owner_module) in &migrations_for_source {
+                let Some(owner_path) = module_output_path(program, *owner_module) else {
+                    continue;
+                };
+                let specifier =
+                    relative_import_specifier(helper_path.as_str(), owner_path.as_str());
+                migrations_by_owner_path
+                    .entry(specifier)
+                    .or_default()
+                    .insert(binding.clone());
+            }
+            for (specifier, bindings) in &migrations_by_owner_path {
+                file.push_source(named_reexport_statement(bindings.iter(), specifier));
+                for binding in bindings {
+                    file.add_binding(PlannedBinding::new(
+                        binding.clone(),
+                        binding.clone(),
+                        BindingShape::Unknown,
+                        true,
+                    ));
+                    file.add_export_with_source_backed(binding.clone(), true);
+                }
+            }
+            for binding in helper_bindings
+                .iter()
+                .filter(|binding| !migrations_for_source.contains_key(*binding))
+                .cloned()
+            {
                 file.add_binding(PlannedBinding::new(
                     binding.clone(),
                     binding.clone(),
@@ -858,6 +1008,190 @@ struct LoweredRuntimeModuleSource {
 struct RuntimeLazyFoldPlan {
     modules: BTreeMap<ModuleId, RuntimeLazyFoldModule>,
     chunks_by_source_file: BTreeMap<u32, Vec<RuntimeFoldedSourceChunk>>,
+}
+
+/// Phase 10: vars currently declared inside `source-<N>-helpers.ts` that
+/// can be relocated to their writer module.
+///
+/// The runtime helper file traditionally holds every cross-module mutable
+/// binding plus a `__reverts_set_X(value)` thunk for each, because ESM
+/// forbids direct assignment to imported bindings. When a binding's value
+/// is only WRITTEN by a single application module AND the runtime body
+/// itself never READS that binding, the setter becomes a workaround for a
+/// problem that no longer exists — the writer module can declare and
+/// export the binding directly.
+///
+/// `migrations_by_binding` maps each migrated binding to its new owner
+/// module. The runtime helper file replaces the binding's declaration
+/// and setter with a `export { X } from '<owner>';` re-export so that
+/// other consumers' existing `import { X } from runtime` keep working.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RuntimeVarMigrationPlan {
+    /// Binding name → (owner module id, runtime source file id the
+    /// binding originally lived in).
+    migrations_by_binding: BTreeMap<BindingName, RuntimeVarMigration>,
+    /// Reverse index: owner module → set of bindings it now owns.
+    migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeVarMigration {
+    owner_module: ModuleId,
+    source_file_id: u32,
+}
+
+/// Identify bindings that can move from the shared runtime helpers file
+/// to a single owner module. Conservative gating:
+///   1. The binding must have a `__reverts_set_X` setter function (i.e.,
+///      it's part of the cross-module mutation surface).
+///   2. The runtime prelude itself must not REFERENCE the binding outside
+///      its own `var X;` declaration and `__reverts_set_X` body. Any
+///      other snippet that names X is a runtime read, and migrating X
+///      would force the runtime to import it back from the owner — a
+///      cycle hazard.
+///   3. Exactly one application module must write the binding (via the
+///      `written_helpers` set populated during lowering). With multiple
+///      writers, no single module can own the binding without one of
+///      them needing setter-mediated cross-module access, defeating the
+///      migration.
+fn compute_runtime_var_migration_plan(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+) -> RuntimeVarMigrationPlan {
+    // Modules whose lazy initializer bodies have already been folded
+    // into the runtime helper file. Their consumer file is an empty
+    // re-export stub; there is no source body to host a migrated
+    // declaration or to absorb same-module assignments. Skip them.
+    let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
+    // Invert `written_helpers` to find single-writer bindings — but
+    // exclude writes that came from a module that was later folded.
+    let mut writers: BTreeMap<BindingName, BTreeSet<(ModuleId, u32)>> = BTreeMap::new();
+    for (module_id, source) in lowered_runtime_sources {
+        if folded_modules.contains(module_id) {
+            continue;
+        }
+        for binding in &source.written_helpers {
+            writers
+                .entry(binding.clone())
+                .or_default()
+                .insert((*module_id, source.source_file_id));
+        }
+    }
+    let single_writers: BTreeMap<BindingName, (ModuleId, u32)> = writers
+        .into_iter()
+        .filter_map(|(binding, writers)| {
+            if writers.len() == 1 {
+                writers.into_iter().next().map(|w| (binding, w))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut plan = RuntimeVarMigrationPlan::default();
+    // Group single-writer candidates by source file id so each runtime
+    // prelude is scanned once.
+    let mut by_source: BTreeMap<u32, Vec<(BindingName, ModuleId)>> = BTreeMap::new();
+    for (binding, (module_id, source_id)) in single_writers {
+        by_source
+            .entry(source_id)
+            .or_default()
+            .push((binding, module_id));
+    }
+    for (source_id, candidates) in by_source {
+        let Some(prelude) = program.model().graph().runtime_prelude(source_id) else {
+            continue;
+        };
+        for (binding, owner_module) in candidates {
+            // The binding must have a setter (zero-writer or shared
+            // bindings never enter `written_helpers`, but the prelude may
+            // also expose source-backed reads for which there is no setter
+            // — skip those).
+            // The binding must be a real prelude declaration. Restrict
+            // to bare `var X;` (or `let`/`const`) declarations without
+            // an initializer — when the prelude has `var X = something;`
+            // the runtime would lose the initial value if we removed the
+            // line and moved the declaration to the writer (whose first
+            // assignment may not match the original init).
+            let Some(snippet) = prelude.snippets.get(&binding) else {
+                continue;
+            };
+            if !is_uninitialized_var_declaration(snippet.source.as_str(), binding.as_str()) {
+                continue;
+            }
+            // The setter function is synthesized by the planner at emit
+            // time — it doesn't appear in the prelude snippets. Any
+            // OTHER prelude snippet, namespace export, or folded chunk
+            // that references X counts as a runtime read.
+            let mut runtime_reads = false;
+            for (key, snippet) in &prelude.snippets {
+                if key == &binding {
+                    continue;
+                }
+                if identifier_reference_positions(snippet.source.as_str(), binding.as_str())
+                    .next()
+                    .is_some()
+                {
+                    runtime_reads = true;
+                    break;
+                }
+            }
+            // Folded lazy initializer bodies have been pulled into the
+            // runtime helpers file via `runtime_lazy_folds`. Any read of
+            // the binding inside a folded chunk is just as fatal as one
+            // in a regular prelude snippet — the runtime file's loader
+            // would need the migrated binding to be defined before
+            // evaluating that chunk.
+            if !runtime_reads
+                && let Some(chunks) = runtime_lazy_folds.chunks_by_source_file.get(&source_id)
+            {
+                for chunk in chunks {
+                    if identifier_reference_positions(chunk.source.as_str(), binding.as_str())
+                        .next()
+                        .is_some()
+                    {
+                        runtime_reads = true;
+                        break;
+                    }
+                }
+            }
+            // Namespace exports synthesize `Object.defineProperties(...,
+            // { name: { get: () => X } })` runtime reads. Migrating X
+            // would force the runtime to import it back to drive the
+            // getter. Treat any binding referenced by a namespace export
+            // (either as the namespace itself or as one of the exported
+            // bindings) as a runtime read.
+            if !runtime_reads {
+                for namespace_export in &prelude.namespace_exports {
+                    if namespace_export.namespace == binding
+                        || namespace_export.helper == binding
+                        || namespace_export
+                            .exports
+                            .values()
+                            .any(|target| target == &binding)
+                    {
+                        runtime_reads = true;
+                        break;
+                    }
+                }
+            }
+            if runtime_reads {
+                continue;
+            }
+            plan.migrations_by_binding.insert(
+                binding.clone(),
+                RuntimeVarMigration {
+                    owner_module,
+                    source_file_id: source_id,
+                },
+            );
+            plan.migrations_by_owner
+                .entry(owner_module)
+                .or_default()
+                .insert(binding);
+        }
+    }
+    plan
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6008,10 +6342,18 @@ fn identifier_reference_positions<'a>(
                     cursor += 1;
                 }
                 if &source[start..cursor] == identifier {
-                    if start
-                        .checked_sub(1)
-                        .and_then(|index| bytes.get(index))
-                        .is_some_and(|byte| matches!(*byte, b'#' | b'.'))
+                    // `obj.X` and `obj#X` access X as a property name, not
+                    // a binding reference — skip. But `...X` (spread) is
+                    // a value read of X, so when the preceding byte is
+                    // `.` we have to peek further: a SECOND preceding
+                    // `.` indicates the trailing dot of `...` and the
+                    // identifier IS a binding reference.
+                    let prev = start.checked_sub(1).and_then(|index| bytes.get(index));
+                    if prev == Some(&b'#') {
+                        continue;
+                    }
+                    if prev == Some(&b'.')
+                        && start.checked_sub(2).and_then(|index| bytes.get(index)) != Some(&b'.')
                     {
                         continue;
                     }
@@ -6305,6 +6647,58 @@ fn lazy_value_helper_source() -> &'static str {
 
 fn runtime_helper_setter_name(binding: &BindingName) -> String {
     format!("__reverts_set_{}", binding.as_str())
+}
+
+/// Returns `true` when `snippet` is exactly `var X;`, `let X;`, or
+/// `const X;` (no initializer) for the given binding. The migration plan
+/// gates on this so we never silently drop an initializer when moving a
+/// declaration to its writer module.
+fn is_uninitialized_var_declaration(snippet: &str, binding: &str) -> bool {
+    let trimmed = snippet.trim();
+    for keyword in ["var", "let", "const"] {
+        if let Some(rest) = trimmed.strip_prefix(keyword)
+            && rest.starts_with(|c: char| c.is_ascii_whitespace())
+        {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_suffix(';')
+                && rest.trim() == binding
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Remove `var X;` (or `var X = undefined;`) statements for each binding
+/// in `bindings` from the runtime helper source. Used after Phase 10b's
+/// migration plan moves the declaration to a new owner module — the
+/// declaration is no longer needed in the runtime, and leaving it would
+/// either create a duplicate-declaration audit failure or shadow the
+/// re-exported binding from the owner module.
+fn strip_runtime_var_declarations<'a>(
+    source: &str,
+    bindings: impl IntoIterator<Item = &'a BindingName>,
+) -> String {
+    let drop_set: BTreeSet<&str> = bindings.into_iter().map(BindingName::as_str).collect();
+    if drop_set.is_empty() {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        let stripped = trimmed.trim();
+        let matched = stripped
+            .strip_prefix("var ")
+            .and_then(|rest| rest.strip_suffix(';'))
+            .map(str::trim)
+            .is_some_and(|name| drop_set.contains(name));
+        if matched {
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
@@ -6666,6 +7060,32 @@ mod tests {
         let input = r#"var s = "__reverts_set_X(1)"; __reverts_set_X(2);"#;
         let expected = r#"var s = "__reverts_set_X(1)"; (X = 2);"#;
         assert_eq!(inline_internal_setter_calls(input), expected);
+    }
+
+    #[test]
+    fn identifier_reference_positions_treats_spread_as_read() {
+        // `obj.X` is property access and must NOT count as a reference,
+        // but `...X` (spread) IS a read of the binding X and must count.
+        // The check looks back two bytes to distinguish single `.` from
+        // the trailing dot of `...`.
+        let source = "function f(a) { return [...X, a]; }";
+        let positions: Vec<usize> = super::identifier_reference_positions(source, "X").collect();
+        assert_eq!(
+            positions.len(),
+            1,
+            "spread `...X` must register as a single read"
+        );
+    }
+
+    #[test]
+    fn identifier_reference_positions_skips_member_access() {
+        let source = "function f(obj) { return obj.X + obj.X.Y; }";
+        let positions: Vec<usize> = super::identifier_reference_positions(source, "X").collect();
+        assert_eq!(
+            positions.len(),
+            0,
+            "property access `obj.X` must NOT be a binding reference"
+        );
     }
 
     /// Build an `EnrichedProgram` with the binding-shape solution derived from the
@@ -9731,7 +10151,11 @@ mod tests {
     #[test]
     fn runtime_prelude_update_writes_use_live_setters() {
         let planner = ImportExportPlanner;
-        let prelude = "var counter = 2;\nvar result;\n";
+        // Both bindings have explicit initializers in the prelude so the
+        // Phase 10b migration plan skips them — the setter mechanism
+        // remains intact and this test continues to validate the
+        // update-operator rewrite path.
+        let prelude = "var counter = 2;\nvar result = 0;\n";
         let body = "result = counter--;\n++counter;\nexport { counter, result };\n";
         let source = format!("{prelude}{body}");
         assert!(
@@ -9841,7 +10265,10 @@ mod tests {
     #[test]
     fn runtime_prelude_array_destructuring_writes_use_live_setters() {
         let planner = ImportExportPlanner;
-        let prelude = "var left, right;\n";
+        // Initialize both prelude vars so the Phase 10b migration plan
+        // skips them — the destructuring rewrite path under test still
+        // routes writes through the setter.
+        let prelude = "var left = 0;\nvar right = 0;\n";
         let body = "[left, right] = [1, 2];\nexport { left, right };\n";
         let source = format!("{prelude}{body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -9882,7 +10309,10 @@ mod tests {
     #[test]
     fn runtime_prelude_write_inside_computed_class_key_uses_live_setter() {
         let planner = ImportExportPlanner;
-        let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream;\nvar holder;\n";
+        // Initialize the prelude vars so the Phase 10b migration plan
+        // leaves them in the runtime — the test still exercises the
+        // setter rewrite inside a computed class key.
+        let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream = null;\nvar holder = null;\n";
         let body = "void 0;\nvar init = J(() => { Stream = class Stream { [(holder = new WeakMap(), Symbol.iterator)]() { return 1; } }; });\nexport { Stream, init };\n";
         let source = format!("{prelude}{body}");
         assert!(
@@ -9924,7 +10354,11 @@ mod tests {
     #[test]
     fn runtime_helper_namespace_exports_initialize_empty_object_helpers() {
         let planner = ImportExportPlanner;
-        let prelude = "var zT = () => 'enum';\nvar m = {};\nM5(m, { enum: () => zT });\nvar d2;\n";
+        // Initialize d2 so Phase 10b's migration plan leaves it in the
+        // runtime — this test continues to validate the
+        // namespace-export setup alongside cross-module setter use.
+        let prelude =
+            "var zT = () => 'enum';\nvar m = {};\nM5(m, { enum: () => zT });\nvar d2 = null;\n";
         let body = "d2 = m;\nexport { d2 };\n";
         let source = format!("{prelude}{body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
