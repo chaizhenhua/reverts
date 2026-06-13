@@ -614,9 +614,38 @@ impl ImportExportPlanner {
                 // `written_runtime_helpers`) now bind to the same-module
                 // `var X;` slot. The runtime helpers file re-exports
                 // these from this module, so cross-module readers keep
-                // resolving them transparently.
+                // resolving them transparently. Bindings that came with
+                // a literal initializer in the prelude emit
+                // `var X = INIT;` so the writer keeps the original
+                // initial value the runtime used to set at load.
                 if !migrated_locally.is_empty() {
-                    file.push_source(variable_declaration_statement(migrated_locally.iter()));
+                    let bare: BTreeSet<&BindingName> = migrated_locally
+                        .iter()
+                        .filter(|binding| {
+                            runtime_var_migrations
+                                .migrations_by_binding
+                                .get(*binding)
+                                .and_then(|m| m.initializer.as_deref())
+                                .is_none()
+                        })
+                        .collect();
+                    if !bare.is_empty() {
+                        file.push_source(variable_declaration_statement(bare.into_iter()));
+                    }
+                    for binding in &migrated_locally {
+                        let Some(migration) =
+                            runtime_var_migrations.migrations_by_binding.get(binding)
+                        else {
+                            continue;
+                        };
+                        let Some(initializer) = migration.initializer.as_deref() else {
+                            continue;
+                        };
+                        file.push_source(format!(
+                            "var {name} = {initializer};",
+                            name = binding.as_str()
+                        ));
+                    }
                 }
                 let normalized = normalize_source_for_emit(
                     module.id,
@@ -1034,10 +1063,16 @@ struct RuntimeVarMigrationPlan {
     migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeVarMigration {
     owner_module: ModuleId,
     source_file_id: u32,
+    /// Optional initializer expression preserved from the runtime
+    /// declaration. `None` means the original `var X;` had no
+    /// initializer; `Some(text)` carries a side-effect-free literal
+    /// (`null`, `0`, `!1`, `void 0`, etc.) to be emitted alongside the
+    /// writer module's `var X = INIT;`.
+    initializer: Option<String>,
 }
 
 /// Identify bindings that can move from the shared runtime helpers file
@@ -1107,18 +1142,22 @@ fn compute_runtime_var_migration_plan(
             // bindings never enter `written_helpers`, but the prelude may
             // also expose source-backed reads for which there is no setter
             // — skip those).
-            // The binding must be a real prelude declaration. Restrict
-            // to bare `var X;` (or `let`/`const`) declarations without
-            // an initializer — when the prelude has `var X = something;`
-            // the runtime would lose the initial value if we removed the
-            // line and moved the declaration to the writer (whose first
-            // assignment may not match the original init).
+            // The binding must be a real prelude declaration. The
+            // migration accepts bare `var X;` and also `var X = LITERAL;`
+            // where LITERAL is a side-effect-free literal that the
+            // writer can re-emit verbatim. Anything more complex (calls,
+            // identifier references, member access) stays put — moving
+            // such an initializer would require dragging its
+            // dependencies along.
             let Some(snippet) = prelude.snippets.get(&binding) else {
                 continue;
             };
-            if !is_uninitialized_var_declaration(snippet.source.as_str(), binding.as_str()) {
+            let Some(initializer_kind) =
+                classify_migratable_var_declaration(snippet.source.as_str(), binding.as_str())
+            else {
                 continue;
-            }
+            };
+            let initializer = initializer_kind.map(str::to_string);
             // The setter function is synthesized by the planner at emit
             // time — it doesn't appear in the prelude snippets. Any
             // OTHER prelude snippet, namespace export, or folded chunk
@@ -1183,6 +1222,7 @@ fn compute_runtime_var_migration_plan(
                 RuntimeVarMigration {
                     owner_module,
                     source_file_id: source_id,
+                    initializer,
                 },
             );
             plan.migrations_by_owner
@@ -6649,33 +6689,71 @@ fn runtime_helper_setter_name(binding: &BindingName) -> String {
     format!("__reverts_set_{}", binding.as_str())
 }
 
-/// Returns `true` when `snippet` is exactly `var X;`, `let X;`, or
-/// `const X;` (no initializer) for the given binding. The migration plan
-/// gates on this so we never silently drop an initializer when moving a
-/// declaration to its writer module.
-fn is_uninitialized_var_declaration(snippet: &str, binding: &str) -> bool {
+/// Decide whether a prelude var declaration is safe to migrate, and
+/// extract its initializer expression when present.
+///
+/// Returns:
+///   * `None` — declaration is not a single-binding `var/let/const X[ =
+///     init];` statement, or the initializer is too complex to safely
+///     copy to a writer module (calls, member access, identifier
+///     references, etc.).
+///   * `Some(None)` — bare `var X;` declaration with no initializer.
+///   * `Some(Some(literal))` — `var X = LITERAL;` where LITERAL is a
+///     side-effect-free literal that can be transplanted as-is.
+fn classify_migratable_var_declaration<'a>(
+    snippet: &'a str,
+    binding: &str,
+) -> Option<Option<&'a str>> {
     let trimmed = snippet.trim();
     for keyword in ["var", "let", "const"] {
         if let Some(rest) = trimmed.strip_prefix(keyword)
             && rest.starts_with(|c: char| c.is_ascii_whitespace())
         {
             let rest = rest.trim_start();
-            if let Some(rest) = rest.strip_suffix(';')
-                && rest.trim() == binding
-            {
-                return true;
+            let Some(rest) = rest.strip_suffix(';') else {
+                continue;
+            };
+            let rest = rest.trim();
+            // Bare `var X;`
+            if rest == binding {
+                return Some(None);
+            }
+            // `var X = INIT;`
+            let mut splitter = rest.splitn(2, '=');
+            let lhs = splitter.next()?.trim();
+            let rhs = splitter.next()?.trim();
+            if lhs != binding {
+                continue;
+            }
+            if is_pure_literal_initializer(rhs) {
+                return Some(Some(rhs));
             }
         }
     }
-    false
+    None
 }
 
-/// Remove `var X;` (or `var X = undefined;`) statements for each binding
-/// in `bindings` from the runtime helper source. Used after Phase 10b's
-/// migration plan moves the declaration to a new owner module — the
-/// declaration is no longer needed in the runtime, and leaving it would
-/// either create a duplicate-declaration audit failure or shadow the
-/// re-exported binding from the owner module.
+/// Recognize the small set of literal initializers that are safe to
+/// move from the runtime helpers file to a writer module without
+/// dragging along references to other bindings. Limited to truly
+/// side-effect-free shapes — anything that involves calls, member
+/// access, or identifier references is rejected to keep the migration
+/// from accidentally introducing forward references in the writer.
+fn is_pure_literal_initializer(text: &str) -> bool {
+    let text = text.trim();
+    if matches!(text, "void 0") {
+        return true;
+    }
+    is_literal_expression(text)
+}
+
+/// Remove `var X;` or `var X = LITERAL;` declarations for each binding
+/// in `bindings` from the runtime helper source. Used after the Phase
+/// 10b/10c migration plan moves the declaration (and any literal
+/// initializer) to a new owner module — the declaration is no longer
+/// needed in the runtime, and leaving it would either create a
+/// duplicate-declaration audit failure or shadow the re-exported
+/// binding from the owner module.
 fn strip_runtime_var_declarations<'a>(
     source: &str,
     bindings: impl IntoIterator<Item = &'a BindingName>,
@@ -6691,7 +6769,14 @@ fn strip_runtime_var_declarations<'a>(
         let matched = stripped
             .strip_prefix("var ")
             .and_then(|rest| rest.strip_suffix(';'))
-            .map(str::trim)
+            .map(|body| {
+                // Strip everything past `=` for declarations with an
+                // initializer; the migration's gate already verified the
+                // initializer is a side-effect-free literal that the
+                // writer carries verbatim, so the runtime line is safe
+                // to drop entirely.
+                body.split('=').next().unwrap_or(body).trim()
+            })
             .is_some_and(|name| drop_set.contains(name));
         if matched {
             continue;
@@ -9858,7 +9943,10 @@ mod tests {
     #[test]
     fn runtime_prelude_binding_written_by_module_uses_live_setter() {
         let planner = ImportExportPlanner;
-        let prelude = "var shared = 0;\n";
+        // Object literal initializer keeps Phase 10c's migration plan
+        // from picking this binding up — the test still validates that
+        // the cross-module setter mechanism is wired correctly.
+        let prelude = "var shared = {};\n";
         let body = "shared = 1;\nexport { shared };\n";
         let source = format!("{prelude}{body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -10151,11 +10239,12 @@ mod tests {
     #[test]
     fn runtime_prelude_update_writes_use_live_setters() {
         let planner = ImportExportPlanner;
-        // Both bindings have explicit initializers in the prelude so the
-        // Phase 10b migration plan skips them — the setter mechanism
-        // remains intact and this test continues to validate the
-        // update-operator rewrite path.
-        let prelude = "var counter = 2;\nvar result = 0;\n";
+        // Object-literal initializers keep both bindings out of the
+        // Phase 10c migration plan (literal-number initializers would
+        // otherwise be picked up). The numeric update-operator rewrite
+        // path under test runs against the runtime-coerced numbers
+        // produced at runtime.
+        let prelude = "var counter = {};\nvar result = {};\n";
         let body = "result = counter--;\n++counter;\nexport { counter, result };\n";
         let source = format!("{prelude}{body}");
         assert!(
@@ -10265,10 +10354,11 @@ mod tests {
     #[test]
     fn runtime_prelude_array_destructuring_writes_use_live_setters() {
         let planner = ImportExportPlanner;
-        // Initialize both prelude vars so the Phase 10b migration plan
-        // skips them — the destructuring rewrite path under test still
-        // routes writes through the setter.
-        let prelude = "var left = 0;\nvar right = 0;\n";
+        // Object-literal initializers keep both bindings out of the
+        // Phase 10c migration plan — the destructuring rewrite path
+        // under test still routes writes through the cross-module
+        // setter.
+        let prelude = "var left = {};\nvar right = {};\n";
         let body = "[left, right] = [1, 2];\nexport { left, right };\n";
         let source = format!("{prelude}{body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -10309,10 +10399,10 @@ mod tests {
     #[test]
     fn runtime_prelude_write_inside_computed_class_key_uses_live_setter() {
         let planner = ImportExportPlanner;
-        // Initialize the prelude vars so the Phase 10b migration plan
-        // leaves them in the runtime — the test still exercises the
+        // Object-literal initializers keep the prelude vars out of the
+        // Phase 10c migration plan — the test still exercises the
         // setter rewrite inside a computed class key.
-        let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream = null;\nvar holder = null;\n";
+        let prelude = "var J = (init, value) => () => (init && (value = init(init = 0)), value);\nvar Stream = {};\nvar holder = {};\n";
         let body = "void 0;\nvar init = J(() => { Stream = class Stream { [(holder = new WeakMap(), Symbol.iterator)]() { return 1; } }; });\nexport { Stream, init };\n";
         let source = format!("{prelude}{body}");
         assert!(
@@ -10354,11 +10444,11 @@ mod tests {
     #[test]
     fn runtime_helper_namespace_exports_initialize_empty_object_helpers() {
         let planner = ImportExportPlanner;
-        // Initialize d2 so Phase 10b's migration plan leaves it in the
-        // runtime — this test continues to validate the
+        // Object-literal initializer keeps d2 out of the Phase 10c
+        // migration plan — this test continues to validate the
         // namespace-export setup alongside cross-module setter use.
         let prelude =
-            "var zT = () => 'enum';\nvar m = {};\nM5(m, { enum: () => zT });\nvar d2 = null;\n";
+            "var zT = () => 'enum';\nvar m = {};\nM5(m, { enum: () => zT });\nvar d2 = {};\n";
         let body = "d2 = m;\nexport { d2 };\n";
         let source = format!("{prelude}{body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
