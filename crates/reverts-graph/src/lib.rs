@@ -745,13 +745,15 @@ fn collect_runtime_prelude_declarations(
         if !span_outside_module_spans(span.start, span.end, module_spans) {
             continue;
         }
-        if let Some(mut candidate) =
-            runtime_entrypoint_from_statement(source_file_id, statement, source)
+        let namespace_export = runtime_namespace_export_from_statement(statement);
+        if namespace_export.is_none()
+            && let Some(mut candidate) =
+                runtime_entrypoint_from_statement(source_file_id, statement, source)
         {
             candidate.side_effects = entrypoint_side_effects.clone();
             entrypoint_candidate = Some(candidate);
         }
-        if let Some(namespace_export) = runtime_namespace_export_from_statement(statement) {
+        if let Some(namespace_export) = namespace_export {
             namespace_exports.push(namespace_export);
         }
         let declarations = runtime_prelude_declarations_from_statement(statement, source);
@@ -3495,6 +3497,10 @@ mod tests {
         assert_eq!(namespace_export.helper.as_str(), "expose");
         assert_eq!(namespace_export.exports["ready"].as_str(), "ready");
         assert_eq!(namespace_export.exports["other-name"].as_str(), "other");
+        assert!(
+            prelude.entrypoint.is_none(),
+            "namespace initializer calls must not become runtime entrypoints"
+        );
         assert!(source.contains("var ns = {};"));
         assert!(source.contains("function ready()"));
         assert!(source.contains("function other()"));
