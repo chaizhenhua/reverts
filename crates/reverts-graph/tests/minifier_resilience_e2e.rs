@@ -607,6 +607,38 @@ fn pipeline_aligns_combined_guarded_rewrites() {
 }
 
 #[test]
+fn pipeline_aligns_typeof_local_undefined_with_strict_equality() {
+    // Minified source uses `typeof x === "undefined"` for a local
+    // variable check; hand-written source uses `x === undefined`.
+    // The guarded pass proves both preconditions hold (`x` is a
+    // local param, `undefined` is unshadowed) and the rewrite
+    // converges the two forms.
+    let minified = r#"function f(x) { return typeof x === "undefined"; }"#;
+    let source = r#"function f(x) { return x === undefined; }"#;
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "typeof X === 'undefined' and X === undefined must converge for local X"
+    );
+}
+
+#[test]
+fn pipeline_keeps_typeof_global_distinct_from_strict_equality() {
+    // For an *undeclared* identifier the guarded pass bails out —
+    // typeof's ReferenceError-safety is observable. The two forms
+    // therefore stay distinct.
+    let minified = r#"function f() { return typeof globalName === "undefined"; }"#;
+    let source = r#"function f() { return globalName === undefined; }"#;
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_ne!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "guarded pass must NOT collapse typeof when X is an undeclared global"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
