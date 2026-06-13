@@ -1334,6 +1334,17 @@ fn analyze_lazy_body_statements(
 ) -> Option<String> {
     let mut captured_value: Option<String> = None;
     let mut property_writes: BTreeMap<String, String> = BTreeMap::new();
+    // Side-effect statements collected before the value-producing
+    // statement. They get folded into a comma expression: the lazy
+    // thunk's original "run on first call" semantics map to "run at
+    // module load" — same observable state under the SCC-singleton
+    // gate that compute_eager_safe_analysis enforces. Recognized
+    // prologue forms:
+    //   * `__reverts_set_<X>(PURE)` — reverts-emitted setter; pure-
+    //     mutates a module-local binding.
+    //   * Bare identifier reference (`x;`) — esbuild emits these as
+    //     anti-tree-shake markers; they have no runtime effect.
+    let mut prologue: Vec<String> = Vec::new();
     for stmt in statements {
         match stmt {
             Statement::VariableDeclaration(decl) => {
@@ -1387,17 +1398,55 @@ fn analyze_lazy_body_statements(
                     }
                     return None;
                 }
-                if let Expression::CallExpression(call) = chain
-                    && let Some((key, value)) =
+                if let Expression::CallExpression(call) = chain {
+                    if let Some((key, value)) =
                         match_object_define_property(call, exports_param, source)
-                {
-                    if captured_value.is_some() {
-                        return None;
+                    {
+                        if captured_value.is_some() {
+                            return None;
+                        }
+                        if property_writes.insert(key, value).is_some() {
+                            return None;
+                        }
+                        continue;
                     }
-                    if property_writes.insert(key, value).is_some() {
-                        return None;
+                    if is_reverts_setter_call_with_pure_args(call, source) {
+                        let inner: &CallExpression<'_> = call;
+                        prologue.push(span_text(inner, source).to_string());
+                        continue;
                     }
+                    return None;
+                }
+                if matches!(chain, Expression::Identifier(_)) {
+                    // Bare identifier reference statement — esbuild
+                    // emits these as anti-tree-shake markers. No
+                    // runtime effect. Drop on collapse.
                     continue;
+                }
+                if let Expression::SequenceExpression(seq) = chain {
+                    // Commonly seen: `setter1(...), setter2(...), setter3(...);`
+                    // — every comma-separated expression must be one
+                    // of our accepted side-effect forms.
+                    let mut all_acceptable = true;
+                    for sub in &seq.expressions {
+                        match sub {
+                            Expression::Identifier(_) => {}
+                            Expression::CallExpression(c)
+                                if is_reverts_setter_call_with_pure_args(c, source) =>
+                            {
+                                let inner: &CallExpression<'_> = c;
+                                prologue.push(span_text(inner, source).to_string());
+                            }
+                            _ => {
+                                all_acceptable = false;
+                                break;
+                            }
+                        }
+                    }
+                    if all_acceptable {
+                        continue;
+                    }
+                    return None;
                 }
                 return None;
             }
@@ -1417,18 +1466,97 @@ fn analyze_lazy_body_statements(
             _ => return None,
         }
     }
-    if let Some(value) = captured_value {
-        return Some(value);
+    let base_value: Option<String> = if let Some(value) = captured_value {
+        Some(value)
+    } else if !property_writes.is_empty() {
+        let formatted = property_writes
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!("{{ {formatted} }}"))
+    } else if !prologue.is_empty() {
+        // Init-only body: no value produced, just side effects.
+        // Use the lazy thunk's natural "empty result":
+        //   * lazyModule → empty exports object `{}` (what the
+        //     wrapper would have created on first call)
+        //   * lazyValue  → `void 0` (thunk with no return)
+        Some(if module_param.is_some() {
+            "{}".into()
+        } else {
+            "void 0".into()
+        })
+    } else {
+        None
+    };
+    let base = base_value?;
+    if prologue.is_empty() {
+        return Some(base);
     }
-    if property_writes.is_empty() {
-        return None;
+    // Compose `(setter1, setter2, base)` — side effects run in order,
+    // expression evaluates to `base`. Direction-of-evaluation matches
+    // the original lazy body, just shifted to module-load time.
+    let mut combined = String::new();
+    combined.push('(');
+    for stmt in &prologue {
+        combined.push_str(stmt);
+        combined.push_str(", ");
     }
-    let formatted = property_writes
-        .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("{{ {formatted} }}"))
+    combined.push_str(&base);
+    combined.push(')');
+    Some(combined)
+}
+
+fn is_reverts_setter_call_with_pure_args(call: &CallExpression<'_>, source: &str) -> bool {
+    let Expression::Identifier(callee) = &call.callee else {
+        return false;
+    };
+    if !callee.name.as_str().starts_with("__reverts_set_") {
+        return false;
+    }
+    if call.arguments.len() != 1 {
+        return false;
+    }
+    is_pure_setter_argument(&call.arguments[0], source)
+}
+
+/// Same shape as `is_pure_eager_expression` but applied to the
+/// `Argument` variants of OXC AST. The two enums share discriminants
+/// (via OXC's `inherit_variants!` macro) but Rust treats them as
+/// distinct types — there's no zero-cost `Argument -> Expression`
+/// view in OXC 0.42, so we re-state the variant match here. Only the
+/// shapes a reverts-emitted setter call ever receives (literal-like
+/// values, function/class expressions, simple unary negations) are
+/// accepted; anything else (call, member access, identifier reference)
+/// keeps the lazy thunk to be safe.
+fn is_pure_setter_argument(arg: &Argument<'_>, source: &str) -> bool {
+    use oxc_ast::ast::Argument as A;
+    match arg {
+        A::NumericLiteral(_)
+        | A::StringLiteral(_)
+        | A::BooleanLiteral(_)
+        | A::NullLiteral(_)
+        | A::BigIntLiteral(_)
+        | A::RegExpLiteral(_)
+        | A::TemplateLiteral(_)
+        | A::FunctionExpression(_)
+        | A::ArrowFunctionExpression(_)
+        | A::ClassExpression(_) => true,
+        A::ObjectExpression(obj) => is_pure_object_expression(obj, source),
+        A::ArrayExpression(arr) => arr.elements.iter().all(is_pure_array_element),
+        A::ParenthesizedExpression(inner) => is_pure_eager_expression(&inner.expression, source),
+        A::UnaryExpression(unary) => {
+            matches!(
+                unary.operator,
+                oxc_syntax::operator::UnaryOperator::LogicalNot
+                    | oxc_syntax::operator::UnaryOperator::UnaryNegation
+                    | oxc_syntax::operator::UnaryOperator::UnaryPlus
+                    | oxc_syntax::operator::UnaryOperator::BitwiseNot
+                    | oxc_syntax::operator::UnaryOperator::Void
+            ) && is_pure_eager_expression(&unary.argument, source)
+        }
+        _ => false,
+    }
 }
 
 fn is_harmless_variable_declaration(
@@ -2392,6 +2520,140 @@ mod tests {
         // `module.exports = A = computeStuff()` — the final value is
         // a function call, which can have side effects. Reject.
         let body = "var A;\nmodule.exports = A = computeStuff();";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn lazy_body_classifier_accepts_reverts_setter_call_with_pure_arg() {
+        // Setter call alongside an exports write — common in CJS
+        // wrappers where some helper bindings are set as side effects
+        // before the main exports value. Phase 8e folds the setter
+        // into a leading comma expression so the side effect still
+        // runs at module load.
+        let body = "__reverts_set_helper(42); module.exports = 'value';";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(
+            value.as_deref(),
+            Some("(__reverts_set_helper(42), 'value')")
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_accepts_bare_identifier_statement() {
+        // `x;` as a standalone expression statement is a no-op the
+        // bundler emits to keep imports from being tree-shaken. Drop
+        // it on collapse.
+        let body = "bareImport;\nmodule.exports = 1;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_emits_init_only_lazy_module_as_empty_exports() {
+        // A `lazyModule` body that only invokes setters (no
+        // `module.exports = ...` write) eagerifies to `({}, ...,
+        // emptyExports)` where emptyExports is the wrapper's default
+        // — observers of `X()` previously got `{}` (the untouched
+        // exports object), so the rewrite preserves that.
+        let body = "__reverts_set_a(1); __reverts_set_b(2);";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(
+            value.as_deref(),
+            Some("(__reverts_set_a(1), __reverts_set_b(2), {})")
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_emits_init_only_lazy_value_as_void_zero() {
+        // For `lazyValue` bodies (no module param), an init-only
+        // body returned `undefined` originally; the eagerified form
+        // is `(setters..., void 0)`.
+        let body = "__reverts_set_a(1);\n__reverts_set_b(2);";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "",
+            None,
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(
+            value.as_deref(),
+            Some("(__reverts_set_a(1), __reverts_set_b(2), void 0)")
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_accepts_comma_separated_setter_sequence() {
+        // esbuild commonly emits multi-setter init as one statement
+        // joined by commas: `setterA(1), setterB(2), setterC(3);` —
+        // this is a SequenceExpression in the AST. Phase 8e walks
+        // each element and accepts the whole sequence when every
+        // comma-separated call is a setter (or a bare ident).
+        let body = "__reverts_set_a(1), __reverts_set_b(true), __reverts_set_c({ key: 'v' });";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "",
+            None,
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        // Note: the comma-separated setters are pushed individually
+        // into the prologue, so the emitted comma expression flattens
+        // them: `(setter_a(...), setter_b(...), setter_c(...), void 0)`.
+        assert_eq!(
+            value.as_deref(),
+            Some(
+                "(__reverts_set_a(1), __reverts_set_b(true), __reverts_set_c({ key: 'v' }), void 0)"
+            )
+        );
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_setter_with_function_call_arg() {
+        // `__reverts_set_X(otherThunk())` — the argument is a function
+        // call, which could have side effects we can't see. The
+        // existing impure-call rejection is the safety floor for
+        // Phase 8e; inter-procedural classification is a separate
+        // future pass.
+        let body = "__reverts_set_a(loadData()); module.exports = 1;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(value, None);
+    }
+
+    #[test]
+    fn lazy_body_classifier_rejects_non_setter_call_in_body() {
+        let body = "initSomething();\nmodule.exports = 1;";
         let value = extract_lazy_module_eager_value(
             body,
             "exports",
