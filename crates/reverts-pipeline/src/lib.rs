@@ -1745,10 +1745,10 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.is_clean());
-        // Entry module plus the per-source runtime helper file holding lazyValue.
-        // The CommonJS lazy wrapper is now inlined locally so it no longer
-        // needs a shared runtime lazyModule import.
-        assert_eq!(run.project.files.len(), 2);
+        // The CommonJS wrapper and the remaining zero-arg lazyValue thunk are
+        // both local now, so this fixture no longer needs a shared runtime
+        // helper file at all.
+        assert_eq!(run.project.files.len(), 1);
         let entry = run
             .project
             .files
@@ -1758,21 +1758,18 @@ mod tests {
         assert!(!entry.source.contains("$wrap7"));
         assert!(!entry.source.contains("_lazy9"));
         assert!(!entry.source.contains("lazyModule("));
-        assert!(entry.source.contains("lazyValue("));
-        // The CommonJS memoization temps are local to the recovered module;
-        // lazyValue temps still live only inside the helper file.
+        assert!(!entry.source.contains("lazyValue("));
+        assert!(entry.source.contains("var _$l ="));
+        // The CommonJS memoization temps and the tiny lazyValue memoizer are
+        // local to the recovered module.
         assert!(entry.source.contains("_$cached"));
         assert!(!entry.source.contains("_$init"));
-        let helper = run
-            .project
-            .files
-            .iter()
-            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-            .expect("runtime helper file should be emitted");
-        assert!(!helper.source.contains("function lazyModule(factory) {"));
-        assert!(helper.source.contains("function lazyValue(factory) {"));
-        assert!(!helper.source.contains("_$cached"));
-        assert!(helper.source.contains("_$init"));
+        assert!(
+            run.project
+                .files
+                .iter()
+                .all(|file| file.path != "modules/runtime/source-1-helpers.ts")
+        );
     }
 
     #[test]

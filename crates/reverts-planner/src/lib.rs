@@ -460,11 +460,13 @@ impl ImportExportPlanner {
                 });
             }
 
+            let mut has_runtime_edge_before_lazy_helpers = false;
             if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
                 for (target_module_id, bindings) in module_imports {
                     if let Some(folded) = runtime_lazy_folds.modules.get(target_module_id)
                         && omitted_folded_stub_modules.contains(target_module_id)
                     {
+                        has_runtime_edge_before_lazy_helpers = true;
                         used_runtime_helper_files
                             .entry(folded.source_file_id)
                             .or_default()
@@ -557,27 +559,75 @@ impl ImportExportPlanner {
                 .collect();
 
             let runtime_import_groups = group_runtime_imports(runtime_imports);
-            let lazy_helper_names = lowered_source
+            let mut runtime_import_partitions = Vec::<(u32, RuntimeReexportImportPartition)>::new();
+            for (source_file_id, bindings) in runtime_import_groups {
+                let bindings = bindings
+                    .into_iter()
+                    .filter(|binding| !lowered_helpers.contains(binding))
+                    .filter(|binding| !remaining_runtime_helpers.contains(binding))
+                    .filter(|binding| !planned_bindings.contains(binding))
+                    .filter(|binding| !local_source_definitions.contains(binding))
+                    .filter(|binding| !local_source_writes.contains(binding))
+                    .collect::<BTreeSet<_>>();
+                if bindings.is_empty() {
+                    continue;
+                }
+                let import_partition = partition_runtime_reexport_bindings(
+                    &runtime_var_migrations,
+                    source_file_id,
+                    module.id,
+                    bindings,
+                );
+                if !import_partition.runtime_bindings.is_empty()
+                    || !import_partition.direct_imports.is_empty()
+                {
+                    runtime_import_partitions.push((source_file_id, import_partition));
+                }
+            }
+            let has_runtime_group_imports = runtime_import_partitions
+                .iter()
+                .any(|(_, partition)| !partition.runtime_bindings.is_empty());
+            let lowered_import_partition = lowered_source
+                .map(|lowered_source| {
+                    partition_runtime_reexport_bindings(
+                        &runtime_var_migrations,
+                        lowered_source.source_file_id,
+                        module.id,
+                        remaining_runtime_helpers.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            let mut lazy_helper_names = lowered_source
                 .map(lazy_helper_import_names_for_source)
                 .unwrap_or_default();
+            let mut localized_lazy_value_source: Option<String> = None;
+            if let Some(lowered_source) = lowered_source
+                && lowered_source.uses_lazy_value
+                && !lowered_source.uses_lazy_module
+                && !has_runtime_edge_before_lazy_helpers
+                && lowered_import_partition.runtime_bindings.is_empty()
+                && written_runtime_helpers.is_empty()
+                && !has_runtime_group_imports
+            {
+                let (localized, changed) =
+                    inline_remaining_lazy_value_wrappers(&lowered_source.source);
+                if changed {
+                    localized_lazy_value_source = Some(localized);
+                    lazy_helper_names.retain(|name| *name != "lazyValue");
+                }
+            }
             if let Some(lowered_source) = lowered_source
                 && (!remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty())
             {
-                let import_partition = partition_runtime_reexport_bindings(
-                    &runtime_var_migrations,
-                    lowered_source.source_file_id,
-                    module.id,
-                    remaining_runtime_helpers.clone(),
-                );
                 emit_direct_owner_imports(
                     program,
                     module.id,
                     path,
                     &mut file,
                     &mut planned_bindings,
-                    &import_partition.direct_imports,
+                    &lowered_import_partition.direct_imports,
                 );
-                let remaining_runtime_helpers = import_partition.runtime_bindings;
+                let remaining_runtime_helpers = lowered_import_partition.runtime_bindings.clone();
                 if !remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty() {
                     used_runtime_helper_files
                         .entry(lowered_source.source_file_id)
@@ -602,7 +652,7 @@ impl ImportExportPlanner {
                 if lowered_source.uses_lazy_module {
                     used_lazy_module.insert(lowered_source.source_file_id);
                 }
-                if lowered_source.uses_lazy_value {
+                if lazy_helper_names.contains(&"lazyValue") {
                     used_lazy_value.insert(lowered_source.source_file_id);
                 }
                 let specifier = relative_import_specifier(
@@ -633,24 +683,7 @@ impl ImportExportPlanner {
                 }
             }
 
-            for (source_file_id, bindings) in runtime_import_groups {
-                let bindings = bindings
-                    .into_iter()
-                    .filter(|binding| !lowered_helpers.contains(binding))
-                    .filter(|binding| !remaining_runtime_helpers.contains(binding))
-                    .filter(|binding| !planned_bindings.contains(binding))
-                    .filter(|binding| !local_source_definitions.contains(binding))
-                    .filter(|binding| !local_source_writes.contains(binding))
-                    .collect::<BTreeSet<_>>();
-                if bindings.is_empty() {
-                    continue;
-                }
-                let import_partition = partition_runtime_reexport_bindings(
-                    &runtime_var_migrations,
-                    source_file_id,
-                    module.id,
-                    bindings,
-                );
+            for (source_file_id, import_partition) in runtime_import_partitions {
                 emit_direct_owner_imports(
                     program,
                     module.id,
@@ -757,7 +790,9 @@ impl ImportExportPlanner {
 
             if let Some(lowered_source) = lowered_source {
                 let source_file_path = lowered_source.source_file_path.as_str();
-                let mut source = lowered_source.source.clone();
+                let mut source = localized_lazy_value_source
+                    .clone()
+                    .unwrap_or_else(|| lowered_source.source.clone());
                 if !written_runtime_helpers.is_empty() {
                     source =
                         rewrite_runtime_helper_writes(source.as_str(), &written_runtime_helpers);
@@ -1933,11 +1968,12 @@ fn lowered_runtime_sources(
             .safe_call_targets_by_module
             .get(&module.id)
             .unwrap_or(&empty_safe_targets);
-        let mut lowering = lower_runtime_helpers(
+        let mut lowering = lower_runtime_helpers_with_options(
             source.source,
             &helper_kinds,
             &exported_bindings,
             eager_safe_call_targets,
+            false,
         );
         // Phase 8 cross-module rewrite: bindings this module imports
         // that the eager-safe analysis cleared no longer carry their
@@ -5078,11 +5114,28 @@ struct RuntimeHelperLowering {
     reshaped_bindings: BTreeSet<BindingName>,
 }
 
+#[cfg(test)]
 fn lower_runtime_helpers(
     source: &str,
     helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
     exported_bindings: &BTreeSet<BindingName>,
     eager_safe_call_targets: &BTreeSet<String>,
+) -> RuntimeHelperLowering {
+    lower_runtime_helpers_with_options(
+        source,
+        helper_kinds,
+        exported_bindings,
+        eager_safe_call_targets,
+        true,
+    )
+}
+
+fn lower_runtime_helpers_with_options(
+    source: &str,
+    helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
+    exported_bindings: &BTreeSet<BindingName>,
+    eager_safe_call_targets: &BTreeSet<String>,
+    allow_local_lazy_value_wrappers: bool,
 ) -> RuntimeHelperLowering {
     let mut lowered = source.to_string();
     let mut lowered_helpers = BTreeSet::new();
@@ -5111,7 +5164,7 @@ fn lower_runtime_helpers(
             }
         }
     }
-    let remaining_helpers = helper_kinds
+    let remaining_helpers: BTreeSet<BindingName> = helper_kinds
         .iter()
         .filter(|(helper, kind)| match kind {
             RuntimePreludeBindingKind::CommonJsWrapper
@@ -5147,6 +5200,12 @@ fn lower_runtime_helpers(
         let (next, decomposed) = decompose_function_namespace_objects(&lowered, exported_bindings);
         lowered = next;
         reshaped_bindings.extend(decomposed);
+        let can_inline_remaining_lazy_values = {
+            let local_definitions = top_level_definitions_in_source(&lowered);
+            remaining_helpers
+                .iter()
+                .all(|binding| local_definitions.contains(binding))
+        };
         // Anything that survived the pure-value delazify pass still needs
         // lazy CommonJS semantics, but it does not need to import the shared
         // `lazyModule` helper. Inline the tiny memoizing wrapper locally so
@@ -5154,6 +5213,16 @@ fn lower_runtime_helpers(
         // runtime helper file just for this loader.
         let (next, _inlined_lazy_modules) = inline_remaining_lazy_module_wrappers(&lowered);
         lowered = next;
+        // Same for lazyValue thunks that must remain callable (exported,
+        // first-class, or impure bodies): keep memoization semantics, but make
+        // the wrapper local to the declaring module when that removes the
+        // only runtime-helper edge. If the module already needs runtime
+        // bindings, keeping the shared helper is smaller and avoids replacing
+        // one import specifier with another generated local var.
+        if allow_local_lazy_value_wrappers && can_inline_remaining_lazy_values {
+            let (next, _inlined_lazy_values) = inline_remaining_lazy_value_wrappers(&lowered);
+            lowered = next;
+        }
         // Re-derive the flags from the post-rewrite source: if every lazy
         // thunk collapsed, the helper module no longer needs the helper.
         uses_lazy_value = source_contains_top_level_call(&lowered, "lazyValue");
@@ -5167,6 +5236,166 @@ fn lower_runtime_helpers(
         uses_lazy_value,
         reshaped_bindings,
     }
+}
+
+fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
+    let bytes = source.as_bytes();
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let helper_name = local_lazy_value_helper_name(source);
+    let mut cursor = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+            && let Some((decl, after)) = try_parse_lazy_value_wrapper_declaration(source, cursor)
+        {
+            edits.push((decl.callee_span.0, decl.callee_span.1, helper_name.clone()));
+            cursor = after;
+            continue;
+        }
+        match bytes[cursor] {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+        cursor += 1;
+    }
+    if edits.is_empty() {
+        return (source.to_string(), false);
+    }
+    let source = apply_text_edits(source, &edits);
+    (
+        format!("{}\n{source}", local_lazy_value_helper_source(&helper_name)),
+        true,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct ParsedLazyValueWrapper {
+    callee_span: (usize, usize),
+}
+
+fn try_parse_lazy_value_wrapper_declaration(
+    source: &str,
+    start: usize,
+) -> Option<(ParsedLazyValueWrapper, usize)> {
+    let (_keyword, after_keyword) = declaration_keyword_at(source, start)?;
+    let bytes = source.as_bytes();
+    let mut cursor = skip_ws(bytes, start + after_keyword);
+    let (_binding, after_binding) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    let callee_start = cursor;
+    if !keyword_at(source, cursor, "lazyValue") {
+        return None;
+    }
+    cursor += "lazyValue".len();
+    let callee_end = cursor;
+    cursor = skip_ws(bytes, cursor);
+    if bytes.get(cursor) != Some(&b'(') {
+        return None;
+    }
+    let call_open = cursor;
+    let call_close = find_matching_paren(source, call_open)?;
+    let factory = source[call_open + 1..call_close].trim();
+    if factory.is_empty() {
+        return None;
+    }
+    if !lazy_value_factory_is_zero_arg_arrow(factory) {
+        return None;
+    }
+    // Keep assignment-heavy lazy initializers in their canonical
+    // `lazyValue(...)` shape for the runtime-folding pass. Those bodies are
+    // often the writer side of runtime mutable bindings; inlining them before
+    // fold planning would hide the `X = ...` writes and prevent the safer
+    // runtime relocation/folding machinery from seeing them.
+    if lazy_value_factory_contains_assignment(factory) {
+        return None;
+    }
+    let after_call = skip_ws(bytes, call_close + 1);
+    if bytes.get(after_call) != Some(&b';') {
+        return None;
+    }
+    let stmt_end = after_call + 1;
+    Some((
+        ParsedLazyValueWrapper {
+            callee_span: (callee_start, callee_end),
+        },
+        stmt_end,
+    ))
+}
+
+fn lazy_value_factory_contains_assignment(factory: &str) -> bool {
+    let Some(arrow) = factory.find("=>") else {
+        return true;
+    };
+    let body = &factory[arrow + 2..];
+    let bytes = body.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(body, cursor) {
+            cursor = next;
+            continue;
+        }
+        if bytes[cursor] != b'=' {
+            cursor += 1;
+            continue;
+        }
+        let prev = previous_non_ws(bytes, cursor);
+        let next = skip_ws(bytes, cursor + 1);
+        let prev_is_operator =
+            prev.is_some_and(|idx| matches!(bytes[idx], b'=' | b'!' | b'<' | b'>'));
+        let next_is_operator = matches!(bytes.get(next), Some(b'=') | Some(b'>'));
+        if !prev_is_operator && !next_is_operator {
+            return true;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn lazy_value_factory_is_zero_arg_arrow(factory: &str) -> bool {
+    let bytes = factory.as_bytes();
+    let mut cursor = skip_ws(bytes, 0);
+    if bytes.get(cursor) != Some(&b'(') {
+        return false;
+    }
+    let Some(params_end) = find_matching_paren(factory, cursor) else {
+        return false;
+    };
+    if !factory[cursor + 1..params_end].trim().is_empty() {
+        return false;
+    }
+    cursor = skip_ws(bytes, params_end + 1);
+    expect_arrow(bytes, cursor).is_some()
+}
+
+fn local_lazy_value_helper_name(source: &str) -> String {
+    let mut name = "_$l".to_string();
+    let mut suffix = 0usize;
+    while contains_identifier_reference(source, name.as_str()) {
+        suffix += 1;
+        name = format!("_$l{suffix}");
+    }
+    name
+}
+
+fn local_lazy_value_helper_source(helper_name: &str) -> String {
+    format!("var {helper_name}=(_$f,_$v)=>()=>(_$f&&(_$v=_$f(_$f=0)),_$v);")
 }
 
 fn inline_remaining_lazy_module_wrappers(source: &str) -> (String, bool) {
@@ -8609,7 +8838,7 @@ mod tests {
 
         // No synthetic scaffolding survives in the lowered source.
         assert!(!lowered.source.contains("lazyModule("));
-        assert!(!lowered.source.contains("lazyValue("));
+        assert!(!lowered.source.contains("= lazyValue("));
         assert!(!lowered.source.contains("_$"));
         assert!(!lowered.source.contains("__reverts_"));
         // Every reshape was tracked so the planner can downgrade the
@@ -8653,7 +8882,7 @@ mod tests {
         );
         assert!(lowered.source.contains("console.log(palette.primary);"));
         assert!(lowered.source.contains("use(palette.secondary);"));
-        assert!(!lowered.source.contains("lazyValue("));
+        assert!(!lowered.source.contains("= lazyValue("));
         assert!(!lowered.uses_lazy_value);
     }
 
@@ -8674,8 +8903,12 @@ mod tests {
         let lowered =
             lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
-        assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
-        assert!(lowered.uses_lazy_value);
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var thunk = _$l(() => {"));
+        assert!(lowered.source.contains("return 42;"));
+        assert!(lowered.source.contains("register(thunk);"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
     }
 
     #[test]
@@ -8695,9 +8928,14 @@ mod tests {
 
         // `export { settings };` references `settings` as a value, not a call —
         // delazifying would change consumer semantics across the module
-        // boundary. Keep the lazy thunk until cross-module rewriting lands.
-        assert!(lowered.source.contains("var settings = lazyValue(() => {"));
-        assert!(lowered.uses_lazy_value);
+        // boundary. Keep the lazy thunk shape, but inline the tiny memoizer
+        // locally instead of importing the shared runtime helper.
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var settings = _$l(() => {"));
+        assert!(lowered.source.contains("return { ready: true };"));
+        assert!(lowered.source.contains("export { settings };"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
     }
 
     #[test]
@@ -8713,10 +8951,12 @@ mod tests {
 
         // Body has a side-effect call but no `return EXPR;` — collapsing to
         // `var init = ...` would evaluate the side effect at module load.
-        // Keep the lazy thunk.
-        assert!(lowered.source.contains("var init = lazyValue(() => {"));
+        // Keep the lazy thunk semantics via a local memoizer.
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var init = _$l(() => {"));
         assert!(lowered.source.contains("setup();"));
-        assert!(lowered.uses_lazy_value);
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
     }
 
     #[test]
@@ -8735,8 +8975,124 @@ mod tests {
 
         // `loadConfig()` is a function call — could have side effects or
         // depend on later state. Don't change evaluation timing.
-        assert!(lowered.source.contains("var lazy = lazyValue(() => {"));
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var lazy = _$l(() => {"));
+        assert!(lowered.source.contains("return loadConfig();"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn inline_remaining_lazy_value_skips_assignment_factories() {
+        let source = concat!(
+            "var target;\n",
+            "var init = L(() => { target ||= makeValue(); });\n",
+            "register(init);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+        // Assignment bodies are the writer side for runtime-var folding. Keep
+        // the canonical lazyValue shape so later phases can still see the
+        // assignment and move it with the runtime binding.
+        assert!(!lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var init = lazyValue(() => {"));
+        assert!(lowered.source.contains("target ||= makeValue();"));
         assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn inline_remaining_lazy_value_ignores_assignment_lookalikes() {
+        let source = concat!(
+            "var init = L(() => {\n",
+            "  // text: target = value\n",
+            "  if (\"target = value\" === 'target = value') setup();\n",
+            "  return () => \"target = value\";\n",
+            "});\n",
+            "register(init);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var init = _$l(() => {"));
+        assert!(
+            lowered
+                .source
+                .contains("\"target = value\" === 'target = value'")
+        );
+        assert!(lowered.source.contains("return () => \"target = value\";"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn inline_remaining_lazy_value_uses_collision_free_helper_name() {
+        let source = concat!(
+            "var _$l = 'user binding';\n",
+            "var thunk = L(() => { setup(); });\n",
+            "register(thunk);\n",
+        );
+        let helper_kinds = BTreeMap::from([(
+            BindingName::new("L"),
+            RuntimePreludeBindingKind::LazyInitializer,
+        )]);
+
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+        assert!(
+            lowered.source.contains("var _$l1"),
+            "expected synthesized helper to avoid the existing user binding:\n{}",
+            lowered.source
+        );
+        assert!(lowered.source.contains("var _$l = 'user binding';"));
+        assert!(lowered.source.contains("var thunk = _$l1(() => {"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn inline_remaining_lazy_value_keeps_shared_helper_when_runtime_import_remains() {
+        let source = concat!(
+            "runtimeDep();\n",
+            "var thunk = L(() => { setup(); });\n",
+            "register(thunk);\n",
+        );
+        let helper_kinds = BTreeMap::from([
+            (
+                BindingName::new("L"),
+                RuntimePreludeBindingKind::LazyInitializer,
+            ),
+            (
+                BindingName::new("runtimeDep"),
+                RuntimePreludeBindingKind::SourceBacked,
+            ),
+        ]);
+
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+        assert!(!lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
+        assert!(lowered.source.contains("runtimeDep();"));
+        assert!(lowered.uses_lazy_value);
+        assert!(
+            lowered
+                .remaining_helpers
+                .contains(&BindingName::new("runtimeDep")),
+            "source-backed runtime binding should still be imported"
+        );
     }
 
     #[test]
@@ -8756,8 +9112,11 @@ mod tests {
         let lowered =
             lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
-        assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
-        assert!(lowered.uses_lazy_value);
+        assert!(lowered.source.contains("var _$l"));
+        assert!(lowered.source.contains("var thunk = _$l(() => {"));
+        assert!(lowered.source.contains("thunk(0);"));
+        assert!(!lowered.source.contains("= lazyValue("));
+        assert!(!lowered.uses_lazy_value);
     }
 
     #[test]
@@ -9443,7 +9802,7 @@ mod tests {
 
         // Every lazy thunk collapsed to a direct binding; no helper imports.
         assert!(!entry_source.contains("lazyModule("));
-        assert!(!entry_source.contains("lazyValue("));
+        assert!(!entry_source.contains("= lazyValue("));
         assert!(!entry_source.contains("from './runtime/"));
 
         // Primitive-valued namespaces stay grouped — `config` and `palette`
@@ -9716,24 +10075,22 @@ mod tests {
             .iter()
             .find(|file| file.path == "modules/entry.ts")
             .expect("entry file should be planned");
-        let helper = plan
-            .files
-            .iter()
-            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-            .expect("runtime helper file should be planned");
         let entry_source = entry.body.join("\n");
-        let helper_source = helper.body.join("\n");
 
         // `entry` is exported — delazifying would change cross-module
-        // semantics. Stays a lazy thunk and pulls in `lazyModule`.
+        // semantics. Stays a lazy thunk, but the CommonJS memoizer is local.
         assert!(entry_source.contains("var entry = (() => {"));
         assert!(!entry_source.contains("lazyModule("));
         // `init` body is `entry();` (side effect, no return). Can't
-        // hoist to module load time. Stays as a lazy thunk.
-        assert!(entry_source.contains("var init = lazyValue("));
-        // Helper file declares the helpers consumers still need.
-        assert!(!helper_source.contains("function lazyModule(factory)"));
-        assert!(helper_source.contains("function lazyValue(factory)"));
+        // hoist to module load time. Stays as a lazy thunk, now with a
+        // module-local memoizer instead of a runtime lazyValue import.
+        assert!(entry_source.contains("var _$l"), "{entry_source}");
+        assert!(entry_source.contains("var init = _$l(() => {"));
+        assert!(!entry_source.contains("= lazyValue("));
+        assert!(
+            planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+            "all lazy wrappers are now local, so no shared runtime helper is needed"
+        );
     }
 
     #[test]
@@ -10395,13 +10752,13 @@ mod tests {
         assert!(!module_source.contains("_lazy9"));
         assert!(module_source.contains("var entry = (() => {"));
         assert!(!module_source.contains("lazyModule("));
-        assert!(module_source.contains("lazyValue("));
+        assert!(!module_source.contains("= lazyValue("));
         // The remaining CommonJS lazy boundary is now local to this module,
         // so its tiny memoization temps live in the recovered module instead
-        // of requiring a shared runtime lazyModule import.
+        // of requiring shared runtime lazyModule/lazyValue imports.
         assert!(module_source.contains("_$cached"));
-        assert!(!module_source.contains("_$init"));
-        assert!(!module_source.contains("_$val"));
+        assert!(module_source.contains("var _$l"), "{module_source}");
+        assert!(module_source.contains("var init = _$l(() => {"));
         assert!(module_source.contains("_$module"));
     }
 
@@ -11040,6 +11397,7 @@ mod tests {
 
         assert!(helper_source.contains("function buildShared()"));
         assert!(helper_source.contains("shared = buildShared();"));
+        assert!(helper_source.contains("var initShared = lazyValue(() => {"));
         assert!(helper_source.contains("function lazyValue(factory) {"));
         assert!(helper_source.contains("export { initShared, lazyValue, shared };"));
     }
@@ -11634,7 +11992,7 @@ mod tests {
         ]);
         let lowered = purify_private_runtime_lazy_initializers(source, &writable);
 
-        assert!(!lowered.contains("lazyValue("));
+        assert!(!lowered.contains("= lazyValue("));
         assert!(lowered.contains("target = value;"));
         assert!(lowered.contains("var init = () => {};"));
         assert!(lowered.contains("function read() { init(); return target; }"));
