@@ -524,8 +524,8 @@ pub struct VersionedPackageMatchReport {
 #[derive(Debug, Clone, PartialEq)]
 /// Unified package matching pipeline output.
 ///
-/// This is the single matcher-side orchestration point for the legacy
-/// module/source matcher, the function-level cascade matcher, structural-bag
+/// This is the single matcher-side orchestration point for the module/source
+/// version matcher, the function-level cascade matcher, structural-bag
 /// ownership, and dependency-closure ownership promotion. CLI callers should
 /// use this instead of manually running those tracks in parallel.
 pub struct PackageMatchingPipelineReport {
@@ -594,38 +594,6 @@ pub fn match_packages_with_pipeline(
         package_report,
         cascade_report,
         structural_bag_report,
-    }
-}
-
-impl From<VersionedPackageMatchReport> for PackageMatchReport {
-    fn from(report: VersionedPackageMatchReport) -> Self {
-        Self {
-            attributions: report.attributions,
-            surfaces: report.surfaces,
-            matches: report.matches,
-            audit: report.audit,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-/// Exact package matcher over normalized module and package sources.
-pub struct ExactPackageMatcher;
-
-impl ExactPackageMatcher {
-    /// Matches package modules in unvalidated input rows before generation.
-    ///
-    /// The matcher reads module source only through `InputRows::module_source_slice`
-    /// and normalizes both sides through `reverts-js` before exact comparison.
-    #[must_use]
-    pub fn match_rows(
-        self,
-        rows: &InputRows,
-        package_sources: &[PackageSource],
-    ) -> PackageMatchReport {
-        VersionedPackageMatcher::default()
-            .match_rows(rows, package_sources)
-            .into()
     }
 }
 
@@ -1068,19 +1036,6 @@ fn accept_partial_cascade_coverage(
         return false;
     }
     runner_up_functions == 0 || covered_functions >= runner_up_functions.saturating_mul(3)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-/// Result of a package matching pass.
-pub struct PackageMatchReport {
-    /// Accepted attributions that can be persisted by the caller.
-    pub attributions: Vec<PackageAttributionInput>,
-    /// Accepted project-level package surfaces discovered from source-backed bare imports.
-    pub surfaces: Vec<PackageSurfaceInput>,
-    /// Match evidence for accepted attributions.
-    pub matches: Vec<PackageMatch>,
-    /// Ambiguity, missing source, and parse findings.
-    pub audit: AuditReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2442,8 +2397,8 @@ mod tests {
     use reverts_observe::FindingCode;
 
     use super::{
-        BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageModuleSourceQuality,
-        PackageSource, VersionedPackageMatcher, match_structural_bags,
+        BestVersionMatch, ModuleMatchStrategy, PackageModuleSourceQuality, PackageSource,
+        VersionedPackageMatcher, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality,
     };
@@ -2543,7 +2498,7 @@ mod tests {
             "export function add(a, b) {\n  return a + b;\n}",
         )];
 
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert!(report.audit.is_clean());
         assert_eq!(report.attributions.len(), 1);
@@ -2972,7 +2927,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ),
         ];
 
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert!(report.attributions.is_empty());
         assert!(report.audit.has(FindingCode::AmbiguousPackageMatch));
@@ -3004,7 +2959,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "export const two = 2;",
         )];
 
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert_eq!(report.attributions.len(), 1);
         assert_eq!(report.attributions[0].module_id, ModuleId(11));
@@ -3028,7 +2983,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "export function add(a, b) { return a + b; }",
         )];
 
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert!(report.attributions.is_empty());
         assert!(report.matches.is_empty());
@@ -3049,7 +3004,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             PackageSource::external("pkg", "3.0.0", "pkg/z", "z.js", "export const z = 26;"),
         ];
         let rows = rows_with_package_source("export const target=42");
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert!(report.audit.is_clean());
         assert_eq!(report.attributions.len(), 1);
@@ -3276,7 +3231,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 "undici",
             ));
 
-        let report = ExactPackageMatcher.match_rows(&rows, &[]);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &[]);
 
         assert!(report.audit.is_clean());
         assert_eq!(report.surfaces.len(), 1);
@@ -3310,7 +3265,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ),
         ];
 
-        let report = ExactPackageMatcher.match_rows(&rows, &package_sources);
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
 
         assert_eq!(report.surfaces.len(), 1);
         assert_eq!(report.surfaces[0].package_name, "ws");

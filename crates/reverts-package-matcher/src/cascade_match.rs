@@ -1,17 +1,13 @@
 //! End-to-end cascade + variant + version + Hungarian pipeline against a slice
 //! of [`PackageSource`]s.
 //!
-//! This is the Phase-1 entry point introduced by the new package matcher spec
-//! (§13). It builds an in-memory fingerprint index from the supplied package
-//! sources, runs the cascade tiers per bundle function, lets the Hungarian
-//! assignment resolve cross-package collisions, classifies each accepted match
-//! through [`acceptance::classify`], and finally emits
+//! This function-level evidence engine is now orchestrated by
+//! [`crate::match_packages_with_pipeline`]. It builds an in-memory fingerprint
+//! index from the supplied package sources, runs the cascade tiers per bundle
+//! function, lets the Hungarian assignment resolve cross-package collisions,
+//! classifies each accepted match through [`acceptance::classify`], and emits
 //! [`PackageAttributionInput`] rows with `function_span` + `confidence`
 //! populated.
-//!
-//! The existing `ExactPackageMatcher` / `VersionedPackageMatcher` paths in the
-//! parent module are untouched: the new pipeline runs alongside the legacy one
-//! during Phase-1 rollout.
 
 use std::collections::BTreeMap;
 
@@ -58,8 +54,9 @@ pub struct CascadeOwnershipMatch {
 /// per-module bundle fingerprints, using `package_sources` as the right-hand
 /// side index.
 ///
-/// Phase-1: this runs alongside [`crate::ExactPackageMatcher`] /
-/// [`crate::VersionedPackageMatcher`]; callers may consume either or both.
+/// Public lower-level evidence engine. Most callers should prefer
+/// [`crate::match_packages_with_pipeline`], which folds this evidence back into
+/// module-level attributions/ownership matches.
 #[must_use]
 pub fn match_with_cascade(
     fingerprints_by_module: &BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
