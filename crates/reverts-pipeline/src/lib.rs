@@ -1412,6 +1412,23 @@ mod tests {
     }
 
     #[test]
+    fn export_hint_wins_over_later_object_property_hint() {
+        let rows = rows_with_application_source(
+            "const a = 1; export { a as createClient }; const obj = { internalName: a };",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("const createClient = 1;"));
+        assert!(source.contains("export { createClient };"));
+        assert!(source.contains("const obj = { internalName: createClient };"));
+        assert!(!source.contains("const internalName = 1;"));
+    }
+
+    #[test]
     fn duplicate_named_imports_are_merged_and_sorted_late() {
         let rows = rows_with_application_source(
             "import { z } from './utils'; import { a } from './utils'; console.log(z, a);",

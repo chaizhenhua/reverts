@@ -100,6 +100,22 @@ impl GeneratedRename {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReadabilityReport {
+    pub entries: Vec<String>,
+}
+
+impl ReadabilityReport {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn push(&mut self, entry: impl Into<String>) {
+        self.entries.push(entry.into());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringLiteralFact {
     pub value: String,
@@ -572,6 +588,27 @@ pub fn format_source_with_module_items_and_renames(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> Result<String> {
+    format_source_with_module_items_and_renames_with_report(
+        body_source,
+        generated_imports,
+        generated_exports,
+        readability_renames,
+        path_hint,
+        goal,
+        lowering,
+    )
+    .map(|(source, _)| source)
+}
+
+pub fn format_source_with_module_items_and_renames_with_report(
+    body_source: &str,
+    generated_imports: &[GeneratedImport],
+    generated_exports: &[GeneratedExport],
+    readability_renames: &[GeneratedRename],
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    lowering: CompilerLowering,
+) -> Result<(String, ReadabilityReport)> {
     // Source-level pre-rewrites: applied before the main parse/codegen path so
     // that subsequent steps (audit, codegen) see the lowered form. The
     // rewriter parses once, collects span-aware edits, and returns the
@@ -581,6 +618,7 @@ pub fn format_source_with_module_items_and_renames(
     let body_source = lowered.as_str();
 
     let mut errors = Vec::new();
+    let mut report = ReadabilityReport::default();
 
     for source_type in source_type_candidates(path_hint, goal) {
         let allocator = Allocator::default();
@@ -642,15 +680,23 @@ pub fn format_source_with_module_items_and_renames(
                 .body
                 .push(generated_export_statement(&builder, generated_export));
         }
-        let mut readability_renames_with_imports =
-            collect_late_readability_renames(&parsed.program, readability_renames);
-        readability_renames_with_imports.extend(readability_renames.iter().cloned());
+        let mut readability_hints = collect_late_readability_rename_hints(&parsed.program);
+        readability_hints.extend(readability_renames.iter().map(|rename| {
+            ReadabilityRenameHint::new(
+                rename.original.as_str(),
+                rename.renamed.as_str(),
+                ReadabilityRenameSource::ExplicitSemantic,
+            )
+        }));
+        let readability_renames_with_imports =
+            resolve_readability_rename_hints(readability_hints, &mut report);
         apply_readability_renames(
             &allocator,
             &mut parsed.program,
             &readability_renames_with_imports,
+            &mut report,
         );
-        apply_emit_readability_polish(&allocator, &mut parsed.program);
+        apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -662,28 +708,136 @@ pub fn format_source_with_module_items_and_renames(
                 ..Default::default()
             })
             .build(&parsed.program);
-        return Ok(output.code);
+        return Ok((output.code, report));
     }
 
     Err(JsError::ParseFailed(errors))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ReadabilityRenameSource {
+    ObjectProperty,
+    PackageNamespace,
+    ImportExportPublic,
+    CommonJsExport,
+    ExplicitSemantic,
+}
+
+impl ReadabilityRenameSource {
+    fn confidence(self) -> u8 {
+        match self {
+            Self::ExplicitSemantic => 100,
+            Self::ImportExportPublic | Self::CommonJsExport => 90,
+            Self::PackageNamespace => 80,
+            Self::ObjectProperty => 50,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ExplicitSemantic => "explicit_semantic",
+            Self::ImportExportPublic => "import_export_public",
+            Self::CommonJsExport => "commonjs_export",
+            Self::PackageNamespace => "package_namespace",
+            Self::ObjectProperty => "object_property",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReadabilityRenameHint {
+    original: String,
+    renamed: String,
+    source: ReadabilityRenameSource,
+}
+
+impl ReadabilityRenameHint {
+    fn new(original: &str, renamed: &str, source: ReadabilityRenameSource) -> Self {
+        Self {
+            original: original.trim().to_string(),
+            renamed: renamed.trim().to_string(),
+            source,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedReadabilityRename {
+    original: String,
+    renamed: String,
+    source: ReadabilityRenameSource,
+}
+
+fn resolve_readability_rename_hints(
+    hints: Vec<ReadabilityRenameHint>,
+    report: &mut ReadabilityReport,
+) -> Vec<ResolvedReadabilityRename> {
+    let mut hints_by_original = BTreeMap::<String, Vec<ReadabilityRenameHint>>::new();
+    for hint in hints {
+        if hint.original.is_empty() || hint.renamed.is_empty() || hint.original == hint.renamed {
+            continue;
+        }
+        if sanitize_identifier(hint.renamed.as_str()) != hint.renamed {
+            report.push(format!(
+                "skipped rename {} -> {}, source={}, reason=invalid_target",
+                hint.original,
+                hint.renamed,
+                hint.source.as_str()
+            ));
+            continue;
+        }
+        hints_by_original
+            .entry(hint.original.clone())
+            .or_default()
+            .push(hint);
+    }
+
+    let mut resolved = Vec::new();
+    for (original, hints) in hints_by_original {
+        let max_confidence = hints
+            .iter()
+            .map(|hint| hint.source.confidence())
+            .max()
+            .unwrap_or(0);
+        let top_hints = hints
+            .iter()
+            .filter(|hint| hint.source.confidence() == max_confidence)
+            .collect::<Vec<_>>();
+        let top_names = top_hints
+            .iter()
+            .map(|hint| hint.renamed.as_str())
+            .collect::<BTreeSet<_>>();
+        if top_names.len() != 1 {
+            let candidates = top_hints
+                .iter()
+                .map(|hint| format!("{}:{}", hint.source.as_str(), hint.renamed))
+                .collect::<Vec<_>>()
+                .join(", ");
+            report.push(format!(
+                "skipped rename {}, reason=conflicting_hints, candidates={candidates}",
+                original
+            ));
+            continue;
+        }
+        let chosen = top_hints[0];
+        resolved.push(ResolvedReadabilityRename {
+            original,
+            renamed: chosen.renamed.clone(),
+            source: chosen.source,
+        });
+    }
+    resolved
+}
+
 fn apply_readability_renames<'a>(
     allocator: &'a Allocator,
     program: &mut Program<'a>,
-    readability_renames: &[GeneratedRename],
+    readability_renames: &[ResolvedReadabilityRename],
+    report: &mut ReadabilityReport,
 ) {
     let requested = readability_renames
         .iter()
-        .filter_map(|rename| {
-            let original = rename.original.trim();
-            let renamed = rename.renamed.trim();
-            if original.is_empty() || original == renamed || sanitize_identifier(renamed) != renamed
-            {
-                return None;
-            }
-            Some((original.to_string(), renamed.to_string()))
-        })
+        .map(|rename| (rename.original.clone(), rename.clone()))
         .collect::<BTreeMap<_, _>>();
     if requested.is_empty() {
         return;
@@ -705,11 +859,16 @@ fn apply_readability_renames<'a>(
             .collect::<Vec<_>>();
 
         let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
-        for (original, renamed) in &requested {
+        for (original, rename) in &requested {
+            let renamed = rename.renamed.as_str();
             // If the desired name is already used as a free global reference,
             // introducing a module-scope binding with that name would change
             // resolution for nested reads. Leave the original name intact.
             if unresolved_root_names.contains(renamed) {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source={}, reason=would_capture_global",
+                    rename.source.as_str()
+                ));
                 continue;
             }
             let targets = root_symbols
@@ -718,16 +877,36 @@ fn apply_readability_renames<'a>(
                 .filter(|symbol_id| symbols.get_name(*symbol_id) == original)
                 .collect::<Vec<_>>();
             if targets.len() != 1 {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source={}, reason=missing_or_ambiguous_original",
+                    rename.source.as_str()
+                ));
                 continue;
             }
             let target = targets[0];
-            let collides = root_symbols.iter().copied().any(|symbol_id| {
-                symbol_id != target && symbols.get_name(symbol_id) == renamed.as_str()
-            });
-            if collides || symbol_renames.values().any(|value| value == renamed) {
+            let collides = root_symbols
+                .iter()
+                .copied()
+                .any(|symbol_id| symbol_id != target && symbols.get_name(symbol_id) == renamed);
+            if collides {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source={}, reason=name_collision",
+                    rename.source.as_str()
+                ));
                 continue;
             }
-            symbol_renames.insert(target, renamed.clone());
+            if symbol_renames.values().any(|value| value == renamed) {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source={}, reason=duplicate_target",
+                    rename.source.as_str()
+                ));
+                continue;
+            }
+            symbol_renames.insert(target, renamed.to_string());
+            report.push(format!(
+                "renamed {original} -> {renamed}, source={}",
+                rename.source.as_str()
+            ));
         }
 
         let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
@@ -752,46 +931,24 @@ fn apply_readability_renames<'a>(
     renamer.visit_program(program);
 }
 
-fn collect_late_readability_renames(
-    program: &Program<'_>,
-    explicit_renames: &[GeneratedRename],
-) -> Vec<GeneratedRename> {
-    let explicit_originals = explicit_renames
-        .iter()
-        .map(|rename| rename.original.trim())
-        .filter(|original| !original.is_empty())
-        .collect::<BTreeSet<_>>();
-    let mut collector = LateReadabilityRenameCollector {
-        explicit_originals,
-        renames: Vec::new(),
-    };
+fn collect_late_readability_rename_hints(program: &Program<'_>) -> Vec<ReadabilityRenameHint> {
+    let mut collector = LateReadabilityRenameCollector { hints: Vec::new() };
     collector.visit_program(program);
-    collector.renames
+    collector.hints
 }
 
-struct LateReadabilityRenameCollector<'a> {
-    explicit_originals: BTreeSet<&'a str>,
-    renames: Vec<GeneratedRename>,
+struct LateReadabilityRenameCollector {
+    hints: Vec<ReadabilityRenameHint>,
 }
 
-impl<'a> LateReadabilityRenameCollector<'a> {
-    fn push_rename(&mut self, original: &str, renamed: &str) {
-        if original == renamed
-            || original.is_empty()
-            || renamed.is_empty()
-            || self.explicit_originals.contains(original)
-            || sanitize_identifier(renamed) != renamed
-        {
-            return;
-        }
-        self.renames.push(GeneratedRename::new(
-            original.to_string(),
-            renamed.to_string(),
-        ));
+impl LateReadabilityRenameCollector {
+    fn push_hint(&mut self, original: &str, renamed: &str, source: ReadabilityRenameSource) {
+        self.hints
+            .push(ReadabilityRenameHint::new(original, renamed, source));
     }
 }
 
-impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
+impl<'a> Visit<'a> for LateReadabilityRenameCollector {
     fn visit_program(&mut self, program: &Program<'a>) {
         collect_import_alias_readability_renames(program, self);
         oxc_ast::visit::walk::walk_program(self, program);
@@ -809,7 +966,11 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
                 if exported == "default" {
                     continue;
                 }
-                self.push_rename(local.as_str(), exported.as_str());
+                self.push_hint(
+                    local.as_str(),
+                    exported.as_str(),
+                    ReadabilityRenameSource::ImportExportPublic,
+                );
             }
         }
         walk_export_named_declaration(self, declaration);
@@ -820,12 +981,20 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
             if let Some(exported) = commonjs_export_property_name(&expression.left)
                 && let Expression::Identifier(identifier) = &expression.right
             {
-                self.push_rename(identifier.name.as_str(), exported.as_str());
+                self.push_hint(
+                    identifier.name.as_str(),
+                    exported.as_str(),
+                    ReadabilityRenameSource::CommonJsExport,
+                );
             }
             if commonjs_module_exports_target(&expression.left)
                 && let Expression::ObjectExpression(object) = &expression.right
             {
-                collect_object_export_readability_renames(self, object);
+                collect_object_export_readability_renames(
+                    self,
+                    object,
+                    ReadabilityRenameSource::CommonJsExport,
+                );
             }
         }
         walk_assignment_expression(self, expression);
@@ -833,7 +1002,11 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
 
     fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
         if let Some((exported, local)) = object_define_property_export_getter(expression) {
-            self.push_rename(local.as_str(), exported.as_str());
+            self.push_hint(
+                local.as_str(),
+                exported.as_str(),
+                ReadabilityRenameSource::CommonJsExport,
+            );
         }
         walk_call_expression(self, expression);
     }
@@ -845,15 +1018,20 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
             && let Some(property_name) = property_key_readability_name(&property.key)
             && let Expression::Identifier(identifier) = &property.value
         {
-            self.push_rename(identifier.name.as_str(), property_name.as_str());
+            self.push_hint(
+                identifier.name.as_str(),
+                property_name.as_str(),
+                ReadabilityRenameSource::ObjectProperty,
+            );
         }
         walk_object_property(self, property);
     }
 }
 
 fn collect_object_export_readability_renames(
-    collector: &mut LateReadabilityRenameCollector<'_>,
+    collector: &mut LateReadabilityRenameCollector,
     object: &ObjectExpression<'_>,
+    source: ReadabilityRenameSource,
 ) {
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
@@ -865,14 +1043,14 @@ fn collect_object_export_readability_renames(
             && let Some(property_name) = property_key_readability_name(&property.key)
             && let Expression::Identifier(identifier) = &property.value
         {
-            collector.push_rename(identifier.name.as_str(), property_name.as_str());
+            collector.push_hint(identifier.name.as_str(), property_name.as_str(), source);
         }
     }
 }
 
 fn collect_import_alias_readability_renames(
     program: &Program<'_>,
-    collector: &mut LateReadabilityRenameCollector<'_>,
+    collector: &mut LateReadabilityRenameCollector,
 ) {
     for statement in &program.body {
         let Statement::ImportDeclaration(declaration) = statement else {
@@ -891,7 +1069,11 @@ fn collect_import_alias_readability_renames(
                         continue;
                     }
                     let local = specifier.local.name.as_str();
-                    collector.push_rename(local, imported.as_str());
+                    collector.push_hint(
+                        local,
+                        imported.as_str(),
+                        ReadabilityRenameSource::ImportExportPublic,
+                    );
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
                     let local = specifier.local.name.as_str();
@@ -903,7 +1085,11 @@ fn collect_import_alias_readability_renames(
                     else {
                         continue;
                     };
-                    collector.push_rename(local, namespace.as_str());
+                    collector.push_hint(
+                        local,
+                        namespace.as_str(),
+                        ReadabilityRenameSource::PackageNamespace,
+                    );
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {}
             }
@@ -1104,29 +1290,39 @@ fn readable_namespace_name_for_import(specifier: &str) -> Option<String> {
     }
 }
 
-fn apply_emit_readability_polish<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
-    recover_function_declarations(allocator, program);
-    recover_class_declarations(allocator, program);
-    inline_simple_root_aliases(allocator, program);
-    apply_object_property_readability(program);
-    split_safe_namespace_imports(allocator, program);
-    merge_and_sort_named_imports(allocator, program);
+fn apply_emit_readability_polish<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
+    recover_function_declarations(allocator, program, report);
+    recover_class_declarations(allocator, program, report);
+    inline_simple_root_aliases(allocator, program, report);
+    apply_object_property_readability(program, report);
+    split_safe_namespace_imports(allocator, program, report);
+    merge_and_sort_named_imports(allocator, program, report);
 }
 
 #[derive(Debug, Clone)]
 struct AliasCandidate {
-    statement_start: u32,
+    statement_index: usize,
+    declaration_start: u32,
+    alias_name: String,
     alias_symbol: SymbolId,
     source_symbol: SymbolId,
     source_name: String,
 }
 
-fn inline_simple_root_aliases<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+fn inline_simple_root_aliases<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
     // Alias inlining is intentionally iterative. For chains like
     // `const a = source; const b = a; use(b);`, the first pass removes `a`
     // and rewrites `b`'s initializer, while the second pass can remove `b`.
     for _ in 0..8 {
-        let (reference_rewrites, removable_statement_starts) = {
+        let (reference_rewrites, removable_statement_indices, inlined_aliases) = {
             let semantic = SemanticBuilder::new().build(program).semantic;
             let symbols = semantic.symbols();
             let root_scope_id = semantic.scopes().root_scope_id();
@@ -1135,14 +1331,14 @@ fn inline_simple_root_aliases<'a>(allocator: &'a Allocator, program: &mut Progra
             candidates.retain(|candidate| {
                 symbols.get_scope_id(candidate.alias_symbol) == root_scope_id
                     && symbols.get_scope_id(candidate.source_symbol) == root_scope_id
-                    && symbols.get_span(candidate.source_symbol).start < candidate.statement_start
+                    && symbols.get_span(candidate.source_symbol).start < candidate.declaration_start
                     && !exported_locals.contains(symbols.get_name(candidate.alias_symbol))
                     && !symbols.symbol_is_mutated(candidate.alias_symbol)
                     && !name_is_shadowed(symbols, root_scope_id, &candidate.source_name)
                     && references_are_safe_to_inline(
                         &semantic,
                         candidate.alias_symbol,
-                        candidate.statement_start,
+                        candidate.declaration_start,
                     )
             });
             let candidate_alias_symbols = candidates
@@ -1153,14 +1349,20 @@ fn inline_simple_root_aliases<'a>(allocator: &'a Allocator, program: &mut Progra
                 .retain(|candidate| !candidate_alias_symbols.contains(&candidate.source_symbol));
 
             let mut reference_rewrites = BTreeMap::<ReferenceId, String>::new();
-            let mut removable_statement_starts = BTreeSet::<u32>::new();
+            let mut removable_statement_indices = BTreeSet::<usize>::new();
+            let mut inlined_aliases = Vec::<(String, String)>::new();
             for candidate in &candidates {
                 for reference_id in symbols.get_resolved_reference_ids(candidate.alias_symbol) {
                     reference_rewrites.insert(*reference_id, candidate.source_name.clone());
                 }
-                removable_statement_starts.insert(candidate.statement_start);
+                removable_statement_indices.insert(candidate.statement_index);
+                inlined_aliases.push((candidate.alias_name.clone(), candidate.source_name.clone()));
             }
-            (reference_rewrites, removable_statement_starts)
+            (
+                reference_rewrites,
+                removable_statement_indices,
+                inlined_aliases,
+            )
         };
 
         if reference_rewrites.is_empty() {
@@ -1172,9 +1374,15 @@ fn inline_simple_root_aliases<'a>(allocator: &'a Allocator, program: &mut Progra
             reference_rewrites,
         };
         inliner.visit_program(program);
-        program
-            .body
-            .retain(|statement| !removable_statement_starts.contains(&statement.span().start));
+        let mut index = 0usize;
+        program.body.retain(|_| {
+            let keep = !removable_statement_indices.contains(&index);
+            index += 1;
+            keep
+        });
+        for (alias, source) in inlined_aliases {
+            report.push(format!("inlined alias {alias} -> {source}"));
+        }
     }
 }
 
@@ -1247,7 +1455,8 @@ fn collect_alias_candidates(
     program
         .body
         .iter()
-        .filter_map(|statement| {
+        .enumerate()
+        .filter_map(|(statement_index, statement)| {
             let Statement::VariableDeclaration(declaration) = statement else {
                 return None;
             };
@@ -1277,7 +1486,9 @@ fn collect_alias_candidates(
             let source_reference_id = source.reference_id.get()?;
             let source_symbol = symbols.get_reference(source_reference_id).symbol_id()?;
             Some(AliasCandidate {
-                statement_start: statement.span().start,
+                statement_index,
+                declaration_start: statement.span().start,
+                alias_name: alias.name.as_str().to_string(),
                 alias_symbol,
                 source_symbol,
                 source_name: source.name.as_str().to_string(),
@@ -1334,11 +1545,16 @@ impl<'a> VisitMut<'a> for AliasReferenceInliner<'a> {
 
 #[derive(Debug, Clone)]
 struct FunctionDeclarationCandidate {
-    statement_start: u32,
+    statement_index: usize,
+    declaration_start: u32,
     binding_name: String,
 }
 
-fn recover_function_declarations<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+fn recover_function_declarations<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
     let candidates = {
         let semantic = SemanticBuilder::new().build(program).semantic;
         let symbols = semantic.symbols();
@@ -1354,7 +1570,7 @@ fn recover_function_declarations<'a>(allocator: &'a Allocator, program: &mut Pro
                     })
                     .is_some_and(|symbol_id| {
                         symbols.get_resolved_references(symbol_id).all(|reference| {
-                            semantic.reference_span(reference).start > candidate.statement_start
+                            semantic.reference_span(reference).start > candidate.declaration_start
                         })
                     })
             })
@@ -1365,16 +1581,19 @@ fn recover_function_declarations<'a>(allocator: &'a Allocator, program: &mut Pro
     }
     let names_by_statement = candidates
         .into_iter()
-        .map(|candidate| (candidate.statement_start, candidate.binding_name))
+        .map(|candidate| (candidate.statement_index, candidate.binding_name))
         .collect::<BTreeMap<_, _>>();
     let builder = AstBuilder::new(allocator);
-    for statement in program.body.iter_mut() {
-        let Some(binding_name) = names_by_statement.get(&statement.span().start).cloned() else {
+    for (statement_index, statement) in program.body.iter_mut().enumerate() {
+        let Some(binding_name) = names_by_statement.get(&statement_index).cloned() else {
             continue;
         };
         let replacement = function_declaration_replacement(&builder, statement, binding_name);
         if let Some(function) = replacement {
             *statement = Statement::FunctionDeclaration(function);
+            if let Some(binding_name) = names_by_statement.get(&statement_index) {
+                report.push(format!("recovered function declaration {binding_name}"));
+            }
         }
     }
 }
@@ -1385,7 +1604,8 @@ fn collect_function_declaration_candidates(
     program
         .body
         .iter()
-        .filter_map(|statement| {
+        .enumerate()
+        .filter_map(|(statement_index, statement)| {
             let Statement::VariableDeclaration(declaration) = statement else {
                 return None;
             };
@@ -1414,7 +1634,8 @@ fn collect_function_declaration_candidates(
                 return None;
             }
             Some(FunctionDeclarationCandidate {
-                statement_start: statement.span().start,
+                statement_index,
+                declaration_start: statement.span().start,
                 binding_name: binding.name.as_str().to_string(),
             })
         })
@@ -1442,11 +1663,16 @@ fn function_declaration_replacement<'a>(
 
 #[derive(Debug, Clone)]
 struct ClassDeclarationCandidate {
-    statement_start: u32,
+    statement_index: usize,
+    declaration_start: u32,
     binding_name: String,
 }
 
-fn recover_class_declarations<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+fn recover_class_declarations<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
     let candidates = {
         let semantic = SemanticBuilder::new().build(program).semantic;
         let symbols = semantic.symbols();
@@ -1462,7 +1688,7 @@ fn recover_class_declarations<'a>(allocator: &'a Allocator, program: &mut Progra
                     })
                     .is_some_and(|symbol_id| {
                         symbols.get_resolved_references(symbol_id).all(|reference| {
-                            semantic.reference_span(reference).start > candidate.statement_start
+                            semantic.reference_span(reference).start > candidate.declaration_start
                         })
                     })
             })
@@ -1473,16 +1699,19 @@ fn recover_class_declarations<'a>(allocator: &'a Allocator, program: &mut Progra
     }
     let names_by_statement = candidates
         .into_iter()
-        .map(|candidate| (candidate.statement_start, candidate.binding_name))
+        .map(|candidate| (candidate.statement_index, candidate.binding_name))
         .collect::<BTreeMap<_, _>>();
     let builder = AstBuilder::new(allocator);
-    for statement in program.body.iter_mut() {
-        let Some(binding_name) = names_by_statement.get(&statement.span().start).cloned() else {
+    for (statement_index, statement) in program.body.iter_mut().enumerate() {
+        let Some(binding_name) = names_by_statement.get(&statement_index).cloned() else {
             continue;
         };
         let replacement = class_declaration_replacement(&builder, statement, binding_name);
         if let Some(class) = replacement {
             *statement = Statement::ClassDeclaration(class);
+            if let Some(binding_name) = names_by_statement.get(&statement_index) {
+                report.push(format!("recovered class declaration {binding_name}"));
+            }
         }
     }
 }
@@ -1491,7 +1720,8 @@ fn collect_class_declaration_candidates(program: &Program<'_>) -> Vec<ClassDecla
     program
         .body
         .iter()
-        .filter_map(|statement| {
+        .enumerate()
+        .filter_map(|(statement_index, statement)| {
             let Statement::VariableDeclaration(declaration) = statement else {
                 return None;
             };
@@ -1520,7 +1750,8 @@ fn collect_class_declaration_candidates(program: &Program<'_>) -> Vec<ClassDecla
                 return None;
             }
             Some(ClassDeclarationCandidate {
-                statement_start: statement.span().start,
+                statement_index,
+                declaration_start: statement.span().start,
                 binding_name: binding.name.as_str().to_string(),
             })
         })
@@ -1546,14 +1777,16 @@ fn class_declaration_replacement<'a>(
     Some(class)
 }
 
-fn apply_object_property_readability(program: &mut Program<'_>) {
-    let mut shorthand = ObjectPropertyReadability;
+fn apply_object_property_readability(program: &mut Program<'_>, report: &mut ReadabilityReport) {
+    let mut shorthand = ObjectPropertyReadability { report };
     shorthand.visit_program(program);
 }
 
-struct ObjectPropertyReadability;
+struct ObjectPropertyReadability<'report> {
+    report: &'report mut ReadabilityReport,
+}
 
-impl<'a> VisitMut<'a> for ObjectPropertyReadability {
+impl<'a> VisitMut<'a> for ObjectPropertyReadability<'_> {
     fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
         if !property.computed
             && !property.method
@@ -1563,6 +1796,8 @@ impl<'a> VisitMut<'a> for ObjectPropertyReadability {
             && identifier.name.as_str() == property_name
         {
             property.shorthand = true;
+            self.report
+                .push(format!("applied object shorthand {property_name}"));
         }
         if property.kind == PropertyKind::Init
             && !property.computed
@@ -1571,6 +1806,10 @@ impl<'a> VisitMut<'a> for ObjectPropertyReadability {
             && let Expression::FunctionExpression(function) = &property.value
             && function.id.is_none()
         {
+            if let Some(property_name) = property_key_readability_name(&property.key) {
+                self.report
+                    .push(format!("recovered object method {property_name}"));
+            }
             property.method = true;
         }
         walk_object_property_mut(self, property);
@@ -1590,7 +1829,11 @@ struct NamespaceImportSplit {
     member_by_reference: BTreeMap<ReferenceId, String>,
 }
 
-fn split_safe_namespace_imports<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+fn split_safe_namespace_imports<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
     let splits = plan_safe_namespace_import_splits(program);
     if splits.is_empty() {
         return;
@@ -1611,6 +1854,10 @@ fn split_safe_namespace_imports<'a>(allocator: &'a Allocator, program: &mut Prog
             continue;
         };
         replace_namespace_import_with_named_specifiers(&builder, declaration, members);
+        report.push(format!(
+            "split namespace import {namespace} -> {{{}}}",
+            members.iter().cloned().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     let member_by_reference = splits
@@ -1928,7 +2175,11 @@ impl<'a> VisitMut<'a> for NamespaceImportMemberRewriter<'a> {
     }
 }
 
-fn merge_and_sort_named_imports<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+fn merge_and_sort_named_imports<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
     let builder = AstBuilder::new(allocator);
     let mut next = builder.vec();
     let mut first_by_source = BTreeMap::<String, usize>::new();
@@ -1945,6 +2196,7 @@ fn merge_and_sort_named_imports<'a>(allocator: &'a Allocator, program: &mut Prog
                     {
                         first_specifiers.extend(specifiers.drain(..));
                         sort_and_dedup_import_specifiers(first_specifiers);
+                        report.push(format!("merged imports from {source}"));
                         continue;
                     }
                 }
@@ -3570,7 +3822,8 @@ mod tests {
         classify_lazy_module_body, collect_file_url_source_location_rewrites,
         collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
         extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
-        format_source_with_module_items_and_renames, normalize_source_for_pipeline,
+        format_source_with_module_items_and_renames,
+        format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
         parse_error_message, parse_source, sanitize_identifier,
         verify_only_immediate_call_references,
     };
@@ -3890,6 +4143,50 @@ mod tests {
     }
 
     #[test]
+    fn readability_hint_resolver_prefers_export_name_over_later_object_property() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = 1; export { a as createClient }; const obj = { internalName: a };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const createClient = 1;"));
+        assert!(formatted.contains("export { createClient };"));
+        assert!(formatted.contains("const obj = { internalName: createClient };"));
+        assert!(!formatted.contains("const internalName = 1;"));
+    }
+
+    #[test]
+    fn readability_hint_resolver_skips_conflicting_object_property_names() {
+        let (formatted, report) = format_source_with_module_items_and_renames_with_report(
+            "const a = 1; const first = { foo: a }; const second = { bar: a }; console.log(a);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const a = 1;"));
+        assert!(formatted.contains("foo: a"));
+        assert!(formatted.contains("bar: a"));
+        assert!(formatted.contains("console.log(a);"));
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.contains("reason=conflicting_hints"))
+        );
+    }
+
+    #[test]
     fn readability_renames_from_commonjs_export_property_and_recovers_function_declaration() {
         let formatted = format_source_with_module_items_and_renames(
             "const a = function() { return 1; }; exports.createClient = a;",
@@ -3957,6 +4254,33 @@ mod tests {
         assert!(formatted.contains("const createClient = 1;"));
         assert!(formatted.contains("get()"));
         assert!(formatted.contains("return createClient;"));
+    }
+
+    #[test]
+    fn readability_report_records_applied_rename_and_polish() {
+        let (formatted, report) = format_source_with_module_items_and_renames_with_report(
+            "const a = function() { return 1; }; exports.createClient = a;",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function createClient()"));
+        assert!(
+            report.entries.iter().any(|entry| {
+                entry.contains("renamed a -> createClient, source=commonjs_export")
+            })
+        );
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.contains("recovered function declaration createClient"))
+        );
     }
 
     #[test]
@@ -4116,6 +4440,43 @@ mod tests {
 
         assert!(formatted.contains("createClient()"));
         assert!(!formatted.contains("createClient: function"));
+    }
+
+    #[test]
+    fn readability_polish_is_idempotent_after_late_transforms() {
+        let source = "\
+            import * as lodash from 'lodash';\n\
+            const a = function() { return lodash.map([1], x => x); };\n\
+            const Client = class { connect() { return a(); } };\n\
+            const api = { createClient: function() { return a(); } };\n\
+            exports.createClient = a;\n\
+            console.log(lodash.filter([1], Boolean), Client, api);";
+        let first = format_source_with_module_items_and_renames(
+            source,
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+        let second = format_source_with_module_items_and_renames(
+            first.as_str(),
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format again");
+
+        assert_eq!(second, first);
+        assert!(first.contains("import { filter, map } from 'lodash';"));
+        assert!(first.contains("function createClient()"));
+        assert!(first.contains("class Client"));
+        assert!(first.contains("createClient()"));
     }
 
     #[test]
