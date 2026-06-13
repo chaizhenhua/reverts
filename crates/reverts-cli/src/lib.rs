@@ -4341,6 +4341,7 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let bundle_path = tempdir.path().join("bundle.js");
         let bundle_src = r#"
+            var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
             var lib = __commonJS({
                 "node_modules/example/index.js": (exports, module) => {
                     function add(a, b) { return a + b; }
@@ -4474,6 +4475,12 @@ mod tests {
             "export function add(a,b){return a+b}",
             &[],
         );
+        connection
+            .execute(
+                "UPDATE modules SET package_version = '1.2.3' WHERE id = 10",
+                [],
+            )
+            .expect("set exact package version");
         let args = MatchPackagesArgs {
             input: PathBuf::from("unused.db"),
             project_id: 1,
@@ -5565,7 +5572,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_package_versions_write_rejected_attribution() {
+    fn unversioned_package_versions_write_rejected_attribution_without_inference() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -5624,14 +5631,14 @@ mod tests {
             )
             .expect("package_version column should exist");
 
-        assert!(outcome.audit.has(FindingCode::AmbiguousPackageMatch));
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.matched_modules, 0);
         assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 1);
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 1);
         assert_eq!(status, "rejected");
-        assert!(rejection_reason.contains("more than one best version"));
+        assert!(rejection_reason.contains("did not produce an accepted attribution"));
         assert_eq!(package_version, None);
         assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version_not_null, 0);
@@ -5688,7 +5695,7 @@ mod tests {
         assert_eq!(package_attribution_count(&connection), 1);
         assert_eq!(status, "rejected");
         assert_eq!(package_version, None);
-        assert!(rejection_reason.contains("no cached package source"));
+        assert!(rejection_reason.contains("did not produce an accepted attribution"));
         reverts_input::sqlite::load_project_bundle_from_connection(&connection, 1)
             .expect("rejected attribution should satisfy generation input contract");
     }

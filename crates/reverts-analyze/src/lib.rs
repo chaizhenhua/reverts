@@ -539,10 +539,6 @@ fn detect_module_compiler_profile(
     ) || collect_source_pattern_evidence(source, BABEL_SOURCE_PATTERNS, &mut evidence)
     {
         CompilerKind::Babel
-    } else if wrappers.contains(&AstWrapperKind::ArrowIife) {
-        // Top-level arrow IIFE is the signature shape of esbuild's bundle output
-        // and is rare in hand-written or non-bundled code.
-        CompilerKind::Esbuild
     } else if minified {
         CompilerKind::Terser
     } else {
@@ -1149,10 +1145,9 @@ mod tests {
     }
 
     #[test]
-    fn top_level_arrow_iife_alone_classifies_as_esbuild() {
-        // Top-level arrow IIFE is rare in hand-written code but is the signature
-        // shape of esbuild's bundle output. With no identifier or pattern hits,
-        // the wrapper alone should tip classification away from Unknown.
+    fn top_level_arrow_iife_alone_does_not_classify_as_esbuild() {
+        // A wrapper shape alone is not enough to infer the compiler. Without
+        // identifier or explicit pattern evidence, classification stays Unknown.
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(
             1,
@@ -1171,7 +1166,7 @@ mod tests {
                 .compiler_profile()
                 .module(ModuleId(1))
                 .compiler,
-            CompilerKind::Esbuild,
+            CompilerKind::Unknown,
         );
     }
 

@@ -132,6 +132,7 @@ mod tests {
     #[test]
     fn classify_routes_esbuild_commonjs_to_marked() {
         let src = r#"
+            var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
             var x = __commonJS({
                 "node_modules/lodash/index.js": (e, m) => { m.exports = 1; }
             });

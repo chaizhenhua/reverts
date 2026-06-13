@@ -12,6 +12,7 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
     let tempdir = tempdir().expect("tempdir");
     let bundle_path = tempdir.path().join("bundle.js");
     let bundle_src = r#"
+        var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
         var lib = __commonJS({
             "node_modules/example/index.js": (exports, module) => {
                 function add(a, b) { return a + b; }

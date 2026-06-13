@@ -142,7 +142,7 @@ mod public_api_tests {
     #[test]
     fn extract_esbuild_bundle_produces_new_module() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-        let src = r#"var x = __commonJS({"node_modules/lodash/index.js": (e, m) => { m.exports = 1; }});"#;
+        let src = r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports); var x = __commonJS({"node_modules/lodash/index.js": (e, m) => { m.exports = 1; }});"#;
         rows.source_files
             .push(SourceFileInput::new(1, "bundle.js", Some(src.to_string())));
         let extraction = extract(&rows);

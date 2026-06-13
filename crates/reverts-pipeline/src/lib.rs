@@ -2464,14 +2464,14 @@ mod tests {
     }
 
     #[test]
-    fn esbuild_runtime_identifier_in_function_emits_esbuild_banner() {
+    fn esbuild_runtime_identifier_in_function_does_not_emit_esbuild_banner() {
         let source = "function setup() {\n  __toCommonJS({});\n}\n";
         let run = run_with_source(source, &["setup"]);
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: esbuild"),
-            "esbuild fixture must carry esbuild banner, got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: esbuild"),
+            "function-local esbuild identifier must not trigger esbuild banner, got:\n{emitted}",
         );
     }
 
@@ -2488,14 +2488,14 @@ mod tests {
     }
 
     #[test]
-    fn babel_interop_helper_in_function_emits_babel_banner() {
+    fn babel_interop_helper_in_function_does_not_emit_babel_banner() {
         let source = "function load(mod) {\n  return _interopRequireDefault(mod);\n}\n";
         let run = run_with_source(source, &["load"]);
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: babel"),
-            "babel fixture must carry babel banner, got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: babel"),
+            "function-local babel identifier must not trigger babel banner, got:\n{emitted}",
         );
     }
 
@@ -2966,10 +2966,10 @@ mod tests {
     }
 
     #[test]
-    fn esbuild_helper_strip_descends_into_top_level_iife_wrapper() {
-        // Real esbuild bundles wrap everything in a top-level IIFE. The
-        // helper-strip pass must descend into the IIFE body so the
-        // unreferenced helpers actually disappear.
+    fn esbuild_helper_strip_does_not_run_from_iife_shape_alone() {
+        // A top-level IIFE shape alone is not enough to infer esbuild. Without
+        // module-scope runtime identifier evidence, helper stripping must not
+        // run inside the wrapper.
         let source = "(() => {\n\
                         var __commonJS = (cb, mod) => function () { return mod; };\n\
                         var __defProp = Object.defineProperty;\n\
@@ -2980,13 +2980,13 @@ mod tests {
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: esbuild"),
-            "esbuild fixture must carry esbuild banner; got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: esbuild"),
+            "IIFE shape alone must not carry esbuild banner; got:\n{emitted}",
         );
         for helper in ["__commonJS", "__defProp", "__export"] {
             assert!(
-                !emitted.contains(&format!("var {helper}")),
-                "IIFE-internal unreferenced helper `{helper}` must be stripped; got:\n{emitted}",
+                emitted.contains(&format!("var {helper}")),
+                "IIFE-internal helper `{helper}` must remain without esbuild evidence; got:\n{emitted}",
             );
         }
         assert!(
@@ -2996,7 +2996,7 @@ mod tests {
     }
 
     #[test]
-    fn webpack_helper_strip_descends_into_top_level_iife_wrapper() {
+    fn webpack_helper_strip_does_not_run_from_iife_local_identifiers() {
         let source = "(() => {\n\
                         var __webpack_modules__ = {};\n\
                         var __webpack_module_cache__ = {};\n\
@@ -3007,8 +3007,8 @@ mod tests {
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
-            "webpack fixture must carry webpack banner; got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: webpack"),
+            "IIFE-local webpack identifiers must not trigger webpack banner; got:\n{emitted}",
         );
         assert!(
             emitted.contains("function __webpack_require__"),
@@ -3016,8 +3016,8 @@ mod tests {
         );
         for helper in ["__webpack_modules__", "__webpack_module_cache__"] {
             assert!(
-                !emitted.contains(&format!("var {helper}")),
-                "unreferenced webpack helper `{helper}` must be stripped from inside IIFE; got:\n{emitted}",
+                emitted.contains(&format!("var {helper}")),
+                "unreferenced webpack helper `{helper}` must remain without webpack evidence; got:\n{emitted}",
             );
         }
         assert!(
@@ -3027,7 +3027,7 @@ mod tests {
     }
 
     #[test]
-    fn webpack_lowering_strips_no_op_runtime_make_namespace_call() {
+    fn webpack_lowering_does_not_run_from_iife_local_identifiers() {
         // `__webpack_require__.r(exports)` is webpack's CJS-to-ESM marker:
         // it sets `__esModule` on the exports object. In an ESM emit
         // context the call is either a no-op (when exports is bound) or a
@@ -3042,12 +3042,12 @@ mod tests {
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
-            "webpack fixture must carry webpack banner; got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: webpack"),
+            "IIFE-local webpack identifiers must not trigger webpack banner; got:\n{emitted}",
         );
         assert!(
-            !emitted.contains("__webpack_require__.r("),
-            "the no-op `__webpack_require__.r(...)` marker must be stripped; got:\n{emitted}",
+            emitted.contains("__webpack_require__.r("),
+            "the marker call must remain without webpack evidence; got:\n{emitted}",
         );
         assert!(
             emitted.contains("var entry = __webpack_require__(1)"),
