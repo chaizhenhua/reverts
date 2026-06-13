@@ -49,6 +49,11 @@ pub enum MatchPackagesError {
         path: PathBuf,
         source: io::Error,
     },
+    MaterializePackageSource {
+        package_name: String,
+        package_version: String,
+        message: String,
+    },
     WriteAttribution(rusqlite::Error),
     WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
@@ -86,6 +91,16 @@ impl fmt::Display for MatchPackagesError {
                     formatter,
                     "failed to read package source root {}: {source}",
                     path.display()
+                )
+            }
+            Self::MaterializePackageSource {
+                package_name,
+                package_version,
+                message,
+            } => {
+                write!(
+                    formatter,
+                    "failed to materialize {package_name}@{package_version}: {message}"
                 )
             }
             Self::WriteAttribution(source) => {
@@ -142,6 +157,7 @@ impl Error for MatchPackagesError {
             Self::ReadPackageSourceRoot { source, .. } => Some(source),
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)
+            | Self::MaterializePackageSource { .. }
             | Self::MissingMatchEvidence { .. }
             | Self::MissingModuleForAttribution { .. }
             | Self::InvalidAttribution { .. }

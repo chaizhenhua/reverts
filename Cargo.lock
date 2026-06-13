@@ -946,6 +946,7 @@ dependencies = [
  "reverts-package-matcher",
  "reverts-pipeline",
  "rusqlite",
+ "semver",
  "serde_json",
  "tempfile",
 ]

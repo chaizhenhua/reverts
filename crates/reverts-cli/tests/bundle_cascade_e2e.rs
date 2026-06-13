@@ -61,6 +61,7 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        materialize_package_sources: false,
     };
     let outcome = reverts_cli::match_packages_from_connection(&mut connection, &args)
         .expect("match should succeed");

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use reverts_graph::FunctionExtractor;
@@ -18,7 +19,7 @@ use reverts_input::{
     AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode, SourceFileInput,
 };
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
@@ -35,6 +36,7 @@ pub struct MatchPackagesArgs {
     pub apply: bool,
     pub package_names: Vec<String>,
     pub package_source_roots: Vec<PathBuf>,
+    pub materialize_package_sources: bool,
 }
 
 impl MatchPackagesArgs {
@@ -44,6 +46,7 @@ impl MatchPackagesArgs {
         let mut apply = false;
         let mut package_names = Vec::new();
         let mut package_source_roots = Vec::new();
+        let mut materialize_package_sources = false;
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -70,6 +73,7 @@ impl MatchPackagesArgs {
                 "--package-source-root" => {
                     package_source_roots.push(next_path(&mut args, "--package-source-root")?);
                 }
+                "--materialize-package-sources" => materialize_package_sources = true,
                 other => return Err(CliError::UnknownArgument(other.to_string())),
             }
         }
@@ -80,6 +84,7 @@ impl MatchPackagesArgs {
             apply,
             package_names,
             package_source_roots,
+            materialize_package_sources,
         })
     }
 }
@@ -384,8 +389,13 @@ pub fn match_packages_from_connection(
     extraction.merge_into(&mut rows);
 
     let package_names = package_source_filter(&rows, &args.package_names);
-    let package_sources =
-        load_package_sources(connection, &package_names, &args.package_source_roots)?;
+    let package_sources = load_package_sources(
+        connection,
+        &rows,
+        &package_names,
+        &args.package_source_roots,
+        args.materialize_package_sources,
+    )?;
     let mut report = if args.package_names.is_empty() {
         VersionedPackageMatcher::default().match_rows(&rows, &package_sources)
     } else {
@@ -1430,12 +1440,15 @@ fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> b
 
 fn load_package_sources(
     connection: &Connection,
+    rows: &InputRows,
     package_names: &BTreeSet<String>,
     package_source_roots: &[PathBuf],
+    materialize_package_sources: bool,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
     let has_package_source_cache = sqlite_table_exists(connection, "package_source_cache")
         .map_err(MatchPackagesError::QueryPackageSources)?;
-    if !has_package_source_cache && package_source_roots.is_empty() {
+    if !has_package_source_cache && package_source_roots.is_empty() && !materialize_package_sources
+    {
         return Err(MatchPackagesError::MissingTable("package_source_cache"));
     }
 
@@ -1484,6 +1497,9 @@ fn load_package_sources(
         package_names,
         package_source_roots,
     )?);
+    if materialize_package_sources {
+        package_sources.extend(materialize_package_sources_from_hints(rows, package_names)?);
+    }
     dedup_package_sources(&mut package_sources);
     Ok(package_sources)
 }
@@ -1540,6 +1556,138 @@ fn load_package_sources_from_roots(
         }
     }
     Ok(sources)
+}
+
+fn materialize_package_sources_from_hints(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+) -> Result<Vec<PackageSource>, MatchPackagesError> {
+    let hints = package_version_hints_for_materialization(rows, package_names);
+    if hints.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut sources = Vec::new();
+    for (idx, (package_name, package_version)) in hints.into_iter().enumerate() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "reverts-package-source-{}-{idx}",
+            std::process::id()
+        ));
+        if temp_root.exists() {
+            fs::remove_dir_all(temp_root.as_path()).map_err(|source| {
+                MatchPackagesError::ReadPackageSourceRoot {
+                    path: temp_root.clone(),
+                    source,
+                }
+            })?;
+        }
+        fs::create_dir_all(temp_root.as_path()).map_err(|source| {
+            MatchPackagesError::ReadPackageSourceRoot {
+                path: temp_root.clone(),
+                source,
+            }
+        })?;
+
+        let result = materialize_one_package_source(
+            temp_root.as_path(),
+            package_name.as_str(),
+            package_version.as_str(),
+            &mut sources,
+        );
+        let cleanup = fs::remove_dir_all(temp_root.as_path());
+        result?;
+        if let Err(source) = cleanup {
+            return Err(MatchPackagesError::ReadPackageSourceRoot {
+                path: temp_root,
+                source,
+            });
+        }
+    }
+    Ok(sources)
+}
+
+fn materialize_one_package_source(
+    temp_root: &Path,
+    package_name: &str,
+    package_version: &str,
+    sources: &mut Vec<PackageSource>,
+) -> Result<(), MatchPackagesError> {
+    let package_spec = format!("{package_name}@{package_version}");
+    let output = Command::new("npm")
+        .arg("install")
+        .arg(package_spec.as_str())
+        .arg("--prefix")
+        .arg(temp_root)
+        .arg("--ignore-scripts")
+        .arg("--package-lock=false")
+        .arg("--no-audit")
+        .arg("--no-fund")
+        .output()
+        .map_err(|source| MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            message: format!("failed to run npm install: {source}"),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = if stderr.is_empty() { stdout } else { stderr };
+        return Err(MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            message,
+        });
+    }
+
+    let mut matched = false;
+    for package_dir in package_dir_candidates(temp_root, package_name) {
+        let Some(metadata) = local_package_metadata(package_dir.as_path())? else {
+            continue;
+        };
+        if metadata.name == package_name && metadata.version == package_version {
+            collect_local_package_sources(package_dir.as_path(), &metadata, sources)?;
+            matched = true;
+            break;
+        }
+    }
+    if !matched {
+        return Err(MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            message: "npm install succeeded but the expected package directory was not found"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn package_version_hints_for_materialization(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+) -> BTreeSet<(String, String)> {
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            let package_name = module.package_name.as_deref()?.trim();
+            if package_name.is_empty()
+                || !is_valid_package_name(package_name)
+                || (!package_names.is_empty() && !package_names.contains(package_name))
+            {
+                return None;
+            }
+            let package_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| is_exact_package_version_hint(version))?;
+            Some((package_name.to_string(), package_version.to_string()))
+        })
+        .collect()
+}
+
+fn is_exact_package_version_hint(version: &str) -> bool {
+    semver::Version::parse(version).is_ok()
 }
 
 fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
@@ -2887,9 +3035,12 @@ pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::path::PathBuf;
 
+    use reverts_input::{InputRows, ModuleInput, ProjectInput};
+    use reverts_ir::ModuleId;
     use reverts_observe::FindingCode;
     use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency};
     use rusqlite::{Connection, params};
@@ -2898,7 +3049,8 @@ mod tests {
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
         MatchPackagesArgs, extract_bun_embedded_asset_from_bytes, help_text,
-        match_packages_from_connection, run, version_text,
+        match_packages_from_connection, package_version_hints_for_materialization, run,
+        version_text,
     };
 
     #[test]
@@ -2945,6 +3097,7 @@ mod tests {
             "pkg".to_string(),
             "--package-source-root".to_string(),
             "node_modules".to_string(),
+            "--materialize-package-sources".to_string(),
             "--apply".to_string(),
         ])
         .expect("args should parse");
@@ -2956,6 +3109,7 @@ mod tests {
             args.package_source_roots,
             vec![PathBuf::from("node_modules")]
         );
+        assert!(args.materialize_package_sources);
         assert!(args.apply);
 
         let old_command = CliCommand::parse(["match-packages-v2".to_string()]);
@@ -3054,8 +3208,56 @@ mod tests {
         assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
+        assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
         assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
         assert!(version_text().starts_with("reverts-cli "));
+    }
+
+    #[test]
+    fn materialization_hints_use_exact_filtered_package_versions() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "lodash",
+            "node_modules/lodash/index.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "rxjs",
+            "node_modules/rxjs/index.js",
+            "rxjs",
+            Some("7.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "zod",
+            "node_modules/zod/index.js",
+            "zod",
+            Some("4.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(13),
+            "react",
+            "node_modules/react/index.js",
+            "react",
+            Some("latest".to_string()),
+        ));
+
+        let hints = package_version_hints_for_materialization(
+            &rows,
+            &BTreeSet::from([
+                "lodash".to_string(),
+                "rxjs".to_string(),
+                "react".to_string(),
+            ]),
+        );
+
+        assert_eq!(
+            hints,
+            BTreeSet::from([("lodash".to_string(), "4.17.21".to_string())])
+        );
     }
 
     #[test]
@@ -3205,6 +3407,7 @@ mod tests {
             apply: false,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
@@ -3233,6 +3436,7 @@ mod tests {
             apply: false,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3280,6 +3484,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3352,6 +3557,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3411,6 +3617,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3469,6 +3676,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3519,6 +3727,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3582,6 +3791,7 @@ mod tests {
             apply: false,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().to_path_buf()],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3613,6 +3823,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3669,6 +3880,7 @@ mod tests {
             apply: true,
             package_names: vec!["pkg".to_string()],
             package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3787,6 +3999,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3871,6 +4084,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3937,6 +4151,7 @@ mod tests {
             apply: false,
             package_names: vec!["pkg".to_string()],
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -3976,6 +4191,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -4022,6 +4238,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -4092,6 +4309,7 @@ mod tests {
             apply: false,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -4137,6 +4355,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -4210,6 +4429,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
@@ -4255,6 +4475,7 @@ mod tests {
             apply: true,
             package_names: Vec::new(),
             package_source_roots: Vec::new(),
+            materialize_package_sources: false,
         };
 
         let outcome =
