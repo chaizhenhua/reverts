@@ -702,6 +702,82 @@ fn pipeline_aligns_nullish_assignment_on_member_with_explicit_if() {
 }
 
 #[test]
+fn pipeline_aligns_parenthesized_with_bare_expression() {
+    // OXC preserves `(expr)` as a separate `ParenthesizedExpression`
+    // AST node — its hash lands in the `otherexpr` catch-all bucket
+    // while the bare expression hashes into its structured form.
+    // `parenthesized_expression_unwrapped` strips wrappers up front so
+    // both shapes converge.
+    let parenthesized = "function f(a, b) { return (a + b); }";
+    let bare = "function f(a, b) { return a + b; }";
+    let fp_p = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(parenthesized));
+    let fp_b = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(bare));
+    assert_eq!(
+        fp_p[0].primary.ast, fp_b[0].primary.ast,
+        "(a + b) and a + b must converge after pipeline"
+    );
+}
+
+#[test]
+fn pipeline_aligns_nested_parens_with_bare_inside_conditional() {
+    let wrapped = "function f(c, a, b) { return (c) ? (a) : (b); }";
+    let bare = "function f(c, a, b) { return c ? a : b; }";
+    let fp_w = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(wrapped));
+    let fp_b = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(bare));
+    assert_eq!(
+        fp_w[0].primary.ast, fp_b[0].primary.ast,
+        "(c) ? (a) : (b) and c ? a : b must converge after pipeline"
+    );
+}
+
+#[test]
+fn pipeline_aligns_trailing_void_return_with_implicit_return() {
+    // `function f() { sideEffect(); return; }` is observably
+    // identical to `function f() { sideEffect(); }` — both implicit
+    // and explicit final `return` return undefined.
+    let explicit = "function f() { sideEffect(); return; }";
+    let implicit = "function f() { sideEffect(); }";
+    let fp_e = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(explicit));
+    let fp_i = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(implicit));
+    assert_eq!(
+        fp_e[0].primary.ast, fp_i[0].primary.ast,
+        "trailing return; and implicit return must converge"
+    );
+    assert_eq!(
+        fp_e[0].statement_count, fp_i[0].statement_count,
+        "statement_count must converge after trailing-return strip"
+    );
+}
+
+#[test]
+fn pipeline_aligns_empty_else_with_no_else() {
+    // `if (c) f();` and `if (c) f(); else {}` are observably
+    // identical — entering an empty alternate performs no work.
+    let with_empty_else = "function g(c) { if (c) doWork(); else {} }";
+    let without_else = "function g(c) { if (c) doWork(); }";
+    let fp_e = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(with_empty_else));
+    let fp_n = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(without_else));
+    assert_eq!(
+        fp_e[0].primary.ast, fp_n[0].primary.ast,
+        "empty-else if and no-else if must converge"
+    );
+}
+
+#[test]
+fn pipeline_aligns_member_compound_assignment_with_explicit_form() {
+    // `obj.field = obj.field + 1` and `obj.field += 1` are
+    // observably identical when `obj` is a pure identifier.
+    let explicit = "function f(obj) { obj.count = obj.count + 1; }";
+    let compound = "function f(obj) { obj.count += 1; }";
+    let fp_e = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(explicit));
+    let fp_c = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(compound));
+    assert_eq!(
+        fp_e[0].primary.ast, fp_c[0].primary.ast,
+        "obj.x = obj.x + 1 and obj.x += 1 must converge for identifier receiver"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
