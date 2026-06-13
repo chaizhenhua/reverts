@@ -419,6 +419,7 @@ impl ImportExportPlanner {
             &runtime_lazy_folds,
             &externalized_packages,
         );
+        let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
 
         // When a lazy binding is folded into its helper module, the consumer no
         // longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
@@ -646,6 +647,7 @@ impl ImportExportPlanner {
                 }
                 let import_partition = partition_runtime_reexport_bindings(
                     &runtime_var_migrations,
+                    &runtime_prelude_direct_imports,
                     source_file_id,
                     module.id,
                     bindings,
@@ -659,10 +661,11 @@ impl ImportExportPlanner {
             let has_runtime_group_imports = runtime_import_partitions
                 .iter()
                 .any(|(_, partition)| !partition.runtime_bindings.is_empty());
-            let lowered_import_partition = lowered_source
+            let mut lowered_import_partition = lowered_source
                 .map(|lowered_source| {
                     partition_runtime_reexport_bindings(
                         &runtime_var_migrations,
+                        &runtime_prelude_direct_imports,
                         lowered_source.source_file_id,
                         module.id,
                         remaining_runtime_helpers.clone(),
@@ -690,6 +693,29 @@ impl ImportExportPlanner {
                     lazy_helper_names.retain(|name| *name != "lazyValue");
                 }
             }
+            let mut runtime_sources_for_module = BTreeSet::<u32>::new();
+            if let Some(lowered_source) = lowered_source
+                && (!lowered_import_partition.runtime_bindings.is_empty()
+                    || !written_runtime_helpers.is_empty()
+                    || !lazy_helper_names.is_empty())
+            {
+                runtime_sources_for_module.insert(lowered_source.source_file_id);
+            }
+            for (source_file_id, partition) in &runtime_import_partitions {
+                if !partition.runtime_bindings.is_empty() {
+                    runtime_sources_for_module.insert(*source_file_id);
+                }
+            }
+            if let Some(lowered_source) = lowered_source
+                && runtime_sources_for_module.contains(&lowered_source.source_file_id)
+            {
+                lowered_import_partition.route_prelude_imports_through_runtime();
+            }
+            for (source_file_id, partition) in &mut runtime_import_partitions {
+                if runtime_sources_for_module.contains(source_file_id) {
+                    partition.route_prelude_imports_through_runtime();
+                }
+            }
             if let Some(lowered_source) = lowered_source
                 && (!remaining_runtime_helpers.is_empty()
                     || !written_runtime_helpers.is_empty()
@@ -702,6 +728,11 @@ impl ImportExportPlanner {
                     &mut file,
                     &mut planned_bindings,
                     &lowered_import_partition.direct_imports,
+                );
+                emit_direct_prelude_imports(
+                    &mut file,
+                    &mut planned_bindings,
+                    &lowered_import_partition.direct_prelude_imports,
                 );
                 let remaining_runtime_helpers = lowered_import_partition.runtime_bindings.clone();
                 if !remaining_runtime_helpers.is_empty()
@@ -773,6 +804,11 @@ impl ImportExportPlanner {
                     &mut file,
                     &mut planned_bindings,
                     &import_partition.direct_imports,
+                );
+                emit_direct_prelude_imports(
+                    &mut file,
+                    &mut planned_bindings,
+                    &import_partition.direct_prelude_imports,
                 );
                 let bindings = import_partition.runtime_bindings;
                 if bindings.is_empty() {
@@ -1537,15 +1573,39 @@ impl RuntimeVarMigrationPlan {
 struct RuntimeReexportImportPartition {
     runtime_bindings: BTreeSet<BindingName>,
     direct_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    direct_prelude_imports: BTreeMap<BindingName, RuntimePreludeDirectImport>,
+}
+
+impl RuntimeReexportImportPartition {
+    fn route_prelude_imports_through_runtime(&mut self) {
+        let direct_prelude_imports = std::mem::take(&mut self.direct_prelude_imports);
+        self.runtime_bindings
+            .extend(direct_prelude_imports.into_keys());
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimePreludeDirectImport {
+    source: String,
+    kind: RuntimePreludeDirectImportKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimePreludeDirectImportKind {
+    Default,
+    Namespace,
+    Named { imported: String },
 }
 
 fn partition_runtime_reexport_bindings(
     migrations: &RuntimeVarMigrationPlan,
+    direct_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
     source_file_id: u32,
     current_module: ModuleId,
     bindings: BTreeSet<BindingName>,
 ) -> RuntimeReexportImportPartition {
     let mut partition = RuntimeReexportImportPartition::default();
+    let direct_imports_for_source = direct_imports.get(&source_file_id);
     for binding in bindings {
         match migrations.reexport_owner(source_file_id, &binding) {
             Some(owner) if owner != current_module => {
@@ -1557,7 +1617,15 @@ fn partition_runtime_reexport_bindings(
             }
             Some(_owner_is_current_module) => {}
             None => {
-                partition.runtime_bindings.insert(binding);
+                if let Some(import) =
+                    direct_imports_for_source.and_then(|imports| imports.get(&binding))
+                {
+                    partition
+                        .direct_prelude_imports
+                        .insert(binding, import.clone());
+                } else {
+                    partition.runtime_bindings.insert(binding);
+                }
             }
         }
     }
@@ -1598,6 +1666,209 @@ fn emit_direct_owner_imports(
             ));
         }
     }
+}
+
+fn emit_direct_prelude_imports(
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    direct_imports: &BTreeMap<BindingName, RuntimePreludeDirectImport>,
+) {
+    if direct_imports.is_empty() {
+        return;
+    }
+
+    let mut named_by_source = BTreeMap::<String, BTreeSet<(String, BindingName)>>::new();
+    for (binding, import) in direct_imports {
+        if planned_bindings.contains(binding) {
+            continue;
+        }
+        match &import.kind {
+            RuntimePreludeDirectImportKind::Default => {
+                file.push_source(default_import_statement(binding, import.source.as_str()));
+            }
+            RuntimePreludeDirectImportKind::Namespace => {
+                file.push_source(namespace_import_statement(binding, import.source.as_str()));
+            }
+            RuntimePreludeDirectImportKind::Named { imported } => {
+                named_by_source
+                    .entry(import.source.clone())
+                    .or_default()
+                    .insert((imported.clone(), binding.clone()));
+            }
+        }
+        planned_bindings.insert(binding.clone());
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            BindingShape::Unknown,
+            true,
+        ));
+    }
+
+    for (source, specifiers) in named_by_source {
+        file.push_source(named_import_alias_statement(
+            specifiers
+                .iter()
+                .map(|(imported, local)| (imported.as_str(), local)),
+            source.as_str(),
+        ));
+    }
+}
+
+fn runtime_prelude_direct_imports(
+    program: &EnrichedProgram,
+) -> BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>> {
+    program
+        .model()
+        .graph()
+        .runtime_preludes()
+        .iter()
+        .filter_map(|(source_file_id, prelude)| {
+            let imports = runtime_prelude_direct_imports_for_prelude(prelude);
+            (!imports.is_empty()).then_some((*source_file_id, imports))
+        })
+        .collect()
+}
+
+fn runtime_prelude_direct_imports_for_prelude(
+    prelude: &RuntimePrelude,
+) -> BTreeMap<BindingName, RuntimePreludeDirectImport> {
+    let mut imports = BTreeMap::<BindingName, RuntimePreludeDirectImport>::new();
+    for (binding, snippet) in &prelude.snippets {
+        let Some(import) = parse_runtime_prelude_direct_import(snippet.source.as_str(), binding)
+        else {
+            continue;
+        };
+        imports.entry(binding.clone()).or_insert(import);
+    }
+    imports
+}
+
+fn parse_runtime_prelude_direct_import(
+    source: &str,
+    binding: &BindingName,
+) -> Option<RuntimePreludeDirectImport> {
+    let source = source.trim();
+    let rest = source.strip_prefix("import ")?;
+    if rest.starts_with("type ") {
+        return None;
+    }
+    let rest = rest.strip_suffix(';')?.trim();
+    if rest.contains(" with ") || rest.contains(" assert ") {
+        return None;
+    }
+    let (clause, specifier) = split_import_clause_and_specifier(rest)?;
+    if !is_bare_import_specifier(specifier) {
+        return None;
+    }
+    parse_import_clause_for_binding(clause, binding).map(|kind| RuntimePreludeDirectImport {
+        source: specifier.to_string(),
+        kind,
+    })
+}
+
+fn split_import_clause_and_specifier(rest: &str) -> Option<(&str, &str)> {
+    for delimiter in [" from '", " from \""] {
+        let Some((clause, tail)) = rest.rsplit_once(delimiter) else {
+            continue;
+        };
+        let quote = delimiter.as_bytes().last().copied()? as char;
+        let specifier = tail.strip_suffix(quote)?;
+        return Some((clause.trim(), specifier));
+    }
+    None
+}
+
+fn parse_import_clause_for_binding(
+    clause: &str,
+    binding: &BindingName,
+) -> Option<RuntimePreludeDirectImportKind> {
+    let binding = binding.as_str();
+    if let Some(namespace) = parse_namespace_import_clause(clause)
+        && namespace == binding
+    {
+        return Some(RuntimePreludeDirectImportKind::Namespace);
+    }
+
+    let (default_part, rest) = split_default_import_clause(clause);
+    if let Some(default_part) = default_part
+        && default_part == binding
+    {
+        return Some(RuntimePreludeDirectImportKind::Default);
+    }
+
+    let rest = rest?;
+    if let Some(namespace) = parse_namespace_import_clause(rest)
+        && namespace == binding
+    {
+        return Some(RuntimePreludeDirectImportKind::Namespace);
+    }
+
+    for (imported, local) in parse_named_import_clause(rest)? {
+        if local == binding {
+            return Some(RuntimePreludeDirectImportKind::Named { imported });
+        }
+    }
+    None
+}
+
+fn parse_namespace_import_clause(clause: &str) -> Option<&str> {
+    let local = clause.trim().strip_prefix("* as ")?.trim();
+    is_identifier_like(local).then_some(local)
+}
+
+fn split_default_import_clause(clause: &str) -> (Option<&str>, Option<&str>) {
+    let clause = clause.trim();
+    if clause.starts_with('{') || clause.starts_with("* as ") {
+        return (None, Some(clause));
+    }
+    let (default_part, rest) = clause
+        .split_once(',')
+        .map_or((clause, None), |(default_part, rest)| {
+            (default_part, Some(rest.trim()))
+        });
+    let default_part = default_part.trim();
+    if is_identifier_like(default_part) {
+        (Some(default_part), rest)
+    } else {
+        (None, rest)
+    }
+}
+
+fn parse_named_import_clause(clause: &str) -> Option<Vec<(String, String)>> {
+    let clause = clause.trim();
+    let inner = clause.strip_prefix('{')?.strip_suffix('}')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut specifiers = Vec::new();
+    for raw in inner.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.starts_with("type ") {
+            return None;
+        }
+        let (imported, local) = raw
+            .split_once(" as ")
+            .map_or((raw, raw), |(imported, local)| {
+                (imported.trim(), local.trim())
+            });
+        if !is_identifier_like(imported) || !is_identifier_like(local) {
+            return None;
+        }
+        specifiers.push((imported.to_string(), local.to_string()));
+    }
+    Some(specifiers)
+}
+
+fn is_bare_import_specifier(specifier: &str) -> bool {
+    !specifier.is_empty() && !specifier.starts_with('.') && !specifier.starts_with('/')
+}
+
+fn is_identifier_like(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && is_identifier_start(bytes[0])
+        && bytes[1..].iter().all(|byte| is_identifier_continue(*byte))
 }
 
 /// Identify bindings that can move from the shared runtime helpers file
@@ -8062,6 +8333,31 @@ fn named_import_statement<'a>(
     format!("import {{ {names} }} from '{specifier}';")
 }
 
+fn named_import_alias_statement<'a>(
+    specifiers: impl Iterator<Item = (&'a str, &'a BindingName)>,
+    source: &str,
+) -> String {
+    let names = specifiers
+        .map(|(imported, local)| {
+            if imported == local.as_str() {
+                local.as_str().to_string()
+            } else {
+                format!("{imported} as {local}", local = local.as_str())
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("import {{ {names} }} from '{source}';")
+}
+
+fn default_import_statement(binding: &BindingName, source: &str) -> String {
+    format!("import {} from '{source}';", binding.as_str())
+}
+
+fn namespace_import_statement(binding: &BindingName, source: &str) -> String {
+    format!("import * as {} from '{source}';", binding.as_str())
+}
+
 fn parse_generated_named_import_statement(source: &str) -> Option<(BTreeSet<BindingName>, String)> {
     let source = source.trim();
     let rest = source.strip_prefix("import { ")?;
@@ -10282,6 +10578,110 @@ mod tests {
         assert_eq!(lowered.source, source);
         assert!(lowered.lowered_helpers.is_empty());
         assert!(lowered.remaining_helpers.contains(&BindingName::new("pvH")));
+    }
+
+    #[test]
+    fn planner_direct_imports_bare_runtime_prelude_namespace_imports() {
+        let prelude = "import * as pathNS from 'path';\n";
+        let body = "var value = pathNS.join('a', 'b');\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(entry_source.contains("import * as pathNS from 'path';"));
+        assert!(entry_source.contains("pathNS.join('a', 'b')"));
+        assert!(
+            planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+            "the prelude import is now consumed directly, so no runtime helper file is needed"
+        );
+    }
+
+    #[test]
+    fn planner_direct_imports_bare_runtime_prelude_default_and_named_imports() {
+        let prelude =
+            "import proc, { cwd as cwdAlias, default as procAlias } from 'node:process';\n";
+        let body = "var value = [proc, cwdAlias(), procAlias];\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(entry_source.contains("import proc from 'node:process';"));
+        assert!(
+            entry_source
+                .contains("import { cwd as cwdAlias, default as procAlias } from 'node:process';")
+        );
+        assert!(entry_source.contains("procAlias"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn planner_keeps_relative_runtime_prelude_imports_on_runtime_path() {
+        let prelude = "import * as localNS from './local.js';\n";
+        let body = "var value = localNS.value;\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(entry_source.contains("import { localNS } from './runtime/source-1-helpers.js';"));
+        assert!(helper_source.contains("import * as localNS from './local.js';"));
+        assert!(helper_source.contains("export { localNS };"));
+    }
+
+    #[test]
+    fn planner_keeps_prelude_import_on_runtime_path_when_runtime_edge_remains() {
+        let prelude = "import * as pathNS from 'path';\nfunction helper() { return 1; }\n";
+        let body = "var value = pathNS.join('a', String(helper()));\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            entry_source
+                .contains("import { helper, pathNS } from './runtime/source-1-helpers.js';"),
+            "entry:\n{entry_source}"
+        );
+        assert!(!entry_source.contains("from 'path'"));
+        assert!(helper_source.contains("import * as pathNS from 'path';"));
+        assert!(helper_source.contains("function helper()"));
+        assert!(helper_source.contains("export { helper, pathNS };"));
     }
 
     #[test]
