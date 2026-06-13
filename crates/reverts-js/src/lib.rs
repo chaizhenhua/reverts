@@ -696,6 +696,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
             &readability_renames_with_imports,
             &mut report,
         );
+        apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
@@ -932,6 +933,74 @@ fn apply_readability_renames<'a>(
         reference_renames,
     };
     renamer.visit_program(program);
+}
+
+fn apply_emit_safety_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
+    let (symbol_renames, reference_renames) = {
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let symbols = semantic.symbols();
+        let mut used_names = symbols
+            .symbol_ids()
+            .map(|symbol_id| symbols.get_name(symbol_id).to_string())
+            .collect::<BTreeSet<_>>();
+        used_names.extend(
+            semantic
+                .scopes()
+                .root_unresolved_references()
+                .keys()
+                .map(|name| name.as_str().to_string()),
+        );
+
+        let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
+        let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
+        for symbol_id in symbols.symbol_ids() {
+            let original = symbols.get_name(symbol_id);
+            let sanitized = sanitize_identifier(original);
+            if sanitized == original {
+                continue;
+            }
+            let renamed = unique_safe_identifier(&sanitized, &mut used_names);
+            symbol_renames.insert(symbol_id, renamed.clone());
+            for reference_id in symbols.get_resolved_reference_ids(symbol_id) {
+                reference_renames.insert(*reference_id, renamed.clone());
+            }
+            report.push(format!(
+                "renamed {original} -> {renamed}, source=emit_safety"
+            ));
+        }
+
+        (symbol_renames, reference_renames)
+    };
+
+    if symbol_renames.is_empty() && reference_renames.is_empty() {
+        return;
+    }
+
+    let mut renamer = ReadabilityRenamer {
+        builder: AstBuilder::new(allocator),
+        symbol_renames,
+        reference_renames,
+    };
+    renamer.visit_program(program);
+}
+
+fn unique_safe_identifier(base: &str, used_names: &mut BTreeSet<String>) -> String {
+    if !used_names.contains(base) {
+        used_names.insert(base.to_string());
+        return base.to_string();
+    }
+    for suffix in 2.. {
+        let candidate = format!("{base}{suffix}");
+        if !used_names.contains(&candidate) {
+            used_names.insert(candidate.clone());
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search should always find an identifier")
 }
 
 fn collect_late_readability_rename_hints(program: &Program<'_>) -> Vec<ReadabilityRenameHint> {
@@ -4079,6 +4148,7 @@ fn is_reserved_word(value: &str) -> bool {
     matches!(
         value,
         "await"
+            | "arguments"
             | "break"
             | "case"
             | "catch"
@@ -4091,6 +4161,7 @@ fn is_reserved_word(value: &str) -> bool {
             | "do"
             | "else"
             | "enum"
+            | "eval"
             | "export"
             | "extends"
             | "false"
@@ -4098,12 +4169,20 @@ fn is_reserved_word(value: &str) -> bool {
             | "for"
             | "function"
             | "if"
+            | "implements"
             | "import"
             | "in"
             | "instanceof"
+            | "interface"
+            | "let"
             | "new"
             | "null"
+            | "package"
+            | "private"
+            | "protected"
+            | "public"
             | "return"
+            | "static"
             | "super"
             | "switch"
             | "this"
@@ -5013,6 +5092,45 @@ mod tests {
     }
 
     #[test]
+    fn emit_safety_renames_strict_reserved_bindings_before_esm_output() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var package = 1; function read() { var private = package + 1; return private; } console.log(package, read());",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var _package = 1;"));
+        assert!(formatted.contains("var _private = _package + 1;"));
+        assert!(formatted.contains("return _private;"));
+        assert!(formatted.contains("console.log(_package, read());"));
+        assert!(!formatted.contains("var package"));
+        assert!(!formatted.contains("var private"));
+    }
+
+    #[test]
+    fn emit_safety_renames_avoid_existing_binding_collisions() {
+        let formatted = format_source_with_module_items_and_renames(
+            "var _package = 1; var package = 2; console.log(_package, package);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("var _package = 1;"));
+        assert!(formatted.contains("_package2 = 2"));
+        assert!(formatted.contains("console.log(_package, _package2);"));
+    }
+
+    #[test]
     fn pipeline_normalization_accepts_commonjs_bin_sources() {
         let normalized = normalize_source_for_pipeline(
             "if (require.main === module) {\n  return;\n}\nmodule.exports = {};\n",
@@ -5028,6 +5146,9 @@ mod tests {
         assert_eq!(sanitize_identifier("@smithy/XY7"), "_smithy_XY7");
         assert_eq!(sanitize_identifier("9patch-name"), "_9patch_name");
         assert_eq!(sanitize_identifier("class"), "_class");
+        assert_eq!(sanitize_identifier("package"), "_package");
+        assert_eq!(sanitize_identifier("private"), "_private");
+        assert_eq!(sanitize_identifier("arguments"), "_arguments");
     }
 
     fn binding_set(names: &[&str]) -> BTreeSet<String> {
