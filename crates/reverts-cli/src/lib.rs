@@ -5504,6 +5504,8 @@ mod tests {
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
         assert!(evidence.contains("aggregate_structural_bag_similarity"));
+        assert!(evidence.contains("pair_coverage="));
+        assert!(evidence.contains("shape_function_coverage="));
         assert!(evidence.contains("\"writes_external_import\":false"));
     }
 
