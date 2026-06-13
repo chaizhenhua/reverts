@@ -45,6 +45,10 @@ pub enum MatchPackagesError {
     ConfigureDatabase(rusqlite::Error),
     LoadInput(SqliteInputError),
     QueryPackageSources(rusqlite::Error),
+    ReadPackageSourceRoot {
+        path: PathBuf,
+        source: io::Error,
+    },
     WriteAttribution(rusqlite::Error),
     WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
@@ -76,6 +80,13 @@ impl fmt::Display for MatchPackagesError {
             Self::LoadInput(source) => write!(formatter, "{source}"),
             Self::QueryPackageSources(source) => {
                 write!(formatter, "failed to load package source cache: {source}")
+            }
+            Self::ReadPackageSourceRoot { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read package source root {}: {source}",
+                    path.display()
+                )
             }
             Self::WriteAttribution(source) => {
                 write!(formatter, "failed to write package attribution: {source}")
@@ -128,6 +139,7 @@ impl Error for MatchPackagesError {
             | Self::QueryPackageSources(source)
             | Self::WriteAttribution(source)
             | Self::WritePackageSurface(source) => Some(source),
+            Self::ReadPackageSourceRoot { source, .. } => Some(source),
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)
             | Self::MissingMatchEvidence { .. }

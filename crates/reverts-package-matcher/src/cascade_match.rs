@@ -128,6 +128,14 @@ fn build_index(
 ) -> InMemoryFingerprintIndex {
     let mut index = InMemoryFingerprintIndex::new();
     for (idx, source) in package_sources.iter().enumerate() {
+        if !source.external_importable {
+            // The cascade pipeline emits accepted external attribution rows.
+            // Source-only roots are useful ownership evidence for the
+            // versioned matcher, but they may point at private files that are
+            // not valid package import specifiers; do not index them here
+            // until an import-shape resolver proves they are safe.
+            continue;
+        }
         let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
@@ -331,6 +339,29 @@ mod tests {
         assert_eq!(attr.export_specifier.as_deref(), Some("pkg/add"));
         assert!(attr.function_span.is_some(), "function_span must be set");
         assert!(attr.confidence.is_some(), "confidence must be set");
+    }
+
+    #[test]
+    fn cascade_match_ignores_source_only_package_sources() {
+        let bundle_source = "function f(a, b) { return a + b; }";
+        let bundle_fps = FunctionExtractor::fingerprint(ModuleId(10), bundle_source);
+        let mut fps_map: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
+        fps_map.insert(ModuleId(10), bundle_fps);
+        let pkg_sources = [PackageSource::source_only(
+            "pkg",
+            "1.0.0",
+            "pkg/internal/add.js",
+            "internal/add.js",
+            bundle_source,
+        )];
+
+        let report = match_with_cascade(&fps_map, &pkg_sources);
+
+        assert!(
+            report.attributions.is_empty(),
+            "source-only package roots must not emit external cascade attributions"
+        );
+        assert!(report.audit.is_clean());
     }
 
     #[test]

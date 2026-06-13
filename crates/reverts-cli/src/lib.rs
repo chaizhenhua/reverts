@@ -33,6 +33,7 @@ pub struct MatchPackagesArgs {
     pub project_id: u32,
     pub apply: bool,
     pub package_names: Vec<String>,
+    pub package_source_roots: Vec<PathBuf>,
 }
 
 impl MatchPackagesArgs {
@@ -41,6 +42,7 @@ impl MatchPackagesArgs {
         let mut project_id = None;
         let mut apply = false;
         let mut package_names = Vec::new();
+        let mut package_source_roots = Vec::new();
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -64,6 +66,9 @@ impl MatchPackagesArgs {
                     }
                     package_names.push(package_name);
                 }
+                "--package-source-root" => {
+                    package_source_roots.push(next_path(&mut args, "--package-source-root")?);
+                }
                 other => return Err(CliError::UnknownArgument(other.to_string())),
             }
         }
@@ -73,6 +78,7 @@ impl MatchPackagesArgs {
             project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
             apply,
             package_names,
+            package_source_roots,
         })
     }
 }
@@ -372,7 +378,8 @@ pub fn match_packages_from_connection(
     extraction.merge_into(&mut rows);
 
     let package_names = package_source_filter(&rows, &args.package_names);
-    let package_sources = load_package_sources(connection, &package_names)?;
+    let package_sources =
+        load_package_sources(connection, &package_names, &args.package_source_roots)?;
     let report = if args.package_names.is_empty() {
         VersionedPackageMatcher::default().match_rows(&rows, &package_sources)
     } else {
@@ -1143,50 +1150,60 @@ fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> b
 fn load_package_sources(
     connection: &Connection,
     package_names: &BTreeSet<String>,
+    package_source_roots: &[PathBuf],
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
-    if !sqlite_table_exists(connection, "package_source_cache")
-        .map_err(MatchPackagesError::QueryPackageSources)?
-    {
+    let has_package_source_cache = sqlite_table_exists(connection, "package_source_cache")
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    if !has_package_source_cache && package_source_roots.is_empty() {
         return Err(MatchPackagesError::MissingTable("package_source_cache"));
     }
 
-    let mut sql = String::from(
-        r"
-        SELECT package_name, package_version, entry_path, source_content
-          FROM package_source_cache
-         WHERE TRIM(COALESCE(package_name, '')) != ''
-           AND TRIM(COALESCE(package_version, '')) != ''
-           AND TRIM(COALESCE(entry_path, '')) != ''
-           AND TRIM(COALESCE(source_content, '')) != ''
-        ",
-    );
-    if !package_names.is_empty() {
-        use std::fmt::Write as _;
-        let _ = write!(
-            sql,
-            " AND package_name IN ({})",
-            sqlite_placeholders(package_names.len())
+    let mut package_sources = if has_package_source_cache {
+        let mut sql = String::from(
+            r"
+            SELECT package_name, package_version, entry_path, source_content
+              FROM package_source_cache
+             WHERE TRIM(COALESCE(package_name, '')) != ''
+               AND TRIM(COALESCE(package_version, '')) != ''
+               AND TRIM(COALESCE(entry_path, '')) != ''
+               AND TRIM(COALESCE(source_content, '')) != ''
+            ",
         );
-    }
-    sql.push_str(" ORDER BY package_name, package_version, entry_path");
+        if !package_names.is_empty() {
+            use std::fmt::Write as _;
+            let _ = write!(
+                sql,
+                " AND package_name IN ({})",
+                sqlite_placeholders(package_names.len())
+            );
+        }
+        sql.push_str(" ORDER BY package_name, package_version, entry_path");
 
-    let mut statement = connection
-        .prepare(sql.as_str())
-        .map_err(MatchPackagesError::QueryPackageSources)?;
-    let package_sources = if package_names.is_empty() {
-        let rows = statement
-            .query_map([], package_source_from_row)
+        let mut statement = connection
+            .prepare(sql.as_str())
             .map_err(MatchPackagesError::QueryPackageSources)?;
-        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)?
+        if package_names.is_empty() {
+            let rows = statement
+                .query_map([], package_source_from_row)
+                .map_err(MatchPackagesError::QueryPackageSources)?;
+            collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)?
+        } else {
+            let rows = statement
+                .query_map(
+                    params_from_iter(package_names.iter()),
+                    package_source_from_row,
+                )
+                .map_err(MatchPackagesError::QueryPackageSources)?;
+            collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)?
+        }
     } else {
-        let rows = statement
-            .query_map(
-                params_from_iter(package_names.iter()),
-                package_source_from_row,
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?;
-        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)?
+        Vec::new()
     };
+    package_sources.extend(load_package_sources_from_roots(
+        package_names,
+        package_source_roots,
+    )?);
+    dedup_package_sources(&mut package_sources);
     Ok(package_sources)
 }
 
@@ -1221,6 +1238,195 @@ fn clean_package_entry_path(entry_path: &str) -> String {
         .trim_start_matches("./")
         .trim_start_matches('/')
         .to_string()
+}
+
+fn load_package_sources_from_roots(
+    package_names: &BTreeSet<String>,
+    package_source_roots: &[PathBuf],
+) -> Result<Vec<PackageSource>, MatchPackagesError> {
+    let mut sources = Vec::new();
+    for root in package_source_roots {
+        for package_name in package_names {
+            for package_dir in package_dir_candidates(root.as_path(), package_name.as_str()) {
+                let Some((declared_name, package_version)) =
+                    local_package_metadata(package_dir.as_path())?
+                else {
+                    continue;
+                };
+                if declared_name != *package_name {
+                    continue;
+                }
+                collect_local_package_sources(
+                    package_dir.as_path(),
+                    declared_name.as_str(),
+                    package_version.as_str(),
+                    &mut sources,
+                )?;
+            }
+        }
+    }
+    Ok(sources)
+}
+
+fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
+    let package_path = package_name
+        .split('/')
+        .fold(PathBuf::new(), |path, segment| path.join(segment));
+    let mut candidates = Vec::new();
+    candidates.push(root.join("node_modules").join(&package_path));
+    candidates.push(root.join(&package_path));
+    candidates.push(root.to_path_buf());
+    let mut seen = BTreeSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn local_package_metadata(
+    package_dir: &Path,
+) -> Result<Option<(String, String)>, MatchPackagesError> {
+    let package_json_path = package_dir.join("package.json");
+    if !package_json_path.is_file() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(package_json_path.as_path()).map_err(|source| {
+        MatchPackagesError::ReadPackageSourceRoot {
+            path: package_json_path.clone(),
+            source,
+        }
+    })?;
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content.as_str()) else {
+        return Ok(None);
+    };
+    let Some(package_name) = value.get("name").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(package_version) = value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some((
+        package_name.trim().to_string(),
+        package_version.trim().to_string(),
+    )))
+}
+
+fn collect_local_package_sources(
+    package_dir: &Path,
+    package_name: &str,
+    package_version: &str,
+    sources: &mut Vec<PackageSource>,
+) -> Result<(), MatchPackagesError> {
+    let mut stack = vec![package_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(dir.as_path()).map_err(|source| {
+            MatchPackagesError::ReadPackageSourceRoot {
+                path: dir.clone(),
+                source,
+            }
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+                path: dir.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            let file_type =
+                entry
+                    .file_type()
+                    .map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+                        path: path.clone(),
+                        source,
+                    })?;
+            if file_type.is_dir() {
+                if should_descend_package_source_dir(path.as_path()) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(package_dir) else {
+                continue;
+            };
+            let rel_path = slash_path(rel);
+            if !is_local_package_source_candidate(rel_path.as_str()) {
+                continue;
+            }
+            let source = fs::read_to_string(path.as_path()).map_err(|source| {
+                MatchPackagesError::ReadPackageSourceRoot {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            let export_specifier = package_export_specifier(package_name, rel_path.as_str());
+            let source_path = format!("{package_name}@{package_version}/{rel_path}");
+            sources.push(PackageSource::source_only(
+                package_name,
+                package_version,
+                export_specifier,
+                source_path,
+                source,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn should_descend_package_source_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "node_modules" | "test" | "tests" | "__tests__" | "coverage" | "benchmark" | "benchmarks"
+    )
+}
+
+fn is_local_package_source_candidate(rel_path: &str) -> bool {
+    let lower = rel_path.to_ascii_lowercase();
+    if lower.ends_with(".d.ts")
+        || lower.ends_with(".min.js")
+        || lower.contains("/test/")
+        || lower.contains("/tests/")
+        || lower.contains("/__tests__/")
+        || lower.starts_with("test/")
+        || lower.starts_with("tests/")
+        || lower.starts_with("__tests__/")
+    {
+        return false;
+    }
+    matches!(
+        Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx")
+    )
+}
+
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(segment) => Some(segment.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn dedup_package_sources(package_sources: &mut Vec<PackageSource>) {
+    let mut seen = BTreeSet::new();
+    package_sources.retain(|source| {
+        seen.insert((
+            source.package_name.clone(),
+            source.package_version.clone(),
+            source.source_path.clone(),
+        ))
+    });
 }
 
 fn persist_package_attributions(
@@ -1516,6 +1722,14 @@ fn decision_package_name(decision: &BestVersionMatch) -> &str {
 
 fn rejection_reason_from_decision(decision: &BestVersionMatch) -> String {
     match decision {
+        BestVersionMatch::Selected { module_matches, .. }
+            if module_matches
+                .iter()
+                .all(|module_match| !module_match.external_importable) =>
+        {
+            "selected package source is source-only and has not been proven external-importable"
+                .to_string()
+        }
         BestVersionMatch::Selected { .. } => {
             "selected package version did not match this module source".to_string()
         }
@@ -2162,6 +2376,8 @@ mod tests {
             "13495".to_string(),
             "--package-name".to_string(),
             "pkg".to_string(),
+            "--package-source-root".to_string(),
+            "node_modules".to_string(),
             "--apply".to_string(),
         ])
         .expect("args should parse");
@@ -2169,6 +2385,10 @@ mod tests {
         assert_eq!(args.input, PathBuf::from("input.db"));
         assert_eq!(args.project_id, 13495);
         assert_eq!(args.package_names, vec!["pkg"]);
+        assert_eq!(
+            args.package_source_roots,
+            vec![PathBuf::from("node_modules")]
+        );
         assert!(args.apply);
 
         let old_command = CliCommand::parse(["match-packages-v2".to_string()]);
@@ -2266,6 +2486,7 @@ mod tests {
         assert!(help_text(HelpTopic::TopLevel).contains("extract-assets"));
         assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
+        assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
         assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
         assert!(version_text().starts_with("reverts-cli "));
     }
@@ -2416,6 +2637,7 @@ mod tests {
             project_id: 1,
             apply: false,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
@@ -2443,6 +2665,7 @@ mod tests {
             project_id: 1,
             apply: false,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2455,6 +2678,121 @@ mod tests {
         assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 0);
         assert_eq!(outcome.written_surfaces, 0);
+        assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_loads_source_only_files_from_package_source_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
+        fs::create_dir_all(package_dir.join("tests").as_path()).expect("create package test dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3"}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package source");
+        fs::write(
+            package_dir.join("tests/add.test.js"),
+            "export function testOnly() { return 'skip'; }",
+        )
+        .expect("write skipped package test source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            outcome.loaded_package_sources, 1,
+            "only lib/add.js should be loaded; tests must be skipped"
+        );
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(
+            outcome.written_attributions, 1,
+            "source-only ownership matches are persisted as application_source decisions"
+        );
+        assert_eq!(
+            outcome.cascade_attributions, 0,
+            "source-only roots must not feed external cascade attribution"
+        );
+        assert_eq!(outcome.written_cascade_attributions, 0);
+        let (status, emission_mode, rejection_reason, package_version): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, rejection_reason, package_version
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("source-only match should leave a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert!(rejection_reason.contains("source-only"));
+    }
+
+    #[test]
+    fn match_packages_uses_package_source_root_without_cache_table() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3"}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        connection
+            .execute("DROP TABLE package_source_cache", [])
+            .expect("drop cache table");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().to_path_buf()],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.cascade_attributions, 0);
         assert_eq!(package_attribution_count(&connection), 0);
     }
 
@@ -2501,6 +2839,7 @@ mod tests {
             project_id: 1,
             apply: false,
             package_names: vec!["pkg".to_string()],
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2539,6 +2878,7 @@ mod tests {
             project_id: 1,
             apply: true,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2584,6 +2924,7 @@ mod tests {
             project_id: 1,
             apply: true,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2653,6 +2994,7 @@ mod tests {
             project_id: 1,
             apply: false,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2697,6 +3039,7 @@ mod tests {
             project_id: 1,
             apply: true,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2769,6 +3112,7 @@ mod tests {
             project_id: 1,
             apply: true,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =
@@ -2813,6 +3157,7 @@ mod tests {
             project_id: 1,
             apply: true,
             package_names: Vec::new(),
+            package_source_roots: Vec::new(),
         };
 
         let outcome =

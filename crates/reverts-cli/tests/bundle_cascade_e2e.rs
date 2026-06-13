@@ -60,6 +60,7 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
         project_id: 1,
         apply: false,
         package_names: Vec::new(),
+        package_source_roots: Vec::new(),
     };
     let outcome = reverts_cli::match_packages_from_connection(&mut connection, &args)
         .expect("match should succeed");

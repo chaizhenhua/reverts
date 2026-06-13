@@ -65,6 +65,13 @@ pub struct PackageSource {
     pub source_path: String,
     /// package source body.
     pub source: String,
+    /// Whether a match against this source may be emitted as an external import.
+    ///
+    /// Full package source roots often include private/internal files that are
+    /// useful for ownership matching but are not guaranteed to be importable
+    /// through a package's `exports` map. Those sources must stay source-only
+    /// until an import-shape resolver proves the specifier is safe.
+    pub external_importable: bool,
 }
 
 impl PackageSource {
@@ -83,6 +90,28 @@ impl PackageSource {
             export_specifier: export_specifier.into(),
             source_path: source_path.into(),
             source: source.into(),
+            external_importable: true,
+        }
+    }
+
+    /// Creates a package source candidate used only for ownership/source
+    /// matching. Matches against this source are reported but are not turned
+    /// into accepted `external_import` attributions.
+    #[must_use]
+    pub fn source_only(
+        package_name: impl Into<String>,
+        package_version: impl Into<String>,
+        export_specifier: impl Into<String>,
+        source_path: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        Self {
+            package_name: package_name.into(),
+            package_version: package_version.into(),
+            export_specifier: export_specifier.into(),
+            source_path: source_path.into(),
+            source: source.into(),
+            external_importable: false,
         }
     }
 }
@@ -179,6 +208,8 @@ pub struct ModulePackageMatch {
     pub function_signature_matches: usize,
     /// overlapping string anchors.
     pub string_anchor_matches: usize,
+    /// Whether this match is safe to turn into an external import attribution.
+    pub external_importable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,7 +355,9 @@ impl VersionedPackageMatcher {
             } = &decision
             {
                 for module_match in module_matches {
-                    attributions.push(accepted_attribution_from_match(module_match));
+                    if module_match.external_importable {
+                        attributions.push(accepted_attribution_from_match(module_match));
+                    }
                     matches.push(PackageMatch::from_module_match(module_match));
                 }
             } else if let BestVersionMatch::Ambiguous {
@@ -436,6 +469,8 @@ pub struct PackageMatch {
     pub function_signature_matches: usize,
     /// overlapping string anchors.
     pub string_anchor_matches: usize,
+    /// Whether this match was eligible for external import emission.
+    pub external_importable: bool,
 }
 
 impl PackageMatch {
@@ -450,6 +485,7 @@ impl PackageMatch {
             strategy: module_match.strategy,
             function_signature_matches: module_match.function_signature_matches,
             string_anchor_matches: module_match.string_anchor_matches,
+            external_importable: module_match.external_importable,
         }
     }
 }
@@ -789,6 +825,12 @@ impl<'a> PackageVersionIndex<'a> {
             sources.sort_by(|left, right| {
                 left.normalized_source_hash
                     .cmp(&right.normalized_source_hash)
+                    .then_with(|| {
+                        right
+                            .source
+                            .external_importable
+                            .cmp(&left.source.external_importable)
+                    })
                     .then_with(|| left.source.source_path.cmp(&right.source.source_path))
                     .then_with(|| {
                         left.source
@@ -1283,6 +1325,13 @@ fn best_source_match(
             .1
             .cmp(&left.1)
             .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| {
+                right
+                    .0
+                    .source
+                    .external_importable
+                    .cmp(&left.0.source.external_importable)
+            })
             .then_with(|| left.0.source.source_path.cmp(&right.0.source.source_path))
     });
 
@@ -1362,6 +1411,7 @@ fn module_package_match(
         normalized_source_hash: source.normalized_source_hash.clone(),
         function_signature_matches,
         string_anchor_matches,
+        external_importable: source.source.external_importable,
     }
 }
 
@@ -1464,6 +1514,70 @@ mod tests {
             Some("pkg/add")
         );
         assert_eq!(report.attributions[0].subpath.as_deref(), Some("add"));
+    }
+
+    #[test]
+    fn source_only_package_source_matches_without_external_attribution() {
+        let rows = rows_with_package_source("export function add(a,b){return a+b}");
+        let package_sources = [PackageSource::source_only(
+            "pkg",
+            "1.2.3",
+            "pkg/lib/add.js",
+            "lib/add.js",
+            "export function add(a, b) {\n  return a + b;\n}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert!(
+            report.attributions.is_empty(),
+            "source-only package sources must not be externalized"
+        );
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].package_name, "pkg");
+        assert_eq!(report.matches[0].package_version, "1.2.3");
+        assert_eq!(report.matches[0].source_path, "lib/add.js");
+        assert!(!report.matches[0].external_importable);
+        match &report.version_matches[0] {
+            BestVersionMatch::Selected { module_matches, .. } => {
+                assert_eq!(module_matches.len(), 1);
+                assert!(!module_matches[0].external_importable);
+            }
+            other => panic!("expected source-only match to select a version, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn external_package_source_wins_over_duplicate_source_only_candidate() {
+        let rows = rows_with_package_source("export function add(a,b){return a+b}");
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/add",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/add",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            ),
+        ];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.attributions[0].export_specifier.as_deref(),
+            Some("pkg/add")
+        );
+        assert_eq!(report.matches.len(), 1);
+        assert!(report.matches[0].external_importable);
     }
 
     #[test]
