@@ -48,7 +48,7 @@ impl NormalizationPass for TypeofLocalUndefinedGuarded {
         NormalizationPassId::TypeofLocalUndefinedGuarded
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>) {
         if super::shadow_check::program_can_shadow(program, "undefined") {
@@ -93,10 +93,21 @@ struct Rewriter<'a> {
     locals: BTreeSet<String>,
 }
 
-#[derive(Copy, Clone)]
+/// Result operator. `typeof` always returns a string, so `==` and
+/// `===` against a string literal are spec-identical — both forms
+/// reduce to "is the typeof result this exact string?". We
+/// therefore canonicalise both flavours of the loose-equality test
+/// to **strict** equality on the rewrite side, because `x === undefined`
+/// is strictly narrower than `x == undefined`:
+///
+/// * `typeof x == "undefined"` is true iff x is undefined.
+/// * `x == undefined` is true iff x is null OR undefined.
+///
+/// So the only spec-equivalent rewrite of `typeof x == "undefined"`
+/// is `x === undefined`, not `x == undefined`. The Op enum collapses
+/// both equality forms into one strict variant.
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum Op {
-    StrictEquality,
-    StrictInequality,
     Equality,
     Inequality,
 }
@@ -104,10 +115,8 @@ enum Op {
 impl Op {
     fn as_binary(self) -> BinaryOperator {
         match self {
-            Op::StrictEquality => BinaryOperator::StrictEquality,
-            Op::StrictInequality => BinaryOperator::StrictInequality,
-            Op::Equality => BinaryOperator::Equality,
-            Op::Inequality => BinaryOperator::Inequality,
+            Op::Equality => BinaryOperator::StrictEquality,
+            Op::Inequality => BinaryOperator::StrictInequality,
         }
     }
 }
@@ -143,10 +152,12 @@ fn matches_typeof_local_undefined(
         return None;
     };
     let op = match bin.operator {
-        BinaryOperator::StrictEquality => Op::StrictEquality,
-        BinaryOperator::StrictInequality => Op::StrictInequality,
-        BinaryOperator::Equality => Op::Equality,
-        BinaryOperator::Inequality => Op::Inequality,
+        // typeof always returns a string, so == and === against a
+        // string literal produce identical results. Both collapse
+        // to strict equality on the rewrite side — see the Op enum
+        // docs for the full argument.
+        BinaryOperator::StrictEquality | BinaryOperator::Equality => Op::Equality,
+        BinaryOperator::StrictInequality | BinaryOperator::Inequality => Op::Inequality,
         _ => return None,
     };
 
@@ -196,13 +207,30 @@ mod tests {
     }
 
     #[test]
-    fn rewrites_typeof_param_loose_equal_undefined() {
+    fn rewrites_typeof_param_loose_equal_to_strict_undefined() {
+        // `typeof x == "undefined"` is spec-identical to
+        // `typeof x === "undefined"` (string-to-string equality), so
+        // the rewrite must produce STRICT equality on the right-hand
+        // side: `x === undefined`, not the broader `x == undefined`
+        // which would also match `null`.
         let out = apply_to_source(
             &TypeofLocalUndefinedGuarded,
             r#"function f(x) { return typeof x == "undefined"; }"#,
         )
         .expect("parse");
-        assert!(out.contains("x == undefined"), "got: {out}");
+        assert!(out.contains("x === undefined"), "got: {out}");
+        assert!(!out.contains("x == undefined"), "got: {out}");
+    }
+
+    #[test]
+    fn rewrites_typeof_param_loose_inequal_to_strict_inequality() {
+        let out = apply_to_source(
+            &TypeofLocalUndefinedGuarded,
+            r#"function f(x) { return typeof x != "undefined"; }"#,
+        )
+        .expect("parse");
+        assert!(out.contains("x !== undefined"), "got: {out}");
+        assert!(!out.contains("x != undefined"), "got: {out}");
     }
 
     #[test]
