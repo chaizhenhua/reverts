@@ -552,14 +552,19 @@ fn pipeline_aligns_boolean_call_with_double_not_when_not_shadowed() {
 }
 
 #[test]
-fn pipeline_aligns_number_call_with_unary_plus_when_not_shadowed() {
-    let minified = "function f(x) { return Number(x); }";
-    let source = "function f(x) { return +x; }";
-    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
-    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
-    assert_eq!(
-        fp_m[0].primary.ast, fp_s[0].primary.ast,
-        "Number(x) and +x must converge after pipeline when `Number` is not shadowed"
+fn pipeline_keeps_number_call_distinct_from_unary_plus() {
+    // `Number(x)` and `+x` are NOT spec-equivalent: they diverge on
+    // BigInt operands (Number(0n) returns 0, +0n throws TypeError).
+    // No safe normalization unifies them under our "strict spec-
+    // equivalence" policy, so the pipeline keeps both forms intact
+    // and their primary AST hashes stay distinct.
+    let one = "function f(x) { return Number(x); }";
+    let two = "function f(x) { return +x; }";
+    let fp_o = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(one));
+    let fp_t = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(two));
+    assert_ne!(
+        fp_o[0].primary.ast, fp_t[0].primary.ast,
+        "Number(x) and +x must NOT be unified — diverge on BigInt"
     );
 }
 
