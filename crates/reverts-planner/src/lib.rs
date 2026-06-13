@@ -657,8 +657,17 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let helper_closure =
+            let mut helper_closure =
                 close_runtime_helper_source(prelude, &root_bindings, entrypoint, folded_chunks);
+            // Phase 9a: collapse `__reverts_set_X(arg)` → `(X = arg)`
+            // whenever the call sits inside the runtime helpers module
+            // itself. Same-module direct assignment is observationally
+            // equivalent for single-argument invocations, and the form
+            // reads as the underlying bundler intent. The cross-module
+            // setter function is still emitted below so consumer modules
+            // (which can't legally assign through their read-only ESM
+            // imports) keep their existing call form unchanged.
+            helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
             let helper_imports = runtime_source_module_imports(
                 program,
                 helper_closure.source.as_str(),
@@ -6304,6 +6313,137 @@ fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
     format!("function {setter}(value) {{ {binding} = value; return value; }}")
 }
 
+/// Inline same-module setter calls inside the runtime helpers module.
+/// `__reverts_set_X(<arg>)` becomes `(X = <arg>)` whenever:
+///   * The identifier appears in call position (not as a value reference
+///     or member access).
+///   * The argument list contains exactly one expression (no top-level
+///     comma).
+///
+/// The two forms are observationally equivalent for single-argument
+/// invocations: both evaluate the argument once, write the binding, and
+/// produce the argument's value as the expression's result. The cross-
+/// module mutation channel (the setter function) is still defined and
+/// exported afterwards — only the runtime's own internal calls collapse.
+fn inline_internal_setter_calls(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            out.push_str(&source[cursor..next]);
+            cursor = next;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            // Push a single UTF-8 codepoint to keep the byte stream valid.
+            // ASCII fits in one byte; multi-byte sequences (continuation
+            // bytes match 10xxxxxx) need the full run to stay paired.
+            let mut next = cursor + 1;
+            if bytes[cursor] >= 0x80 {
+                while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
+                    next += 1;
+                }
+            }
+            out.push_str(&source[cursor..next]);
+            cursor = next;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        let ident = &source[start..cursor];
+        let Some(target) = ident.strip_prefix("__reverts_set_") else {
+            out.push_str(ident);
+            continue;
+        };
+        if target.is_empty() {
+            out.push_str(ident);
+            continue;
+        }
+        let prev = start
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .copied();
+        if matches!(prev, Some(b'.') | Some(b'#')) {
+            out.push_str(ident);
+            continue;
+        }
+        let arg_open = skip_ws(bytes, cursor);
+        if bytes.get(arg_open) != Some(&b'(') {
+            out.push_str(ident);
+            continue;
+        }
+        let Some(arg_close) = find_matching_paren(source, arg_open) else {
+            out.push_str(ident);
+            continue;
+        };
+        let arg_slice = &source[arg_open + 1..arg_close];
+        if !arg_text_is_single_expression(arg_slice) {
+            out.push_str(ident);
+            continue;
+        }
+        // The trim avoids leading/trailing whitespace cluttering the
+        // assignment form; the byte-for-byte interior is otherwise
+        // preserved so embedded comments / newlines stay intact.
+        out.push('(');
+        out.push_str(target);
+        out.push_str(" = ");
+        out.push_str(arg_slice.trim());
+        out.push(')');
+        cursor = arg_close + 1;
+    }
+    out
+}
+
+/// Walk `source` (the bytes between a call's `(` and `)`) and return
+/// `true` iff it contains exactly one top-level expression — i.e., no
+/// top-level comma outside nested parens/brackets/braces/strings. Used
+/// to gate the setter-call inliner: multi-argument setter calls have
+/// different semantics from a comma-folded assignment expression, so
+/// they stay as function calls.
+fn arg_text_is_single_expression(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                let Some(close) = find_matching_paren(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b'[' => {
+                let Some(close) = find_matching_bracket(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b'{' => {
+                let Some(close) = find_matching_brace(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b',' => return false,
+            _ => cursor += 1,
+        }
+    }
+    true
+}
+
 fn runtime_namespace_export_statement(namespace_export: &RuntimeNamespaceExport) -> String {
     let properties = namespace_export
         .exports
@@ -6479,8 +6619,54 @@ mod tests {
     };
 
     use super::{
-        CompilerRecoveryAction, ImportExportPlanner, SourceCompilerStrategy, lower_runtime_helpers,
+        CompilerRecoveryAction, ImportExportPlanner, SourceCompilerStrategy,
+        inline_internal_setter_calls, lower_runtime_helpers,
     };
+
+    #[test]
+    fn inline_internal_setter_calls_collapses_single_arg_call() {
+        let input = "function foo() { __reverts_set_X(42); }";
+        let expected = "function foo() { (X = 42); }";
+        assert_eq!(inline_internal_setter_calls(input), expected);
+    }
+
+    #[test]
+    fn inline_internal_setter_calls_preserves_multi_arg_call() {
+        // Multi-argument setter call has different semantics from a
+        // comma-folded assignment — the comma expression's value would
+        // be the LAST operand, but a setter call returns the FIRST. Stay
+        // conservative.
+        let input = "__reverts_set_X(a, b);";
+        assert_eq!(inline_internal_setter_calls(input), input);
+    }
+
+    #[test]
+    fn inline_internal_setter_calls_preserves_member_access() {
+        // `obj.__reverts_set_X` is not a top-level setter reference;
+        // member access must be left alone.
+        let input = "obj.__reverts_set_X(v);";
+        assert_eq!(inline_internal_setter_calls(input), input);
+    }
+
+    #[test]
+    fn inline_internal_setter_calls_handles_non_ascii_identifiers() {
+        // Greek π (U+03C0) is a two-byte UTF-8 sequence; the rewriter
+        // must advance through the whole codepoint to preserve the byte
+        // stream. Without this, the first byte (0xCF) would be emitted
+        // alone and produce `Ï` instead of `π`.
+        let input = "var keymap = { π: 'alt+p' }; __reverts_set_X(1);";
+        let expected = "var keymap = { π: 'alt+p' }; (X = 1);";
+        assert_eq!(inline_internal_setter_calls(input), expected);
+    }
+
+    #[test]
+    fn inline_internal_setter_calls_skips_setter_inside_string_literal() {
+        // A setter-shaped identifier inside a string literal is not a
+        // call expression — `skip_non_code_at` jumps over it.
+        let input = r#"var s = "__reverts_set_X(1)"; __reverts_set_X(2);"#;
+        let expected = r#"var s = "__reverts_set_X(1)"; (X = 2);"#;
+        assert_eq!(inline_internal_setter_calls(input), expected);
+    }
 
     /// Build an `EnrichedProgram` with the binding-shape solution derived from the
     /// def-use graph. Use this in tests where planner output should observe real
