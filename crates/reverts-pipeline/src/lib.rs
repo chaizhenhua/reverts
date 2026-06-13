@@ -1352,6 +1352,37 @@ mod tests {
     }
 
     #[test]
+    fn commonjs_export_property_drives_late_name_and_function_recovery() {
+        let rows = rows_with_application_source(
+            "const a = function() { return 1; }; exports.createClient = a;",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("function createClient()"));
+        assert!(source.contains("exports.createClient = createClient;"));
+        assert!(!source.contains("const a = function"));
+    }
+
+    #[test]
+    fn duplicate_named_imports_are_merged_and_sorted_late() {
+        let rows = rows_with_application_source(
+            "import { z } from './utils'; import { a } from './utils'; console.log(z, a);",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert_eq!(source.matches("from './utils'").count(), 1);
+        assert!(source.contains("import { a, z } from './utils';"));
+    }
+
+    #[test]
     fn late_readability_rename_skips_colliding_source_binding() {
         let mut rows = rows_with_application_source(
             "var a = 1; var settings = 2; console.log(a, settings); export { a };",
