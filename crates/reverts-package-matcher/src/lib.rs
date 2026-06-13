@@ -11,7 +11,9 @@ pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
-pub use structural_bag::{StructuralBagMatchReport, match_structural_bags};
+pub use structural_bag::{
+    StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
+};
 pub use tier::{
     FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,
     try_feature_similarity, try_structural_anchored, try_structural_only,
@@ -1919,7 +1921,8 @@ mod tests {
     use super::{
         BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageModuleSourceQuality,
         PackageSource, VersionedPackageMatcher, match_structural_bags,
-        package_import_names_from_sources, package_module_source_quality,
+        match_structural_bags_with_excluded_modules, package_import_names_from_sources,
+        package_module_source_quality,
     };
 
     fn rows_with_package_source(source: &str) -> InputRows {
@@ -2271,6 +2274,60 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.matches[0].strategy,
             ModuleMatchStrategy::AggregateStructuralBagSimilarity
         );
+    }
+
+    #[test]
+    fn structural_bag_skips_modules_already_matched_by_stronger_strategy() {
+        let source = r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle-one.js",
+            Some(source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "bundle-two.js",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(ModuleId(10), "m10", "pkg/one.js", "pkg", None)
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(11), "m11", "pkg/two.js", "pkg", None)
+                .with_source_file(2),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/second",
+                "second.js",
+                "function second(input){if(input){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_structural_bags_with_excluded_modules(
+            &rows,
+            &package_sources,
+            None,
+            &BTreeSet::from([ModuleId(10)]),
+        );
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].module_id, ModuleId(11));
     }
 
     #[test]

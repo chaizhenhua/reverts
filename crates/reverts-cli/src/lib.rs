@@ -25,7 +25,7 @@ use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
     PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
-    VersionedPackageMatcher, match_structural_bags, match_with_cascade,
+    VersionedPackageMatcher, match_structural_bags_with_excluded_modules, match_with_cascade,
     package_import_names_from_sources, package_module_source_quality,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
@@ -450,10 +450,16 @@ pub fn match_packages_from_connection(
         &cascade_report,
         &mut report,
     );
-    let structural_bag_report = match_structural_bags(
+    let structural_bag_excluded_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let structural_bag_report = match_structural_bags_with_excluded_modules(
         &rows,
         &package_sources,
         (!args.package_names.is_empty()).then_some(&package_names),
+        &structural_bag_excluded_modules,
     );
     promote_structural_bag_ownership_matches(&rows, structural_bag_report.matches, &mut report);
 
@@ -3130,7 +3136,12 @@ fn persist_package_attributions(
                 module_id: attribution.module_id,
             },
         )?;
-        persist_rejected_package_attribution(&transaction, module_original_name, attribution)?;
+        persist_rejected_package_attribution(
+            &transaction,
+            module_original_name,
+            attribution,
+            matches_by_module.get(&attribution.module_id).copied(),
+        )?;
         written += 1;
     }
 
@@ -3345,30 +3356,30 @@ fn rejected_package_attributions_for_unaccepted_modules(
             continue;
         }
 
-        let reason = report
-            .matches
-            .iter()
-            .find(|package_match| {
-                package_match.module_id == module.id
-                    && !package_match.external_importable
-                    && matches!(
-                        package_match.strategy,
-                        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
-                            | ModuleMatchStrategy::CascadeFunctionCoverage
-                            | ModuleMatchStrategy::CascadePartialFunctionCoverage
-                            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-                    )
+        let source_only_match = report.matches.iter().find(|package_match| {
+            package_match.module_id == module.id && !package_match.external_importable
+        });
+        let reason = source_only_match
+            .filter(|package_match| {
+                matches!(
+                    package_match.strategy,
+                    ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+                        | ModuleMatchStrategy::CascadeFunctionCoverage
+                        | ModuleMatchStrategy::CascadePartialFunctionCoverage
+                        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+                )
             })
             .map(|_| {
                 "matched package ownership, but the evidence does not prove a safe single external import"
             })
             .or_else(|| decision_reasons.get(package_name).map(String::as_str))
             .unwrap_or("package matcher did not produce an accepted attribution for this package");
-        rejected.push(PackageAttributionInput::rejected_source(
-            module.id,
-            package_name,
-            reason,
-        ));
+        let mut attribution =
+            PackageAttributionInput::rejected_source(module.id, package_name, reason);
+        if let Some(package_match) = source_only_match {
+            attribution.package_version = Some(package_match.package_version.clone());
+        }
+        rejected.push(attribution);
     }
     Ok(rejected)
 }
@@ -3487,6 +3498,7 @@ fn persist_rejected_package_attribution(
     connection: &Connection,
     module_original_name: &str,
     attribution: &PackageAttributionInput,
+    module_match: Option<&PackageMatch>,
 ) -> Result<(), MatchPackagesError> {
     let rejection_reason =
         attribution
@@ -3503,14 +3515,30 @@ fn persist_rejected_package_attribution(
         });
     }
 
+    let match_evidence = module_match.map(|module_match| {
+        serde_json::json!({
+            "package_name": module_match.package_name,
+            "package_version": module_match.package_version,
+            "export_specifier": module_match.export_specifier,
+            "source_path": module_match.source_path,
+            "normalized_source_hash": module_match.normalized_source_hash,
+            "match_strategy": module_match.strategy.as_str(),
+            "function_signature_matches": module_match.function_signature_matches,
+            "string_anchor_matches": module_match.string_anchor_matches,
+            "external_importable": module_match.external_importable,
+        })
+    });
     let evidence = serde_json::json!({
-        "matcher": "exact_normalized_source_binary_search",
+        "matcher": "package_ownership_matcher",
         "package_name": attribution.package_name,
+        "package_version": attribution.package_version,
         "status": "rejected",
         "rejection_reason": rejection_reason,
-        "writes_package_version": false,
+        "ownership_match": match_evidence,
+        "writes_external_import": false,
     })
     .to_string();
+    let resolved_file = module_match.map(|module_match| module_match.source_path.as_str());
     connection
         .execute(
             r"
@@ -3518,8 +3546,8 @@ fn persist_rejected_package_attribution(
                 (module_id, module_original_name, package_name, package_version,
                  package_subpath, resolved_file, export_specifier, emission_mode,
                  status, evidence_json, rejection_reason, created_at, updated_at)
-            VALUES (?1, ?2, ?3, NULL, NULL, NULL, NULL, 'application_source',
-                    'rejected', ?4, ?5, datetime('now'), datetime('now'))
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'application_source',
+                    'rejected', ?8, ?9, datetime('now'), datetime('now'))
             ON CONFLICT(module_id) DO UPDATE SET
                 module_original_name = excluded.module_original_name,
                 package_name = excluded.package_name,
@@ -3537,6 +3565,10 @@ fn persist_rejected_package_attribution(
                 i64::from(attribution.module_id.0),
                 module_original_name,
                 attribution.package_name.as_str(),
+                attribution.package_version.as_deref(),
+                attribution.subpath.as_deref(),
+                resolved_file,
+                attribution.export_specifier.as_deref(),
                 evidence,
                 rejection_reason,
             ],
@@ -4789,7 +4821,7 @@ mod tests {
             .expect("source-only match should leave a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version, None);
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert!(rejection_reason.contains("source-only"));
     }
 
@@ -5020,7 +5052,7 @@ mod tests {
             .expect("ambiguous wildcard export should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version, None);
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert_eq!(export_specifier, None);
     }
 
@@ -5205,7 +5237,7 @@ mod tests {
             .expect("source-only cascade ownership should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version, None);
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
         assert!(evidence.contains("\"status\":\"rejected\""));
@@ -5255,17 +5287,18 @@ mod tests {
             outcome.written_attributions, 1,
             "ownership-only structural matches should persist an explicit rejected source decision"
         );
-        let (status, emission_mode, package_version, export_specifier, rejection_reason): (
+        let (status, emission_mode, package_version, export_specifier, rejection_reason, evidence): (
             String,
             String,
             Option<String>,
             Option<String>,
+            String,
             String,
         ) = connection
             .query_row(
                 r"
                 SELECT status, emission_mode, package_version, export_specifier,
-                       rejection_reason
+                       rejection_reason, evidence_json
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
@@ -5277,15 +5310,18 @@ mod tests {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
             .expect("structural ownership should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version, None);
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
+        assert!(evidence.contains("aggregate_structural_bag_similarity"));
+        assert!(evidence.contains("\"writes_external_import\":false"));
     }
 
     #[test]
@@ -5385,7 +5421,7 @@ mod tests {
             .expect("partial cascade ownership should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version, None);
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
     }

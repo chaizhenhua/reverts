@@ -42,8 +42,25 @@ pub fn match_structural_bags(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> StructuralBagMatchReport {
+    match_structural_bags_with_excluded_modules(
+        rows,
+        package_sources,
+        package_filter,
+        &BTreeSet::new(),
+    )
+}
+
+/// Like [`match_structural_bags`], but skips modules that have already been
+/// matched by stronger package strategies in the caller's current report.
+#[must_use]
+pub fn match_structural_bags_with_excluded_modules(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
+    excluded_modules: &BTreeSet<ModuleId>,
+) -> StructuralBagMatchReport {
     let mut audit = AuditReport::default();
-    let module_bags = candidate_modules(rows, package_filter)
+    let module_bags = candidate_modules(rows, package_filter, excluded_modules)
         .filter_map(|module| build_module_bag(rows, module))
         .collect::<Vec<_>>();
     let needed_packages = module_bags
@@ -89,9 +106,11 @@ pub fn match_structural_bags(
 fn candidate_modules<'a>(
     rows: &'a InputRows,
     package_filter: Option<&'a BTreeSet<String>>,
+    excluded_modules: &'a BTreeSet<ModuleId>,
 ) -> impl Iterator<Item = &'a ModuleInput> + 'a {
     rows.modules.iter().filter(move |module| {
         module.kind == ModuleKind::Package
+            && !excluded_modules.contains(&module.id)
             && !has_accepted_external_attribution(rows, module.id)
             && package_filter.map_or(true, |filter| {
                 module
