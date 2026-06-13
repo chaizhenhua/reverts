@@ -599,6 +599,7 @@ impl ImportExportPlanner {
             }
 
             let runtime_imports = program.model().graph().runtime_imports_for(module.id);
+            let runtime_import_groups = group_runtime_imports(runtime_imports);
             let lowered_source = lowered_runtime_sources.get(&module.id);
             let lowered_helpers = lowered_source
                 .map(|source| source.lowered_helpers.clone())
@@ -611,6 +612,7 @@ impl ImportExportPlanner {
                 .as_ref()
                 .map(|source| source.local_writes.clone())
                 .unwrap_or_default();
+            let source_imports = program.model().graph().ast_imports_for(module.id);
             let remaining_runtime_helpers = lowered_source
                 .map(|source| source.remaining_helpers.clone())
                 .unwrap_or_default();
@@ -650,9 +652,24 @@ impl ImportExportPlanner {
                 .difference(&migrated_locally)
                 .cloned()
                 .collect();
+            let namespace_member_rewrite = lowered_source.and_then(|source| {
+                let mut reserved_bindings = local_source_definitions.clone();
+                reserved_bindings.extend(source_imports.iter().cloned());
+                reserved_bindings.extend(planned_bindings.iter().cloned());
+                rewrite_runtime_namespace_member_accesses(
+                    source.source.as_str(),
+                    &runtime_import_groups,
+                    program.model().graph(),
+                    &reserved_bindings,
+                )
+            });
             let source_runtime_refs = lowered_source
                 .map(|source| {
-                    let mut refs = runtime_import_identifiers_in_source(source.source.as_str())
+                    let source_text = namespace_member_rewrite
+                        .as_ref()
+                        .map(|rewrite| rewrite.source.as_str())
+                        .unwrap_or(source.source.as_str());
+                    let mut refs = runtime_import_identifiers_in_source(source_text)
                         .into_iter()
                         .map(BindingName::new)
                         .collect::<BTreeSet<_>>();
@@ -667,9 +684,7 @@ impl ImportExportPlanner {
                     if let Some(exports) = source_module_wiring.exports_by_module.get(&module.id) {
                         refs.extend(exports.iter().cloned());
                     }
-                    if let Some((_stripped, exports)) =
-                        strip_top_level_named_exports(source.source.as_str())
-                    {
+                    if let Some((_stripped, exports)) = strip_top_level_named_exports(source_text) {
                         refs.extend(exports);
                     }
                     refs
@@ -679,8 +694,12 @@ impl ImportExportPlanner {
                 lowered_source
                 && !written_runtime_helpers.is_empty()
             {
+                let source_text = namespace_member_rewrite
+                    .as_ref()
+                    .map(|rewrite| rewrite.source.as_str())
+                    .unwrap_or(lowered_source.source.as_str());
                 let rewritten =
-                    rewrite_runtime_helper_writes(&lowered_source.source, &written_runtime_helpers);
+                    rewrite_runtime_helper_writes(source_text, &written_runtime_helpers);
                 let mut refs_after_write_rewrite = runtime_import_identifiers_in_source(&rewritten)
                     .into_iter()
                     .map(BindingName::new)
@@ -731,9 +750,32 @@ impl ImportExportPlanner {
                         || source_runtime_refs.contains(binding)
                 })
                 .collect();
-            let runtime_import_groups = group_runtime_imports(runtime_imports);
+            let dropped_runtime_namespaces_for_source = lowered_source
+                .and_then(|source| {
+                    namespace_member_rewrite.as_ref().and_then(|rewrite| {
+                        rewrite
+                            .dropped_namespaces_by_source
+                            .get(&source.source_file_id)
+                    })
+                })
+                .cloned()
+                .unwrap_or_default();
+            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
+                .into_iter()
+                .filter(|binding| !dropped_runtime_namespaces_for_source.contains(binding))
+                .collect();
             let mut runtime_import_partitions = Vec::<(u32, RuntimeReexportImportPartition)>::new();
             for (source_file_id, bindings) in runtime_import_groups {
+                let dropped_runtime_namespaces = namespace_member_rewrite
+                    .as_ref()
+                    .and_then(|rewrite| rewrite.dropped_namespaces_by_source.get(&source_file_id))
+                    .cloned()
+                    .unwrap_or_default();
+                let namespace_member_imports = namespace_member_rewrite
+                    .as_ref()
+                    .and_then(|rewrite| rewrite.imports_by_source.get(&source_file_id))
+                    .cloned()
+                    .unwrap_or_default();
                 let namespace_export_helpers = program
                     .model()
                     .graph()
@@ -748,6 +790,8 @@ impl ImportExportPlanner {
                     .unwrap_or_default();
                 let bindings = bindings
                     .into_iter()
+                    .filter(|binding| !dropped_runtime_namespaces.contains(binding))
+                    .chain(namespace_member_imports.into_iter())
                     // Namespace helper calls such as `__export(ns, {...})`
                     // are planner-lowered to `Object.defineProperties(...)`
                     // when the namespace setup is emitted. If graph recovery
@@ -814,10 +858,12 @@ impl ImportExportPlanner {
                 && written_runtime_helpers.is_empty()
                 && !has_runtime_group_imports
             {
+                let source_for_lazy = namespace_member_rewrite
+                    .as_ref()
+                    .map(|rewrite| rewrite.source.as_str())
+                    .unwrap_or(lowered_source.source.as_str());
                 let (localized, changed) =
-                    inline_remaining_lazy_value_wrappers_allowing_assignments(
-                        &lowered_source.source,
-                    );
+                    inline_remaining_lazy_value_wrappers_allowing_assignments(source_for_lazy);
                 if changed {
                     localized_lazy_value_source = Some(localized);
                     lazy_helper_names.retain(|name| *name != "lazyValue");
@@ -995,7 +1041,6 @@ impl ImportExportPlanner {
             }
 
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
-            let source_imports = program.model().graph().ast_imports_for(module.id);
             let reshaped_bindings = lowered_source
                 .map(|src| src.reshaped_bindings.clone())
                 .unwrap_or_default();
@@ -1056,9 +1101,12 @@ impl ImportExportPlanner {
 
             if let Some(lowered_source) = lowered_source {
                 let source_file_path = lowered_source.source_file_path.as_str();
-                let mut source = localized_lazy_value_source
-                    .clone()
-                    .unwrap_or_else(|| lowered_source.source.clone());
+                let mut source = localized_lazy_value_source.clone().unwrap_or_else(|| {
+                    namespace_member_rewrite
+                        .as_ref()
+                        .map(|rewrite| rewrite.source.clone())
+                        .unwrap_or_else(|| lowered_source.source.clone())
+                });
                 if !written_runtime_helpers.is_empty() {
                     source =
                         rewrite_runtime_helper_writes(source.as_str(), &written_runtime_helpers);
@@ -1973,6 +2021,148 @@ fn partition_runtime_reexport_bindings(
         }
     }
     partition
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeNamespaceMemberAccessRewrite {
+    source: String,
+    imports_by_source: BTreeMap<u32, BTreeSet<BindingName>>,
+    dropped_namespaces_by_source: BTreeMap<u32, BTreeSet<BindingName>>,
+}
+
+fn rewrite_runtime_namespace_member_accesses(
+    source: &str,
+    runtime_import_groups: &BTreeMap<u32, BTreeSet<BindingName>>,
+    graph: &RevertsGraph,
+    reserved_bindings: &BTreeSet<BindingName>,
+) -> Option<RuntimeNamespaceMemberAccessRewrite> {
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let mut imports_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+    let mut dropped_namespaces_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+    let mut introduced = BTreeSet::<BindingName>::new();
+
+    for (source_file_id, imported_bindings) in runtime_import_groups {
+        let Some(prelude) = graph.runtime_prelude(*source_file_id) else {
+            continue;
+        };
+        for namespace_export in &prelude.namespace_exports {
+            if !imported_bindings.contains(&namespace_export.namespace) {
+                continue;
+            }
+            let properties = namespace_export
+                .exports
+                .iter()
+                .map(|(key, target)| (key.clone(), target.as_str().to_string()))
+                .collect::<Vec<_>>();
+            let Some(access_sites) = collect_member_access_only(
+                source,
+                namespace_export.namespace.as_str(),
+                (0, 0),
+                &properties,
+            ) else {
+                continue;
+            };
+            if access_sites.is_empty() {
+                continue;
+            }
+
+            let mut targets = BTreeSet::<BindingName>::new();
+            let mut namespace_edits = Vec::<(usize, usize, String)>::new();
+            let mut safe = true;
+            for (start, end, key) in access_sites {
+                if !runtime_namespace_member_access_site_is_read_only(source, start, end) {
+                    safe = false;
+                    break;
+                }
+                let Some(target) = namespace_export.exports.get(&key) else {
+                    safe = false;
+                    break;
+                };
+                if target == &namespace_export.namespace || is_js_keyword(target.as_str()) {
+                    safe = false;
+                    break;
+                }
+                if reserved_bindings.contains(target) && !introduced.contains(target) {
+                    safe = false;
+                    break;
+                }
+                targets.insert(target.clone());
+                namespace_edits.push((start, end, target.as_str().to_string()));
+            }
+            if !safe || targets.is_empty() {
+                continue;
+            }
+
+            introduced.extend(targets.iter().cloned());
+            edits.extend(namespace_edits);
+            imports_by_source
+                .entry(*source_file_id)
+                .or_default()
+                .extend(targets);
+            dropped_namespaces_by_source
+                .entry(*source_file_id)
+                .or_default()
+                .insert(namespace_export.namespace.clone());
+        }
+    }
+
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    if edits.windows(2).any(|window| window[0].1 > window[1].0) {
+        return None;
+    }
+    Some(RuntimeNamespaceMemberAccessRewrite {
+        source: apply_text_edits(source, &edits),
+        imports_by_source,
+        dropped_namespaces_by_source,
+    })
+}
+
+fn runtime_namespace_member_access_site_is_read_only(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> bool {
+    let bytes = source.as_bytes();
+    if let Some(before) = previous_non_ws(bytes, start)
+        && before > 0
+        && bytes
+            .get(before - 1..=before)
+            .is_some_and(|operator| operator == b"++" || operator == b"--")
+    {
+        return false;
+    }
+    let after = skip_ws(bytes, end);
+    match bytes.get(after).copied() {
+        Some(b'+') | Some(b'-') => {
+            !matches!(bytes.get(after + 1), Some(b'+') | Some(b'-') | Some(b'='))
+        }
+        Some(b'=') => matches!(bytes.get(after + 1), Some(b'=')),
+        Some(b'*') => {
+            bytes.get(after + 1) != Some(&b'=')
+                && !(bytes.get(after + 1) == Some(&b'*') && bytes.get(after + 2) == Some(&b'='))
+        }
+        Some(b'/' | b'%' | b'^') => bytes.get(after + 1) != Some(&b'='),
+        Some(b'&') => {
+            bytes.get(after + 1) != Some(&b'=')
+                && !(bytes.get(after + 1) == Some(&b'&') && bytes.get(after + 2) == Some(&b'='))
+        }
+        Some(b'|') => {
+            bytes.get(after + 1) != Some(&b'=')
+                && !(bytes.get(after + 1) == Some(&b'|') && bytes.get(after + 2) == Some(&b'='))
+        }
+        Some(b'<') => !(bytes.get(after + 1) == Some(&b'<') && bytes.get(after + 2) == Some(&b'=')),
+        Some(b'>') => {
+            !(bytes.get(after + 1) == Some(&b'>')
+                && (bytes.get(after + 2) == Some(&b'=')
+                    || (bytes.get(after + 2) == Some(&b'>')
+                        && bytes.get(after + 3) == Some(&b'='))))
+        }
+        Some(b'?') => !(bytes.get(after + 1) == Some(&b'?') && bytes.get(after + 2) == Some(&b'=')),
+        _ => true,
+    }
 }
 
 fn planned_runtime_helper_consumed_bindings(
@@ -13288,7 +13478,12 @@ mod tests {
         assert!(writer_source.contains("function readShared() { return ns.value; }"));
         assert!(writer_source.contains("shared = 'ok';"));
         assert!(writer_source.contains("export { ns, readShared };"));
-        assert!(consumer_source.contains("import { ns, readShared } from './writer.js';"));
+        assert!(
+            consumer_source.contains("import { readShared, shared } from './writer.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = readShared() + shared;"));
+        assert!(!consumer_source.contains("ns.value"));
         let helper_source = planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts");
         assert!(
             helper_source.is_none(),
@@ -13389,7 +13584,12 @@ mod tests {
         assert!(writer_source.contains("left = 1;"));
         assert!(writer_source.contains("right = 2;"));
         assert!(writer_source.contains("export { ns };"));
-        assert!(consumer_source.contains("import { ns } from './writer.js';"));
+        assert!(
+            consumer_source.contains("import { left } from './writer.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = left;"));
+        assert!(!consumer_source.contains("ns.left"));
         assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
@@ -13445,11 +13645,17 @@ mod tests {
             right_source.contains("__reverts_set_right"),
             "{right_source}"
         );
-        assert!(consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"));
-        assert!(helper_source.contains("var ns = {};"));
-        assert!(helper_source.contains(
-            "Object.defineProperties(ns, { left: { enumerable: true, get: () => left }, right: { enumerable: true, get: () => right } });"
-        ));
+        assert!(
+            consumer_source.contains("import { left } from './runtime/source-1-helpers.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = left;"));
+        assert!(!consumer_source.contains("ns.left"));
+        assert!(!helper_source.contains("var ns = {};"), "{helper_source}");
+        assert!(
+            !helper_source.contains("Object.defineProperties(ns"),
+            "{helper_source}"
+        );
         assert!(
             helper_source
                 .contains("function __reverts_set_left(value) { left = value; return value; }")
@@ -13458,6 +13664,188 @@ mod tests {
             helper_source
                 .contains("function __reverts_set_right(value) { right = value; return value; }")
         );
+    }
+
+    #[test]
+    fn runtime_namespace_member_access_rewrites_to_target_import_and_drops_namespace() {
+        let prelude = concat!(
+            "var shared = 1;\n",
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { value: () => shared });\n",
+        );
+        let consumer_body = "var value = ns.value + 1;\nexport { value };\n";
+        let source = format!("{prelude}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            consumer_source.contains("import { shared } from './runtime/source-1-helpers.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = shared + 1;"));
+        assert!(!consumer_source.contains("ns.value"));
+        assert!(!consumer_source.contains("import { ns"));
+        assert!(helper_source.contains("var shared = 1;"), "{helper_source}");
+        assert!(!helper_source.contains("var ns = {};"), "{helper_source}");
+        assert!(
+            !helper_source.contains("Object.defineProperties(ns"),
+            "{helper_source}"
+        );
+        assert!(
+            !helper_source.contains("function expose"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn runtime_namespace_member_access_keeps_namespace_for_value_use() {
+        let prelude = concat!(
+            "var shared = 1;\n",
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { value: () => shared });\n",
+        );
+        let consumer_body = "var value = ns;\nexport { value };\n";
+        let source = format!("{prelude}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = ns;"));
+        assert!(helper_source.contains("var ns = {};"), "{helper_source}");
+        assert!(
+            helper_source.contains("Object.defineProperties(ns"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn runtime_namespace_member_access_rejects_local_name_collision() {
+        let prelude = concat!(
+            "var shared = 1;\n",
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { value: () => shared });\n",
+        );
+        let consumer_body =
+            "var shared = 'local';\nvar value = ns.value + shared;\nexport { value };\n";
+        let source = format!("{prelude}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("var value = ns.value + shared;"));
+        assert!(helper_source.contains("var ns = {};"), "{helper_source}");
+        assert!(
+            helper_source.contains("Object.defineProperties(ns"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn runtime_namespace_member_access_rejects_writes_and_updates() {
+        let prelude = concat!(
+            "var shared = 1;\n",
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { value: () => shared });\n",
+        );
+        let consumer_body = "ns.value = 2;\nvar value = ns.value++;\nexport { value };\n";
+        let source = format!("{prelude}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"),
+            "{consumer_source}"
+        );
+        assert!(consumer_source.contains("ns.value = 2;"));
+        assert!(consumer_source.contains("var value = ns.value++;"));
+        assert!(helper_source.contains("var ns = {};"), "{helper_source}");
+        assert!(
+            helper_source.contains("Object.defineProperties(ns"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn runtime_namespace_member_access_read_gate_rejects_compound_assignments() {
+        for (source, start, end) in [
+            ("ns.value += 1;", 0, 8),
+            ("ns.value &&= 1;", 0, 8),
+            ("ns.value ||= 1;", 0, 8),
+            ("ns.value ??= 1;", 0, 8),
+            ("ns.value **= 2;", 0, 8),
+            ("ns.value <<= 1;", 0, 8),
+            ("ns.value >>>= 1;", 0, 8),
+            ("++ns.value;", 2, 10),
+            ("ns.value--;", 0, 8),
+        ] {
+            assert!(
+                !super::runtime_namespace_member_access_site_is_read_only(source, start, end),
+                "{source}"
+            );
+        }
+        for (source, start, end) in [
+            ("ns.value + 1;", 0, 8),
+            ("ns.value && other;", 0, 8),
+            ("ns.value || other;", 0, 8),
+            ("ns.value ?? other;", 0, 8),
+            ("ns.value >= 1;", 0, 8),
+            ("ns.value === 1;", 0, 8),
+        ] {
+            assert!(
+                super::runtime_namespace_member_access_site_is_read_only(source, start, end),
+                "{source}"
+            );
+        }
     }
 
     #[test]
