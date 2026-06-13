@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod cascade;
 pub mod cascade_match;
 pub mod hungarian;
+pub mod structural_bag;
 pub mod tier;
 pub mod variant;
 pub mod version;
@@ -10,6 +11,7 @@ pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
+pub use structural_bag::{StructuralBagMatchReport, match_structural_bags};
 pub use tier::{
     FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,
     try_feature_similarity, try_structural_anchored, try_structural_only,
@@ -198,6 +200,10 @@ pub enum ModuleMatchStrategy {
     /// package ownership only; it is not sufficient to externalize the whole
     /// module as an import.
     CascadePartialFunctionCoverage,
+    /// Aggregate structural fingerprint axes matched one package version. This
+    /// proves package ownership only and intentionally does not prove a unique
+    /// importable source file.
+    AggregateStructuralBagSimilarity,
 }
 
 impl ModuleMatchStrategy {
@@ -211,6 +217,7 @@ impl ModuleMatchStrategy {
             }
             Self::CascadeFunctionCoverage => "cascade_function_coverage",
             Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
+            Self::AggregateStructuralBagSimilarity => "aggregate_structural_bag_similarity",
         }
     }
 }
@@ -1911,8 +1918,8 @@ mod tests {
 
     use super::{
         BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageModuleSourceQuality,
-        PackageSource, VersionedPackageMatcher, package_import_names_from_sources,
-        package_module_source_quality,
+        PackageSource, VersionedPackageMatcher, match_structural_bags,
+        package_import_names_from_sources, package_module_source_quality,
     };
 
     fn rows_with_package_source(source: &str) -> InputRows {
@@ -2150,6 +2157,120 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(!report.matches[0].external_importable);
         assert!(report.matches[0].function_signature_matches >= 3);
+    }
+
+    #[test]
+    fn structural_bag_matches_weak_minified_aggregate_without_external_import() {
+        let mut rows = rows_with_package_source(
+            r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#,
+        );
+        rows.modules[0].semantic_path = "pkg/not-present-in-source.js".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/second",
+                "second.js",
+                "function second(input){if(input){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_structural_bags(&rows, &package_sources, None);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        );
+        assert_eq!(report.matches[0].package_version, "1.2.3");
+        assert!(!report.matches[0].external_importable);
+        assert_eq!(report.matches[0].function_signature_matches, 2);
+        assert!(
+            report.matches[0].string_anchor_matches >= 2,
+            "structural bag should count strong structural axes as evidence"
+        );
+    }
+
+    #[test]
+    fn structural_bag_rejects_equal_versions_without_version_hint() {
+        let rows = rows_with_package_source(
+            r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#,
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_structural_bags(&rows, &package_sources, None);
+
+        assert!(report.audit.is_clean());
+        assert!(
+            report.matches.is_empty(),
+            "equal structural evidence across versions must not guess a version"
+        );
+    }
+
+    #[test]
+    fn structural_bag_uses_exact_module_version_hint_for_equal_versions() {
+        let mut rows = rows_with_package_source(
+            r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#,
+        );
+        rows.modules[0].package_version = Some("1.0.0".to_string());
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_structural_bags(&rows, &package_sources, None);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(report.matches[0].package_version, "1.0.0");
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        );
     }
 
     #[test]

@@ -25,8 +25,8 @@ use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
     PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
-    VersionedPackageMatcher, match_with_cascade, package_import_names_from_sources,
-    package_module_source_quality,
+    VersionedPackageMatcher, match_structural_bags, match_with_cascade,
+    package_import_names_from_sources, package_module_source_quality,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -450,6 +450,12 @@ pub fn match_packages_from_connection(
         &cascade_report,
         &mut report,
     );
+    let structural_bag_report = match_structural_bags(
+        &rows,
+        &package_sources,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
+    promote_structural_bag_ownership_matches(&rows, structural_bag_report.matches, &mut report);
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
         // Persist synthetic modules first so the FK from
@@ -502,6 +508,7 @@ pub fn match_packages_from_connection(
     let mut audit = extraction_audit;
     audit.extend(report.audit);
     audit.extend(cascade_report.audit);
+    audit.extend(structural_bag_report.audit);
     let audit = dedup_audit_report(audit);
 
     Ok(MatchPackagesOutcome {
@@ -1000,6 +1007,39 @@ fn promote_cascade_function_coverage_to_module_attributions(
             string_anchor_matches: 0,
             external_importable: can_externalize,
         });
+    }
+}
+
+fn promote_structural_bag_ownership_matches(
+    rows: &InputRows,
+    structural_matches: Vec<PackageMatch>,
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = report
+        .attributions
+        .iter()
+        .chain(rows.package_attributions.iter())
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+
+    for package_match in structural_matches {
+        if already_accepted.contains(&package_match.module_id)
+            || matched_modules.contains(&package_match.module_id)
+            || package_match.external_importable
+        {
+            continue;
+        }
+        matched_modules.insert(package_match.module_id);
+        report.matches.push(package_match);
     }
 }
 
@@ -3316,6 +3356,7 @@ fn rejected_package_attributions_for_unaccepted_modules(
                         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
                             | ModuleMatchStrategy::CascadeFunctionCoverage
                             | ModuleMatchStrategy::CascadePartialFunctionCoverage
+                            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
                     )
             })
             .map(|_| {
@@ -5168,6 +5209,83 @@ mod tests {
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
         assert!(evidence.contains("\"status\":\"rejected\""));
+    }
+
+    #[test]
+    fn match_packages_promotes_structural_bag_ownership_after_cascade() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#,
+            &[(
+                "pkg",
+                "1.2.3",
+                "combined.js",
+                r#"
+                function first(value){if(value){return true;}return false;}
+                function second(input){if(input){return true;}return false;}
+                "#,
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            outcome.matched_modules, 1,
+            "structural bag should rescue aggregate ownership when exact/signature/cascade do not"
+        );
+        assert_eq!(
+            outcome.cascade_ownership_matches, 0,
+            "this fixture should be matched by the late structural bag fallback, not cascade"
+        );
+        assert_eq!(
+            outcome.written_attributions, 1,
+            "ownership-only structural matches should persist an explicit rejected source decision"
+        );
+        let (status, emission_mode, package_version, export_specifier, rejection_reason): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier,
+                       rejection_reason
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("structural ownership should write a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.contains("safe single external import"));
     }
 
     #[test]
