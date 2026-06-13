@@ -2614,6 +2614,10 @@ fn compute_runtime_var_migration_plan(
             .iter()
             .map(|(binding, _, _)| binding.clone())
             .collect::<BTreeSet<_>>();
+        let candidate_owners = candidates
+            .iter()
+            .map(|(binding, owner_module, _)| (binding.clone(), *owner_module))
+            .collect::<BTreeMap<_, _>>();
         let folded_chunks = runtime_lazy_folds
             .chunks_by_source_file
             .get(&source_id)
@@ -2626,6 +2630,7 @@ fn compute_runtime_var_migration_plan(
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
+            candidate_owners: &candidate_owners,
         };
         for (binding, owner_module, initializer) in candidates {
             // The binding must have a setter (zero-writer or shared
@@ -2818,6 +2823,7 @@ struct RuntimeReaderClusterContext<'a> {
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     movable_bindings: &'a BTreeSet<BindingName>,
+    candidate_owners: &'a BTreeMap<BindingName, ModuleId>,
 }
 
 fn migratable_runtime_reader_cluster(
@@ -2911,8 +2917,12 @@ fn migratable_runtime_reader_cluster(
             if dep == binding || moved_snippets.contains(dep) {
                 continue;
             }
-            if ctx.movable_bindings.contains(dep) {
-                return None;
+            if let Some(dep_owner) = ctx.candidate_owners.get(dep) {
+                if *dep_owner != owner_module {
+                    return None;
+                }
+                extra_runtime_deps.insert(dep.clone());
+                continue;
             }
             if !ctx.prelude.defines(dep) {
                 return None;
@@ -13335,7 +13345,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_getter_runtime_var_migration_rejects_other_movable_export_target() {
+    fn namespace_getter_runtime_var_migration_moves_same_writer_export_targets() {
         let prelude = concat!(
             "var left;\n",
             "var right;\n",
@@ -13368,13 +13378,74 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(!writer_source.contains("source-1-helpers"));
+        assert!(writer_source.contains("var left, right;") || writer_source.contains("var left;"));
+        assert!(writer_source.contains("var ns = {};"));
+        assert!(writer_source.contains(
+            "Object.defineProperties(ns, { left: { enumerable: true, get: () => left }, right: { enumerable: true, get: () => right } });"
+        ));
+        assert!(writer_source.contains("left = 1;"));
+        assert!(writer_source.contains("right = 2;"));
+        assert!(writer_source.contains("export { ns };"));
+        assert!(consumer_source.contains("import { ns } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn namespace_getter_runtime_var_migration_rejects_cross_writer_export_target() {
+        let prelude = concat!(
+            "var left;\n",
+            "var right;\n",
+            "var ns = {};\n",
+            "function expose(target, exports) {}\n",
+            "expose(ns, { left: () => left, right: () => right });\n",
+        );
+        let left_body = "left = 1;\nexport { left };\n";
+        let right_body = "right = 2;\nexport { right };\n";
+        let consumer_body = "var value = ns.left;\nexport { value };\n";
+        let source = format!("{prelude}{left_body}{right_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "left-writer", "modules/left-writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + left_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "right-writer", "modules/right-writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + left_body.len()) as u32,
+                    (prelude.len() + left_body.len() + right_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + left_body.len() + right_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let left_source = planned_source(&plan, "modules/left-writer.ts");
+        let right_source = planned_source(&plan, "modules/right-writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
         let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
-        assert!(writer_source.contains(
-            "import { left, right, __reverts_set_left, __reverts_set_right } from './runtime/source-1-helpers.js';"
-        ));
-        assert!(writer_source.contains("__reverts_set_left(1);"));
-        assert!(writer_source.contains("__reverts_set_right(2);"));
+        assert!(left_source.contains("__reverts_set_left"), "{left_source}");
+        assert!(
+            right_source.contains("__reverts_set_right"),
+            "{right_source}"
+        );
+        assert!(consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"));
         assert!(helper_source.contains("var ns = {};"));
         assert!(helper_source.contains(
             "Object.defineProperties(ns, { left: { enumerable: true, get: () => left }, right: { enumerable: true, get: () => right } });"
