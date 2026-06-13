@@ -24,6 +24,7 @@ impl EmitPlan {
     pub fn push_file(&mut self, mut file: PlannedFile) {
         file.coalesce_consecutive_uninitialized_var_declarations();
         file.coalesce_generated_named_imports();
+        file.coalesce_generated_named_exports();
         self.files.push(file);
     }
 }
@@ -130,6 +131,43 @@ impl PlannedFile {
                 continue;
             }
             if let Some(replacement) = replacements.get(&index) {
+                merged.push(replacement.clone());
+            } else {
+                merged.push(source.clone());
+            }
+        }
+        self.body = merged;
+    }
+
+    fn coalesce_generated_named_exports(&mut self) {
+        let mut exported_bindings = BTreeSet::<BindingName>::new();
+        let mut first_index = None::<usize>;
+        let mut duplicate_indices = BTreeSet::<usize>::new();
+        for (index, source) in self.body.iter().enumerate() {
+            let Some(bindings) = parse_generated_named_export_statement(source) else {
+                continue;
+            };
+            exported_bindings.extend(bindings);
+            if first_index.is_none() {
+                first_index = Some(index);
+            } else {
+                duplicate_indices.insert(index);
+            }
+        }
+        if duplicate_indices.is_empty() {
+            return;
+        }
+        let Some(first_index) = first_index else {
+            return;
+        };
+        let replacement = named_export_statement(exported_bindings.iter());
+        let mut merged =
+            Vec::with_capacity(self.body.len().saturating_sub(duplicate_indices.len()));
+        for (index, source) in self.body.iter().enumerate() {
+            if duplicate_indices.contains(&index) {
+                continue;
+            }
+            if index == first_index {
                 merged.push(replacement.clone());
             } else {
                 merged.push(source.clone());
@@ -8369,6 +8407,28 @@ fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -
     format!("export {{ {names} }};")
 }
 
+fn parse_generated_named_export_statement(source: &str) -> Option<BTreeSet<BindingName>> {
+    let source = source.trim();
+    let names = source.strip_prefix("export { ")?.strip_suffix(" };")?;
+    if names.trim().is_empty() || names.contains(" from ") || names.contains(" as ") {
+        return None;
+    }
+    let mut bindings = BTreeSet::<BindingName>::new();
+    for name in names.split(',').map(str::trim) {
+        if name.is_empty() {
+            return None;
+        }
+        let Some((identifier, end)) = parse_identifier(name, 0) else {
+            return None;
+        };
+        if end != name.len() || is_js_keyword(identifier) {
+            return None;
+        }
+        bindings.insert(BindingName::new(identifier));
+    }
+    (!bindings.is_empty()).then_some(bindings)
+}
+
 fn named_reexport_statement<'a>(
     bindings: impl Iterator<Item = &'a BindingName>,
     specifier: &str,
@@ -8600,6 +8660,43 @@ mod tests {
             1
         );
         assert!(source.contains("import { local } from './local.js';"));
+    }
+
+    #[test]
+    fn emit_plan_coalesces_generated_named_exports() {
+        let mut file = PlannedFile::new("modules/consumer.ts");
+        file.push_source("const keep = 1;");
+        file.push_source("export { beta };");
+        file.push_source("console.log(keep);");
+        file.push_source("export { alpha };");
+        file.push_source("export { beta };");
+
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+        let source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(source.contains("export { alpha, beta };"));
+        assert_eq!(source.matches("export {").count(), 1);
+        assert!(!source.contains("export { beta };\nconsole.log"));
+        assert!(source.contains("console.log(keep);"));
+    }
+
+    #[test]
+    fn emit_plan_keeps_reexports_and_alias_exports_separate() {
+        let mut file = PlannedFile::new("modules/consumer.ts");
+        file.push_source("export { beta };");
+        file.push_source("export { alpha as renamed };");
+        file.push_source("export { gamma } from './gamma.js';");
+        file.push_source("export { alpha };");
+
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+        let source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(source.contains("export { alpha, beta };"));
+        assert!(source.contains("export { alpha as renamed };"));
+        assert!(source.contains("export { gamma } from './gamma.js';"));
+        assert_eq!(source.matches("export {").count(), 3);
     }
 
     #[test]
