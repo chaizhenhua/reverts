@@ -413,6 +413,8 @@ impl ImportExportPlanner {
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
         let omitted_folded_stub_modules =
             folded_stub_modules_with_internal_consumers(&runtime_lazy_folds, &source_module_wiring);
+        let pure_reexport_bypasses =
+            pure_reexport_bypass_plan(program, &source_module_wiring, &externalized_packages);
         let runtime_var_migrations = compute_runtime_var_migration_plan(
             program,
             &lowered_runtime_sources,
@@ -457,6 +459,10 @@ impl ImportExportPlanner {
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
             file.set_compiler_recovery(compiler_recovery);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
+
+            if pure_reexport_bypasses.omitted_modules.contains(&module.id) {
+                continue;
+            }
 
             if let Some(folded) = runtime_lazy_folds.modules.get(&module.id) {
                 required_runtime_helper_bindings
@@ -508,50 +514,75 @@ impl ImportExportPlanner {
             let mut has_runtime_edge_before_lazy_helpers = false;
             if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
                 for (target_module_id, bindings) in module_imports {
-                    if let Some(folded) = runtime_lazy_folds.modules.get(target_module_id)
-                        && omitted_folded_stub_modules.contains(target_module_id)
+                    let mut bindings_by_target = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+                    if let Some(redirects) = pure_reexport_bypasses.redirects.get(target_module_id)
                     {
-                        has_runtime_edge_before_lazy_helpers = true;
-                        used_runtime_helper_files
-                            .entry(folded.source_file_id)
-                            .or_default()
-                            .extend(bindings.iter().cloned());
-                        let specifier = relative_import_specifier(
-                            path,
-                            runtime_helpers_path(folded.source_file_id).as_str(),
-                        );
+                        for binding in bindings {
+                            let effective_target =
+                                redirects.get(binding).copied().unwrap_or(*target_module_id);
+                            bindings_by_target
+                                .entry(effective_target)
+                                .or_default()
+                                .insert(binding.clone());
+                        }
+                    } else {
+                        bindings_by_target.insert(*target_module_id, bindings.clone());
+                    }
+                    for (effective_target_module_id, effective_bindings) in bindings_by_target {
+                        if effective_target_module_id == module.id {
+                            continue;
+                        }
+                        if let Some(folded) =
+                            runtime_lazy_folds.modules.get(&effective_target_module_id)
+                            && omitted_folded_stub_modules.contains(&effective_target_module_id)
+                        {
+                            has_runtime_edge_before_lazy_helpers = true;
+                            used_runtime_helper_files
+                                .entry(folded.source_file_id)
+                                .or_default()
+                                .extend(effective_bindings.iter().cloned());
+                            let specifier = relative_import_specifier(
+                                path,
+                                runtime_helpers_path(folded.source_file_id).as_str(),
+                            );
+                            file.push_source(named_import_statement(
+                                effective_bindings.iter(),
+                                specifier.as_str(),
+                            ));
+                            for binding in effective_bindings {
+                                planned_bindings.insert(binding.clone());
+                                file.add_binding(plan_binding_from_program(
+                                    program,
+                                    module.id,
+                                    binding.clone(),
+                                    binding,
+                                    true,
+                                    None,
+                                ));
+                            }
+                            continue;
+                        }
+                        let Some(target_path) =
+                            module_output_path(program, effective_target_module_id)
+                        else {
+                            continue;
+                        };
+                        let specifier = relative_import_specifier(path, target_path.as_str());
                         file.push_source(named_import_statement(
-                            bindings.iter(),
+                            effective_bindings.iter(),
                             specifier.as_str(),
                         ));
-                        for binding in bindings {
+                        for binding in effective_bindings {
                             planned_bindings.insert(binding.clone());
                             file.add_binding(plan_binding_from_program(
                                 program,
                                 module.id,
                                 binding.clone(),
-                                binding.clone(),
+                                binding,
                                 true,
                                 None,
                             ));
                         }
-                        continue;
-                    }
-                    let Some(target_path) = module_output_path(program, *target_module_id) else {
-                        continue;
-                    };
-                    let specifier = relative_import_specifier(path, target_path.as_str());
-                    file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-                    for binding in bindings {
-                        planned_bindings.insert(binding.clone());
-                        file.add_binding(plan_binding_from_program(
-                            program,
-                            module.id,
-                            binding.clone(),
-                            binding.clone(),
-                            true,
-                            None,
-                        ));
                     }
                 }
             }
@@ -1433,6 +1464,12 @@ struct RuntimeLazyFoldPlan {
     chunks_by_source_file: BTreeMap<u32, Vec<RuntimeFoldedSourceChunk>>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PureReexportBypassPlan {
+    omitted_modules: BTreeSet<ModuleId>,
+    redirects: BTreeMap<ModuleId, BTreeMap<BindingName, ModuleId>>,
+}
+
 fn folded_stub_modules_with_internal_consumers(
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     source_module_wiring: &SourceModuleWiring,
@@ -1448,6 +1485,102 @@ fn folded_stub_modules_with_internal_consumers(
         })
         .copied()
         .collect()
+}
+
+fn pure_reexport_bypass_plan(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> PureReexportBypassPlan {
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let explicit_exports_by_module = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| {
+            (
+                module.id,
+                program
+                    .model()
+                    .graph()
+                    .import_export()
+                    .exports_for(module.id)
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut plan = PureReexportBypassPlan::default();
+
+    for module in program.model().modules() {
+        if module.kind != ModuleKind::Application || externalized_packages.contains(&module.id) {
+            continue;
+        }
+        let Some(source) = program.model().input().module_source_slice(module.id) else {
+            continue;
+        };
+        let Some(reexports) = pure_direct_named_reexports(source.source) else {
+            continue;
+        };
+        if reexports.is_empty()
+            || !module_has_internal_source_consumers(source_module_wiring, module.id)
+        {
+            continue;
+        }
+        let mut redirects = BTreeMap::<BindingName, ModuleId>::new();
+        for binding in &reexports {
+            let mut owners = BTreeSet::<ModuleId>::new();
+            for dependency in &program.model().input().dependencies {
+                if dependency.from_module_id != module.id {
+                    continue;
+                }
+                let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+                    continue;
+                };
+                let Some(target_module) = modules_by_id.get(&target_module_id) else {
+                    continue;
+                };
+                if target_module.kind == ModuleKind::Package
+                    && externalized_packages.contains(&target_module_id)
+                {
+                    continue;
+                }
+                if explicit_exports_by_module
+                    .get(&target_module_id)
+                    .is_some_and(|exports| exports.contains(binding))
+                {
+                    owners.insert(target_module_id);
+                }
+            }
+            let Some(owner) = owners.iter().next().copied() else {
+                continue;
+            };
+            if owners.len() == 1 {
+                redirects.insert(binding.clone(), owner);
+            }
+        }
+        if redirects.len() == reexports.len() {
+            plan.omitted_modules.insert(module.id);
+            plan.redirects.insert(module.id, redirects);
+        }
+    }
+
+    plan
+}
+
+fn module_has_internal_source_consumers(
+    source_module_wiring: &SourceModuleWiring,
+    module_id: ModuleId,
+) -> bool {
+    source_module_wiring
+        .imports_by_module
+        .values()
+        .any(|imports_by_target| imports_by_target.contains_key(&module_id))
 }
 
 /// Phase 10: vars currently declared inside `source-<N>-helpers.ts` that
@@ -5647,6 +5780,9 @@ fn source_exportable_bindings(
 ) -> BTreeSet<BindingName> {
     let mut bindings = source_definition_bindings(program, module_id);
     bindings.extend(program.model().graph().ast_imports_for(module_id));
+    if let Some(source) = program.model().input().module_source_slice(module_id) {
+        bindings.extend(named_reexported_bindings(source.source));
+    }
     bindings
 }
 
@@ -5671,6 +5807,84 @@ fn source_definition_bindings(
         bindings.extend(implicit_global_writes_in_source(source.source));
     }
     bindings
+}
+
+fn named_reexported_bindings(source: &str) -> BTreeSet<BindingName> {
+    export_from_statements(source)
+        .into_iter()
+        .flat_map(|statement| named_reexport_specifiers(statement).unwrap_or_default())
+        .map(|specifier| BindingName::new(specifier.exported))
+        .collect()
+}
+
+fn pure_direct_named_reexports(source: &str) -> Option<BTreeSet<BindingName>> {
+    let statements = export_from_statements(source);
+    if statements.is_empty() {
+        return None;
+    }
+    let mut bindings = BTreeSet::<BindingName>::new();
+    let mut consumed = 0usize;
+    for statement in statements {
+        consumed += statement.len();
+        let specifiers = named_reexport_specifiers(statement)?;
+        if specifiers.is_empty() || specifiers.iter().any(|specifier| specifier.is_aliased) {
+            return None;
+        }
+        bindings.extend(
+            specifiers
+                .into_iter()
+                .map(|specifier| BindingName::new(specifier.exported)),
+        );
+    }
+    let non_statement_bytes = source
+        .split(';')
+        .filter(|part| !part.trim().is_empty())
+        .filter(|part| !part.trim_start().starts_with("export {"))
+        .map(str::len)
+        .sum::<usize>();
+    (non_statement_bytes == 0 && consumed > 0).then_some(bindings)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamedReexportSpecifier {
+    exported: String,
+    is_aliased: bool,
+}
+
+fn export_from_statements(source: &str) -> Vec<&str> {
+    source
+        .split(';')
+        .map(str::trim)
+        .filter(|statement| statement.starts_with("export {") && statement.contains("} from "))
+        .collect()
+}
+
+fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
+    let rest = statement.strip_prefix("export {")?;
+    let (inner, after) = rest.split_once('}')?;
+    if !after.trim_start().starts_with("from ") {
+        return None;
+    }
+    let mut specifiers = Vec::new();
+    for raw in inner.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.starts_with("type ") {
+            return None;
+        }
+        let (imported, exported, is_aliased) = raw
+            .split_once(" as ")
+            .map_or((raw, raw, false), |(imported, exported)| {
+                (imported.trim(), exported.trim(), true)
+            });
+        if !is_identifier_like(imported) || !is_identifier_like(exported) {
+            return None;
+        }
+        specifiers.push(NamedReexportSpecifier {
+            exported: exported.to_string(),
+            is_aliased,
+        });
+    }
+    Some(specifiers)
 }
 
 fn extra_exports_for_module<'a>(
@@ -13290,6 +13504,148 @@ mod tests {
         assert!(helper_source.contains("shared = 1;"));
         assert!(helper_source.contains("var initShared = () => {};"));
         assert!(helper_source.contains("export { initShared, shared };"));
+    }
+
+    #[test]
+    fn pure_reexport_stub_with_internal_consumers_is_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "barrel.js",
+            Some("export { value } from './target.js';\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("console.log(value);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "barrel", "modules/barrel.ts")
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(planned_source_opt(&plan, "modules/barrel.ts").is_none());
+        assert!(consumer_source.contains("import { value } from './target.js';"));
+        assert!(!consumer_source.contains("from './barrel.js'"));
+    }
+
+    #[test]
+    fn pure_reexport_alias_stub_is_not_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "barrel.js",
+            Some("export { value as renamed } from './target.js';\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("console.log(renamed);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "barrel", "modules/barrel.ts")
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let barrel_source = planned_source(&plan, "modules/barrel.ts");
+
+        assert!(consumer_source.contains("import { renamed } from './barrel.js';"));
+        assert!(barrel_source.contains("export { value as renamed } from './target.js';"));
+    }
+
+    #[test]
+    fn side_effectful_reexport_barrel_is_not_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "barrel.js",
+            Some("console.log('load barrel');\nexport { value } from './target.js';\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("console.log(value);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "barrel", "modules/barrel.ts")
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let barrel_source = planned_source(&plan, "modules/barrel.ts");
+
+        assert!(consumer_source.contains("import { value } from './barrel.js';"));
+        assert!(barrel_source.contains("console.log('load barrel')"));
+        assert!(barrel_source.contains("export { value } from './target.js';"));
     }
 
     #[test]
