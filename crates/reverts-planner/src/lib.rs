@@ -838,11 +838,18 @@ impl ImportExportPlanner {
                 &helper_closure.emitted_bindings,
                 &externalized_packages,
             );
+            let package_init_shims = externalized_package_init_shims(
+                program,
+                helper_closure.source.as_str(),
+                &externalized_packages,
+            );
+            let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
+            emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
             let helper_path = runtime_helpers_path(*source_file_id);
             let unresolved = unresolved_runtime_helper_references(
                 prelude,
                 helper_closure.source.as_str(),
-                &helper_closure.emitted_bindings,
+                &emitted_runtime_bindings,
                 &helper_imports,
             );
             if !unresolved.is_empty() {
@@ -859,6 +866,9 @@ impl ImportExportPlanner {
                 let specifier =
                     relative_import_specifier(helper_path.as_str(), module_path.as_str());
                 file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+            }
+            for binding in &package_init_shims {
+                file.push_source(noop_function_statement(binding));
             }
             file.push_source(helper_closure.source);
             let setter_bindings = used_runtime_helper_setters
@@ -2420,6 +2430,33 @@ fn runtime_source_module_imports(
     imports
 }
 
+fn externalized_package_init_shims(
+    program: &EnrichedProgram,
+    source: &str,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeSet<BindingName> {
+    if externalized_packages.is_empty() {
+        return BTreeSet::new();
+    }
+    let local_bindings = local_bindings_in_source(source);
+    let definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
+    call_identifiers_in_source(source)
+        .into_iter()
+        .filter(|identifier| !local_bindings.contains(identifier))
+        .map(BindingName::new)
+        .filter(|binding| {
+            definition_modules
+                .get(binding)
+                .and_then(|module_id| *module_id)
+                .is_some_and(|module_id| externalized_packages.contains(&module_id))
+        })
+        .collect()
+}
+
+fn noop_function_statement(binding: &BindingName) -> String {
+    format!("function {}() {{}}", binding.as_str())
+}
+
 fn unresolved_runtime_helper_references(
     prelude: &RuntimePrelude,
     source: &str,
@@ -3079,6 +3116,7 @@ fn source_required_package_modules(
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeSet<ModuleId> {
     let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    let definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
     let modules_by_id = program
         .model()
         .modules()
@@ -3120,6 +3158,30 @@ fn source_required_package_modules(
             }
             required.insert(target_module_id);
             changed = true;
+        }
+        for (from_module_id, candidate_reads) in &candidate_reads_by_module {
+            let Some(from_module) = modules_by_id.get(from_module_id) else {
+                continue;
+            };
+            if from_module.kind == ModuleKind::Package
+                && externalized_packages.contains(&from_module.id)
+                && !required.contains(&from_module.id)
+            {
+                continue;
+            }
+            for binding in candidate_reads {
+                let Some(Some(target_module_id)) = definition_modules.get(binding) else {
+                    continue;
+                };
+                if target_module_id == from_module_id
+                    || !externalized_packages.contains(target_module_id)
+                    || required.contains(target_module_id)
+                {
+                    continue;
+                }
+                required.insert(*target_module_id);
+                changed = true;
+            }
         }
         if !changed {
             break;
@@ -9974,6 +10036,79 @@ mod tests {
                 .join("\n")
                 .contains("export { packageInit };")
         );
+    }
+
+    #[test]
+    fn accepted_external_package_read_from_runtime_helper_is_emitted_locally() {
+        let planner = ImportExportPlanner;
+        let package_source = "var dNq = { default: () => 1 };\nvar cNq = lazyValue(() => dNq);\n";
+        let app_source = "var app = lazyValue(() => (cNq(), dNq).default());\n";
+        let entrypoint = "app();\n";
+        let source = format!("{package_source}{app_source}{entrypoint}");
+        let package_start = 0;
+        let package_end = package_source.len() as u32;
+        let app_start = package_end;
+        let app_end = package_end + app_source.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source)));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "open",
+                "modules/open.ts",
+                "open",
+                Some("10.2.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(package_start, package_end)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(app_start, app_end)),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "open",
+                "10.2.0",
+                "open/index.js",
+            ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let accepted_externalized_packages = super::externalized_package_modules(&enriched);
+        let source_required_packages =
+            super::source_required_package_modules(&enriched, &accepted_externalized_packages);
+        assert!(
+            source_required_packages.contains(&ModuleId(1)),
+            "package bindings read by source without an import edge must stay local"
+        );
+        let init_shims = super::externalized_package_init_shims(
+            &enriched,
+            "await (cNq(), dNq).default();",
+            &accepted_externalized_packages,
+        );
+        assert!(init_shims.contains(&BindingName::new("cNq")));
+        assert!(!init_shims.contains(&BindingName::new("dNq")));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("runtime helper package reads should be wired");
+
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/open.ts")
+            .expect("runtime-read package file should be emitted locally");
+        assert!(package_file.body.join("\n").contains("var cNq = lazyValue"));
     }
 
     #[test]

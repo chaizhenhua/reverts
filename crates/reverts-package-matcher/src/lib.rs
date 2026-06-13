@@ -272,6 +272,18 @@ impl VersionedPackageMatcher {
         Self { config }
     }
 
+    /// Matches unresolved package modules for a caller-supplied package-name
+    /// subset. An empty subset intentionally performs no module matching.
+    #[must_use]
+    pub fn match_rows_for_packages(
+        &self,
+        rows: &InputRows,
+        package_sources: &[PackageSource],
+        package_names: &BTreeSet<String>,
+    ) -> VersionedPackageMatchReport {
+        self.match_rows_inner(rows, package_sources, Some(package_names))
+    }
+
     /// Matches unresolved package modules to the best concrete package version.
     #[must_use]
     pub fn match_rows(
@@ -279,13 +291,22 @@ impl VersionedPackageMatcher {
         rows: &InputRows,
         package_sources: &[PackageSource],
     ) -> VersionedPackageMatchReport {
+        self.match_rows_inner(rows, package_sources, None)
+    }
+
+    fn match_rows_inner(
+        &self,
+        rows: &InputRows,
+        package_sources: &[PackageSource],
+        package_filter: Option<&BTreeSet<String>>,
+    ) -> VersionedPackageMatchReport {
         let mut audit = AuditReport::default();
         let index = PackageVersionIndex::build(package_sources, &mut audit);
         let mut decisions = Vec::new();
         let mut matches = Vec::new();
         let mut attributions = Vec::new();
 
-        for package_name in package_names_for_matching(rows) {
+        for package_name in package_names_for_matching(rows, package_filter) {
             let module_fingerprints =
                 fingerprint_modules_for_package(rows, package_name.as_str(), &mut audit);
             if module_fingerprints.is_empty() {
@@ -321,7 +342,8 @@ impl VersionedPackageMatcher {
             }
             decisions.push(decision);
         }
-        let surfaces = resolve_source_package_surfaces(rows, &attributions, package_sources);
+        let surfaces =
+            resolve_source_package_surfaces(rows, &attributions, package_sources, package_filter);
 
         VersionedPackageMatchReport {
             attributions,
@@ -447,13 +469,21 @@ fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
     })
 }
 
-fn package_names_for_matching(rows: &InputRows) -> BTreeSet<String> {
-    rows.modules
+fn package_names_for_matching(
+    rows: &InputRows,
+    package_filter: Option<&BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut names = rows
+        .modules
         .iter()
         .filter(|module| module.kind == ModuleKind::Package)
         .filter(|module| !has_accepted_attribution(rows, module.id))
         .filter_map(|module| module.package_name.clone())
-        .collect()
+        .collect::<BTreeSet<_>>();
+    if let Some(package_filter) = package_filter {
+        names.retain(|package_name| package_filter.contains(package_name));
+    }
+    names
 }
 
 /// Returns npm package names referenced by source-backed `import`, `export from`,
@@ -490,9 +520,15 @@ fn resolve_source_package_surfaces(
     rows: &InputRows,
     current_attributions: &[PackageAttributionInput],
     package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
 ) -> Vec<PackageSurfaceInput> {
     let mut sites_by_specifier = BTreeMap::<(String, String), BTreeSet<String>>::new();
     for site in package_import_sites_from_sources(rows) {
+        if let Some(package_filter) = package_filter
+            && !package_filter.contains(site.package_name.as_str())
+        {
+            continue;
+        }
         if has_accepted_surface(rows, site.specifier.as_str()) {
             continue;
         }

@@ -373,10 +373,21 @@ pub fn match_packages_from_connection(
 
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources = load_package_sources(connection, &package_names)?;
-    let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+    let report = if args.package_names.is_empty() {
+        VersionedPackageMatcher::default().match_rows(&rows, &package_sources)
+    } else {
+        VersionedPackageMatcher::default().match_rows_for_packages(
+            &rows,
+            &package_sources,
+            &package_names,
+        )
+    };
 
     // Phase-1: also run the cascade pipeline alongside the legacy matcher.
-    let fingerprints_by_module = fingerprints_from_rows(&rows);
+    let fingerprints_by_module = fingerprints_from_rows(
+        &rows,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
     let cascade_report = match_with_cascade(&fingerprints_by_module, &package_sources);
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
@@ -448,9 +459,20 @@ pub fn match_packages_from_connection(
 /// index builder for package sources.
 fn fingerprints_from_rows(
     rows: &InputRows,
+    package_filter: Option<&BTreeSet<String>>,
 ) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
     let mut out = BTreeMap::new();
     for module in &rows.modules {
+        if let Some(package_filter) = package_filter {
+            if module.kind != ModuleKind::Package
+                || !module
+                    .package_name
+                    .as_deref()
+                    .is_some_and(|package_name| package_filter.contains(package_name))
+            {
+                continue;
+            }
+        }
         if let Some(slice) = rows.module_source_slice(module.id) {
             let fps = FunctionExtractor::fingerprint(module.id, slice.source);
             if !fps.is_empty() {
@@ -2434,6 +2456,61 @@ mod tests {
         assert_eq!(outcome.written_attributions, 0);
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_package_name_filter_skips_unrequested_modules() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let other_source_path = tempdir.path().join("other.js");
+        fs::write(other_source_path.as_path(), "function broken(").expect("write source fixture");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (2, ?1)",
+                [other_source_path.to_string_lossy().as_ref()],
+            )
+            .expect("insert source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 2)",
+                [],
+            )
+            .expect("insert project file");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (11, 2, 'other', 'other/index.js', 'package', 'other', NULL, 0, ?1)
+                ",
+                ["function broken(".len() as i64],
+            )
+            .expect("insert unrequested module");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: vec!["pkg".to_string()],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_modules, 2);
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.matched_package_surfaces, 0);
     }
 
     #[test]
