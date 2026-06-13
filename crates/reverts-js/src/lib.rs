@@ -1,6 +1,6 @@
 pub mod normalize;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use oxc_allocator::Allocator;
@@ -1289,10 +1289,12 @@ impl<'a> Visit<'a> for CallFormCollector<'_> {
 ///   * `Object.defineProperty(exports, "k", { value: PURE_EXPR })`
 ///   * `return PURE_EXPR;` (for `lazyValue` bodies)
 ///
-/// Returns `None` for any unrecognized statement — wrong rewrites break
-/// the runtime, missed rewrites are harmless (the existing lazy stays).
-/// The body is wrapped in `function __lazy() { BODY }` for parsing so it
-/// can contain `return` statements.
+/// Returns `None` for any unrecognized statement OR when the body has
+/// thunk-call dependencies that need inter-procedural fixpoint
+/// resolution. The richer [`classify_lazy_module_body`] is the
+/// recommended entry point — callers that need the deps for fixpoint
+/// propagation use it; callers that want a value-or-nothing answer
+/// use this wrapper.
 #[must_use]
 pub fn extract_lazy_module_eager_value(
     body: &str,
@@ -1301,6 +1303,82 @@ pub fn extract_lazy_module_eager_value(
     path_hint: Option<&Path>,
     goal: ParseGoal,
 ) -> Option<String> {
+    match classify_lazy_module_body(body, exports_param, module_param, path_hint, goal) {
+        LazyBodyClassification::Eager { value } => Some(value),
+        _ => None,
+    }
+}
+
+/// Outcome of analyzing a lazy thunk body. The eagerification pipeline
+/// uses this to decide whether the body can be inlined at module load,
+/// and — when it depends on other thunks — what those dependencies are
+/// so an inter-procedural fixpoint can resolve them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LazyBodyClassification {
+    /// Body is mechanically eagerifiable with no calls into other
+    /// lazy thunks. The `value` is the source-text to use as the
+    /// replacement RHS (already includes any setter-call prologue
+    /// folded into a comma expression).
+    Eager { value: String },
+    /// Body would be eagerifiable IF every name in `call_deps` resolves
+    /// to a thunk that is itself eager-safe. The producer's fixpoint
+    /// validates this by recursive propagation. The `value` is the
+    /// composed replacement RHS assuming all deps clear; thunk calls
+    /// like `dep()` are intentionally NOT in the prologue, because
+    /// eagerifying each dep makes its side effects run at the dep
+    /// module's load time (earlier than the consumer's), so re-calling
+    /// would be redundant or unsafe.
+    EagerWithDeps {
+        value: String,
+        call_deps: BTreeSet<String>,
+    },
+    /// Body has unrecognized side effects. Cannot be eagerified
+    /// regardless of caller's eagerness.
+    Impure,
+}
+
+/// Same as [`extract_lazy_module_eager_value`] but also accepts bodies
+/// whose dependencies are all in `eager_safe_call_targets`. Returns the
+/// composed value (with the dep calls already DROPPED from the prologue
+/// — the eagerified producers will have already run by module-load time).
+#[must_use]
+pub fn extract_lazy_module_eager_value_with_safe_deps(
+    body: &str,
+    exports_param: &str,
+    module_param: Option<&str>,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    eager_safe_call_targets: &BTreeSet<String>,
+) -> Option<String> {
+    match classify_lazy_module_body(body, exports_param, module_param, path_hint, goal) {
+        LazyBodyClassification::Eager { value } => Some(value),
+        LazyBodyClassification::EagerWithDeps { value, call_deps } => {
+            if call_deps
+                .iter()
+                .all(|d| eager_safe_call_targets.contains(d))
+            {
+                Some(value)
+            } else {
+                None
+            }
+        }
+        LazyBodyClassification::Impure => None,
+    }
+}
+
+/// Inter-procedural-friendly body classifier. Same shape recognition as
+/// [`extract_lazy_module_eager_value`] but also reports zero-arg calls
+/// to bare identifiers as dependencies for a global fixpoint to resolve.
+/// The fixpoint determines whether each dependency identifier maps to a
+/// thunk that is itself eager-safe; if so, the body is eager-safe.
+#[must_use]
+pub fn classify_lazy_module_body(
+    body: &str,
+    exports_param: &str,
+    module_param: Option<&str>,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> LazyBodyClassification {
     let allocator = Allocator::default();
     let wrapped = format!("function __lazy_body_classifier_wrapper() {{\n{body}\n}}");
     for source_type in source_type_candidates(path_hint, goal) {
@@ -1316,40 +1394,45 @@ pub fn extract_lazy_module_eager_value(
         }) else {
             continue;
         };
-        return analyze_lazy_body_statements(
+        let analysis = analyze_lazy_body_statements_v2(
             &function_body.statements,
             &wrapped,
             exports_param,
             module_param,
         );
+        return analysis_to_classification(analysis, module_param);
     }
-    None
+    LazyBodyClassification::Impure
 }
 
-fn analyze_lazy_body_statements(
+/// Internal mutable state collected during AST traversal of a lazy
+/// body. The v2 analyzer fills this in; `analysis_to_classification`
+/// converts it to a `LazyBodyClassification` based on whether
+/// dependencies were collected.
+#[derive(Debug, Default)]
+struct LazyBodyAnalysisState {
+    captured_value: Option<String>,
+    property_writes: BTreeMap<String, String>,
+    prologue: Vec<String>,
+    call_deps: BTreeSet<String>,
+    impure: bool,
+}
+
+fn analyze_lazy_body_statements_v2(
     statements: &oxc_allocator::Vec<'_, Statement<'_>>,
     source: &str,
     exports_param: &str,
     module_param: Option<&str>,
-) -> Option<String> {
-    let mut captured_value: Option<String> = None;
-    let mut property_writes: BTreeMap<String, String> = BTreeMap::new();
-    // Side-effect statements collected before the value-producing
-    // statement. They get folded into a comma expression: the lazy
-    // thunk's original "run on first call" semantics map to "run at
-    // module load" — same observable state under the SCC-singleton
-    // gate that compute_eager_safe_analysis enforces. Recognized
-    // prologue forms:
-    //   * `__reverts_set_<X>(PURE)` — reverts-emitted setter; pure-
-    //     mutates a module-local binding.
-    //   * Bare identifier reference (`x;`) — esbuild emits these as
-    //     anti-tree-shake markers; they have no runtime effect.
-    let mut prologue: Vec<String> = Vec::new();
+) -> LazyBodyAnalysisState {
+    let mut state = LazyBodyAnalysisState::default();
     for stmt in statements {
+        if state.impure {
+            break;
+        }
         match stmt {
             Statement::VariableDeclaration(decl) => {
                 if !is_harmless_variable_declaration(decl, source) {
-                    return None;
+                    state.impure = true;
                 }
             }
             Statement::EmptyStatement(_) => {}
@@ -1359,16 +1442,34 @@ fn analyze_lazy_body_statements(
                     chain = &inner.expression;
                 }
                 if let Some(inner_body) = iife_block_body(chain) {
-                    let recurse = analyze_lazy_body_statements(
+                    let inner_state = analyze_lazy_body_statements_v2(
                         &inner_body.statements,
                         source,
                         exports_param,
                         module_param,
-                    )?;
-                    if captured_value.is_some() || !property_writes.is_empty() {
-                        return None;
+                    );
+                    if inner_state.impure {
+                        state.impure = true;
+                        continue;
                     }
-                    captured_value = Some(recurse);
+                    if state.captured_value.is_some() || !state.property_writes.is_empty() {
+                        // Another exports write or value already captured —
+                        // having two values from different statements is
+                        // ambiguous. Refuse.
+                        state.impure = true;
+                        continue;
+                    }
+                    // Merge inner state into outer.
+                    state.prologue.extend(inner_state.prologue);
+                    state.call_deps.extend(inner_state.call_deps);
+                    if let Some(value) = inner_state.captured_value {
+                        state.captured_value = Some(value);
+                    } else if !inner_state.property_writes.is_empty() {
+                        state.property_writes.extend(inner_state.property_writes);
+                    }
+                    // If inner had only prologue (init-only), the IIFE
+                    // contributes no value but its prologue's side
+                    // effects bubble up.
                     continue;
                 }
                 if let Expression::AssignmentExpression(assign) = chain {
@@ -1377,65 +1478,90 @@ fn analyze_lazy_body_statements(
                     {
                         let final_value = unwrap_assignment_chain(&assign.right);
                         if !is_pure_eager_expression(final_value, source) {
-                            return None;
+                            state.impure = true;
+                            continue;
                         }
-                        if captured_value.is_some() || !property_writes.is_empty() {
-                            return None;
+                        if state.captured_value.is_some() || !state.property_writes.is_empty() {
+                            state.impure = true;
+                            continue;
                         }
-                        captured_value = Some(span_text(final_value, source).to_string());
+                        state.captured_value = Some(span_text(final_value, source).to_string());
                         continue;
                     }
                     if let Some((key, value)) =
                         match_exports_key_assignment(assign, exports_param, source)
                     {
-                        if captured_value.is_some() {
-                            return None;
+                        if state.captured_value.is_some() {
+                            state.impure = true;
+                            continue;
                         }
-                        if property_writes.insert(key, value).is_some() {
-                            return None;
+                        if state.property_writes.insert(key, value).is_some() {
+                            state.impure = true;
                         }
                         continue;
                     }
-                    return None;
+                    state.impure = true;
+                    continue;
                 }
                 if let Expression::CallExpression(call) = chain {
                     if let Some((key, value)) =
                         match_object_define_property(call, exports_param, source)
                     {
-                        if captured_value.is_some() {
-                            return None;
+                        if state.captured_value.is_some() {
+                            state.impure = true;
+                            continue;
                         }
-                        if property_writes.insert(key, value).is_some() {
-                            return None;
+                        if state.property_writes.insert(key, value).is_some() {
+                            state.impure = true;
                         }
                         continue;
                     }
                     if is_reverts_setter_call_with_pure_args(call, source) {
                         let inner: &CallExpression<'_> = call;
-                        prologue.push(span_text(inner, source).to_string());
+                        state.prologue.push(span_text(inner, source).to_string());
                         continue;
                     }
-                    return None;
+                    // NEW: zero-arg call to a bare identifier — register
+                    // as an inter-procedural dependency. The fixpoint
+                    // determines whether the called binding is itself
+                    // eager-safe; if all deps clear, the call's side
+                    // effects are subsumed by the dep's eagerification
+                    // (which runs at the dep's module-load time, before
+                    // this module's). We DO NOT add the call to the
+                    // prologue — re-invoking an eagerified binding
+                    // would dereference a non-function.
+                    if call.arguments.is_empty()
+                        && let Expression::Identifier(callee) = &call.callee
+                    {
+                        state.call_deps.insert(callee.name.to_string());
+                        continue;
+                    }
+                    state.impure = true;
+                    continue;
                 }
                 if matches!(chain, Expression::Identifier(_)) {
-                    // Bare identifier reference statement — esbuild
-                    // emits these as anti-tree-shake markers. No
-                    // runtime effect. Drop on collapse.
                     continue;
                 }
                 if let Expression::SequenceExpression(seq) = chain {
-                    // Commonly seen: `setter1(...), setter2(...), setter3(...);`
-                    // — every comma-separated expression must be one
-                    // of our accepted side-effect forms.
                     let mut all_acceptable = true;
                     for sub in &seq.expressions {
                         match sub {
                             Expression::Identifier(_) => {}
-                            Expression::CallExpression(c)
-                                if is_reverts_setter_call_with_pure_args(c, source) =>
-                            {
-                                let inner: &CallExpression<'_> = c;
-                                prologue.push(span_text(inner, source).to_string());
+                            Expression::CallExpression(c) => {
+                                if is_reverts_setter_call_with_pure_args(c, source) {
+                                    let inner: &CallExpression<'_> = c;
+                                    state.prologue.push(span_text(inner, source).to_string());
+                                } else if c.arguments.is_empty() {
+                                    if let Expression::Identifier(callee) = &c.callee {
+                                        state.call_deps.insert(callee.name.to_string());
+                                    } else {
+                                        all_acceptable = false;
+                                        break;
+                                    }
+                                } else {
+                                    all_acceptable = false;
+                                    break;
+                                }
                             }
                             _ => {
                                 all_acceptable = false;
@@ -1443,44 +1569,55 @@ fn analyze_lazy_body_statements(
                             }
                         }
                     }
-                    if all_acceptable {
-                        continue;
+                    if !all_acceptable {
+                        state.impure = true;
                     }
-                    return None;
+                    continue;
                 }
-                return None;
+                state.impure = true;
             }
             Statement::ReturnStatement(ret) => {
                 let Some(arg) = &ret.argument else {
-                    return None;
+                    state.impure = true;
+                    continue;
                 };
                 let final_value = unwrap_assignment_chain(arg);
                 if !is_pure_eager_expression(final_value, source) {
-                    return None;
+                    state.impure = true;
+                    continue;
                 }
-                if captured_value.is_some() || !property_writes.is_empty() {
-                    return None;
+                if state.captured_value.is_some() || !state.property_writes.is_empty() {
+                    state.impure = true;
+                    continue;
                 }
-                captured_value = Some(span_text(final_value, source).to_string());
+                state.captured_value = Some(span_text(final_value, source).to_string());
             }
-            _ => return None,
+            _ => {
+                state.impure = true;
+            }
         }
     }
-    let base_value: Option<String> = if let Some(value) = captured_value {
+    state
+}
+
+fn analysis_to_classification(
+    state: LazyBodyAnalysisState,
+    module_param: Option<&str>,
+) -> LazyBodyClassification {
+    if state.impure {
+        return LazyBodyClassification::Impure;
+    }
+    let base_value: Option<String> = if let Some(value) = state.captured_value {
         Some(value)
-    } else if !property_writes.is_empty() {
-        let formatted = property_writes
+    } else if !state.property_writes.is_empty() {
+        let formatted = state
+            .property_writes
             .iter()
             .map(|(k, v)| format!("{k}: {v}"))
             .collect::<Vec<_>>()
             .join(", ");
         Some(format!("{{ {formatted} }}"))
-    } else if !prologue.is_empty() {
-        // Init-only body: no value produced, just side effects.
-        // Use the lazy thunk's natural "empty result":
-        //   * lazyModule → empty exports object `{}` (what the
-        //     wrapper would have created on first call)
-        //   * lazyValue  → `void 0` (thunk with no return)
+    } else if !state.prologue.is_empty() || !state.call_deps.is_empty() {
         Some(if module_param.is_some() {
             "{}".into()
         } else {
@@ -1489,22 +1626,30 @@ fn analyze_lazy_body_statements(
     } else {
         None
     };
-    let base = base_value?;
-    if prologue.is_empty() {
-        return Some(base);
+    let Some(base) = base_value else {
+        return LazyBodyClassification::Impure;
+    };
+    let value = if state.prologue.is_empty() {
+        base
+    } else {
+        let mut combined = String::new();
+        combined.push('(');
+        for stmt in &state.prologue {
+            combined.push_str(stmt);
+            combined.push_str(", ");
+        }
+        combined.push_str(&base);
+        combined.push(')');
+        combined
+    };
+    if state.call_deps.is_empty() {
+        LazyBodyClassification::Eager { value }
+    } else {
+        LazyBodyClassification::EagerWithDeps {
+            value,
+            call_deps: state.call_deps,
+        }
     }
-    // Compose `(setter1, setter2, base)` — side effects run in order,
-    // expression evaluates to `base`. Direction-of-evaluation matches
-    // the original lazy body, just shifted to module-load time.
-    let mut combined = String::new();
-    combined.push('(');
-    for stmt in &prologue {
-        combined.push_str(stmt);
-        combined.push_str(", ");
-    }
-    combined.push_str(&base);
-    combined.push(')');
-    Some(combined)
 }
 
 fn is_reverts_setter_call_with_pure_args(call: &CallExpression<'_>, source: &str) -> bool {
@@ -1543,7 +1688,10 @@ fn is_pure_setter_argument(arg: &Argument<'_>, source: &str) -> bool {
         | A::ArrowFunctionExpression(_)
         | A::ClassExpression(_) => true,
         A::ObjectExpression(obj) => is_pure_object_expression(obj, source),
-        A::ArrayExpression(arr) => arr.elements.iter().all(is_pure_array_element),
+        A::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .all(|element| is_pure_array_element(element, source)),
         A::ParenthesizedExpression(inner) => is_pure_eager_expression(&inner.expression, source),
         A::UnaryExpression(unary) => {
             matches!(
@@ -1708,7 +1856,10 @@ fn is_pure_eager_expression(expr: &Expression<'_>, source: &str) -> bool {
         | Expression::ArrowFunctionExpression(_)
         | Expression::ClassExpression(_) => true,
         Expression::ObjectExpression(obj) => is_pure_object_expression(obj, source),
-        Expression::ArrayExpression(arr) => arr.elements.iter().all(is_pure_array_element),
+        Expression::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .all(|element| is_pure_array_element(element, source)),
         Expression::ParenthesizedExpression(inner) => {
             is_pure_eager_expression(&inner.expression, source)
         }
@@ -1743,26 +1894,47 @@ fn is_pure_object_expression(obj: &oxc_ast::ast::ObjectExpression<'_>, source: &
     true
 }
 
-fn is_pure_array_element(elem: &oxc_ast::ast::ArrayExpressionElement<'_>) -> bool {
-    // We deliberately keep this list narrow: only literal-shape elements
-    // are accepted. Nested object/array/function inside an array is
-    // technically pure too, but the recursive case here would require
-    // converting an `ArrayExpressionElement` to a borrowed `Expression`
-    // (which oxc doesn't expose) — and array-of-non-literal exports is
-    // a rare pattern in practice. Eagerifying is opt-in: missing a case
-    // just leaves the lazy thunk alone, which is safe.
+fn is_pure_array_element(elem: &oxc_ast::ast::ArrayExpressionElement<'_>, source: &str) -> bool {
+    // `ArrayExpressionElement` shares discriminants with `Expression`
+    // via OXC's `inherit_variants!` macro but the two enums are distinct
+    // types in Rust — there's no zero-cost `&ArrayExpressionElement →
+    // &Expression` view. We re-state the same recursive shape match here
+    // so that arrays of nested objects, arrays, and other pure shapes
+    // are accepted (matching the byte-level `pure_array_literal` scanner
+    // in the planner). The two enums share `Elision` and `SpreadElement`,
+    // which `Expression` doesn't have — spread keeps the lazy thunk to
+    // be safe.
     use oxc_ast::ast::ArrayExpressionElement as A;
-    matches!(
-        elem,
+    match elem {
         A::Elision(_)
-            | A::NumericLiteral(_)
-            | A::StringLiteral(_)
-            | A::BooleanLiteral(_)
-            | A::NullLiteral(_)
-            | A::BigIntLiteral(_)
-            | A::RegExpLiteral(_)
-            | A::TemplateLiteral(_)
-    )
+        | A::NumericLiteral(_)
+        | A::StringLiteral(_)
+        | A::BooleanLiteral(_)
+        | A::NullLiteral(_)
+        | A::BigIntLiteral(_)
+        | A::RegExpLiteral(_)
+        | A::TemplateLiteral(_)
+        | A::FunctionExpression(_)
+        | A::ArrowFunctionExpression(_)
+        | A::ClassExpression(_) => true,
+        A::ObjectExpression(obj) => is_pure_object_expression(obj, source),
+        A::ArrayExpression(arr) => arr
+            .elements
+            .iter()
+            .all(|element| is_pure_array_element(element, source)),
+        A::ParenthesizedExpression(inner) => is_pure_eager_expression(&inner.expression, source),
+        A::UnaryExpression(unary) => {
+            matches!(
+                unary.operator,
+                oxc_syntax::operator::UnaryOperator::LogicalNot
+                    | oxc_syntax::operator::UnaryOperator::UnaryNegation
+                    | oxc_syntax::operator::UnaryOperator::UnaryPlus
+                    | oxc_syntax::operator::UnaryOperator::BitwiseNot
+                    | oxc_syntax::operator::UnaryOperator::Void
+            ) && is_pure_eager_expression(&unary.argument, source)
+        }
+        _ => false,
+    }
 }
 
 fn span_text<'a>(node: &impl oxc_span::GetSpan, source: &'a str) -> &'a str {
@@ -1935,9 +2107,10 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        CompilerLowering, GeneratedExport, GeneratedImport, ImportUsageScope, JsError, ParseGoal,
-        classify_import_usage_scope, collect_file_url_source_location_rewrites,
-        collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
+        CompilerLowering, GeneratedExport, GeneratedImport, ImportUsageScope, JsError,
+        LazyBodyClassification, ParseGoal, classify_import_usage_scope, classify_lazy_module_body,
+        collect_file_url_source_location_rewrites, collect_path_builder_calls,
+        collect_static_resource_specifiers, collect_string_literals,
         extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
         normalize_source_for_pipeline, parse_error_message, parse_source, sanitize_identifier,
         verify_only_immediate_call_references,
@@ -2662,6 +2835,106 @@ mod tests {
             ParseGoal::TypeScript,
         );
         assert_eq!(value, None);
+    }
+
+    #[test]
+    fn classify_lazy_body_returns_deps_for_zero_arg_thunk_calls() {
+        // Body has bare zero-arg calls to imported thunks alongside an
+        // exports write. These become inter-procedural dependencies —
+        // the fixpoint resolves them; the value still composes.
+        let body = "initOne(); initTwo(); module.exports = 42;";
+        let result = classify_lazy_module_body(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        match result {
+            LazyBodyClassification::EagerWithDeps { value, call_deps } => {
+                // Thunk calls are NOT in the prologue — they're handled
+                // by their producer's eagerification.
+                assert_eq!(value, "42");
+                assert!(call_deps.contains("initOne"));
+                assert!(call_deps.contains("initTwo"));
+                assert_eq!(call_deps.len(), 2);
+            }
+            other => panic!("expected EagerWithDeps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_lazy_body_treats_setter_calls_alongside_thunk_deps_correctly() {
+        // Mix of setter calls (go into prologue, run at module load)
+        // and zero-arg thunk calls (become deps, handled by their own
+        // eagerification). The value composes the setters + the
+        // captured exports write.
+        let body = "thunkA(); __reverts_set_foo(1); thunkB(); module.exports = bar;";
+        // module.exports = bar — `bar` is an identifier (not pure) so
+        // captured_value rejects → Impure overall.
+        let result = classify_lazy_module_body(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result, LazyBodyClassification::Impure);
+    }
+
+    #[test]
+    fn classify_lazy_body_thunk_only_init_returns_deps_with_empty_exports() {
+        // No exports write, no return — just thunk calls. lazyModule
+        // bodies yield `{}` (the wrapper's empty exports object).
+        let body = "thunkA();\nthunkB();";
+        let result = classify_lazy_module_body(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        match result {
+            LazyBodyClassification::EagerWithDeps { value, call_deps } => {
+                assert_eq!(value, "{}");
+                assert_eq!(call_deps.len(), 2);
+            }
+            other => panic!("expected EagerWithDeps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_lazy_body_rejects_call_with_arguments_as_unknown_effect() {
+        // `foo(1)` — call with an argument is NOT a zero-arg thunk
+        // invocation; it could be calling a regular function with side
+        // effects we can't classify. Stay impure.
+        let body = "foo(1); module.exports = 42;";
+        let result = classify_lazy_module_body(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result, LazyBodyClassification::Impure);
+    }
+
+    #[test]
+    fn classify_lazy_body_eager_when_body_has_no_calls() {
+        let body = "module.exports = { a: 1, b: 2 };";
+        let result = classify_lazy_module_body(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        match result {
+            LazyBodyClassification::Eager { value } => {
+                assert_eq!(value, "{ a: 1, b: 2 }");
+            }
+            other => panic!("expected Eager, got {other:?}"),
+        }
     }
 
     #[test]

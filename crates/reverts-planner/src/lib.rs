@@ -918,7 +918,17 @@ fn lowered_runtime_sources(
                 exported_bindings.remove(binding);
             }
         }
-        let mut lowering = lower_runtime_helpers(source.source, &helper_kinds, &exported_bindings);
+        let empty_safe_targets = BTreeSet::<String>::new();
+        let eager_safe_call_targets = eager_safe_analysis
+            .safe_call_targets_by_module
+            .get(&module.id)
+            .unwrap_or(&empty_safe_targets);
+        let mut lowering = lower_runtime_helpers(
+            source.source,
+            &helper_kinds,
+            &exported_bindings,
+            eager_safe_call_targets,
+        );
         // Phase 8 cross-module rewrite: bindings this module imports
         // that the eager-safe analysis cleared no longer carry their
         // lazy thunk in the exporting module. Their `X()` call sites
@@ -2785,6 +2795,12 @@ struct EagerSafeAnalysis {
     /// For each target module, the subset of its exported bindings that
     /// pass the cross-module eager-safety check.
     eager_safe_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    /// For each consumer module, the set of import names that resolve
+    /// to bindings the fixpoint marked eager-safe. The lowering pass
+    /// passes this set to the body extractor so `EagerWithDeps` bodies
+    /// (zero-arg calls to imported thunks) can extract their value
+    /// when every dep would itself have been eagerified.
+    safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>>,
 }
 
 fn compute_eager_safe_analysis(
@@ -2800,13 +2816,11 @@ fn compute_eager_safe_analysis(
     // already calling it correctly (not invoking a thunk).
     let thunk_wrapped_exports = compute_thunk_wrapped_exports(program);
     // Additional gate: only bindings whose BODY actually passes the
-    // delazify-extraction check qualify for eagerification. Producer
-    // body-purity is non-trivial (init helpers, IIFE wraps, chain
-    // assignments…), and we must not strip a consumer's `X()` call
-    // unless the producer is going to emit a direct value. Otherwise
-    // the consumer hits the thunk-as-non-function and crashes at
-    // runtime.
-    let delazifiable_exports = predict_delazifiable_exports(program);
+    // delazify-extraction check qualify for eagerification. The
+    // prediction also reports per-consumer `safe_call_targets` so the
+    // lowering extractor can accept `EagerWithDeps` bodies whose deps
+    // would themselves eagerify.
+    let prediction = predict_delazifiable_exports(program, source_module_wiring);
     let mut eager_safe_exports_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     for (target_id, exported_bindings) in &source_module_wiring.exports_by_module {
         if !singleton_modules.contains(target_id) {
@@ -2815,7 +2829,7 @@ fn compute_eager_safe_analysis(
         let Some(thunk_wrapped) = thunk_wrapped_exports.get(target_id) else {
             continue;
         };
-        let Some(delazifiable) = delazifiable_exports.get(target_id) else {
+        let Some(delazifiable) = prediction.delazifiable_exports_by_module.get(target_id) else {
             continue;
         };
         let mut safe = BTreeSet::<BindingName>::new();
@@ -2860,6 +2874,7 @@ fn compute_eager_safe_analysis(
     }
     EagerSafeAnalysis {
         eager_safe_exports_by_module,
+        safe_call_targets_by_module: prediction.safe_call_targets_by_module,
     }
 }
 
@@ -3081,21 +3096,76 @@ fn scan_thunk_wrapped_bindings(
 }
 
 /// For each module, predict the subset of its thunk-wrapped exports
-/// whose body would actually delazify. This is the "would the producer
-/// emit a direct value or keep the lazy thunk" gate — strictly necessary
-/// for cross-module rewriting to be sound. If we promise the consumer
-/// it can drop `X()` to `X` but the producer's body is impure (so the
-/// thunk survives), the consumer hits a non-callable value at runtime.
+/// whose body would actually delazify — including transitively, via
+/// the inter-procedural fixpoint over zero-arg thunk-call dependencies.
 ///
-/// Scans each module's source for `var X = HELPER((params) => { BODY })`
-/// shapes, dispatches the BODY through the same extractors that
-/// `lower_runtime_helpers` uses (byte-level direct / multi-property /
-/// pure-return, and the OXC AST fallback). A `Some(_)` return from any
-/// extractor means the binding would survive the body-purity gate.
+/// Pipeline:
+///   1. Enumerate every `var X = HELPER((params) => { BODY })` across
+///      every module and classify each BODY via the AST-level
+///      `classify_lazy_module_body`. Outcomes:
+///         * `Eager` — body has a value with no calls; immediately safe.
+///         * `EagerWithDeps` — body composes a value but invokes one or
+///           more zero-arg bindings; safe iff those bindings are
+///           themselves eager-safe.
+///         * `Impure` — body has unrecognized side effects; never safe.
+///   2. Build a per-module name-resolution table from
+///      `source_module_wiring.imports_by_module` so each `call_deps`
+///      identifier in step 1 can be mapped to a `(target_module, binding)`
+///      pair. Local thunks (declared in the consumer module itself)
+///      resolve to that same module's `(M, name)`.
+///   3. Fixpoint: seed with all `Eager` bindings, then loop: add
+///      `EagerWithDeps{deps}` bindings where every resolved dep already
+///      lives in the safe set, until stable. Mutual recursion (cycles
+///      in the dep graph) keep both sides unsafe — neither can be added
+///      without the other already in the set.
 fn predict_delazifiable_exports(
     program: &EnrichedProgram,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    let mut out = BTreeMap::new();
+    source_module_wiring: &SourceModuleWiring,
+) -> EagerSafetyPrediction {
+    let classifications = enumerate_and_classify_lazy_bindings(program);
+    let resolution = build_dep_resolution_map(program, source_module_wiring, &classifications);
+    let safe_keys = compute_eager_safe_fixpoint(&classifications, &resolution);
+    let mut delazifiable_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>> =
+        BTreeMap::new();
+    for (module_id, binding) in &safe_keys {
+        delazifiable_exports_by_module
+            .entry(*module_id)
+            .or_default()
+            .insert(binding.clone());
+    }
+    let mut safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>> = BTreeMap::new();
+    for module in program.model().modules() {
+        let names = build_eager_safe_call_targets_for_module(module.id, &safe_keys, &resolution);
+        if !names.is_empty() {
+            safe_call_targets_by_module.insert(module.id, names);
+        }
+    }
+    EagerSafetyPrediction {
+        delazifiable_exports_by_module,
+        safe_call_targets_by_module,
+    }
+}
+
+/// Bundle of outputs from the inter-procedural fixpoint. Both fields
+/// are needed by the lowering: the exports set tells the cross-module
+/// rewriter which consumer `X()` calls to strip, and the call-targets
+/// set tells the body extractor which thunk-call deps to treat as
+/// "already handled by the producer's eagerification" — i.e., drop
+/// from the consumer's prologue.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct EagerSafetyPrediction {
+    delazifiable_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>>,
+}
+
+/// Walk every module, find each `var X = HELPER((params) => { BODY })`
+/// declaration where HELPER is a lazy wrapper, and classify the BODY
+/// via the AST classifier in `reverts_js`. Returns the classification
+/// keyed by `(module_id, binding)`.
+fn enumerate_and_classify_lazy_bindings(
+    program: &EnrichedProgram,
+) -> BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification> {
+    let mut classifications = BTreeMap::new();
     for module in program.model().modules() {
         let Some(source) = program.model().input().module_source_slice(module.id) else {
             continue;
@@ -3120,29 +3190,25 @@ fn predict_delazifiable_exports(
         if module_helpers.is_empty() && value_helpers.is_empty() {
             continue;
         }
-        let mut delazifiable = BTreeSet::<BindingName>::new();
-        scan_predict_delazifiable_bindings(
+        scan_and_classify_lazy_bindings_in_module(
             source.source,
             &module_helpers,
             &value_helpers,
-            &mut delazifiable,
+            module.id,
+            &mut classifications,
         );
-        if !delazifiable.is_empty() {
-            out.insert(module.id, delazifiable);
-        }
     }
-    out
+    classifications
 }
 
-/// Walk `source` for every top-level `var X = HELPER((params) => { BODY })`
-/// declaration whose `HELPER` is a lazy-wrapping helper. For each one,
-/// run the same body extractors the lowering pass uses and add `X` to
-/// `out` when at least one extractor returns a value.
-fn scan_predict_delazifiable_bindings(
+/// Companion to `enumerate_and_classify_lazy_bindings`: for one module,
+/// scan its source for lazy declarations and stash the body classification.
+fn scan_and_classify_lazy_bindings_in_module(
     source: &str,
     commonjs_helpers: &BTreeSet<&str>,
     lazy_value_helpers: &BTreeSet<&str>,
-    out: &mut BTreeSet<BindingName>,
+    module_id: ModuleId,
+    out: &mut BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
 ) {
     let bytes = source.as_bytes();
     let mut cursor = 0;
@@ -3185,7 +3251,6 @@ fn scan_predict_delazifiable_bindings(
             cursor = after_helper;
             continue;
         }
-        // Parse `((params) => { BODY })` inside the helper call.
         c = skip_ws(bytes, c + 1);
         let (exports_param, module_param, body_start, body_end) =
             match parse_lazy_factory_signature(source, c, is_commonjs) {
@@ -3196,33 +3261,133 @@ fn scan_predict_delazifiable_bindings(
                 }
             };
         let body = &source[body_start..body_end];
-        let delazifies = if is_commonjs {
-            extract_module_exports_assignment(body, module_param.unwrap_or("")).is_some()
-                || extract_exports_properties_as_object_literal(body, exports_param).is_some()
-                || reverts_js::extract_lazy_module_eager_value(
-                    body,
-                    exports_param,
-                    module_param,
-                    None,
-                    ParseGoal::TypeScript,
-                )
-                .is_some()
-        } else {
-            extract_pure_return_expression(body).is_some()
-                || reverts_js::extract_lazy_module_eager_value(
-                    body,
-                    "",
-                    None,
-                    None,
-                    ParseGoal::TypeScript,
-                )
-                .is_some()
-        };
-        if delazifies {
-            out.insert(BindingName::new(binding_name));
+        let classification = reverts_js::classify_lazy_module_body(
+            body,
+            exports_param,
+            module_param,
+            None,
+            ParseGoal::TypeScript,
+        );
+        if !matches!(classification, reverts_js::LazyBodyClassification::Impure) {
+            out.insert((module_id, BindingName::new(binding_name)), classification);
         }
         cursor = body_end;
     }
+}
+
+/// For each consumer module, build a `name → (target_module, binding)`
+/// table so dep names appearing in lazy bodies can be resolved.
+/// Combines two sources:
+///   * Cross-module imports recorded in `source_module_wiring` — every
+///     imported binding is mapped to its target module.
+///   * Local thunk bindings — if a body calls `localX()` and the same
+///     module has `var localX = lazyValue(...)`, that resolves to
+///     `(self, localX)`.
+fn build_dep_resolution_map(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    _classifications: &BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
+) -> BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>> {
+    // Only cross-module imports are resolved as eager-safe call deps —
+    // local thunks within the same module would need source-order
+    // verification (a thunk declared AFTER its consumer can't be
+    // referenced before its declaration runs) which we don't yet
+    // perform. Restricting to imports is the conservative direction:
+    // local-only chains stay lazy; cross-module chains get the
+    // fixpoint benefit.
+    let mut out: BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>> = BTreeMap::new();
+    for module in program.model().modules() {
+        let entry = out.entry(module.id).or_default();
+        if let Some(targets) = source_module_wiring.imports_by_module.get(&module.id) {
+            for (target_id, bindings) in targets {
+                for binding in bindings {
+                    entry.insert(binding.as_str().to_string(), (*target_id, binding.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Standard worklist fixpoint over the dep graph. Seeds with `Eager`
+/// bindings (no deps), then iteratively adds `EagerWithDeps` bindings
+/// whose dependencies all resolve to entries already in the safe set.
+/// O(N × max-deps) per round; converges in a small number of rounds
+/// in practice because most chains are shallow.
+///
+/// Note: the fixpoint result is used both to gate cross-module
+/// rewriting (consumer `X()` → `X`) and to gate value extraction in
+/// the lowering pass — the matching extractor
+/// `extract_lazy_module_eager_value_with_safe_deps` accepts
+/// `EagerWithDeps` bindings whose every dep is in the safe set, so
+/// producer and consumer agree on whether the binding emits as a
+/// direct value.
+fn compute_eager_safe_fixpoint(
+    classifications: &BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
+    resolution: &BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>>,
+) -> BTreeSet<(ModuleId, BindingName)> {
+    let mut safe: BTreeSet<(ModuleId, BindingName)> = BTreeSet::new();
+    for (key, classification) in classifications {
+        if matches!(
+            classification,
+            reverts_js::LazyBodyClassification::Eager { .. }
+        ) {
+            safe.insert(key.clone());
+        }
+    }
+    loop {
+        let mut added = false;
+        for (key, classification) in classifications {
+            if safe.contains(key) {
+                continue;
+            }
+            let reverts_js::LazyBodyClassification::EagerWithDeps { call_deps, .. } =
+                classification
+            else {
+                continue;
+            };
+            let module_resolution = resolution.get(&key.0);
+            let all_deps_safe = call_deps.iter().all(|name| {
+                module_resolution
+                    .and_then(|r| r.get(name))
+                    .map(|resolved| safe.contains(resolved))
+                    .unwrap_or(false)
+            });
+            if all_deps_safe {
+                safe.insert(key.clone());
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    safe
+}
+
+/// For a given module M, project the global fixpoint result onto the
+/// names visible in M's scope. Returns the set of names X such that
+/// `X()` (zero-arg call) in M's body resolves to a binding that the
+/// fixpoint marked eager-safe — feeds into
+/// `extract_lazy_module_eager_value_with_safe_deps` when lowering M.
+fn build_eager_safe_call_targets_for_module(
+    module_id: ModuleId,
+    safe_keys: &BTreeSet<(ModuleId, BindingName)>,
+    resolution: &BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>>,
+) -> BTreeSet<String> {
+    let Some(module_resolution) = resolution.get(&module_id) else {
+        return BTreeSet::new();
+    };
+    module_resolution
+        .iter()
+        .filter_map(|(name, resolved)| {
+            if safe_keys.contains(resolved) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parse the `((exports[, module]) => { body })` signature inside a
@@ -3535,6 +3700,7 @@ fn lower_runtime_helpers(
     source: &str,
     helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
     exported_bindings: &BTreeSet<BindingName>,
+    eager_safe_call_targets: &BTreeSet<String>,
 ) -> RuntimeHelperLowering {
     let mut lowered = source.to_string();
     let mut lowered_helpers = BTreeSet::new();
@@ -3585,7 +3751,8 @@ fn lower_runtime_helpers(
     // source instead of a lazy thunk wrap.
     let mut reshaped_bindings = BTreeSet::<BindingName>::new();
     if uses_lazy_value || uses_lazy_module {
-        let (next, delazified) = delazify_pure_value_bindings(&lowered, exported_bindings);
+        let (next, delazified) =
+            delazify_pure_value_bindings(&lowered, exported_bindings, eager_safe_call_targets);
         lowered = next;
         reshaped_bindings.extend(delazified);
         // After delazify produced `var X = { fn1, fn2, ... };` for CommonJS
@@ -3641,8 +3808,9 @@ struct DelazifyCandidate {
 fn delazify_pure_value_bindings(
     source: &str,
     exported_bindings: &BTreeSet<BindingName>,
+    eager_safe_call_targets: &BTreeSet<String>,
 ) -> (String, BTreeSet<BindingName>) {
-    let mut candidates = collect_delazify_candidates(source);
+    let mut candidates = collect_delazify_candidates(source, eager_safe_call_targets);
     // Cross-module gate: any binding listed in `exported_bindings` is
     // observed by some other module that still calls `X()` against the
     // unlowered surface. Collapsing it to a value here would crash those
@@ -3657,7 +3825,10 @@ fn delazify_pure_value_bindings(
     (apply_delazify_rewrites(source, &candidates), changed)
 }
 
-fn collect_delazify_candidates(source: &str) -> Vec<DelazifyCandidate> {
+fn collect_delazify_candidates(
+    source: &str,
+    eager_safe_call_targets: &BTreeSet<String>,
+) -> Vec<DelazifyCandidate> {
     let bytes = source.as_bytes();
     let mut candidates = Vec::new();
     let mut cursor = 0;
@@ -3666,8 +3837,8 @@ fn collect_delazify_candidates(source: &str) -> Vec<DelazifyCandidate> {
             cursor = next;
             continue;
         }
-        let parsed = try_parse_lazy_value_declaration(source, cursor)
-            .or_else(|| try_parse_lazy_module_declaration(source, cursor));
+        let parsed = try_parse_lazy_value_declaration(source, cursor, eager_safe_call_targets)
+            .or_else(|| try_parse_lazy_module_declaration(source, cursor, eager_safe_call_targets));
         let Some((declaration, after)) = parsed else {
             cursor += 1;
             continue;
@@ -3699,6 +3870,7 @@ struct ParsedDelazifiableDeclaration {
 fn try_parse_lazy_value_declaration(
     source: &str,
     start: usize,
+    eager_safe_call_targets: &BTreeSet<String>,
 ) -> Option<(ParsedDelazifiableDeclaration, usize)> {
     let bytes = source.as_bytes();
     let keyword = ["var", "let", "const"]
@@ -3739,12 +3911,13 @@ fn try_parse_lazy_value_declaration(
     // assignment chains the byte path doesn't recognize.
     let value_expr = match extract_pure_return_expression(body) {
         Some(expr) => expr,
-        None => reverts_js::extract_lazy_module_eager_value(
+        None => reverts_js::extract_lazy_module_eager_value_with_safe_deps(
             body,
             "",
             None,
             None,
             ParseGoal::TypeScript,
+            eager_safe_call_targets,
         )?,
     };
     let after_body = skip_ws(bytes, body_end + 1);
@@ -3782,6 +3955,7 @@ fn try_parse_lazy_value_declaration(
 fn try_parse_lazy_module_declaration(
     source: &str,
     start: usize,
+    eager_safe_call_targets: &BTreeSet<String>,
 ) -> Option<(ParsedDelazifiableDeclaration, usize)> {
     let bytes = source.as_bytes();
     let keyword = ["var", "let", "const"]
@@ -3839,12 +4013,13 @@ fn try_parse_lazy_module_declaration(
         expr
     } else if let Some(expr) = extract_exports_properties_as_object_literal(body, exports_param) {
         expr
-    } else if let Some(expr) = reverts_js::extract_lazy_module_eager_value(
+    } else if let Some(expr) = reverts_js::extract_lazy_module_eager_value_with_safe_deps(
         body,
         exports_param,
         module_param,
         None,
         ParseGoal::TypeScript,
+        eager_safe_call_targets,
     ) {
         expr
     } else {
@@ -6361,7 +6536,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var hFA = lazyModule((uO) => {"));
         assert!(lowered.source.contains("var U = 1; uO.value = U;"));
@@ -6408,7 +6584,8 @@ mod tests {
             ),
         ]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Phase 6a: pure-value module.exports collapsed.
         assert!(lowered.source.contains("var require_const = 42;"));
@@ -6510,7 +6687,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Declaration collapsed back to a direct value, callers stripped of `()`.
         assert!(
@@ -6538,7 +6716,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
         assert!(lowered.uses_lazy_value);
@@ -6556,7 +6735,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // `export { settings };` references `settings` as a value, not a call —
         // delazifying would change consumer semantics across the module
@@ -6573,7 +6753,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Body has a side-effect call but no `return EXPR;` — collapsing to
         // `var init = ...` would evaluate the side effect at module load.
@@ -6594,7 +6775,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // `loadConfig()` is a function call — could have side effects or
         // depend on later state. Don't change evaluation timing.
@@ -6616,7 +6798,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var thunk = lazyValue(() => {"));
         assert!(lowered.uses_lazy_value);
@@ -6633,7 +6816,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // After delazify both `theme()` call sites collapse and member access
         // continues to work naturally — `.color` and `['palette']` attach to
@@ -6662,7 +6846,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             lowered
@@ -6690,7 +6875,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var entry = 42;"));
         assert!(lowered.source.contains("console.log(entry);"));
@@ -6710,7 +6896,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             lowered
@@ -6732,7 +6919,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             lowered
@@ -6754,7 +6942,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Multi-property `exports.foo = ...; exports.bar = ...;` collapses
         // back to an inline object literal — same observable surface to
@@ -6780,7 +6969,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             lowered
@@ -6803,7 +6993,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // The local `var helper = 1` would have to be hoisted to the
         // consumer or inlined; the current pass refuses anything other
@@ -6825,7 +7016,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var api = lazyModule("));
         assert!(lowered.uses_lazy_module);
@@ -6842,7 +7034,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // `computeHeavy()` is impure — collapsing would change evaluation
         // timing (module load vs. first access). Keep the lazy wrapper.
@@ -6861,7 +7054,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Single-param `(exports) =>` with a single `exports.key = pure;`
         // statement is the simplest property-export shape — collapses to
@@ -6883,7 +7077,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Exported binding — cross-module callers would still do
         // `sharedConst()` after we inline. Until the named-import rewriter
@@ -6910,7 +7105,8 @@ mod tests {
             ),
         ]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var port = 3000;"));
         assert!(lowered.source.contains("var host = 'localhost';"));
@@ -6936,7 +7132,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             !lowered.source.contains("var api ="),
@@ -6971,7 +7168,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Primitive values describe a data record (config-like). The object
         // stays grouped — splitting would scatter "port" / "host" / "name"
@@ -6997,7 +7195,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Mixed function + primitive object — splitting would only partially
         // restore "named exports" semantics and is harder for a reader to
@@ -7025,7 +7224,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var api = {"));
         assert!(lowered.source.contains("register(api);"));
@@ -7043,7 +7243,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // `export { api };` references the binding by value — cross-module
         // consumers see `api`, not `parse` / `stringify` individually. The
@@ -7066,7 +7267,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // The top-level `var parse = 'pre-existing'` would conflict with the
         // decomposed `var parse = function(s)`. Skip the decomposition; the
@@ -7092,7 +7294,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var api = {"));
         assert!(lowered.source.contains("api.unknown()"));
@@ -7113,7 +7316,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Class expressions count as "function-shape" values for the namespace
         // decomposition — they're API surfaces, not data.
@@ -7144,7 +7348,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         // Arrow function expressions also count.
         assert!(!lowered.source.contains("var fns ="));
@@ -7172,7 +7377,8 @@ mod tests {
             RuntimePreludeBindingKind::CommonJsWrapper,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(lowered.source.contains("var unused = {"));
         assert!(lowered.source.contains("parse: function()"));
@@ -7198,7 +7404,8 @@ mod tests {
             RuntimePreludeBindingKind::LazyInitializer,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert!(
             lowered
@@ -7579,7 +7786,8 @@ mod tests {
             RuntimePreludeBindingKind::SourceBacked,
         )]);
 
-        let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new());
+        let lowered =
+            lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
 
         assert_eq!(lowered.source, source);
         assert!(lowered.lowered_helpers.is_empty());
