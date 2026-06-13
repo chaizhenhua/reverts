@@ -682,7 +682,9 @@ impl ImportExportPlanner {
                 && !has_runtime_group_imports
             {
                 let (localized, changed) =
-                    inline_remaining_lazy_value_wrappers(&lowered_source.source);
+                    inline_remaining_lazy_value_wrappers_allowing_assignments(
+                        &lowered_source.source,
+                    );
                 if changed {
                     localized_lazy_value_source = Some(localized);
                     lazy_helper_names.retain(|name| *name != "lazyValue");
@@ -5319,6 +5321,17 @@ fn lower_runtime_helpers_with_options(
 }
 
 fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
+    inline_remaining_lazy_value_wrappers_with_options(source, false)
+}
+
+fn inline_remaining_lazy_value_wrappers_allowing_assignments(source: &str) -> (String, bool) {
+    inline_remaining_lazy_value_wrappers_with_options(source, true)
+}
+
+fn inline_remaining_lazy_value_wrappers_with_options(
+    source: &str,
+    allow_assignment_factories: bool,
+) -> (String, bool) {
     let bytes = source.as_bytes();
     let mut edits = Vec::<(usize, usize, String)>::new();
     let helper_name = local_lazy_value_helper_name(source);
@@ -5334,7 +5347,8 @@ fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
         if paren_depth == 0
             && bracket_depth == 0
             && brace_depth == 0
-            && let Some((decl, after)) = try_parse_lazy_value_wrapper_declaration(source, cursor)
+            && let Some((decl, after)) =
+                try_parse_lazy_value_wrapper_declaration(source, cursor, allow_assignment_factories)
         {
             edits.push((decl.callee_span.0, decl.callee_span.1, helper_name.clone()));
             cursor = after;
@@ -5369,6 +5383,7 @@ struct ParsedLazyValueWrapper {
 fn try_parse_lazy_value_wrapper_declaration(
     source: &str,
     start: usize,
+    allow_assignment_factory: bool,
 ) -> Option<(ParsedLazyValueWrapper, usize)> {
     let (_keyword, after_keyword) = declaration_keyword_at(source, start)?;
     let bytes = source.as_bytes();
@@ -5403,7 +5418,7 @@ fn try_parse_lazy_value_wrapper_declaration(
     // often the writer side of runtime mutable bindings; inlining them before
     // fold planning would hide the `X = ...` writes and prevent the safer
     // runtime relocation/folding machinery from seeing them.
-    if lazy_value_factory_contains_assignment(factory) {
+    if !allow_assignment_factory && lazy_value_factory_contains_assignment(factory) {
         return None;
     }
     let after_call = skip_ws(bytes, call_close + 1);
@@ -8603,8 +8618,8 @@ mod tests {
 
     use super::{
         CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, SourceCompilerStrategy,
-        inline_internal_setter_calls, lower_runtime_helpers,
-        purify_private_runtime_lazy_initializers,
+        inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
+        lower_runtime_helpers, purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -9143,6 +9158,24 @@ mod tests {
         assert!(lowered.source.contains("var init = lazyValue(() => {"));
         assert!(lowered.source.contains("target ||= makeValue();"));
         assert!(lowered.uses_lazy_value);
+    }
+
+    #[test]
+    fn final_lazy_value_localization_allows_assignment_factories() {
+        let source = concat!(
+            "var target;\n",
+            "var init = lazyValue(() => { target ||= makeValue(); });\n",
+            "register(init);\n",
+        );
+
+        let (localized, changed) =
+            inline_remaining_lazy_value_wrappers_allowing_assignments(source);
+
+        assert!(changed);
+        assert!(localized.contains("var _$l"));
+        assert!(localized.contains("var init = _$l(() => {"));
+        assert!(localized.contains("target ||= makeValue();"));
+        assert!(!localized.contains("= lazyValue("));
     }
 
     #[test]
