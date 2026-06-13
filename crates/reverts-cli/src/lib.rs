@@ -1520,6 +1520,7 @@ fn load_package_sources(
         }
         package_sources.extend(materialized_sources);
     }
+    filter_package_sources_to_best_build_variants(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
     Ok(package_sources)
 }
@@ -2387,6 +2388,337 @@ fn is_javascript_source_path(rel_path: &str) -> bool {
         Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
         Some("js" | "mjs" | "cjs")
     )
+}
+
+fn filter_package_sources_to_best_build_variants(
+    rows: &InputRows,
+    package_sources: &mut Vec<PackageSource>,
+) {
+    let hints_by_version = package_path_hints_by_version(rows);
+    if hints_by_version.is_empty() {
+        return;
+    }
+
+    let mut source_families_by_version =
+        BTreeMap::<(String, String), BTreeMap<String, BTreeSet<String>>>::new();
+    for source in package_sources.iter() {
+        let key = (source.package_name.clone(), source.package_version.clone());
+        let rel_path = package_source_cache_entry_path(source);
+        source_families_by_version
+            .entry(key)
+            .or_default()
+            .entry(build_variant_family_key(rel_path.as_str()))
+            .or_default()
+            .insert(rel_path);
+    }
+
+    let mut selected_families_by_version = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for (key, family_paths) in source_families_by_version {
+        let Some(hints) = hints_by_version.get(&key) else {
+            continue;
+        };
+        let mut scored = family_paths
+            .into_iter()
+            .map(|(family, paths)| {
+                let matched_hints = hints
+                    .iter()
+                    .filter(|hint| {
+                        paths
+                            .iter()
+                            .any(|path| package_source_path_matches_hint(path, hint))
+                    })
+                    .count();
+                (family, matched_hints)
+            })
+            .filter(|(_family, matched_hints)| *matched_hints > 0)
+            .collect::<Vec<_>>();
+        if scored.is_empty() {
+            continue;
+        }
+        scored.sort_by(|left, right| {
+            right
+                .1
+                .cmp(&left.1)
+                .then_with(|| {
+                    build_variant_family_rank(left.0.as_str())
+                        .cmp(&build_variant_family_rank(right.0.as_str()))
+                })
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let best_score = scored[0].1;
+        let best_rank = build_variant_family_rank(scored[0].0.as_str());
+        let selected = scored
+            .into_iter()
+            .take_while(|(family, score)| {
+                *score == best_score
+                    && (best_score < 2 || build_variant_family_rank(family.as_str()) == best_rank)
+            })
+            .map(|(family, _score)| family)
+            .collect::<BTreeSet<_>>();
+        selected_families_by_version.insert(key, selected);
+    }
+
+    if selected_families_by_version.is_empty() {
+        return;
+    }
+
+    package_sources.retain(|source| {
+        let key = (source.package_name.clone(), source.package_version.clone());
+        let Some(selected_families) = selected_families_by_version.get(&key) else {
+            return true;
+        };
+        let rel_path = package_source_cache_entry_path(source);
+        selected_families.contains(build_variant_family_key(rel_path.as_str()).as_str())
+    });
+}
+
+fn package_path_hints_by_version(rows: &InputRows) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut hints = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        let Some(package_version) = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| is_exact_package_version_hint(version))
+        else {
+            continue;
+        };
+        let Some(hint) =
+            clean_package_semantic_path_hint(package_name, module.semantic_path.as_str())
+        else {
+            continue;
+        };
+        hints
+            .entry((package_name.to_string(), package_version.to_string()))
+            .or_default()
+            .insert(hint);
+    }
+    hints
+}
+
+fn clean_package_semantic_path_hint(package_name: &str, semantic_path: &str) -> Option<String> {
+    let clean = semantic_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    if clean.is_empty() {
+        return None;
+    }
+    for prefix in package_semantic_path_prefixes(package_name) {
+        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
+        else {
+            continue;
+        };
+        let hint = strip_source_extension(rest)
+            .trim_matches('/')
+            .to_ascii_lowercase();
+        if is_useful_package_path_hint(hint.as_str()) {
+            return Some(hint);
+        }
+    }
+    None
+}
+
+fn strip_package_prefix_from_semantic_path<'a>(
+    semantic_path: &'a str,
+    prefix: &str,
+) -> Option<&'a str> {
+    if let Some(rest) = semantic_path.strip_prefix(format!("{prefix}/").as_str()) {
+        return Some(rest);
+    }
+    for marker in [format!("/{prefix}/"), format!("-{prefix}/")] {
+        if let Some(index) = semantic_path.find(marker.as_str()) {
+            return semantic_path.get(index + marker.len()..);
+        }
+    }
+    None
+}
+
+fn package_semantic_path_prefixes(package_name: &str) -> Vec<String> {
+    let mut prefixes = vec![package_name.to_string()];
+    if let Some(unscoped) = package_name.strip_prefix('@') {
+        prefixes.push(unscoped.to_string());
+        prefixes.push(unscoped.replace('/', "-"));
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn strip_source_extension(path: &str) -> &str {
+    for extension in [".js", ".mjs", ".cjs", ".ts", ".tsx"] {
+        if let Some(stripped) = path.strip_suffix(extension) {
+            return stripped;
+        }
+    }
+    path
+}
+
+fn is_useful_package_path_hint(hint: &str) -> bool {
+    if hint.is_empty() {
+        return false;
+    }
+    let last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    last_segment
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .count()
+        >= 4
+}
+
+fn build_variant_family_key(rel_path: &str) -> String {
+    let lower = rel_path.to_ascii_lowercase();
+    let parts = lower.split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["dist", second, ..]
+            if matches!(
+                *second,
+                "cjs"
+                    | "commonjs"
+                    | "esm"
+                    | "es"
+                    | "es5"
+                    | "es2015"
+                    | "es2020"
+                    | "module"
+                    | "browser"
+                    | "node"
+                    | "umd"
+                    | "bundles"
+                    | "fesm5"
+                    | "fesm2015"
+                    | "fesm2020"
+                    | "fesm2022"
+            ) =>
+        {
+            format!("dist/{second}")
+        }
+        ["lib", second, ..]
+            if matches!(
+                *second,
+                "cjs"
+                    | "commonjs"
+                    | "esm"
+                    | "es"
+                    | "es5"
+                    | "es2015"
+                    | "es2020"
+                    | "module"
+                    | "browser"
+                    | "node"
+                    | "umd"
+            ) =>
+        {
+            format!("lib/{second}")
+        }
+        [first, ..]
+            if matches!(
+                *first,
+                "dist"
+                    | "lib"
+                    | "cjs"
+                    | "commonjs"
+                    | "esm"
+                    | "es"
+                    | "es5"
+                    | "es2015"
+                    | "es2020"
+                    | "module"
+                    | "umd"
+                    | "bundles"
+                    | "fesm5"
+                    | "fesm2015"
+                    | "fesm2020"
+                    | "fesm2022"
+                    | "build"
+                    | "src"
+            ) =>
+        {
+            (*first).to_string()
+        }
+        _ => "root".to_string(),
+    }
+}
+
+fn build_variant_family_rank(family: &str) -> u8 {
+    match family {
+        "dist/esm" | "dist/es" | "dist/es5" | "dist/es2015" | "dist/es2020" | "dist/module"
+        | "lib/esm" | "lib/es" | "lib/es5" | "lib/es2015" | "lib/es2020" | "lib/module" | "esm"
+        | "es" | "es5" | "es2015" | "es2020" | "module" => 0,
+        "dist/cjs" | "dist/commonjs" | "lib/cjs" | "lib/commonjs" | "cjs" | "commonjs" => 1,
+        "dist/node" | "lib/node" => 2,
+        "dist/umd" | "dist/bundles" | "lib/umd" | "umd" | "bundles" => 3,
+        "dist/fesm5" | "dist/fesm2015" | "dist/fesm2020" | "dist/fesm2022" | "fesm5"
+        | "fesm2015" | "fesm2020" | "fesm2022" => 4,
+        "dist" | "lib" | "build" => 5,
+        "root" => 6,
+        "src" => 7,
+        _ => 8,
+    }
+}
+
+fn package_source_path_matches_hint(source_path: &str, hint: &str) -> bool {
+    let source_normalized = normalize_path_for_hint_match(source_path);
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_path_for_hint_match(hint_last_segment);
+    if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
+    {
+        return true;
+    }
+    let source_tokens = path_hint_tokens(source_path);
+    let hint_tokens = path_hint_tokens(hint_last_segment);
+    !hint_tokens.is_empty()
+        && hint_tokens
+            .iter()
+            .all(|token| source_tokens.contains(token))
+}
+
+fn normalize_path_for_hint_match(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn path_hint_tokens(value: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    let mut previous_lowercase = false;
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if current.len() >= 2 {
+                tokens.insert(current.clone());
+            }
+            current.clear();
+            previous_lowercase = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lowercase && !current.is_empty() {
+            if current.len() >= 2 {
+                tokens.insert(current.clone());
+            }
+            current.clear();
+        }
+        current.push(ch.to_ascii_lowercase());
+        previous_lowercase = ch.is_ascii_lowercase();
+    }
+    if current.len() >= 2 {
+        tokens.insert(current);
+    }
+    tokens.remove("js");
+    tokens.remove("ts");
+    tokens.remove("mjs");
+    tokens.remove("cjs");
+    tokens.remove("index");
+    tokens
 }
 
 fn is_local_package_source_candidate(rel_path: &str) -> bool {
@@ -3700,6 +4032,72 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert!(sources[0].source_path.ends_with("dist/index.js"));
         assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn package_source_build_variant_selection_uses_semantic_path_hints() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-rxjs/operators/sample.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "m11",
+            "modules/11-rxjs/_internal/is-array-like.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        ));
+        let mut sources = vec![
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/operators/sample",
+                "rxjs@7.8.2/dist/cjs/operators/sample.js",
+                "exports.sample = sample;",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/internal/isArrayLike",
+                "rxjs@7.8.2/dist/cjs/internal/util/isArrayLike.js",
+                "exports.isArrayLike = isArrayLike;",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/operators/sample",
+                "rxjs@7.8.2/dist/esm/operators/sample.js",
+                "export function sample() {}",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/internal/isArrayLike",
+                "rxjs@7.8.2/dist/esm/internal/util/isArrayLike.js",
+                "export function isArrayLike() {}",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/internal/unrelated",
+                "rxjs@7.8.2/src/internal/unrelated.ts",
+                "export const unrelated = 1;",
+            ),
+        ];
+
+        super::filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .all(|source| source.source_path.contains("/dist/esm/")),
+            "{sources:?}"
+        );
     }
 
     #[test]

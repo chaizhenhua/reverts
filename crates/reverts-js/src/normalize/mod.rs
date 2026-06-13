@@ -13,6 +13,7 @@ pub mod boolean_call_to_double_not_guarded;
 pub mod boolean_undefined_canonicalised;
 pub mod bundler_wrapper_unwrapped;
 pub mod closure_boundary_aligned;
+pub mod commonjs_export_boundary_normalized;
 pub mod compound_assignment_canonical;
 pub mod computed_to_static_member;
 pub mod conditional_boolean_coerced;
@@ -55,6 +56,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 33] {
         Box::new(bundler_wrapper_unwrapped::BundlerWrapperUnwrapped),
         Box::new(helper_identity_inlined::HelperIdentityInlined),
         Box::new(export_boundary_normalized::ExportBoundaryNormalized),
+        Box::new(commonjs_export_boundary_normalized::CommonJsExportBoundaryNormalized),
         Box::new(closure_boundary_aligned::ClosureBoundaryAligned),
         Box::new(boolean_undefined_canonicalised::BooleanUndefinedCanonicalised),
         Box::new(declarator_split::DeclaratorSplit),

@@ -1656,6 +1656,7 @@ fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool 
             | NormalizationPassId::BundlerWrapperUnwrapped
             | NormalizationPassId::HelperIdentityInlined
             | NormalizationPassId::ExportBoundaryNormalized
+            | NormalizationPassId::CommonJsExportBoundaryNormalized
             | NormalizationPassId::BooleanUndefinedCanonicalised
             | NormalizationPassId::ComputedToStaticMember
             | NormalizationPassId::VoidZeroToUndefinedGuarded
@@ -1747,6 +1748,52 @@ mod tests {
             })
             .expect("best version should be selected");
         assert_eq!(selected.source_hash_matches, 1);
+    }
+
+    #[test]
+    fn versioned_matcher_matches_cjs_and_esm_export_boundaries() {
+        let rows = rows_with_package_source("function add(a,b){return a+b}\nexports.add = add;");
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/add",
+            "add.js",
+            "export function add(a, b) {\n  return a + b;\n}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::NormalizedSourceHash,
+            "CommonJS export footer stripping should recover a source hash match"
+        );
+    }
+
+    #[test]
+    fn versioned_matcher_matches_commonjs_define_property_reexport() {
+        let rows = rows_with_package_source(
+            r#"function add(a,b){return a+b}
+Object.defineProperty(exports, "add", { enumerable: true, get: function () { return add; } });"#,
+        );
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/add",
+            "add.js",
+            "export function add(a, b) {\n  return a + b;\n}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::NormalizedSourceHash
+        );
     }
 
     #[test]
