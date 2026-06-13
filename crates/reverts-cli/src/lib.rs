@@ -19,6 +19,7 @@ use reverts_input::{
     AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode, SourceFileInput,
 };
+use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
@@ -395,6 +396,7 @@ pub fn match_packages_from_connection(
         &package_names,
         &args.package_source_roots,
         args.materialize_package_sources,
+        args.apply,
     )?;
     let mut report = if args.package_names.is_empty() {
         VersionedPackageMatcher::default().match_rows(&rows, &package_sources)
@@ -471,6 +473,7 @@ pub fn match_packages_from_connection(
     let mut audit = extraction_audit;
     audit.extend(report.audit);
     audit.extend(cascade_report.audit);
+    let audit = dedup_audit_report(audit);
 
     Ok(MatchPackagesOutcome {
         project_id: args.project_id,
@@ -1439,11 +1442,12 @@ fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> b
 }
 
 fn load_package_sources(
-    connection: &Connection,
+    connection: &mut Connection,
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     package_source_roots: &[PathBuf],
     materialize_package_sources: bool,
+    persist_materialized_package_sources: bool,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
     let has_package_source_cache = sqlite_table_exists(connection, "package_source_cache")
         .map_err(MatchPackagesError::QueryPackageSources)?;
@@ -1453,15 +1457,27 @@ fn load_package_sources(
     }
 
     let mut package_sources = if has_package_source_cache {
+        let has_external_importable_column =
+            sqlite_table_has_column(connection, "package_source_cache", "external_importable")
+                .map_err(MatchPackagesError::QueryPackageSources)?;
+        let external_importable_expr = if has_external_importable_column {
+            "external_importable"
+        } else {
+            "1"
+        };
         let mut sql = String::from(
-            r"
-            SELECT package_name, package_version, entry_path, source_content
+            format!(
+                r"
+            SELECT package_name, package_version, entry_path, source_content,
+                   {external_importable_expr}
               FROM package_source_cache
              WHERE TRIM(COALESCE(package_name, '')) != ''
                AND TRIM(COALESCE(package_version, '')) != ''
                AND TRIM(COALESCE(entry_path, '')) != ''
                AND TRIM(COALESCE(source_content, '')) != ''
-            ",
+            "
+            )
+            .as_str(),
         );
         if !package_names.is_empty() {
             use std::fmt::Write as _;
@@ -1498,7 +1514,11 @@ fn load_package_sources(
         package_source_roots,
     )?);
     if materialize_package_sources {
-        package_sources.extend(materialize_package_sources_from_hints(rows, package_names)?);
+        let materialized_sources = materialize_package_sources_from_hints(rows, package_names)?;
+        if persist_materialized_package_sources && !materialized_sources.is_empty() {
+            persist_package_source_cache(connection, &materialized_sources)?;
+        }
+        package_sources.extend(materialized_sources);
     }
     dedup_package_sources(&mut package_sources);
     Ok(package_sources)
@@ -1509,15 +1529,218 @@ fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageS
     let package_version = row.get::<_, String>(1)?;
     let entry_path = row.get::<_, String>(2)?;
     let source = row.get::<_, String>(3)?;
+    let external_importable = row.get::<_, i64>(4)? != 0;
     let export_specifier = package_export_specifier(package_name.as_str(), entry_path.as_str());
     let source_path = format!("{package_name}@{package_version}/{entry_path}");
-    Ok(PackageSource::external(
-        package_name,
-        package_version,
-        export_specifier,
-        source_path,
-        source,
-    ))
+    if external_importable {
+        Ok(PackageSource::external(
+            package_name,
+            package_version,
+            export_specifier,
+            source_path,
+            source,
+        ))
+    } else {
+        Ok(PackageSource::source_only(
+            package_name,
+            package_version,
+            export_specifier,
+            source_path,
+            source,
+        ))
+    }
+}
+
+fn persist_package_source_cache(
+    connection: &mut Connection,
+    package_sources: &[PackageSource],
+) -> Result<usize, MatchPackagesError> {
+    ensure_package_source_cache_table(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    let mut written = 0;
+    for source in package_sources {
+        let entry_path = package_source_cache_entry_path(source);
+        let content_hash = stable_hash(source.source.as_bytes());
+        written += transaction
+            .execute(
+                r"
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, external_importable, fetched_at, expires_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now', '+30 days'))
+                ON CONFLICT(package_name, package_version, entry_path) DO UPDATE SET
+                    source_content = excluded.source_content,
+                    content_hash = excluded.content_hash,
+                    external_importable = excluded.external_importable,
+                    fetched_at = excluded.fetched_at,
+                    expires_at = excluded.expires_at
+                ",
+                params![
+                    source.package_name.as_str(),
+                    source.package_version.as_str(),
+                    entry_path.as_str(),
+                    source.source.as_str(),
+                    content_hash.as_str(),
+                    if source.external_importable {
+                        1_i64
+                    } else {
+                        0_i64
+                    },
+                ],
+            )
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    Ok(written)
+}
+
+fn ensure_package_source_cache_table(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(PACKAGE_SOURCE_CACHE_CREATE_SQL)
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    if package_source_cache_needs_entry_path_pk_migration(connection)
+        .map_err(MatchPackagesError::WritePackageSourceCache)?
+    {
+        migrate_package_source_cache_entry_path_primary_key(connection)?;
+    }
+    if !sqlite_table_has_column(connection, "package_source_cache", "external_importable")
+        .map_err(MatchPackagesError::WritePackageSourceCache)?
+    {
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_source_cache
+                    ADD COLUMN external_importable INTEGER NOT NULL DEFAULT 1;
+                ",
+            )
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    }
+    connection
+        .execute_batch(PACKAGE_SOURCE_CACHE_INDEX_SQL)
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    Ok(())
+}
+
+const PACKAGE_SOURCE_CACHE_CREATE_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS package_source_cache (
+    package_name TEXT NOT NULL,
+    package_version TEXT NOT NULL,
+    entry_path TEXT NOT NULL,
+    source_content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    external_importable INTEGER NOT NULL DEFAULT 1,
+    fetched_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (package_name, package_version, entry_path)
+);
+";
+
+const PACKAGE_SOURCE_CACHE_INDEX_SQL: &str = r"
+CREATE INDEX IF NOT EXISTS idx_package_cache_expires
+    ON package_source_cache(expires_at);
+";
+
+fn package_source_cache_needs_entry_path_pk_migration(
+    connection: &Connection,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare("PRAGMA table_info(package_source_cache)")?;
+    let columns = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+    })?;
+    let mut primary_key_columns = BTreeMap::<i64, String>::new();
+    for column in columns {
+        let (name, primary_key_ordinal) = column?;
+        if primary_key_ordinal > 0 {
+            primary_key_columns.insert(primary_key_ordinal, name);
+        }
+    }
+    let ordered_primary_key = primary_key_columns.into_values().collect::<Vec<_>>();
+    Ok(ordered_primary_key
+        != vec![
+            "package_name".to_string(),
+            "package_version".to_string(),
+            "entry_path".to_string(),
+        ])
+}
+
+fn migrate_package_source_cache_entry_path_primary_key(
+    connection: &mut Connection,
+) -> Result<(), MatchPackagesError> {
+    let has_external_importable =
+        sqlite_table_has_column(connection, "package_source_cache", "external_importable")
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    let external_importable_expr = if has_external_importable {
+        "external_importable"
+    } else {
+        "1"
+    };
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    transaction
+        .execute_batch(
+            r"
+            ALTER TABLE package_source_cache RENAME TO package_source_cache__reverts_old;
+            ",
+        )
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    transaction
+        .execute_batch(PACKAGE_SOURCE_CACHE_CREATE_SQL)
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    transaction
+        .execute_batch(
+            format!(
+                r"
+            INSERT OR IGNORE INTO package_source_cache (
+                package_name,
+                package_version,
+                entry_path,
+                source_content,
+                content_hash,
+                external_importable,
+                fetched_at,
+                expires_at
+            )
+            SELECT
+                package_name,
+                package_version,
+                entry_path,
+                source_content,
+                content_hash,
+                {external_importable_expr},
+                fetched_at,
+                expires_at
+              FROM package_source_cache__reverts_old
+             WHERE TRIM(COALESCE(package_name, '')) != ''
+               AND TRIM(COALESCE(package_version, '')) != ''
+               AND TRIM(COALESCE(entry_path, '')) != ''
+               AND TRIM(COALESCE(source_content, '')) != '';
+            DROP TABLE package_source_cache__reverts_old;
+            "
+            )
+            .as_str(),
+        )
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    Ok(())
+}
+
+fn package_source_cache_entry_path(source: &PackageSource) -> String {
+    let prefix = format!("{}@{}/", source.package_name, source.package_version);
+    source
+        .source_path
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(source.source_path.as_str())
+        .trim_start_matches('/')
+        .to_string()
 }
 
 fn package_export_specifier(package_name: &str, entry_path: &str) -> String {
@@ -1808,7 +2031,47 @@ fn collect_local_package_sources(
     metadata: &LocalPackageMetadata,
     sources: &mut Vec<PackageSource>,
 ) -> Result<(), MatchPackagesError> {
+    let source_files = collect_local_package_source_files(package_dir)?;
+    let selected_rel_paths = select_runtime_package_source_paths(&source_files);
+    for (rel_path, path) in source_files {
+        if !selected_rel_paths.contains(rel_path.as_str()) {
+            continue;
+        }
+        let source = fs::read_to_string(path.as_path()).map_err(|source| {
+            MatchPackagesError::ReadPackageSourceRoot {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
+        if let Some(export_specifier) = metadata.importable_specifier_for(rel_path.as_str()) {
+            sources.push(PackageSource::external(
+                metadata.name.as_str(),
+                metadata.version.as_str(),
+                export_specifier,
+                source_path,
+                source,
+            ));
+        } else {
+            let export_specifier =
+                package_export_specifier(metadata.name.as_str(), rel_path.as_str());
+            sources.push(PackageSource::source_only(
+                metadata.name.as_str(),
+                metadata.version.as_str(),
+                export_specifier,
+                source_path,
+                source,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_local_package_source_files(
+    package_dir: &Path,
+) -> Result<Vec<(String, PathBuf)>, MatchPackagesError> {
     let mut stack = vec![package_dir.to_path_buf()];
+    let mut source_files = Vec::new();
     while let Some(dir) = stack.pop() {
         let entries = fs::read_dir(dir.as_path()).map_err(|source| {
             MatchPackagesError::ReadPackageSourceRoot {
@@ -1845,35 +2108,28 @@ fn collect_local_package_sources(
             if !is_local_package_source_candidate(rel_path.as_str()) {
                 continue;
             }
-            let source = fs::read_to_string(path.as_path()).map_err(|source| {
-                MatchPackagesError::ReadPackageSourceRoot {
-                    path: path.clone(),
-                    source,
-                }
-            })?;
-            let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
-            if let Some(export_specifier) = metadata.importable_specifier_for(rel_path.as_str()) {
-                sources.push(PackageSource::external(
-                    metadata.name.as_str(),
-                    metadata.version.as_str(),
-                    export_specifier,
-                    source_path,
-                    source,
-                ));
-            } else {
-                let export_specifier =
-                    package_export_specifier(metadata.name.as_str(), rel_path.as_str());
-                sources.push(PackageSource::source_only(
-                    metadata.name.as_str(),
-                    metadata.version.as_str(),
-                    export_specifier,
-                    source_path,
-                    source,
-                ));
-            }
+            source_files.push((rel_path, path));
         }
     }
-    Ok(())
+    source_files.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(source_files)
+}
+
+fn select_runtime_package_source_paths(source_files: &[(String, PathBuf)]) -> BTreeSet<String> {
+    let has_compiled_runtime_sources = source_files.iter().any(|(rel_path, _path)| {
+        is_javascript_source_path(rel_path)
+            && runtime_build_family_score(rel_path)
+                .is_some_and(|score| score <= RUNTIME_BUILD_FAMILY_MAX_SCORE)
+    });
+    source_files
+        .iter()
+        .filter_map(|(rel_path, _path)| {
+            if has_compiled_runtime_sources && is_typescript_source_family_path(rel_path) {
+                return None;
+            }
+            Some(rel_path.clone())
+        })
+        .collect()
 }
 
 fn package_importable_surface(
@@ -2091,6 +2347,48 @@ fn should_descend_package_source_dir(path: &Path) -> bool {
     )
 }
 
+const RUNTIME_BUILD_FAMILY_MAX_SCORE: u8 = 3;
+
+fn runtime_build_family_score(rel_path: &str) -> Option<u8> {
+    let lower = rel_path.to_ascii_lowercase();
+    let first_segment = lower.split('/').next().unwrap_or("");
+    if matches!(
+        first_segment,
+        "dist" | "lib" | "cjs" | "esm" | "module" | "build"
+    ) {
+        return Some(1);
+    }
+    if lower.contains("/dist/")
+        || lower.contains("/lib/")
+        || lower.contains("/cjs/")
+        || lower.contains("/esm/")
+    {
+        return Some(2);
+    }
+    if !lower.starts_with("src/") {
+        return Some(3);
+    }
+    Some(5)
+}
+
+fn is_typescript_source_family_path(rel_path: &str) -> bool {
+    let lower = rel_path.to_ascii_lowercase();
+    lower.starts_with("src/")
+        && matches!(
+            Path::new(lower.as_str())
+                .extension()
+                .and_then(|ext| ext.to_str()),
+            Some("ts" | "tsx")
+        )
+}
+
+fn is_javascript_source_path(rel_path: &str) -> bool {
+    matches!(
+        Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
+        Some("js" | "mjs" | "cjs")
+    )
+}
+
 fn is_local_package_source_candidate(rel_path: &str) -> bool {
     let lower = rel_path.to_ascii_lowercase();
     if lower.ends_with(".d.ts")
@@ -2121,6 +2419,19 @@ fn slash_path(path: &Path) -> String {
 }
 
 fn dedup_package_sources(package_sources: &mut Vec<PackageSource>) {
+    package_sources.sort_by(|left, right| {
+        (
+            left.package_name.as_str(),
+            left.package_version.as_str(),
+            left.source_path.as_str(),
+        )
+            .cmp(&(
+                right.package_name.as_str(),
+                right.package_version.as_str(),
+                right.source_path.as_str(),
+            ))
+            .then_with(|| right.external_importable.cmp(&left.external_importable))
+    });
     let mut seen = BTreeSet::new();
     package_sources.retain(|source| {
         seen.insert((
@@ -2997,6 +3308,21 @@ fn sqlite_table_exists(connection: &Connection, table: &str) -> rusqlite::Result
         .map(|value| value.is_some())
 }
 
+fn sqlite_table_has_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<bool> {
+    let mut statement = connection.prepare(format!("PRAGMA table_info({table})").as_str())?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in columns {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn collect_sqlite_rows<T>(
     rows: impl Iterator<Item = rusqlite::Result<T>>,
 ) -> rusqlite::Result<Vec<T>> {
@@ -3005,6 +3331,24 @@ fn collect_sqlite_rows<T>(
 
 fn sqlite_placeholders(count: usize) -> String {
     (0..count).map(|_| "?").collect::<Vec<_>>().join(", ")
+}
+
+fn dedup_audit_report(audit: AuditReport) -> AuditReport {
+    let mut deduped = AuditReport::default();
+    let mut seen = BTreeSet::new();
+    for finding in audit.findings() {
+        let key = (
+            format!("{:?}", finding.code),
+            format!("{:?}", finding.severity),
+            finding.module.clone(),
+            finding.binding.clone(),
+            finding.message.clone(),
+        );
+        if seen.insert(key) {
+            deduped.push(finding.clone());
+        }
+    }
+    deduped
 }
 
 pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
@@ -3041,16 +3385,18 @@ mod tests {
 
     use reverts_input::{InputRows, ModuleInput, ProjectInput};
     use reverts_ir::ModuleId;
-    use reverts_observe::FindingCode;
+    use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+    use reverts_package_matcher::PackageSource;
     use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency};
     use rusqlite::{Connection, params};
 
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, extract_bun_embedded_asset_from_bytes, help_text,
-        match_packages_from_connection, package_version_hints_for_materialization, run,
-        version_text,
+        MatchPackagesArgs, collect_local_package_sources, dedup_audit_report,
+        extract_bun_embedded_asset_from_bytes, help_text, load_package_sources,
+        local_package_metadata, match_packages_from_connection,
+        package_version_hints_for_materialization, persist_package_source_cache, run, version_text,
     };
 
     #[test]
@@ -3258,6 +3604,116 @@ mod tests {
             hints,
             BTreeSet::from([("lodash".to_string(), "4.17.21".to_string())])
         );
+    }
+
+    #[test]
+    fn package_source_cache_persists_external_importability() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version)
+                );
+                ",
+            )
+            .expect("create legacy package source cache");
+        let sources = vec![
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/public",
+                "pkg@1.2.3/public.js",
+                "export const publicValue = 1;",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/internal",
+                "pkg@1.2.3/internal.js",
+                "export const internalValue = 2;",
+            ),
+        ];
+
+        let written =
+            persist_package_source_cache(&mut connection, &sources).expect("persist cache");
+
+        assert_eq!(written, 2);
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let loaded = load_package_sources(
+            &mut connection,
+            &rows,
+            &BTreeSet::from(["pkg".to_string()]),
+            &[],
+            false,
+            false,
+        )
+        .expect("load cache");
+        assert_eq!(loaded.len(), 2);
+        assert!(
+            loaded
+                .iter()
+                .any(|source| source.source_path.ends_with("public.js")
+                    && source.external_importable)
+        );
+        assert!(loaded.iter().any(
+            |source| source.source_path.ends_with("internal.js") && !source.external_importable
+        ));
+    }
+
+    #[test]
+    fn local_package_source_collection_prefers_compiled_runtime_family_over_src_ts() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("node_modules/pkg");
+        fs::create_dir_all(package_dir.join("src")).expect("create src dir");
+        fs::create_dir_all(package_dir.join("dist")).expect("create dist dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","main":"dist/index.js"}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("src/index.ts"),
+            "export const tsSource: number = 1;",
+        )
+        .expect("write src ts");
+        fs::write(
+            package_dir.join("dist/index.js"),
+            "export const jsSource = 1;",
+        )
+        .expect("write dist js");
+        let metadata = local_package_metadata(package_dir.as_path())
+            .expect("read metadata")
+            .expect("metadata");
+        let mut sources = Vec::new();
+
+        collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)
+            .expect("collect sources");
+
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].source_path.ends_with("dist/index.js"));
+        assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn match_package_audit_findings_are_deduplicated() {
+        let finding = AuditFinding::error(FindingCode::UnparseablePackageSource, "parse failed")
+            .with_module("pkg@1.0.0/src/index.ts")
+            .with_binding("pkg@1.0.0");
+        let mut audit = AuditReport::default();
+        audit.push(finding.clone());
+        audit.push(finding);
+
+        let deduped = dedup_audit_report(audit);
+
+        assert_eq!(deduped.findings().len(), 1);
     }
 
     #[test]

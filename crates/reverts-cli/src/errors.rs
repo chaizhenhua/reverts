@@ -54,6 +54,7 @@ pub enum MatchPackagesError {
         package_version: String,
         message: String,
     },
+    WritePackageSourceCache(rusqlite::Error),
     WriteAttribution(rusqlite::Error),
     WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
@@ -106,6 +107,9 @@ impl fmt::Display for MatchPackagesError {
             Self::WriteAttribution(source) => {
                 write!(formatter, "failed to write package attribution: {source}")
             }
+            Self::WritePackageSourceCache(source) => {
+                write!(formatter, "failed to write package source cache: {source}")
+            }
             Self::WritePackageSurface(source) => {
                 write!(formatter, "failed to write package surface: {source}")
             }
@@ -152,6 +156,7 @@ impl Error for MatchPackagesError {
             Self::OpenDatabase { source, .. }
             | Self::ConfigureDatabase(source)
             | Self::QueryPackageSources(source)
+            | Self::WritePackageSourceCache(source)
             | Self::WriteAttribution(source)
             | Self::WritePackageSurface(source) => Some(source),
             Self::ReadPackageSourceRoot { source, .. } => Some(source),
