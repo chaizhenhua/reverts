@@ -4051,7 +4051,7 @@ pub fn classify_lazy_module_body(
         }) else {
             continue;
         };
-        let analysis = analyze_lazy_body_statements_v2(
+        let analysis = analyze_lazy_body_statements(
             &function_body.statements,
             &wrapped,
             exports_param,
@@ -4063,9 +4063,8 @@ pub fn classify_lazy_module_body(
 }
 
 /// Internal mutable state collected during AST traversal of a lazy
-/// body. The v2 analyzer fills this in; `analysis_to_classification`
-/// converts it to a `LazyBodyClassification` based on whether
-/// dependencies were collected.
+/// body. The analyzer fills this in; `analysis_to_classification` converts it
+/// to a `LazyBodyClassification` based on whether dependencies were collected.
 #[derive(Debug, Default)]
 struct LazyBodyAnalysisState {
     captured_value: Option<String>,
@@ -4075,7 +4074,7 @@ struct LazyBodyAnalysisState {
     impure: bool,
 }
 
-fn analyze_lazy_body_statements_v2(
+fn analyze_lazy_body_statements(
     statements: &oxc_allocator::Vec<'_, Statement<'_>>,
     source: &str,
     exports_param: &str,
@@ -4099,7 +4098,7 @@ fn analyze_lazy_body_statements_v2(
                     chain = &inner.expression;
                 }
                 if let Some(inner_body) = iife_block_body(chain) {
-                    let inner_state = analyze_lazy_body_statements_v2(
+                    let inner_state = analyze_lazy_body_statements(
                         &inner_body.statements,
                         source,
                         exports_param,
@@ -4178,15 +4177,14 @@ fn analyze_lazy_body_statements_v2(
                         state.prologue.push(span_text(inner, source).to_string());
                         continue;
                     }
-                    // NEW: zero-arg call to a bare identifier — register
-                    // as an inter-procedural dependency. The fixpoint
-                    // determines whether the called binding is itself
-                    // eager-safe; if all deps clear, the call's side
-                    // effects are subsumed by the dep's eagerification
-                    // (which runs at the dep's module-load time, before
-                    // this module's). We DO NOT add the call to the
-                    // prologue — re-invoking an eagerified binding
-                    // would dereference a non-function.
+                    // A zero-arg call to a bare identifier is an
+                    // inter-procedural dependency. The fixpoint determines
+                    // whether the called binding is itself eager-safe; if all
+                    // deps clear, the call's side effects are subsumed by the
+                    // dep's eagerification (which runs at the dep's
+                    // module-load time, before this module's). We do not add
+                    // the call to the prologue — re-invoking an eagerified
+                    // binding would dereference a non-function.
                     if call.arguments.is_empty()
                         && let Expression::Identifier(callee) = &call.callee
                     {
@@ -4789,8 +4787,8 @@ enum CompatibleImportDetails {
         local: String,
     },
     DefaultNamespace {
-        _default_local: String,
-        _namespace_local: String,
+        default_local: String,
+        namespace_local: String,
     },
 }
 
@@ -4985,10 +4983,10 @@ fn compatible_import_details(
         (Some(local), None, true) => Some(CompatibleImportDetails::Default { local }),
         (Some(local), None, false) => Some(CompatibleImportDetails::DefaultNamed { local, named }),
         (None, Some(local), true) => Some(CompatibleImportDetails::Namespace { local }),
-        (Some(_default_local), Some(_namespace_local), true) => {
+        (Some(default_local), Some(namespace_local), true) => {
             Some(CompatibleImportDetails::DefaultNamespace {
-                _default_local,
-                _namespace_local,
+                default_local,
+                namespace_local,
             })
         }
         (None, None, false) => Some(CompatibleImportDetails::Named(named)),
@@ -5246,8 +5244,15 @@ impl<'a> Visit<'a> for ImportedBindingUseCollector<'_> {
 
 #[derive(Debug, Default, Clone)]
 struct NamespaceFlattenSourceState {
-    namespace_imports: Vec<(usize, String)>,
+    namespace_imports: Vec<NamespaceFlattenImport>,
     existing_named_aliases: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct NamespaceFlattenImport {
+    index: usize,
+    namespace_local: String,
+    default_local: Option<String>,
 }
 
 fn flatten_node_builtin_namespace_imports_in_program<'a>(
@@ -5266,8 +5271,25 @@ fn flatten_node_builtin_namespace_imports_in_program<'a>(
         }
         let source = declaration.source.value.as_str().to_string();
         let state = states.entry(source).or_default();
-        if let Some(local) = namespace_only_import_local(declaration) {
-            state.namespace_imports.push((index, local));
+        match compatible_import_details(declaration) {
+            Some(CompatibleImportDetails::Namespace { local }) => {
+                state.namespace_imports.push(NamespaceFlattenImport {
+                    index,
+                    namespace_local: local,
+                    default_local: None,
+                });
+            }
+            Some(CompatibleImportDetails::DefaultNamespace {
+                default_local,
+                namespace_local,
+            }) => {
+                state.namespace_imports.push(NamespaceFlattenImport {
+                    index,
+                    namespace_local,
+                    default_local: Some(default_local),
+                });
+            }
+            _ => {}
         }
         for specifier in named_import_aliases(declaration) {
             state
@@ -5292,7 +5314,7 @@ fn flatten_node_builtin_namespace_imports_in_program<'a>(
             state
                 .namespace_imports
                 .iter()
-                .map(|(_, local)| local.clone())
+                .map(|import| import.namespace_local.clone())
         })
         .collect::<BTreeSet<_>>();
     let mut analysis = NamespaceImportUseAnalysis {
@@ -5308,9 +5330,11 @@ fn flatten_node_builtin_namespace_imports_in_program<'a>(
     let mut member_replacements = BTreeMap::<(String, String), String>::new();
     let mut generated_specifiers_by_source =
         BTreeMap::<String, BTreeSet<SimpleNamedImportSpecifier>>::new();
+    let mut default_import_replacements = BTreeMap::<usize, (String, String)>::new();
     let mut removable_namespace_indices = BTreeSet::<usize>::new();
     for (source, state) in &states {
-        for (index, namespace_local) in &state.namespace_imports {
+        for import in &state.namespace_imports {
+            let namespace_local = import.namespace_local.as_str();
             if analysis.bad_locals.contains(namespace_local) {
                 continue;
             }
@@ -5344,9 +5368,13 @@ fn flatten_node_builtin_namespace_imports_in_program<'a>(
                     .insert(specifier);
             }
             for (property, alias) in local_replacements {
-                member_replacements.insert((namespace_local.clone(), property), alias);
+                member_replacements.insert((namespace_local.to_string(), property), alias);
             }
-            removable_namespace_indices.insert(*index);
+            if let Some(default_local) = &import.default_local {
+                default_import_replacements
+                    .insert(import.index, (source.clone(), default_local.clone()));
+            }
+            removable_namespace_indices.insert(import.index);
         }
     }
     if removable_namespace_indices.is_empty() {
@@ -5368,16 +5396,36 @@ fn flatten_node_builtin_namespace_imports_in_program<'a>(
             state
                 .namespace_imports
                 .iter()
-                .map(|(index, _)| *index)
+                .map(|import| import.index)
                 .filter(|index| removable_namespace_indices.contains(index))
                 .min()
         }) else {
             continue;
         };
-        replacement_by_index.insert(
-            first_index,
-            simple_named_import_statement(builder, source.as_str(), specifiers.iter()),
-        );
+        if let Some((_source, default_local)) = default_import_replacements.remove(&first_index) {
+            replacement_by_index.insert(
+                first_index,
+                default_named_import_statement(
+                    builder,
+                    source.as_str(),
+                    default_local.as_str(),
+                    specifiers.iter(),
+                ),
+            );
+        } else {
+            replacement_by_index.insert(
+                first_index,
+                simple_named_import_statement(builder, source.as_str(), specifiers.iter()),
+            );
+        }
+    }
+    for (index, (source, default_local)) in default_import_replacements {
+        if removable_namespace_indices.contains(&index) {
+            replacement_by_index.insert(
+                index,
+                default_only_import_statement(builder, source.as_str(), default_local.as_str()),
+            );
+        }
     }
 
     let mut merged = builder.vec();
@@ -5398,17 +5446,6 @@ fn import_declaration_can_be_merged(declaration: &ImportDeclaration<'_>) -> bool
     declaration.import_kind == ImportOrExportKind::Value
         && declaration.phase.is_none()
         && declaration.with_clause.is_none()
-}
-
-fn namespace_only_import_local(declaration: &ImportDeclaration<'_>) -> Option<String> {
-    let specifiers = declaration.specifiers.as_ref()?;
-    if specifiers.len() != 1 {
-        return None;
-    }
-    let ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) = &specifiers[0] else {
-        return None;
-    };
-    Some(specifier.local.name.as_str().to_string())
 }
 
 fn named_import_aliases(
@@ -6211,6 +6248,30 @@ mod tests {
 
         assert!(formatted.contains("import { join } from 'path';"));
         assert!(formatted.contains("console.log(join('a', 'b'));"));
+        assert_eq!(formatted.matches("from 'path'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_flattens_default_namespace_builtin_import() {
+        let formatted = format_source_with_module_items(
+            "import pathDefault, * as pathNS from 'path';\nconsole.log(pathNS.join('a', 'b'), pathDefault.sep);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(
+            formatted
+                .contains("import pathDefault, { join as __reverts_pathNS_join } from 'path';"),
+            "{formatted}"
+        );
+        assert!(
+            formatted.contains("console.log(__reverts_pathNS_join('a', 'b'), pathDefault.sep);")
+        );
+        assert!(!formatted.contains("pathNS."));
         assert_eq!(formatted.matches("from 'path'").count(), 1);
     }
 
