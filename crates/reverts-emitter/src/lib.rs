@@ -183,8 +183,8 @@ mod tests {
         let project = emit_project(&plan).expect("planned file should emit");
 
         let source = project.files[0].source.as_str();
-        assert!(source.contains("import * as __pkg from 'pkg';"));
-        assert!(source.contains("const answer = __pkg.answer;"));
+        assert!(source.contains("import * as pkg from 'pkg';"));
+        assert!(source.contains("const answer = pkg.answer;"));
         assert!(source.contains("export { answer };"));
     }
 

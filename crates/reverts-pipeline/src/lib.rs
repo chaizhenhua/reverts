@@ -894,7 +894,7 @@ mod tests {
         assert_eq!(run.runtime_dependencies[0].package_name, "lodash");
         assert_eq!(run.runtime_dependencies[0].package_version, "4.17.21");
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("import * as __pkg_lodash_map from 'lodash/map';"));
+        assert!(source.contains("import * as lodashMap from 'lodash/map';"));
         assert!(source.contains("export function activate()"));
         assert!(!source.contains("undefined as any"));
     }
@@ -1316,6 +1316,39 @@ mod tests {
         assert!(source.contains("var settingsAlias = settings;"));
         assert!(source.contains("console.log(settingsAlias);"));
         assert!(source.contains("export { settingsAlias as b };"));
+    }
+
+    #[test]
+    fn source_named_import_alias_is_cleaned_up_late_before_emit() {
+        let mut rows = rows_with_application_source(
+            "import { map as $F1 } from 'lodash/map'; console.log($F1); export { $F1 };",
+        );
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "lodash_map",
+            "node_modules/lodash/map.js",
+            "lodash",
+            Some("4.17.21".to_string()),
+        ));
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "lodash",
+                "4.17.21",
+                "lodash/map",
+            )
+            .with_subpath("map"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("import { map } from 'lodash/map';"));
+        assert!(source.contains("console.log(map);"));
+        assert!(source.contains("export { map as $F1 };"));
+        assert!(!source.contains("console.log($F1);"));
     }
 
     #[test]

@@ -584,12 +584,23 @@ impl ImportExportPlanner {
                 if planned_bindings.contains(original) {
                     continue;
                 }
+                let emitted = program
+                    .semantic_names()
+                    .binding_name(module.id, original.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| original.clone());
+                if emitted != *original {
+                    file.add_readability_rename(PlannedRename::new(
+                        original.clone(),
+                        emitted.clone(),
+                    ));
+                }
                 planned_bindings.insert(original.clone());
                 file.add_binding(plan_binding_from_program(
                     program,
                     module.id,
                     original.clone(),
-                    original.clone(),
+                    emitted,
                     true,
                     None,
                 ));
@@ -8987,6 +8998,51 @@ mod tests {
         assert_eq!(
             plan.files[0].readability_renames[0].renamed.as_str(),
             "lodashGlobalObjectInit"
+        );
+    }
+
+    #[test]
+    fn source_backed_import_plans_late_readability_rename() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("import { map as $F1 } from 'lodash'; export { $F1 };".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let mut semantic_names = reverts_model::SemanticNameMap::default();
+        semantic_names.insert_binding(ModuleId(1), "$F1", "lodashMap");
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            semantic_names,
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let binding = plan.files[0]
+            .bindings
+            .iter()
+            .find(|binding| binding.original.as_str() == "$F1")
+            .expect("source import binding should be planned");
+
+        assert!(binding.source_backed);
+        assert_eq!(binding.emitted.as_str(), "lodashMap");
+        assert_eq!(plan.files[0].readability_renames.len(), 1);
+        assert_eq!(
+            plan.files[0].readability_renames[0].original.as_str(),
+            "$F1"
+        );
+        assert_eq!(
+            plan.files[0].readability_renames[0].renamed.as_str(),
+            "lodashMap"
         );
     }
 

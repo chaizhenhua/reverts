@@ -9,8 +9,9 @@ use oxc_ast::{
     ast::{
         Argument, ArrowFunctionExpression, BindingIdentifier, BindingPatternKind, CallExpression,
         Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-        Expression, Function, IdentifierReference, ImportDeclaration, ImportExpression,
-        ImportOrExportKind, NewExpression, Program, Statement, StringLiteral, VariableDeclarator,
+        Expression, Function, IdentifierReference, ImportDeclaration, ImportDeclarationSpecifier,
+        ImportExpression, ImportOrExportKind, ModuleExportName, NewExpression, Program, Statement,
+        StringLiteral, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_export_all_declaration,
@@ -631,7 +632,14 @@ pub fn format_source_with_module_items_and_renames(
                 .body
                 .push(generated_export_statement(&builder, generated_export));
         }
-        apply_readability_renames(&allocator, &mut parsed.program, readability_renames);
+        let mut readability_renames_with_imports =
+            collect_import_alias_readability_renames(&parsed.program, readability_renames);
+        readability_renames_with_imports.extend(readability_renames.iter().cloned());
+        apply_readability_renames(
+            &allocator,
+            &mut parsed.program,
+            &readability_renames_with_imports,
+        );
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -731,6 +739,121 @@ fn apply_readability_renames<'a>(
         reference_renames,
     };
     renamer.visit_program(program);
+}
+
+fn collect_import_alias_readability_renames(
+    program: &Program<'_>,
+    explicit_renames: &[GeneratedRename],
+) -> Vec<GeneratedRename> {
+    let explicit_originals = explicit_renames
+        .iter()
+        .map(|rename| rename.original.trim())
+        .filter(|original| !original.is_empty())
+        .collect::<BTreeSet<_>>();
+    let mut renames = Vec::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &declaration.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    let Some(imported) = module_export_identifier_name(&specifier.imported) else {
+                        continue;
+                    };
+                    if sanitize_identifier(imported.as_str()) != imported {
+                        continue;
+                    }
+                    let local = specifier.local.name.as_str();
+                    if local == imported.as_str() || explicit_originals.contains(local) {
+                        continue;
+                    }
+                    renames.push(GeneratedRename::new(local, imported));
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    let local = specifier.local.name.as_str();
+                    if !is_generated_package_namespace_alias(local)
+                        || explicit_originals.contains(local)
+                    {
+                        continue;
+                    }
+                    let Some(namespace) =
+                        readable_namespace_name_for_import(declaration.source.value.as_str())
+                    else {
+                        continue;
+                    };
+                    if local == namespace.as_str() {
+                        continue;
+                    }
+                    renames.push(GeneratedRename::new(local, namespace));
+                }
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {}
+            }
+        }
+    }
+    renames
+}
+
+fn module_export_identifier_name(name: &ModuleExportName<'_>) -> Option<String> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str().to_string()),
+        ModuleExportName::IdentifierReference(_) | ModuleExportName::StringLiteral(_) => None,
+    }
+}
+
+fn is_generated_package_namespace_alias(local: &str) -> bool {
+    local == "__pkg" || local.starts_with("__pkg_")
+}
+
+fn readable_namespace_name_for_import(specifier: &str) -> Option<String> {
+    let specifier = specifier
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(specifier)
+        .trim();
+    if specifier.is_empty() || specifier.starts_with('.') {
+        return None;
+    }
+    let mut words = Vec::new();
+    for segment in specifier.split('/') {
+        let segment = segment.trim_start_matches('@');
+        let mut word = String::new();
+        for character in segment.chars() {
+            if character.is_ascii_alphanumeric() {
+                word.push(character);
+            } else if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+    }
+    if words.is_empty() {
+        return None;
+    }
+    let mut candidate = String::new();
+    for (index, word) in words.iter().enumerate() {
+        if index == 0 {
+            candidate.push_str(word);
+            continue;
+        }
+        let mut chars = word.chars();
+        let Some(first) = chars.next() else {
+            continue;
+        };
+        candidate.extend(first.to_uppercase());
+        candidate.push_str(chars.as_str());
+    }
+    let sanitized = sanitize_identifier(candidate.as_str());
+    if sanitized == "_" {
+        None
+    } else {
+        Some(sanitized)
+    }
 }
 
 struct ReadabilityRenamer<'a> {
@@ -2417,8 +2540,8 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import * as __pkg from 'pkg';"));
-        assert!(formatted.contains("const answer = __pkg.answer;"));
+        assert!(formatted.contains("import * as pkg from 'pkg';"));
+        assert!(formatted.contains("const answer = pkg.answer;"));
         assert!(formatted.contains("export { answer };"));
     }
 
@@ -2473,6 +2596,94 @@ mod tests {
         assert!(formatted.contains("function inner($F1)"));
         assert!(formatted.contains("return $F1;"));
         assert!(formatted.contains("obj.$F1 = '$F1';"));
+    }
+
+    #[test]
+    fn readability_renames_named_import_alias_to_imported_name() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import { map as $F1 } from 'lodash'; console.log($F1); export { $F1 };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { map } from 'lodash';"));
+        assert!(formatted.contains("console.log(map);"));
+        assert!(formatted.contains("export { map as $F1 };"));
+        assert!(!formatted.contains("$F1);"));
+    }
+
+    #[test]
+    fn readability_renames_named_import_alias_skips_collisions() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import { map as $F1 } from 'lodash'; const map = 1; console.log($F1, map);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { map as $F1 } from 'lodash';"));
+        assert!(formatted.contains("const map = 1;"));
+        assert!(formatted.contains("console.log($F1, map);"));
+    }
+
+    #[test]
+    fn readability_renames_generated_namespace_import_alias_from_specifier() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const answer = __pkg_lodash_map.answer;",
+            &[GeneratedImport::new("__pkg_lodash_map", "lodash/map")],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as lodashMap from 'lodash/map';"));
+        assert!(formatted.contains("const answer = lodashMap.answer;"));
+    }
+
+    #[test]
+    fn readability_renames_namespace_import_keeps_handwritten_alias() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import * as utilities from 'lodash'; console.log(utilities.map);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as utilities from 'lodash';"));
+        assert!(formatted.contains("console.log(utilities.map);"));
+    }
+
+    #[test]
+    fn readability_renames_explicit_hint_takes_precedence_over_import_alias_cleanup() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import { map as $F1 } from 'lodash'; console.log($F1);",
+            &[],
+            &[],
+            &[GeneratedRename::new("$F1", "lodashMap")],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { map as lodashMap } from 'lodash';"));
+        assert!(formatted.contains("console.log(lodashMap);"));
     }
 
     #[test]
