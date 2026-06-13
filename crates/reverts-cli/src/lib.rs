@@ -50,7 +50,7 @@ impl MatchPackagesArgs {
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
-            .is_some_and(|argument| argument == "match-packages")
+            .is_some_and(|argument| argument == help::MATCH_PACKAGES_COMMAND)
         {
             args.remove(0);
         }
@@ -106,7 +106,7 @@ impl ExtractAssetsArgs {
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
-            .is_some_and(|argument| argument == "extract-assets")
+            .is_some_and(|argument| argument == help::EXTRACT_ASSETS_COMMAND)
         {
             args.remove(0);
         }
@@ -150,28 +150,29 @@ impl CliCommand {
             Some(argument) if is_version_flag(argument) => parse_version(args.as_slice()),
             Some("help") => parse_help_command(args.as_slice()),
             Some("version") => parse_version(args.as_slice()),
-            Some("generate-project-v2") => {
-                if is_command_help(args.as_slice()) {
-                    return Ok(Self::Help(HelpTopic::GenerateProjectV2));
+            Some(command) => {
+                if let Some(topic) = help::command_topic(command) {
+                    if is_command_help(args.as_slice()) {
+                        return Ok(Self::Help(topic));
+                    }
+                    match topic {
+                        HelpTopic::GenerateProjectV2 => {
+                            Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
+                        }
+                        HelpTopic::MatchPackages => {
+                            Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?))
+                        }
+                        HelpTopic::ExtractAssets => {
+                            Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
+                        }
+                        HelpTopic::TopLevel => Ok(Self::Help(HelpTopic::TopLevel)),
+                    }
+                } else if command.starts_with("--") {
+                    Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
+                } else {
+                    Err(CliError::UnknownCommand(command.to_string()))
                 }
-                Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
             }
-            Some("match-packages") => {
-                if is_command_help(args.as_slice()) {
-                    return Ok(Self::Help(HelpTopic::MatchPackages));
-                }
-                Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?))
-            }
-            Some("extract-assets") => {
-                if is_command_help(args.as_slice()) {
-                    return Ok(Self::Help(HelpTopic::ExtractAssets));
-                }
-                Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
-            }
-            Some(argument) if argument.starts_with("--") => {
-                Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
-            }
-            Some(command) => Err(CliError::UnknownCommand(command.to_string())),
             None => Ok(Self::Help(HelpTopic::TopLevel)),
         }
     }
@@ -204,12 +205,7 @@ fn parse_version(args: &[String]) -> Result<CliCommand, CliError> {
 }
 
 fn parse_named_help_topic(command: &str) -> Result<HelpTopic, CliError> {
-    match command {
-        "generate-project-v2" => Ok(HelpTopic::GenerateProjectV2),
-        "match-packages" => Ok(HelpTopic::MatchPackages),
-        "extract-assets" => Ok(HelpTopic::ExtractAssets),
-        other => Err(CliError::UnknownCommand(other.to_string())),
-    }
+    help::command_topic(command).ok_or_else(|| CliError::UnknownCommand(command.to_string()))
 }
 
 fn is_command_help(args: &[String]) -> bool {

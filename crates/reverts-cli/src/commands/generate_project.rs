@@ -26,7 +26,7 @@ impl GenerateProjectV2Args {
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
-            .is_some_and(|argument| argument == "generate-project-v2")
+            .is_some_and(|argument| argument == crate::help::GENERATE_PROJECT_V2_COMMAND)
         {
             args.remove(0);
         }

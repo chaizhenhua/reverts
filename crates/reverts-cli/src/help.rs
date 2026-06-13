@@ -10,6 +10,43 @@ pub enum HelpTopic {
     ExtractAssets,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub topic: HelpTopic,
+    pub summary: &'static str,
+}
+
+pub const GENERATE_PROJECT_V2_COMMAND: &str = "generate-project-v2";
+pub const MATCH_PACKAGES_COMMAND: &str = "match-packages";
+pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
+
+pub const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        name: MATCH_PACKAGES_COMMAND,
+        topic: HelpTopic::MatchPackages,
+        summary: "Populate package_attributions/package_surfaces in SQLite",
+    },
+    CommandSpec {
+        name: EXTRACT_ASSETS_COMMAND,
+        topic: HelpTopic::ExtractAssets,
+        summary: "Populate project_assets from asset references in source slices",
+    },
+    CommandSpec {
+        name: GENERATE_PROJECT_V2_COMMAND,
+        topic: HelpTopic::GenerateProjectV2,
+        summary: "Generate a TypeScript project from SQLite input",
+    },
+];
+
+#[must_use]
+pub fn command_topic(command: &str) -> Option<HelpTopic> {
+    COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.name == command)
+        .map(|spec| spec.topic)
+}
+
 #[must_use]
 pub fn version_text() -> String {
     format!("reverts-cli {}", env!("CARGO_PKG_VERSION"))
