@@ -16,8 +16,8 @@ use std::time::Duration;
 use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::load_project_rows_from_connection;
 use reverts_input::{
-    AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode, SourceFileInput,
+    AssetKind, InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
+    PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
@@ -462,6 +462,7 @@ pub fn match_packages_from_connection(
         &structural_bag_excluded_modules,
     );
     promote_structural_bag_ownership_matches(&rows, structural_bag_report.matches, &mut report);
+    promote_dependency_closure_ownership_matches(&rows, &mut report);
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
         // Persist synthetic modules first so the FK from
@@ -1047,6 +1048,136 @@ fn promote_structural_bag_ownership_matches(
         matched_modules.insert(package_match.module_id);
         report.matches.push(package_match);
     }
+}
+
+fn promote_dependency_closure_ownership_matches(
+    rows: &InputRows,
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = report
+        .attributions
+        .iter()
+        .chain(rows.package_attributions.iter())
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let mut ownership_by_module = report
+        .matches
+        .iter()
+        .map(|package_match| {
+            (
+                package_match.module_id,
+                (
+                    package_match.package_name.clone(),
+                    package_match.package_version.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for attribution in rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+    {
+        if attribution.status == PackageAttributionStatus::Accepted
+            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+            && let Some(package_version) = attribution.package_version.as_deref()
+        {
+            ownership_by_module.insert(
+                attribution.module_id,
+                (
+                    attribution.package_name.clone(),
+                    package_version.to_string(),
+                ),
+            );
+        }
+    }
+
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package
+            || already_accepted.contains(&module.id)
+            || matched_modules.contains(&module.id)
+        {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref() else {
+            continue;
+        };
+        let mut same_package_by_version = BTreeMap::<String, usize>::new();
+        let mut owned_dependencies = 0usize;
+        for dependency_id in direct_module_dependencies(rows, module.id) {
+            let Some((dependency_package, dependency_version)) =
+                ownership_by_module.get(&dependency_id).cloned()
+            else {
+                continue;
+            };
+            owned_dependencies += 1;
+            if dependency_package == package_name {
+                *same_package_by_version
+                    .entry(dependency_version)
+                    .or_default() += 1;
+            }
+        }
+        let same_package_dependencies = same_package_by_version.values().sum::<usize>();
+        if same_package_dependencies < 2
+            || owned_dependencies == 0
+            || same_package_dependencies * 100 < owned_dependencies * 70
+        {
+            continue;
+        }
+        let Some((package_version, version_dependency_count)) = same_package_by_version
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+        else {
+            continue;
+        };
+        if let Some(expected_version) = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            && expected_version != package_version
+        {
+            continue;
+        }
+        if *version_dependency_count * 100 < same_package_dependencies * 70 {
+            continue;
+        }
+        matched_modules.insert(module.id);
+        report.matches.push(PackageMatch {
+            module_id: module.id,
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            export_specifier: package_name.to_string(),
+            source_path: format!(
+                "dependency-closure:{package_name}@{package_version}:owned_deps={same_package_dependencies}/{owned_dependencies}"
+            ),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: same_package_dependencies,
+            string_anchor_matches: owned_dependencies,
+            external_importable: false,
+        });
+    }
+}
+
+fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
+    rows.dependencies
+        .iter()
+        .filter(|dependency| dependency.from_module_id == module_id)
+        .filter_map(|dependency| match dependency.target {
+            ModuleDependencyTarget::Module(target) => Some(target),
+            ModuleDependencyTarget::Package { .. } => None,
+        })
+        .collect()
 }
 
 fn accept_partial_cascade_coverage(
@@ -3367,11 +3498,13 @@ fn rejected_package_attributions_for_unaccepted_modules(
                         | ModuleMatchStrategy::CascadeFunctionCoverage
                         | ModuleMatchStrategy::CascadePartialFunctionCoverage
                         | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+                        | ModuleMatchStrategy::DependencyClosureOwnership
                 )
             })
             .map(|_| {
                 "matched package ownership, but the evidence does not prove a safe single external import"
             })
+            .or_else(|| package_source_quality_rejection_reason(rows, module, package_name))
             .or_else(|| decision_reasons.get(package_name).map(String::as_str))
             .unwrap_or("package matcher did not produce an accepted attribution for this package");
         let mut attribution =
@@ -3382,6 +3515,56 @@ fn rejected_package_attributions_for_unaccepted_modules(
         rejected.push(attribution);
     }
     Ok(rejected)
+}
+
+fn package_source_quality_rejection_reason(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_name: &str,
+) -> Option<&'static str> {
+    let Some(slice) = rows.module_source_slice(module.id) else {
+        return Some(
+            "package module has no source slice, so package ownership could not be verified",
+        );
+    };
+    let quality = package_module_source_quality(module, slice.source_file_path, slice.source);
+    if quality == PackageModuleSourceQuality::Invalid {
+        return Some(
+            "package module source slice is not parseable, so package ownership could not be verified",
+        );
+    }
+    if quality != PackageModuleSourceQuality::Weak {
+        return None;
+    }
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut same_package_dependencies = 0usize;
+    let mut other_package_dependencies = 0usize;
+    for dependency_id in direct_module_dependencies(rows, module.id) {
+        let Some(dependency) = modules_by_id.get(&dependency_id) else {
+            continue;
+        };
+        let Some(dependency_package_name) = dependency.package_name.as_deref() else {
+            continue;
+        };
+        if dependency_package_name == package_name {
+            same_package_dependencies += 1;
+        } else {
+            other_package_dependencies += 1;
+        }
+    }
+    if other_package_dependencies > 0 && same_package_dependencies == 0 {
+        Some(
+            "package hint is weak and direct dependency graph points at other packages; no safe package ownership match was accepted",
+        )
+    } else {
+        Some(
+            "package hint is weak because the module source does not contain strong package path tokens; no package ownership evidence matched",
+        )
+    }
 }
 
 fn decision_package_name(decision: &BestVersionMatch) -> &str {
@@ -5322,6 +5505,187 @@ mod tests {
         assert!(rejection_reason.contains("safe single external import"));
         assert!(evidence.contains("aggregate_structural_bag_similarity"));
         assert!(evidence.contains("\"writes_external_import\":false"));
+    }
+
+    #[test]
+    fn match_packages_promotes_dependency_closure_ownership_for_wrapper() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let wrapper_path = tempdir.path().join("wrapper.js");
+        let one_path = tempdir.path().join("one.js");
+        let two_path = tempdir.path().join("two.js");
+        let mut connection = package_match_connection(
+            wrapper_path.clone(),
+            "var wrap = E(() => { one(); two(); });",
+            &[
+                (
+                    "pkg",
+                    "1.2.3",
+                    "one.js",
+                    "export function one(){return 'one-anchor';}",
+                ),
+                (
+                    "pkg",
+                    "1.2.3",
+                    "two.js",
+                    "export function two(){return 'two-anchor';}",
+                ),
+            ],
+        );
+        fs::write(
+            one_path.as_path(),
+            "export function one(){return 'one-anchor';}",
+        )
+        .expect("write one source");
+        fs::write(
+            two_path.as_path(),
+            "export function two(){return 'two-anchor';}",
+        )
+        .expect("write two source");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (2, ?1), (3, ?2)",
+                params![
+                    one_path.to_string_lossy().as_ref(),
+                    two_path.to_string_lossy().as_ref()
+                ],
+            )
+            .expect("insert source files");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 2), (1, 3)",
+                [],
+            )
+            .expect("insert project files");
+        connection
+            .execute_batch(
+                r"
+                UPDATE modules
+                   SET semantic_name = 'pkg/wrapper.js',
+                       byte_start = NULL,
+                       byte_end = NULL
+                 WHERE id = 10;
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES
+                    (11, 2, 'one', 'pkg/one.js', 'package', 'pkg', NULL, NULL, NULL),
+                    (12, 3, 'two', 'pkg/two.js', 'package', 'pkg', NULL, NULL, NULL);
+                INSERT INTO module_dependencies (module_id, dependency_id)
+                VALUES (10, 11), (10, 12);
+                ",
+            )
+            .expect("seed dependency closure fixture");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.matched_modules, 3);
+        assert_eq!(outcome.written_attributions, 3);
+        let (status, emission_mode, package_version, evidence): (
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, evidence_json
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("wrapper should have source ownership attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
+        assert!(evidence.contains("dependency_closure_ownership"));
+        assert!(evidence.contains("dependency-closure:pkg@1.2.3"));
+    }
+
+    #[test]
+    fn match_packages_explains_weak_hint_contradicted_by_dependencies() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let dependency_path = tempdir.path().join("axios.js");
+        let mut connection = package_match_connection(
+            tempdir.path().join("rxjs-wrapper.js"),
+            "var r = E(() => { axiosDep(); });",
+            &[(
+                "rxjs",
+                "7.8.2",
+                "sample.js",
+                "export function sample(notifier){return notifier;}",
+            )],
+        );
+        connection
+            .execute(
+                "UPDATE modules SET semantic_name = 'rxjs/operators/sample', package_name = 'rxjs', package_version = '7.8.2' WHERE id = 10",
+                [],
+            )
+            .expect("make weak rxjs hint");
+        fs::write(dependency_path.as_path(), "export const axiosDep = 1;")
+            .expect("write dependency source");
+        connection
+            .execute(
+                "INSERT INTO source_files (id, file_path) VALUES (2, ?1)",
+                [dependency_path.to_string_lossy().as_ref()],
+            )
+            .expect("insert dependency source file");
+        connection
+            .execute(
+                "INSERT INTO project_files (project_id, file_id) VALUES (1, 2)",
+                [],
+            )
+            .expect("insert dependency project file");
+        connection
+            .execute_batch(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (11, 2, 'axiosDep', 'axios/index.js', 'package', 'axios', '1.7.3', NULL, NULL);
+                INSERT INTO module_dependencies (module_id, dependency_id) VALUES (10, 11);
+                ",
+            )
+            .expect("seed contradicted dependency");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["rxjs".to_string()],
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.written_attributions, 1);
+        let rejection_reason: String = connection
+            .query_row(
+                r"
+                SELECT rejection_reason
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .expect("weak inconsistent hint should write rejected reason");
+        assert!(rejection_reason.contains("package hint is weak"));
+        assert!(rejection_reason.contains("dependency graph points at other packages"));
     }
 
     #[test]

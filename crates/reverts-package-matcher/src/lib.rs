@@ -206,6 +206,10 @@ pub enum ModuleMatchStrategy {
     /// proves package ownership only and intentionally does not prove a unique
     /// importable source file.
     AggregateStructuralBagSimilarity,
+    /// Direct module dependencies are already owned by one package version.
+    /// This proves ownership for dependency-only bundle wrappers/barrels, but
+    /// not a safe single external import.
+    DependencyClosureOwnership,
 }
 
 impl ModuleMatchStrategy {
@@ -220,6 +224,7 @@ impl ModuleMatchStrategy {
             Self::CascadeFunctionCoverage => "cascade_function_coverage",
             Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
             Self::AggregateStructuralBagSimilarity => "aggregate_structural_bag_similarity",
+            Self::DependencyClosureOwnership => "dependency_closure_ownership",
         }
     }
 }
