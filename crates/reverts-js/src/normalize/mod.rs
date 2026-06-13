@@ -33,6 +33,7 @@ pub mod logical_short_circuit_expanded;
 pub mod nullish_assignment_compacted;
 pub mod nullish_equality_compacted;
 pub mod number_call_to_unary_plus_guarded;
+pub mod parenthesized_expression_unwrapped;
 pub mod return_conditional_expanded;
 pub mod sequence_expression_split;
 pub mod shadow_check;
@@ -43,8 +44,12 @@ pub mod typeof_local_undefined_guarded;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 32] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 33] {
     [
+        // Strip syntactic-only paren wrappers FIRST so every later
+        // pass sees the bare expression and the existing
+        // `strip_parens` local helpers become redundant.
+        Box::new(parenthesized_expression_unwrapped::ParenthesizedExpressionUnwrapped),
         Box::new(ts_runtime_erased::TsRuntimeErased),
         Box::new(jsx_runtime_normalized::JsxRuntimeNormalized),
         Box::new(bundler_wrapper_unwrapped::BundlerWrapperUnwrapped),
@@ -133,6 +138,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 32);
+        assert_eq!(ids.len(), 33);
     }
 }

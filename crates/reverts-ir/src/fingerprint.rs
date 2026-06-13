@@ -107,6 +107,7 @@ pub enum NormalizationPassId {
     ConditionalNegationFlipped,
     NullishAssignmentCompacted,
     EmptyElseBlockRemoved,
+    ParenthesizedExpressionUnwrapped,
 }
 
 impl NormalizationPassId {
@@ -146,6 +147,7 @@ impl NormalizationPassId {
             Self::ConditionalNegationFlipped => "conditional_negation_flipped",
             Self::NullishAssignmentCompacted => "nullish_assignment_compacted",
             Self::EmptyElseBlockRemoved => "empty_else_block_removed",
+            Self::ParenthesizedExpressionUnwrapped => "parenthesized_expression_unwrapped",
         }
     }
 }
