@@ -108,6 +108,7 @@ pub enum NormalizationPassId {
     NullishAssignmentCompacted,
     EmptyElseBlockRemoved,
     ParenthesizedExpressionUnwrapped,
+    LogicalCompoundAssignmentCanonical,
 }
 
 impl NormalizationPassId {
@@ -148,6 +149,7 @@ impl NormalizationPassId {
             Self::NullishAssignmentCompacted => "nullish_assignment_compacted",
             Self::EmptyElseBlockRemoved => "empty_else_block_removed",
             Self::ParenthesizedExpressionUnwrapped => "parenthesized_expression_unwrapped",
+            Self::LogicalCompoundAssignmentCanonical => "logical_compound_assignment_canonical",
         }
     }
 }

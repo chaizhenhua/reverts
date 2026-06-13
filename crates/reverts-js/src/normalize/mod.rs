@@ -28,6 +28,7 @@ pub mod helper_identity_inlined;
 pub mod if_return_else_flattened;
 pub mod infinite_for_to_while;
 pub mod jsx_runtime_normalized;
+pub mod logical_compound_assignment_canonical;
 pub mod logical_not_chain_flattened;
 pub mod logical_short_circuit_expanded;
 pub mod nullish_assignment_compacted;
@@ -44,7 +45,7 @@ pub mod typeof_local_undefined_guarded;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 33] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 34] {
     [
         // Strip syntactic-only paren wrappers FIRST so every later
         // pass sees the bare expression and the existing
@@ -72,6 +73,7 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 33] {
         Box::new(computed_to_static_member::ComputedToStaticMember),
         Box::new(arrow_body_blocked::ArrowBodyBlocked),
         Box::new(compound_assignment_canonical::CompoundAssignmentCanonical),
+        Box::new(logical_compound_assignment_canonical::LogicalCompoundAssignmentCanonical),
         Box::new(if_return_else_flattened::IfReturnElseFlattened),
         Box::new(equality_negation_flattened::EqualityNegationFlattened),
         Box::new(constant_string_concat_folded::ConstantStringConcatFolded),
@@ -138,6 +140,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 33);
+        assert_eq!(ids.len(), 34);
     }
 }
