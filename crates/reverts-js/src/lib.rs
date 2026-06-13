@@ -703,6 +703,9 @@ pub fn format_source_with_module_items_and_renames_with_report(
         flatten_node_builtin_namespace_imports_in_program(&mut parsed.program, &builder);
         coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
         coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
+        prune_unused_import_specifiers_in_program(&mut parsed.program, &builder);
+        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
+        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -4943,10 +4946,188 @@ fn default_namespace_import_statement<'a>(
     ))
 }
 
+fn default_only_import_statement<'a>(
+    builder: &AstBuilder<'a>,
+    source: &str,
+    default_local: &str,
+) -> Statement<'a> {
+    let specifiers = builder.vec1(
+        builder.import_declaration_specifier_import_default_specifier(
+            SPAN,
+            builder.binding_identifier(SPAN, default_local),
+        ),
+    );
+    let source = builder.string_literal(SPAN, source, None);
+    Statement::ImportDeclaration(builder.alloc_import_declaration(
+        SPAN,
+        Some(specifiers),
+        source,
+        None,
+        NONE,
+        ImportOrExportKind::Value,
+    ))
+}
+
 fn default_import_specifier(local: &str) -> SimpleNamedImportSpecifier {
     SimpleNamedImportSpecifier {
         imported: "default".to_string(),
         local: local.to_string(),
+    }
+}
+
+fn prune_unused_import_specifiers_in_program<'a>(
+    program: &mut Program<'a>,
+    builder: &AstBuilder<'a>,
+) {
+    let used_bindings = imported_binding_use_set(program);
+    if used_bindings.is_empty() {
+        return;
+    }
+
+    let mut replacements = BTreeMap::<usize, Statement<'a>>::new();
+    for (index, statement) in program.body.iter().enumerate() {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(details) = compatible_import_details(declaration) else {
+            continue;
+        };
+        let source = declaration.source.value.as_str().to_string();
+        match details {
+            CompatibleImportDetails::Named(named) => {
+                let kept = named
+                    .iter()
+                    .filter(|specifier| used_bindings.contains(specifier.local.as_str()))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !kept.is_empty() && kept.len() < named.len() {
+                    replacements.insert(
+                        index,
+                        simple_named_import_statement(builder, source.as_str(), kept.iter()),
+                    );
+                }
+            }
+            CompatibleImportDetails::DefaultNamed { local, named } => {
+                let keep_default = used_bindings.contains(local.as_str());
+                let kept_named = named
+                    .iter()
+                    .filter(|specifier| used_bindings.contains(specifier.local.as_str()))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                match (keep_default, kept_named.is_empty()) {
+                    (true, false) if kept_named.len() < named.len() => {
+                        replacements.insert(
+                            index,
+                            default_named_import_statement(
+                                builder,
+                                source.as_str(),
+                                local.as_str(),
+                                kept_named.iter(),
+                            ),
+                        );
+                    }
+                    (true, true) => {
+                        replacements.insert(
+                            index,
+                            default_only_import_statement(builder, source.as_str(), local.as_str()),
+                        );
+                    }
+                    (false, false) => {
+                        replacements.insert(
+                            index,
+                            simple_named_import_statement(
+                                builder,
+                                source.as_str(),
+                                kept_named.iter(),
+                            ),
+                        );
+                    }
+                    (false, true) => {}
+                    (true, false) => {}
+                }
+            }
+            CompatibleImportDetails::Default { .. }
+            | CompatibleImportDetails::Namespace { .. }
+            | CompatibleImportDetails::DefaultNamespace { .. } => {}
+        }
+    }
+
+    for (index, replacement) in replacements {
+        program.body[index] = replacement;
+    }
+}
+
+fn imported_binding_use_set(program: &Program<'_>) -> BTreeSet<String> {
+    let imported = imported_value_binding_names(program);
+    if imported.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut collector = ImportedBindingUseCollector {
+        targets: &imported,
+        used: BTreeSet::new(),
+    };
+    collector.visit_program(program);
+    collector.used
+}
+
+fn imported_value_binding_names(program: &Program<'_>) -> BTreeSet<String> {
+    let mut bindings = BTreeSet::<String>::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.import_kind != ImportOrExportKind::Value {
+            continue;
+        }
+        let Some(specifiers) = declaration.specifiers.as_ref() else {
+            continue;
+        };
+        for specifier in specifiers {
+            match specifier {
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                    bindings.insert(specifier.local.name.as_str().to_string());
+                }
+                ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                    bindings.insert(specifier.local.name.as_str().to_string());
+                }
+                ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                    if specifier.import_kind == ImportOrExportKind::Value {
+                        bindings.insert(specifier.local.name.as_str().to_string());
+                    }
+                }
+            }
+        }
+    }
+    bindings
+}
+
+struct ImportedBindingUseCollector<'a> {
+    targets: &'a BTreeSet<String>,
+    used: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for ImportedBindingUseCollector<'_> {
+    fn visit_import_declaration(&mut self, _declaration: &ImportDeclaration<'a>) {}
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_some() {
+            return;
+        }
+        for specifier in &declaration.specifiers {
+            if let Some(local) = module_export_name_text(&specifier.local)
+                && self.targets.contains(local.as_str())
+            {
+                self.used.insert(local);
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        let local = identifier.name.as_str();
+        if self.targets.contains(local) {
+            self.used.insert(local.to_string());
+        }
     }
 }
 
@@ -5682,6 +5863,71 @@ mod tests {
 
         assert!(formatted.contains("import defaultPkg, { alpha, beta as localBeta } from 'pkg';"));
         assert_eq!(formatted.matches("from 'pkg'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_prunes_unused_named_import_specifiers() {
+        let formatted = format_source_with_module_items(
+            "import { used, unused } from 'pkg';\nconsole.log(used);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { used } from 'pkg';"));
+        assert!(!formatted.contains("unused"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_imports_used_by_local_exports() {
+        let formatted = format_source_with_module_items(
+            "import { used, exported, unused } from 'pkg';\nconsole.log(used);\nexport { exported };",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { exported, used } from 'pkg';"));
+        assert!(formatted.contains("export { exported };"));
+        assert!(!formatted.contains("unused"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_all_unused_import_statement_for_side_effects() {
+        let formatted = format_source_with_module_items(
+            "import { unused } from 'pkg';\nconsole.log(1);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { unused } from 'pkg';"));
+    }
+
+    #[test]
+    fn module_item_formatting_prunes_unused_default_from_mixed_import() {
+        let formatted = format_source_with_module_items(
+            "import defaultPkg, { used, unused } from 'pkg';\nconsole.log(used);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { used } from 'pkg';"));
+        assert!(!formatted.contains("defaultPkg"));
+        assert!(!formatted.contains("unused"));
     }
 
     #[test]
