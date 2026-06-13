@@ -24,8 +24,9 @@ use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
-    PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher, match_with_cascade,
-    package_import_names_from_sources,
+    PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
+    VersionedPackageMatcher, match_with_cascade, package_import_names_from_sources,
+    package_module_source_quality,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -271,7 +272,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} cascade ownership match(es), {} audit finding(s)",
+        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} cascade ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
@@ -281,6 +282,10 @@ fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
         outcome.cascade_attributions,
         outcome.written_cascade_attributions,
         outcome.cascade_ownership_matches,
+        outcome.package_source_quality_trusted,
+        outcome.package_source_quality_weak,
+        outcome.package_source_quality_invalid,
+        outcome.package_source_quality_missing,
         outcome.audit.findings().len()
     );
     if !outcome.audit.is_clean() {
@@ -321,7 +326,19 @@ pub struct MatchPackagesOutcome {
     /// Number of cascade-match rows actually written to
     /// `package_function_attributions`. Zero when `apply=false`.
     pub written_cascade_attributions: usize,
+    pub package_source_quality_trusted: usize,
+    pub package_source_quality_weak: usize,
+    pub package_source_quality_invalid: usize,
+    pub package_source_quality_missing: usize,
     pub audit: AuditReport,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PackageModuleSourceQualityCounts {
+    trusted: usize,
+    weak: usize,
+    invalid: usize,
+    missing: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +407,10 @@ pub fn match_packages_from_connection(
     extraction.merge_into(&mut rows);
 
     let package_names = package_source_filter(&rows, &args.package_names);
+    let source_quality_counts = package_module_source_quality_counts(
+        &rows,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
     let package_sources = load_package_sources(
         connection,
         &rows,
@@ -490,6 +511,10 @@ pub fn match_packages_from_connection(
         cascade_attributions: cascade_report.attributions.len(),
         cascade_ownership_matches: cascade_report.ownership_matches.len(),
         written_cascade_attributions,
+        package_source_quality_trusted: source_quality_counts.trusted,
+        package_source_quality_weak: source_quality_counts.weak,
+        package_source_quality_invalid: source_quality_counts.invalid,
+        package_source_quality_missing: source_quality_counts.missing,
         audit,
     })
 }
@@ -514,6 +539,12 @@ fn fingerprints_from_rows(
             }
         }
         if let Some(slice) = rows.module_source_slice(module.id) {
+            if module.kind == ModuleKind::Package
+                && package_module_source_quality(module, slice.source_file_path, slice.source)
+                    == PackageModuleSourceQuality::Invalid
+            {
+                continue;
+            }
             let fps = FunctionExtractor::fingerprint(module.id, slice.source);
             if !fps.is_empty() {
                 out.insert(module.id, fps);
@@ -521,6 +552,36 @@ fn fingerprints_from_rows(
         }
     }
     out
+}
+
+fn package_module_source_quality_counts(
+    rows: &InputRows,
+    package_filter: Option<&BTreeSet<String>>,
+) -> PackageModuleSourceQualityCounts {
+    let mut counts = PackageModuleSourceQualityCounts::default();
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        if let Some(package_filter) = package_filter
+            && !module
+                .package_name
+                .as_deref()
+                .is_some_and(|package_name| package_filter.contains(package_name))
+        {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            counts.missing += 1;
+            continue;
+        };
+        match package_module_source_quality(module, slice.source_file_path, slice.source) {
+            PackageModuleSourceQuality::Trusted => counts.trusted += 1,
+            PackageModuleSourceQuality::Weak => counts.weak += 1,
+            PackageModuleSourceQuality::Invalid => counts.invalid += 1,
+        }
+    }
+    counts
 }
 
 fn match_with_cascade_scoped_by_module_hints(
@@ -3051,7 +3112,8 @@ fn rejected_package_attributions_for_unaccepted_modules(
                     && !package_match.external_importable
                     && matches!(
                         package_match.strategy,
-                        ModuleMatchStrategy::CascadeFunctionCoverage
+                        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+                            | ModuleMatchStrategy::CascadeFunctionCoverage
                             | ModuleMatchStrategy::CascadePartialFunctionCoverage
                     )
             })
@@ -4298,12 +4360,46 @@ mod tests {
 
         assert!(outcome.audit.is_clean());
         assert_eq!(outcome.loaded_package_modules, 1);
+        assert_eq!(outcome.package_source_quality_trusted, 1);
+        assert_eq!(outcome.package_source_quality_invalid, 0);
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
         assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 0);
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_reports_and_skips_invalid_package_module_slice() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "lts.allowAbsoluteUrls !== void 0) K.allowAbsoluteU",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.package_source_quality_trusted, 0);
+        assert_eq!(outcome.package_source_quality_invalid, 1);
+        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.cascade_ownership_matches, 0);
     }
 
     #[test]

@@ -186,6 +186,10 @@ pub enum ModuleMatchStrategy {
     NormalizedSourceHash,
     /// Function signatures plus string anchors matched the package source.
     FunctionSignatureAndStringAnchors,
+    /// Function signatures plus string anchors matched the package version as
+    /// an aggregate, but not one unique importable source file. This proves
+    /// package ownership only.
+    AggregateFunctionSignatureAndStringAnchors,
     /// Every function fingerprint in the module was attributed to one package
     /// version by the cascade matcher.
     CascadeFunctionCoverage,
@@ -202,6 +206,9 @@ impl ModuleMatchStrategy {
         match self {
             Self::NormalizedSourceHash => "normalized_source_hash",
             Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
+            Self::AggregateFunctionSignatureAndStringAnchors => {
+                "aggregate_function_signature_and_string_anchors"
+            }
             Self::CascadeFunctionCoverage => "cascade_function_coverage",
             Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
         }
@@ -301,6 +308,22 @@ pub struct VersionedPackageMatcherConfig {
     pub min_function_signature_matches: usize,
     /// Minimum string anchor overlap for non-source-identity matches.
     pub min_string_anchor_matches: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Coarse trust classification for a source slice attached to a package module.
+///
+/// `Invalid` slices are not parseable as a standalone module body and are
+/// usually bad byte spans recovered from a bundle. They are excluded from
+/// source/hash and cascade matching so they do not pollute package evidence.
+/// `Weak` slices are parseable but do not contain any strong token from the
+/// package path hint; the exact source/hash matcher excludes them, while
+/// callers may still feed them to weaker ownership-only paths such as cascade
+/// because minification often erases source-path names.
+pub enum PackageModuleSourceQuality {
+    Trusted,
+    Weak,
+    Invalid,
 }
 
 impl Default for VersionedPackageMatcherConfig {
@@ -1104,6 +1127,11 @@ fn fingerprint_modules_for_package(
             continue;
         };
 
+        match package_module_source_quality(module, slice.source_file_path, slice.source) {
+            PackageModuleSourceQuality::Trusted => {}
+            PackageModuleSourceQuality::Weak | PackageModuleSourceQuality::Invalid => continue,
+        }
+
         match module_match_fingerprint(module, slice.source_file_path, slice.source) {
             Ok(fingerprint) => fingerprints.push(fingerprint),
             Err(message) => {
@@ -1116,6 +1144,160 @@ fn fingerprint_modules_for_package(
         }
     }
     fingerprints
+}
+
+#[must_use]
+pub fn package_module_source_quality(
+    module: &ModuleInput,
+    source_path: &str,
+    source: &str,
+) -> PackageModuleSourceQuality {
+    if source.trim().is_empty() || !package_module_source_parses(source_path, source) {
+        return PackageModuleSourceQuality::Invalid;
+    }
+    let Some(package_name) = module.package_name.as_deref() else {
+        return PackageModuleSourceQuality::Trusted;
+    };
+    let hint_tokens = package_semantic_path_tokens(package_name, module.semantic_path.as_str());
+    if hint_tokens.is_empty() {
+        return PackageModuleSourceQuality::Trusted;
+    }
+    let normalized_source = normalize_hint_text(source);
+    if hint_tokens
+        .iter()
+        .any(|token| normalized_source.contains(token.as_str()))
+    {
+        PackageModuleSourceQuality::Trusted
+    } else {
+        PackageModuleSourceQuality::Weak
+    }
+}
+
+fn package_module_source_parses(source_path: &str, source: &str) -> bool {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(Some(Path::new(source_path)), ParseGoal::TypeScript) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            return true;
+        }
+    }
+    false
+}
+
+fn package_semantic_path_tokens(package_name: &str, semantic_path: &str) -> BTreeSet<String> {
+    let clean = semantic_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    let mut tokens = BTreeSet::new();
+    for prefix in package_semantic_path_prefixes(package_name) {
+        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
+        else {
+            continue;
+        };
+        for token in path_hint_tokens(strip_source_extension(rest)) {
+            if is_strong_path_hint_token(token.as_str()) {
+                tokens.insert(normalize_hint_text(token.as_str()));
+            }
+        }
+    }
+    tokens
+}
+
+fn package_semantic_path_prefixes(package_name: &str) -> Vec<String> {
+    let mut prefixes = vec![package_name.to_string()];
+    if let Some(unscoped) = package_name.strip_prefix('@') {
+        prefixes.push(unscoped.to_string());
+        prefixes.push(unscoped.replace('/', "-"));
+    }
+    prefixes.sort();
+    prefixes.dedup();
+    prefixes
+}
+
+fn strip_package_prefix_from_semantic_path<'a>(
+    semantic_path: &'a str,
+    prefix: &str,
+) -> Option<&'a str> {
+    if let Some(rest) = semantic_path.strip_prefix(format!("{prefix}/").as_str()) {
+        return Some(rest);
+    }
+    for marker in [format!("/{prefix}/"), format!("-{prefix}/")] {
+        if let Some(index) = semantic_path.find(marker.as_str()) {
+            return semantic_path.get(index + marker.len()..);
+        }
+    }
+    None
+}
+
+fn strip_source_extension(path: &str) -> &str {
+    for extension in [".js", ".mjs", ".cjs", ".ts", ".tsx"] {
+        if let Some(stripped) = path.strip_suffix(extension) {
+            return stripped;
+        }
+    }
+    path
+}
+
+fn path_hint_tokens(value: &str) -> BTreeSet<String> {
+    let mut tokens = BTreeSet::new();
+    let mut current = String::new();
+    let mut previous_lowercase = false;
+    for ch in value.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if current.len() >= 2 {
+                tokens.insert(current.clone());
+            }
+            current.clear();
+            previous_lowercase = false;
+            continue;
+        }
+        if ch.is_ascii_uppercase() && previous_lowercase && !current.is_empty() {
+            if current.len() >= 2 {
+                tokens.insert(current.clone());
+            }
+            current.clear();
+        }
+        current.push(ch.to_ascii_lowercase());
+        previous_lowercase = ch.is_ascii_lowercase();
+    }
+    if current.len() >= 2 {
+        tokens.insert(current);
+    }
+    tokens
+}
+
+fn is_strong_path_hint_token(token: &str) -> bool {
+    token.len() >= 4
+        && !matches!(
+            token,
+            "node"
+                | "node_modules"
+                | "module"
+                | "modules"
+                | "internal"
+                | "index"
+                | "src"
+                | "dist"
+                | "lib"
+                | "cjs"
+                | "esm"
+                | "mjs"
+                | "umd"
+                | "operators"
+                | "observable"
+        )
+}
+
+fn normalize_hint_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn module_match_fingerprint(
@@ -1506,12 +1688,14 @@ fn best_source_match(
             .then_with(|| left.0.source.source_path.cmp(&right.0.source.source_path))
     });
 
-    let best = ranked.first()?;
+    let Some(best) = ranked.first() else {
+        return best_aggregate_match(version, module, config);
+    };
     if ranked
         .get(1)
         .is_some_and(|next| next.1 == best.1 && next.2 == best.2)
     {
-        return None;
+        return best_aggregate_match(version, module, config);
     }
 
     Some(module_package_match(
@@ -1521,6 +1705,35 @@ fn best_source_match(
         best.1,
         best.2,
         best.0.source.external_importable,
+    ))
+}
+
+fn best_aggregate_match(
+    version: &PackageVersionCandidate<'_>,
+    module: &ModuleMatchFingerprint,
+    config: &VersionedPackageMatcherConfig,
+) -> Option<ModulePackageMatch> {
+    let mut function_signature_hashes = BTreeSet::new();
+    let mut string_anchors = BTreeSet::new();
+    for source in &version.sources {
+        function_signature_hashes.extend(source.function_signature_hashes.iter().cloned());
+        string_anchors.extend(source.string_anchors.iter().cloned());
+    }
+    let function_signature_matches = function_signature_hashes
+        .intersection(&module.function_signature_hashes)
+        .count();
+    let string_anchor_matches = string_anchors.intersection(&module.string_anchors).count();
+    let min_function_matches = config.min_function_signature_matches.max(3);
+    if function_signature_matches < min_function_matches
+        || string_anchor_matches < config.min_string_anchor_matches
+    {
+        return None;
+    }
+    Some(module_package_aggregate_match(
+        module,
+        version,
+        function_signature_matches,
+        string_anchor_matches,
     ))
 }
 
@@ -1600,6 +1813,29 @@ fn module_package_match(
     }
 }
 
+fn module_package_aggregate_match(
+    module: &ModuleMatchFingerprint,
+    version: &PackageVersionCandidate<'_>,
+    function_signature_matches: usize,
+    string_anchor_matches: usize,
+) -> ModulePackageMatch {
+    ModulePackageMatch {
+        module_id: module.module_id,
+        package_name: version.package_name.clone(),
+        package_version: version.package_version.clone(),
+        export_specifier: version.package_name.clone(),
+        source_path: format!(
+            "aggregate:{}@{}",
+            version.package_name, version.package_version
+        ),
+        strategy: ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors,
+        normalized_source_hash: module.normalized_source_hash.clone(),
+        function_signature_matches,
+        string_anchor_matches,
+        external_importable: false,
+    }
+}
+
 fn accepted_attribution_from_match(module_match: &ModulePackageMatch) -> PackageAttributionInput {
     let mut attribution = PackageAttributionInput::accepted_external(
         module_match.module_id,
@@ -1674,8 +1910,9 @@ mod tests {
     use reverts_observe::FindingCode;
 
     use super::{
-        BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageSource,
-        VersionedPackageMatcher, package_import_names_from_sources,
+        BestVersionMatch, ExactPackageMatcher, ModuleMatchStrategy, PackageModuleSourceQuality,
+        PackageSource, VersionedPackageMatcher, package_import_names_from_sources,
+        package_module_source_quality,
     };
 
     fn rows_with_package_source(source: &str) -> InputRows {
@@ -1690,6 +1927,76 @@ mod tests {
                 .with_source_file(1),
         );
         rows
+    }
+
+    #[test]
+    fn package_module_source_quality_rejects_unparseable_span() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-rxjs/operators/sample.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        );
+
+        let quality = package_module_source_quality(
+            &module,
+            "bundle.js",
+            "lts.allowAbsoluteUrls !== void 0) K.allowAbsoluteU",
+        );
+
+        assert_eq!(quality, PackageModuleSourceQuality::Invalid);
+    }
+
+    #[test]
+    fn package_module_source_quality_marks_parseable_missing_hint_as_weak() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-rxjs/operators/sample.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        );
+
+        let quality =
+            package_module_source_quality(&module, "bundle.js", "function unrelated(){return 1;}");
+
+        assert_eq!(quality, PackageModuleSourceQuality::Weak);
+    }
+
+    #[test]
+    fn package_module_source_quality_trusts_parseable_hint_token() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-rxjs/operators/sample.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        );
+
+        let quality =
+            package_module_source_quality(&module, "bundle.js", "function sample(){return 1;}");
+
+        assert_eq!(quality, PackageModuleSourceQuality::Trusted);
+    }
+
+    #[test]
+    fn versioned_matcher_skips_weak_path_hint_for_exact_matching() {
+        let mut rows = rows_with_package_source("function unrelated(){return 1;}");
+        rows.modules[0].semantic_path = "pkg/sample.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/sample",
+            "sample.js",
+            "function unrelated(){return 1;}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert!(report.matches.is_empty());
+        assert!(report.attributions.is_empty());
     }
 
     #[test]
@@ -1794,6 +2101,55 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.matches[0].strategy,
             ModuleMatchStrategy::NormalizedSourceHash
         );
+    }
+
+    #[test]
+    fn versioned_matcher_uses_package_aggregate_ownership_when_sources_are_split() {
+        let rows = rows_with_package_source(
+            r#"
+            function one(){return "alpha-anchor";}
+            function two(){return "beta-anchor";}
+            function three(){return "gamma-anchor";}
+            "#,
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/one",
+                "one.js",
+                r#"function one(){return "alpha-anchor";}"#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/two",
+                "two.js",
+                r#"function two(){return "beta-anchor";}"#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/three",
+                "three.js",
+                r#"function three(){return "gamma-anchor";}"#,
+            ),
+        ];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert!(
+            report.attributions.is_empty(),
+            "aggregate package ownership must not emit a single external import"
+        );
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        );
+        assert!(!report.matches[0].external_importable);
+        assert!(report.matches[0].function_signature_matches >= 3);
     }
 
     #[test]
