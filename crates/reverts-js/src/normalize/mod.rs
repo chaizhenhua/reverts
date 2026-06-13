@@ -53,6 +53,13 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 30] {
         Box::new(declarator_split::DeclaratorSplit),
         Box::new(sequence_expression_split::SequenceExpressionSplit),
         Box::new(logical_short_circuit_expanded::LogicalShortCircuitExpanded),
+        // `conditional_negation_flipped` MUST run before
+        // `return_conditional_expanded` / `conditional_statement_expanded`
+        // so the ternary still exists when we strip the leading `!`.
+        // Once those expanders convert `return c ? a : b` into an
+        // `if/else`, the conditional is gone and the negation cannot
+        // be flipped without rewriting if-statements directly.
+        Box::new(conditional_negation_flipped::ConditionalNegationFlipped),
         Box::new(conditional_statement_expanded::ConditionalStatementExpanded),
         Box::new(return_conditional_expanded::ReturnConditionalExpanded),
         Box::new(computed_to_static_member::ComputedToStaticMember),
@@ -72,7 +79,6 @@ pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 30] {
         Box::new(number_call_to_unary_plus_guarded::NumberCallToUnaryPlusGuarded),
         Box::new(nullish_equality_compacted::NullishEqualityCompacted),
         Box::new(typeof_local_undefined_guarded::TypeofLocalUndefinedGuarded),
-        Box::new(conditional_negation_flipped::ConditionalNegationFlipped),
     ]
 }
 

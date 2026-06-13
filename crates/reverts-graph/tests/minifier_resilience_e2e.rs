@@ -639,6 +639,42 @@ fn pipeline_keeps_typeof_global_distinct_from_strict_equality() {
 }
 
 #[test]
+fn pipeline_aligns_negated_conditional_with_swapped_arms() {
+    // `!c ? a : b` and `c ? b : a` are spec-equivalent: both
+    // evaluate c via ToBoolean once, return the same value for
+    // every operand. The `conditional_negation_flipped` pass
+    // canonicalises to the unnegated form so the minified and
+    // hand-written versions converge.
+    let minified = "function f(c, a, b) { return !c ? a : b; }";
+    let source = "function f(c, a, b) { return c ? b : a; }";
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "!c ? a : b must converge with c ? b : a after pipeline"
+    );
+}
+
+#[test]
+fn pipeline_aligns_finite_for_with_while_when_no_init_or_update() {
+    // `for (; cond; ) body` and `while (cond) body` are spec-equivalent.
+    // `for_to_while_finite_canonical` lifts the for to a while so both
+    // forms converge on the same AST shape and structural_anchor counts.
+    let minified = "function f(n) { for (; n > 0; ) { handle(n); n--; } }";
+    let source = "function f(n) { while (n > 0) { handle(n); n--; } }";
+    let fp_m = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(minified));
+    let fp_s = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(source));
+    assert_eq!(
+        fp_m[0].primary.ast, fp_s[0].primary.ast,
+        "for(;cond;) body must converge with while(cond) body after pipeline"
+    );
+    assert_eq!(
+        fp_m[0].primary.structural_anchor, fp_s[0].primary.structural_anchor,
+        "structural_anchor (which tracks loop counts) must also converge"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
