@@ -5825,10 +5825,9 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains(
-            "import { dirname as localDir, join as localJoin, join as otherJoin } from 'path';"
-        ));
+        assert!(formatted.contains("import { dirname, join, join as otherJoin } from 'path';"));
         assert!(formatted.contains("import * as pathNS from 'path';"));
+        assert!(formatted.contains("console.log(pathNS, join, dirname, otherJoin);"));
         assert_eq!(formatted.matches("from 'path'").count(), 2);
     }
 
@@ -5861,7 +5860,8 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import defaultPkg, { alpha, beta as localBeta } from 'pkg';"));
+        assert!(formatted.contains("import defaultPkg, { alpha, beta } from 'pkg';"));
+        assert!(formatted.contains("console.log(defaultPkg, alpha, beta);"));
         assert_eq!(formatted.matches("from 'pkg'").count(), 1);
     }
 
@@ -6024,12 +6024,8 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains(
-            "import { join as __reverts_pathNS_join, resolve as __reverts_pathNS_resolve } from 'path';"
-        ));
-        assert!(formatted.contains(
-            "console.log(__reverts_pathNS_join('a', 'b'), __reverts_pathNS_resolve('x'));"
-        ));
+        assert!(formatted.contains("import { join, resolve } from 'path';"));
+        assert!(formatted.contains("console.log(join('a', 'b'), resolve('x'));"));
         assert!(!formatted.contains("pathNS."));
     }
 
@@ -6045,8 +6041,8 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import { join as j } from 'path';"));
-        assert!(formatted.contains("console.log(j('a', 'b'));"));
+        assert!(formatted.contains("import { join } from 'path';"));
+        assert!(formatted.contains("console.log(join('a', 'b'));"));
         assert_eq!(formatted.matches("from 'path'").count(), 1);
     }
 
@@ -6095,8 +6091,8 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import * as pkgNS from 'pkg';"));
-        assert!(formatted.contains("pkgNS.join"));
+        assert!(formatted.contains("import { join } from 'pkg';"));
+        assert!(formatted.contains("console.log(join('a', 'b'));"));
     }
 
     #[test]
@@ -6288,8 +6284,9 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("export { alpha, beta };"));
-        assert!(formatted.contains("export { beta as renamed };"));
+        assert!(formatted.contains("const renamed = 2;"));
+        assert!(formatted.contains("export { renamed as beta };"));
+        assert!(formatted.contains("export { alpha, renamed };"));
         assert!(formatted.contains("export { gamma } from './gamma.js';"));
         assert_eq!(formatted.matches("export {").count(), 3);
     }
