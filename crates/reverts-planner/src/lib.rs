@@ -394,10 +394,13 @@ impl ImportExportPlanner {
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
         let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        let mut exported_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut required_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
         let mut used_lazy_module = BTreeSet::<u32>::new();
         let mut used_lazy_value = BTreeSet::<u32>::new();
+        let mut exported_lazy_module = BTreeSet::<u32>::new();
+        let mut exported_lazy_value = BTreeSet::<u32>::new();
         let accepted_externalized_packages = externalized_package_modules(program);
         let source_required_packages =
             source_required_package_modules(program, &accepted_externalized_packages);
@@ -482,6 +485,10 @@ impl ImportExportPlanner {
                     .entry(folded.source_file_id)
                     .or_default()
                     .extend(folded.stub_exports.iter().cloned());
+                exported_runtime_helper_bindings
+                    .entry(folded.source_file_id)
+                    .or_default()
+                    .extend(folded.stub_exports.iter().cloned());
                 let specifier = relative_import_specifier(
                     path,
                     runtime_helpers_path(folded.source_file_id).as_str(),
@@ -538,6 +545,10 @@ impl ImportExportPlanner {
                         {
                             has_runtime_edge_before_lazy_helpers = true;
                             used_runtime_helper_files
+                                .entry(folded.source_file_id)
+                                .or_default()
+                                .extend(effective_bindings.iter().cloned());
+                            exported_runtime_helper_bindings
                                 .entry(folded.source_file_id)
                                 .or_default()
                                 .extend(effective_bindings.iter().cloned());
@@ -674,6 +685,14 @@ impl ImportExportPlanner {
                 let bindings = bindings
                     .into_iter()
                     .filter(|binding| !lowered_helpers.contains(binding))
+                    // Runtime imports recorded by the graph can include the
+                    // LHS of cross-module writes. After we rewrite those
+                    // writes through `__reverts_set_X(...)`, a write-only `X`
+                    // must not stay in the value-import/public-export
+                    // surface. Bindings that are both written and read in the
+                    // lowered source are handled by `remaining_runtime_helpers`
+                    // above, so this only removes setter-only leftovers.
+                    .filter(|binding| !written_runtime_helpers.contains(binding))
                     .filter(|binding| !remaining_runtime_helpers.contains(binding))
                     .filter(|binding| !planned_bindings.contains(binding))
                     .filter(|binding| !local_source_definitions.contains(binding))
@@ -789,6 +808,10 @@ impl ImportExportPlanner {
                         .entry(lowered_source.source_file_id)
                         .or_default()
                         .extend(remaining_runtime_helpers.iter().cloned());
+                    exported_runtime_helper_bindings
+                        .entry(lowered_source.source_file_id)
+                        .or_default()
+                        .extend(remaining_runtime_helpers.iter().cloned());
                     required_runtime_helper_bindings
                         .entry(lowered_source.source_file_id)
                         .or_default()
@@ -805,6 +828,12 @@ impl ImportExportPlanner {
                 }
                 if lazy_helper_names.contains(&"lazyValue") {
                     used_lazy_value.insert(lowered_source.source_file_id);
+                }
+                if lazy_helper_names.contains(&"lazyModule") {
+                    exported_lazy_module.insert(lowered_source.source_file_id);
+                }
+                if lazy_helper_names.contains(&"lazyValue") {
+                    exported_lazy_value.insert(lowered_source.source_file_id);
                 }
                 let specifier = relative_import_specifier(
                     path,
@@ -856,6 +885,10 @@ impl ImportExportPlanner {
                     continue;
                 }
                 used_runtime_helper_files
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(bindings.iter().cloned());
+                exported_runtime_helper_bindings
                     .entry(source_file_id)
                     .or_default()
                     .extend(bindings.iter().cloned());
@@ -1120,6 +1153,10 @@ impl ImportExportPlanner {
                 .entry(entrypoint.source_file_id)
                 .or_default()
                 .insert(entrypoint.callee.clone());
+            exported_runtime_helper_bindings
+                .entry(entrypoint.source_file_id)
+                .or_default()
+                .insert(entrypoint.callee.clone());
             required_runtime_helper_bindings
                 .entry(entrypoint.source_file_id)
                 .or_default()
@@ -1131,13 +1168,17 @@ impl ImportExportPlanner {
                 continue;
             };
             let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
+            let public_helper_bindings = exported_runtime_helper_bindings
+                .get(source_file_id)
+                .cloned()
+                .unwrap_or_default();
             let migrations_for_source =
                 runtime_var_migrations.primary_bindings_for_source(*source_file_id);
             let reexported_bindings_for_source =
                 runtime_var_migrations.reexported_bindings_for_source(*source_file_id);
             let runtime_reexports_for_source = reexported_bindings_for_source
                 .iter()
-                .filter(|(binding, _owner)| helper_bindings.contains(*binding))
+                .filter(|(binding, _owner)| public_helper_bindings.contains(*binding))
                 .map(|(binding, owner)| (binding.clone(), *owner))
                 .collect::<BTreeMap<_, _>>();
             let entrypoint = prelude
@@ -1148,6 +1189,9 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .cloned()
                 .unwrap_or_else(|| helper_bindings.clone());
+            if let Some(setter_targets) = used_runtime_helper_setters.get(source_file_id) {
+                root_bindings.extend(setter_targets.iter().cloned());
+            }
             for binding in reexported_bindings_for_source.keys() {
                 root_bindings.remove(binding);
             }
@@ -1268,13 +1312,15 @@ impl ImportExportPlanner {
             }
             let emits_lazy_module = used_lazy_module.contains(source_file_id);
             let emits_lazy_value = used_lazy_value.contains(source_file_id);
+            let exports_lazy_module = exported_lazy_module.contains(source_file_id);
+            let exports_lazy_value = exported_lazy_value.contains(source_file_id);
             if emits_lazy_module {
                 file.push_source(lazy_module_helper_source());
             }
             if emits_lazy_value {
                 file.push_source(lazy_value_helper_source());
             }
-            let mut exported_bindings = helper_bindings.clone();
+            let mut exported_bindings = public_helper_bindings.clone();
             exported_bindings.extend(
                 setter_bindings
                     .iter()
@@ -1287,10 +1333,10 @@ impl ImportExportPlanner {
             for binding in runtime_reexports_for_source.keys() {
                 exported_bindings.remove(binding);
             }
-            if emits_lazy_module {
+            if exports_lazy_module {
                 exported_bindings.insert(BindingName::new("lazyModule"));
             }
-            if emits_lazy_value {
+            if exports_lazy_value {
                 exported_bindings.insert(BindingName::new("lazyValue"));
             }
             if !exported_bindings.is_empty() {
@@ -1325,7 +1371,7 @@ impl ImportExportPlanner {
                     file.add_export_with_source_backed(binding.clone(), true);
                 }
             }
-            for binding in helper_bindings
+            for binding in public_helper_bindings
                 .iter()
                 .filter(|binding| !reexported_bindings_for_source.contains_key(*binding))
                 .cloned()
@@ -1351,8 +1397,8 @@ impl ImportExportPlanner {
                 file.add_export_with_source_backed(setter, true);
             }
             for lazy_name in [
-                emits_lazy_module.then_some("lazyModule"),
-                emits_lazy_value.then_some("lazyValue"),
+                exports_lazy_module.then_some("lazyModule"),
+                exports_lazy_value.then_some("lazyValue"),
             ]
             .into_iter()
             .flatten()
@@ -4321,6 +4367,11 @@ fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usi
     {
         return false;
     }
+    if identifier_is_declaration_name_after_keyword(source, start, "class")
+        || identifier_is_declaration_name_after_keyword(source, start, "function")
+    {
+        return false;
+    }
 
     let after = skip_ws(bytes, end);
     let before = previous_non_ws(bytes, start).and_then(|index| bytes.get(index));
@@ -4350,6 +4401,29 @@ fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usi
     }
 
     true
+}
+
+fn identifier_is_declaration_name_after_keyword(source: &str, start: usize, keyword: &str) -> bool {
+    let bytes = source.as_bytes();
+    let Some(keyword_end) = previous_non_ws(bytes, start) else {
+        return false;
+    };
+    let Some(keyword_start) = keyword_end
+        .checked_add(1)
+        .and_then(|end| end.checked_sub(keyword.len()))
+    else {
+        return false;
+    };
+    if bytes.get(keyword_start..keyword_end + 1) != Some(keyword.as_bytes()) {
+        return false;
+    }
+    let before = keyword_start
+        .checked_sub(1)
+        .and_then(|index| bytes.get(index))
+        .copied();
+    let after = bytes.get(keyword_end + 1).copied();
+    before.is_none_or(|byte| !is_identifier_continue(byte))
+        && after.is_some_and(|byte| byte.is_ascii_whitespace())
 }
 
 fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
@@ -9514,7 +9588,8 @@ mod tests {
     use super::{
         CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, SourceCompilerStrategy,
         inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
-        lower_runtime_helpers, purify_private_runtime_lazy_initializers,
+        lower_runtime_helpers, parse_generated_named_export_statement,
+        purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -12175,9 +12250,11 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("export {"))
             .expect("helper should export runtime bindings");
-        assert!(export_line.contains("__reverts_set_yA"));
-        assert!(export_line.contains("main"));
-        assert!(export_line.contains("yA"));
+        let exports = parse_generated_named_export_statement(export_line)
+            .expect("helper should emit a generated export list");
+        assert!(exports.contains(&BindingName::new("__reverts_set_yA")));
+        assert!(exports.contains(&BindingName::new("main")));
+        assert!(!exports.contains(&BindingName::new("yA")));
     }
 
     #[test]
@@ -12563,6 +12640,28 @@ mod tests {
     }
 
     #[test]
+    fn runtime_import_identifier_scan_ignores_setter_class_expression_name() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "var init = lazyValue(() => { __reverts_set_$F(class $F extends qP8 { method() { return qP8; } }); });",
+        );
+
+        assert!(identifiers.contains("__reverts_set_$F"));
+        assert!(identifiers.contains("qP8"));
+        assert!(!identifiers.contains("$F"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_keeps_later_read_after_setter_class_expression() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "var init = lazyValue(() => { __reverts_set_kr6(class kr6 {}); az.Hooks = kr6; });",
+        );
+
+        assert!(identifiers.contains("__reverts_set_kr6"));
+        assert!(identifiers.contains("az"));
+        assert!(identifiers.contains("kr6"));
+    }
+
+    #[test]
     fn call_identifier_scan_keeps_direct_initializer_calls_with_local_name_collision() {
         let identifiers = super::call_identifiers_in_source(
             "const local = ({ e3 }) => e3;\n\
@@ -12674,7 +12773,7 @@ mod tests {
         assert!(helper_source.contains("shared = buildShared();"));
         assert!(helper_source.contains("var initShared = lazyValue(() => {"));
         assert!(helper_source.contains("function lazyValue(factory) {"));
-        assert!(helper_source.contains("export { initShared, lazyValue, shared };"));
+        assert!(helper_source.contains("export { initShared, shared };"));
     }
 
     #[test]
@@ -13348,8 +13447,10 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("export {"))
             .expect("helper should export runtime bindings");
-        assert!(export_line.contains("__reverts_set_shared"));
-        assert!(export_line.contains("shared"));
+        let exports = parse_generated_named_export_statement(export_line)
+            .expect("helper should emit a generated export list");
+        assert!(exports.contains(&BindingName::new("__reverts_set_shared")));
+        assert!(exports.contains(&BindingName::new("shared")));
     }
 
     #[test]
@@ -13398,8 +13499,10 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("export {"))
             .expect("helper should export runtime bindings");
-        assert!(export_line.contains("__reverts_set_shared"));
-        assert!(export_line.contains("shared"));
+        let exports = parse_generated_named_export_statement(export_line)
+            .expect("helper should emit a generated export list");
+        assert!(exports.contains(&BindingName::new("__reverts_set_shared")));
+        assert!(!exports.contains(&BindingName::new("shared")));
     }
 
     #[test]
@@ -13522,7 +13625,7 @@ mod tests {
         assert!(helper_source.contains("function lazyValue(factory) {"));
         assert!(helper_source.contains("shared = Date.now()"));
         assert!(!helper_source.contains("__reverts_set_shared"));
-        assert!(helper_source.contains("export { initShared, lazyValue, shared };"));
+        assert!(helper_source.contains("export { initShared, shared };"));
     }
 
     #[test]
