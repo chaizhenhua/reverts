@@ -106,6 +106,7 @@ pub enum NormalizationPassId {
     TypeofLocalUndefinedGuarded,
     ConditionalNegationFlipped,
     NullishAssignmentCompacted,
+    EmptyElseBlockRemoved,
 }
 
 impl NormalizationPassId {
@@ -144,6 +145,7 @@ impl NormalizationPassId {
             Self::TypeofLocalUndefinedGuarded => "typeof_local_undefined_guarded",
             Self::ConditionalNegationFlipped => "conditional_negation_flipped",
             Self::NullishAssignmentCompacted => "nullish_assignment_compacted",
+            Self::EmptyElseBlockRemoved => "empty_else_block_removed",
         }
     }
 }
