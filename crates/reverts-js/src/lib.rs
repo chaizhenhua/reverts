@@ -698,6 +698,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         );
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
+        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -4093,6 +4094,118 @@ fn empty_export_statement<'a>(builder: &AstBuilder<'a>) -> Statement<'a> {
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SimpleNamedImportSpecifier {
+    imported: String,
+    local: String,
+}
+
+fn coalesce_simple_named_imports_in_program<'a>(
+    program: &mut Program<'a>,
+    builder: &AstBuilder<'a>,
+) {
+    let mut specifiers_by_source = BTreeMap::<String, BTreeSet<SimpleNamedImportSpecifier>>::new();
+    let mut first_index_by_source = BTreeMap::<String, usize>::new();
+    let mut duplicate_indices = Vec::<usize>::new();
+
+    for (index, statement) in program.body.iter().enumerate() {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(specifiers) = simple_named_import_specifiers(declaration) else {
+            continue;
+        };
+        let source = declaration.source.value.as_str().to_string();
+        specifiers_by_source
+            .entry(source.clone())
+            .or_default()
+            .extend(specifiers);
+        use std::collections::btree_map::Entry;
+        match first_index_by_source.entry(source) {
+            Entry::Vacant(entry) => {
+                entry.insert(index);
+            }
+            Entry::Occupied(_) => {
+                duplicate_indices.push(index);
+            }
+        }
+    }
+
+    if duplicate_indices.is_empty() {
+        return;
+    }
+
+    for (source, index) in first_index_by_source {
+        let Some(specifiers) = specifiers_by_source.get(source.as_str()) else {
+            continue;
+        };
+        program.body[index] =
+            simple_named_import_statement(builder, source.as_str(), specifiers.iter());
+    }
+
+    for index in duplicate_indices.iter().rev() {
+        program.body.remove(*index);
+    }
+}
+
+fn simple_named_import_specifiers(
+    declaration: &ImportDeclaration<'_>,
+) -> Option<BTreeSet<SimpleNamedImportSpecifier>> {
+    if declaration.import_kind != ImportOrExportKind::Value
+        || declaration.phase.is_some()
+        || declaration.with_clause.is_some()
+    {
+        return None;
+    }
+    let specifiers = declaration.specifiers.as_ref()?;
+    if specifiers.is_empty() {
+        return None;
+    }
+
+    let mut out = BTreeSet::<SimpleNamedImportSpecifier>::new();
+    for specifier in specifiers {
+        let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+            return None;
+        };
+        if specifier.import_kind != ImportOrExportKind::Value {
+            return None;
+        }
+        out.insert(SimpleNamedImportSpecifier {
+            imported: module_export_name_text(&specifier.imported)?,
+            local: specifier.local.name.as_str().to_string(),
+        });
+    }
+    Some(out)
+}
+
+fn simple_named_import_statement<'a, 'b>(
+    builder: &AstBuilder<'a>,
+    source: &str,
+    specifiers: impl Iterator<Item = &'b SimpleNamedImportSpecifier>,
+) -> Statement<'a> {
+    let mut generated_specifiers = builder.vec();
+    for specifier in specifiers {
+        let imported =
+            builder.module_export_name_identifier_name(SPAN, specifier.imported.as_str());
+        let local = builder.binding_identifier(SPAN, specifier.local.as_str());
+        generated_specifiers.push(builder.import_declaration_specifier_import_specifier(
+            SPAN,
+            imported,
+            local,
+            ImportOrExportKind::Value,
+        ));
+    }
+    let source = builder.string_literal(SPAN, source, None);
+    Statement::ImportDeclaration(builder.alloc_import_declaration(
+        SPAN,
+        Some(generated_specifiers),
+        source,
+        None,
+        NONE,
+        ImportOrExportKind::Value,
+    ))
+}
+
 fn coalesce_simple_local_named_exports_in_program<'a>(
     program: &mut Program<'a>,
     builder: &AstBuilder<'a>,
@@ -4456,6 +4569,42 @@ mod tests {
         assert!(formatted.contains("import * as pkg from 'pkg';"));
         assert!(formatted.contains("const answer = pkg.answer;"));
         assert!(formatted.contains("export { answer };"));
+    }
+
+    #[test]
+    fn module_item_formatting_coalesces_named_imports_by_source() {
+        let formatted = format_source_with_module_items(
+            "import { join as localJoin } from 'path';\nimport * as pathNS from 'path';\nimport { dirname as localDir, join as otherJoin } from 'path';\nconsole.log(pathNS, localJoin, localDir, otherJoin);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains(
+            "import { dirname as localDir, join as localJoin, join as otherJoin } from 'path';"
+        ));
+        assert!(formatted.contains("import * as pathNS from 'path';"));
+        assert_eq!(formatted.matches("from 'path'").count(), 2);
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_default_imports_separate() {
+        let formatted = format_source_with_module_items(
+            "import defaultPkg from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta } from 'pkg';\nconsole.log(defaultPkg, alpha, beta);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import defaultPkg from 'pkg';"));
+        assert!(formatted.contains("import { alpha, beta } from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 2);
     }
 
     #[test]
