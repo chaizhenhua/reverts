@@ -260,7 +260,6 @@ pub enum CompilerKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompilerEvidence {
     Identifier(String),
-    SourcePattern(&'static str),
     MinifiedLayout,
     TopLevelIife(AstWrapperKind),
 }

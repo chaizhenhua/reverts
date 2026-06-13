@@ -529,15 +529,13 @@ fn detect_module_compiler_profile(
         identifiers,
         ROLLUP_RUNTIME_IDENTIFIERS,
         &mut evidence,
-    ) || collect_source_pattern_evidence(source, ROLLUP_SOURCE_PATTERNS, &mut evidence)
-    {
+    ) {
         CompilerKind::Rollup
     } else if collect_runtime_identifier_evidence(
         identifiers,
         BABEL_RUNTIME_IDENTIFIERS,
         &mut evidence,
-    ) || collect_source_pattern_evidence(source, BABEL_SOURCE_PATTERNS, &mut evidence)
-    {
+    ) {
         CompilerKind::Babel
     } else if minified {
         CompilerKind::Terser
@@ -549,8 +547,7 @@ fn detect_module_compiler_profile(
 }
 
 /// Identifier-based detection. Runtime helper names are accepted only when the
-/// AST fact extractor reports them as identifier evidence; raw source text is
-/// reserved for explicit source-pattern detectors.
+/// AST fact extractor reports them as identifier evidence.
 fn collect_runtime_identifier_evidence(
     identifiers: &BTreeSet<String>,
     candidates: &[&'static str],
@@ -560,21 +557,6 @@ fn collect_runtime_identifier_evidence(
     for candidate in candidates {
         if identifiers.contains(*candidate) {
             evidence.push(CompilerEvidence::Identifier((*candidate).to_string()));
-            matched = true;
-        }
-    }
-    matched
-}
-
-fn collect_source_pattern_evidence(
-    source: &str,
-    candidates: &[&'static str],
-    evidence: &mut Vec<CompilerEvidence>,
-) -> bool {
-    let mut matched = false;
-    for candidate in candidates {
-        if source.contains(*candidate) {
-            evidence.push(CompilerEvidence::SourcePattern(candidate));
             matched = true;
         }
     }
@@ -636,8 +618,6 @@ pub const ROLLUP_RUNTIME_IDENTIFIERS: &[&str] = &[
     "_interopDefaultLegacy",
 ];
 
-const ROLLUP_SOURCE_PATTERNS: &[&str] = &["Object.freeze"];
-
 pub const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
     "_interopRequireDefault",
     "_interopRequireWildcard",
@@ -660,19 +640,6 @@ pub const BABEL_RUNTIME_IDENTIFIERS: &[&str] = &[
 /// and is re-exported here as the single stable public surface for callers
 /// outside `reverts-js`.
 pub use reverts_js::normalize::bundler_wrapper_unwrapped::ESBUILD_WRAPPER_NAMES;
-
-/// Source-level fingerprints that mark Babel-emitted CJS/JSX output without
-/// requiring a runtime helper identifier to be present. These patterns are
-/// intentionally checked *after* webpack/esbuild/rollup runtime identifiers
-/// so cases that any of those bundlers also emit get attributed to the
-/// correct producer first.
-const BABEL_SOURCE_PATTERNS: &[&str] = &[
-    "Object.defineProperty(exports, \"__esModule\"",
-    "from \"react/jsx-runtime\"",
-    "from \"react/jsx-dev-runtime\"",
-    "/jsx-runtime\"",
-    "/jsx-dev-runtime\"",
-];
 
 fn resolve_package_imports(
     model: &ProgramModel,
@@ -1058,12 +1025,8 @@ mod tests {
             CompilerKind::Esbuild
         );
         assert_eq!(
-            detect_module_compiler_profile(
-                "Object.freeze({ answer: 42 })",
-                &BTreeSet::new(),
-                &no_wrappers
-            )
-            .compiler,
+            detect_module_compiler_profile("", &identifiers(["commonjsGlobal"]), &no_wrappers)
+                .compiler,
             CompilerKind::Rollup
         );
         assert_eq!(
@@ -1171,10 +1134,10 @@ mod tests {
     }
 
     #[test]
-    fn babel_es_module_marker_alone_classifies_as_babel() {
-        // CJS modules emitted by Babel/swc/tsc consistently include the
-        // `Object.defineProperty(exports, "__esModule", ...)` marker even when
-        // no `_interopRequireDefault` helper appears (e.g. re-export forms).
+    fn babel_es_module_marker_alone_stays_unknown() {
+        // The `Object.defineProperty(exports, "__esModule", ...)` marker is a
+        // common CJS artifact and is not enough evidence without a Babel
+        // helper identifier extracted from the AST facts.
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(
             1,
@@ -1196,15 +1159,15 @@ mod tests {
                 .compiler_profile()
                 .module(ModuleId(1))
                 .compiler,
-            CompilerKind::Babel,
+            CompilerKind::Unknown,
         );
     }
 
     #[test]
-    fn babel_jsx_runtime_import_alone_classifies_as_babel() {
-        // The `react/jsx-runtime` automatic JSX runtime import is the
-        // signature output of Babel's @babel/plugin-transform-react-jsx
-        // when no transpiler-specific runtime is present.
+    fn babel_jsx_runtime_import_alone_stays_unknown() {
+        // JSX runtime import specifiers are ordinary dependency edges. They
+        // do not prove Babel without a Babel helper identifier extracted from
+        // the AST facts.
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(
             1,
@@ -1226,7 +1189,7 @@ mod tests {
                 .compiler_profile()
                 .module(ModuleId(1))
                 .compiler,
-            CompilerKind::Babel,
+            CompilerKind::Unknown,
         );
     }
 

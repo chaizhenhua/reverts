@@ -1493,9 +1493,9 @@ fn control_flow_node_kind(statement: &Statement<'_>) -> ControlFlowNodeKind {
     }
 }
 
-fn parse_options_for(source_type: oxc_span::SourceType) -> ParseOptions {
+fn parse_options_for(_source_type: oxc_span::SourceType) -> ParseOptions {
     ParseOptions {
-        allow_return_outside_function: source_type.is_script(),
+        allow_return_outside_function: true,
         ..Default::default()
     }
 }

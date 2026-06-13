@@ -1,14 +1,12 @@
 //! L7 Hungarian global assignment correctness fixture per design spec §12.
 //!
-//! Builds a synthetic 10-function bundle where each function has exactly TWO
-//! candidates — one from pkg_a (via primary exact tier) and one from pkg_b
-//! (via exact-alternate tier). Greedy tier-ordering would naively prefer the
-//! primary-exact candidate for every function; Hungarian's globally-optimal
-//! assignment should produce a valid complete assignment of all 10 functions.
+//! Builds synthetic 10-function bundles where the strict exact candidate set
+//! still needs Hungarian one-to-one assignment to avoid reusing package
+//! functions.
 //!
 //! Because pkg_a covers the first 5 slots via primary-exact and pkg_b covers
-//! the last 5 slots via primary-exact (with crossed alternates), the optimal
-//! assignment is deterministically 5 to pkg_a and 5 to pkg_b.
+//! the last 5 slots via primary-exact, the optimal split is deterministically
+//! 5 to pkg_a and 5 to pkg_b.
 
 use reverts_ir::{
     AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId, NormalizationPassId,
@@ -72,13 +70,10 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
     };
 
     // Slot layout:
-    //   Slots 0..5  → pkg_a is unique at PRIMARY_BASE+slot;
-    //                  pkg_b is unique at ALT_BASE+slot.
-    //   Slots 5..10 → pkg_b is unique at PRIMARY_BASE+slot;
-    //                  pkg_a is unique at ALT_BASE+slot.
-    //
-    // Result: slots 0..5 prefer pkg_a (exact > exact-alternate in weight),
-    //         slots 5..10 prefer pkg_b. Hungarian assigns 5 to each.
+    //   Slots 0..5  → pkg_a is unique at PRIMARY_BASE+slot.
+    //   Slots 5..10 → pkg_b is unique at PRIMARY_BASE+slot.
+    // Alternate hashes are present in the index and bundle fingerprints but
+    // are intentionally outside the strict exact pipeline.
     for slot in 0..10u64 {
         let primary_hash = PRIMARY_BASE + slot;
         let alt_hash = ALT_BASE + slot;
@@ -88,8 +83,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
         let pkg_b_fn_id = 100 + slot;
 
         if slot < 5 {
-            // Slots 0-4: pkg_a appears at primary hash (try_exact → rank 0)
-            //            pkg_b appears at alt hash     (try_exact_alternate → rank 1)
+            // Slots 0-4: pkg_a appears at the primary hash.
             idx.insert_exact(
                 ExactKey {
                     param_count: 1,
@@ -121,8 +115,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                 },
             );
         } else {
-            // Slots 5-9: pkg_b appears at primary hash (try_exact → rank 0)
-            //            pkg_a appears at alt hash     (try_exact_alternate → rank 1)
+            // Slots 5-9: pkg_b appears at the primary hash.
             idx.insert_exact(
                 ExactKey {
                     param_count: 1,
@@ -180,8 +173,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
 
     assert_eq!(count_a + count_b, 10, "all assignments must land in a or b");
 
-    // Slots 0-4 prefer pkg_a (primary-exact, rank 0, higher weight).
-    // Slots 5-9 prefer pkg_b (primary-exact, rank 0, higher weight).
+    // Slots 0-4 match pkg_a and slots 5-9 match pkg_b.
     // Because each (package, external_function_id) is unique and the
     // Hungarian assignment maximises total weight, the optimal split is 5/5.
     assert_eq!(
@@ -194,12 +186,11 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
     );
 }
 
-/// Verify that when both packages have equal-weight candidates for every
-/// bundle function AND each package has exactly 5 unique functions (shared
-/// across all 10 slots), the Hungarian assignment still produces a complete
-/// 10-assignment result — at least one match per package.
+/// Verify that reused exact candidate columns are assigned only once. With
+/// strict primary exact matching, alternates do not add extra columns, so only
+/// the five unique pkg_x functions can be chosen.
 #[test]
-fn hungarian_assigns_all_fps_when_candidates_overlap() {
+fn hungarian_assigns_reused_exact_columns_once() {
     let mut idx = InMemoryFingerprintIndex::new();
     let pkg_a = PackageId {
         name: "x".into(),
@@ -210,11 +201,8 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
         version: "1.0".into(),
     };
 
-    // 5 pkg_a functions (fn 0..4), each covering ALL 10 slots via structural key,
-    // and 5 pkg_b functions (fn 5..9), each covering ALL 10 slots.
-    // The structural-only tier for each fp sees multiple candidates → rejects.
-    // Instead, use the exact tier with unique (per-slot) hashes; each slot maps
-    // to one pkg_a and one pkg_b function.
+    // Each primary exact hash maps to one of five reused pkg_x functions.
+    // Matching the same package function twice is forbidden by the assignment.
     for slot in 0..10u64 {
         let a_fn_id = slot % 5; // 5 unique pkg_a functions, reused across slots
         let b_fn_id = 5 + (slot % 5); // 5 unique pkg_b functions, reused across slots
@@ -237,7 +225,8 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
                 external_importable: true,
             },
         );
-        // Slot's alt hash → pkg_b candidate (unique per slot)
+        // Slot's alternate hash → pkg_y candidate. It must not affect the
+        // strict primary exact candidate set.
         idx.insert_exact(
             ExactKey {
                 param_count: 1,
@@ -274,16 +263,13 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
 
     let assignments = assign_globally(&fps, &idx);
 
-    // With 5 unique pkg_a functions and 5 unique pkg_b functions across 10 slots,
-    // Hungarian assigns at most 5 to pkg_a and at most 5 to pkg_b (uniqueness
-    // constraint). The globally-optimal assignment uses all 10 unique columns →
-    // exactly 5 to pkg_a and 5 to pkg_b.
     assert_eq!(
         assignments.len(),
         10,
         "expected 10 assignments, got {}",
         assignments.len()
     );
+    let chosen_count = assignments.iter().filter(|a| a.chosen.is_some()).count();
     let count_a = assignments
         .iter()
         .filter(|a| a.chosen_package_name() == Some("x"))
@@ -292,7 +278,7 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
         .iter()
         .filter(|a| a.chosen_package_name() == Some("y"))
         .count();
-    assert_eq!(count_a + count_b, 10);
-    assert!(count_a >= 1, "pkg_x must receive at least one match");
-    assert!(count_b >= 1, "pkg_y must receive at least one match");
+    assert_eq!(chosen_count, 5);
+    assert_eq!(count_a, 5);
+    assert_eq!(count_b, 0);
 }

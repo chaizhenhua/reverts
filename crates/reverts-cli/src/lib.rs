@@ -23,8 +23,9 @@ use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
-    PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
-    match_packages_with_pipeline, package_import_names_from_sources, package_module_source_quality,
+    PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource,
+    VersionedPackageMatchReport, match_packages_with_pipeline, package_import_names_from_sources,
+    package_module_source_quality,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -421,14 +422,17 @@ pub fn match_packages_from_connection(
         args.materialize_package_sources,
         args.apply,
     )?;
-    let pipeline_report = match_packages_with_pipeline(
-        &rows,
-        &package_sources,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
+    let pipeline_report = if package_sources.is_empty() && package_names.is_empty() {
+        empty_package_matching_pipeline_report()
+    } else {
+        match_packages_with_pipeline(
+            &rows,
+            &package_sources,
+            (!args.package_names.is_empty()).then_some(&package_names),
+        )
+    };
     let report = pipeline_report.package_report;
     let cascade_report = pipeline_report.cascade_report;
-    let structural_bag_report = pipeline_report.structural_bag_report;
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
         // Persist synthetic modules first so the FK from
@@ -481,7 +485,6 @@ pub fn match_packages_from_connection(
     let mut audit = extraction_audit;
     audit.extend(report.audit);
     audit.extend(cascade_report.audit);
-    audit.extend(structural_bag_report.audit);
     let audit = dedup_audit_report(audit);
 
     Ok(MatchPackagesOutcome {
@@ -505,6 +508,23 @@ pub fn match_packages_from_connection(
         package_source_quality_missing: source_quality_counts.missing,
         audit,
     })
+}
+
+fn empty_package_matching_pipeline_report() -> PackageMatchingPipelineReport {
+    PackageMatchingPipelineReport {
+        package_report: VersionedPackageMatchReport {
+            attributions: Vec::new(),
+            surfaces: Vec::new(),
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        },
+        cascade_report: CascadeMatchReport {
+            attributions: Vec::new(),
+            ownership_matches: Vec::new(),
+            audit: AuditReport::default(),
+        },
+    }
 }
 
 fn package_module_source_quality_counts(
@@ -1395,6 +1415,10 @@ fn load_package_sources(
     materialize_package_sources: bool,
     persist_materialized_package_sources: bool,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
+    if package_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let has_package_source_cache = sqlite_table_exists(connection, "package_source_cache")
         .map_err(MatchPackagesError::QueryPackageSources)?;
     if !has_package_source_cache && package_source_roots.is_empty() && !materialize_package_sources
@@ -4039,6 +4063,38 @@ mod tests {
     }
 
     #[test]
+    fn load_package_sources_skips_cache_when_no_package_scope_exists() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content, content_hash, fetched_at, expires_at)
+                VALUES
+                    ('huge', '1.0.0', 'index.js', 'export const value = 1;', 'h', 'now', 'later');
+                ",
+            )
+            .expect("create package source cache");
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+
+        let loaded =
+            load_package_sources(&mut connection, &rows, &BTreeSet::new(), &[], false, false)
+                .expect("empty package scope should be accepted");
+
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
     fn local_package_source_collection_prefers_compiled_runtime_family_over_src_ts() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let package_dir = tempdir.path().join("node_modules/pkg");
@@ -4381,6 +4437,46 @@ mod tests {
     }
 
     #[test]
+    fn match_packages_skips_cache_and_pipeline_when_no_package_scope_exists() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("app.js"),
+            "function local(){return 1;}",
+            &[(
+                "unused",
+                "1.0.0",
+                "index.js",
+                "export function unused(){return 1;}",
+            )],
+        );
+        connection
+            .execute_batch(
+                "DELETE FROM modules WHERE id = 10;
+                 INSERT INTO modules (id, file_id, original_name, semantic_name, module_category,
+                                      package_name, package_version, byte_start, byte_end)
+                 VALUES (10, 1, 'app', 'src/app', 'application', NULL, NULL, 0, 0);",
+            )
+            .expect("seed application module");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_modules, 0);
+        assert_eq!(outcome.loaded_package_sources, 0);
+        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.cascade_attributions, 0);
+    }
+
+    #[test]
     fn match_packages_dry_run_does_not_write_attribution() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
@@ -4442,7 +4538,11 @@ mod tests {
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
 
-        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert!(
+            outcome.audit.has(FindingCode::AstFactExtractionFailed),
+            "{:?}",
+            outcome.audit.findings()
+        );
         assert_eq!(outcome.package_source_quality_trusted, 0);
         assert_eq!(outcome.package_source_quality_invalid, 1);
         assert_eq!(outcome.matched_modules, 0);
@@ -5072,8 +5172,8 @@ mod tests {
                     (id, file_id, original_name, semantic_name, module_category,
                      package_name, package_version, byte_start, byte_end)
                 VALUES
-                    (11, 2, 'one', 'pkg/one.js', 'package', 'pkg', NULL, NULL, NULL),
-                    (12, 3, 'two', 'pkg/two.js', 'package', 'pkg', NULL, NULL, NULL);
+                    (11, 2, 'one', 'pkg/one.js', 'package', 'pkg', '1.2.3', NULL, NULL),
+                    (12, 3, 'two', 'pkg/two.js', 'package', 'pkg', '1.2.3', NULL, NULL);
                 INSERT INTO module_dependencies (module_id, dependency_id)
                 VALUES (10, 11), (10, 12);
                 ",
@@ -5400,7 +5500,11 @@ mod tests {
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
 
-        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert!(
+            outcome.audit.has(FindingCode::AstFactExtractionFailed),
+            "{:?}",
+            outcome.audit.findings()
+        );
         assert_eq!(outcome.loaded_package_modules, 2);
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);

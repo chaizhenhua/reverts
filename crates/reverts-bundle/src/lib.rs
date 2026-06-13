@@ -17,7 +17,7 @@ pub use merge::{MergeOutput, merge_classification};
 use std::path::Path;
 
 use reverts_input::{InputRows, ModuleInput};
-use reverts_observe::AuditReport;
+use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 
 /// Result of running the extractor over an entire `InputRows`.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,7 +75,22 @@ pub fn extract(input: &InputRows) -> BundleExtraction {
         let Some(source) = source_file.source.as_deref() else {
             continue;
         };
-        let classification = classifier::classify(Path::new(&source_file.path), source);
+        let classification = match classifier::classify(Path::new(&source_file.path), source) {
+            Ok(classification) => classification,
+            Err(message) => {
+                audit.push(
+                    AuditFinding::error(
+                        FindingCode::AstFactExtractionFailed,
+                        format!(
+                            "bundle classifier could not parse {}: {message}",
+                            source_file.path
+                        ),
+                    )
+                    .with_module(source_file.id.to_string()),
+                );
+                continue;
+            }
+        };
         let merge_output = merge::merge_classification(
             source_file.id,
             &input.modules,
@@ -137,6 +152,23 @@ mod public_api_tests {
             extraction.classifications.get(&1),
             Some(&BundleClassification::Plain)
         );
+    }
+
+    #[test]
+    fn extract_parse_error_records_audit_without_plain_classification() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "broken.js",
+            Some("function bad( { )".into()),
+        ));
+
+        let extraction = extract(&rows);
+
+        assert!(extraction.new_modules.is_empty());
+        assert!(extraction.updated_modules.is_empty());
+        assert!(extraction.audit.has(FindingCode::AstFactExtractionFailed));
+        assert!(!extraction.classifications.contains_key(&1));
     }
 
     #[test]

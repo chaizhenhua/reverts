@@ -2,11 +2,7 @@ use reverts_ir::{FunctionFingerprint, FunctionId};
 use reverts_package_index::PackageFingerprintIndex;
 
 use crate::hungarian::assign_max_weight;
-use crate::tier::{
-    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity,
-    try_feature_similarity_alternate, try_structural_anchored, try_structural_anchored_alternate,
-    try_structural_only, try_structural_only_alternate,
-};
+use crate::tier::{FunctionMatch, try_exact};
 
 #[must_use]
 pub fn match_function(
@@ -14,24 +10,13 @@ pub fn match_function(
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     try_exact(fp, index)
-        .or_else(|| try_exact_alternate(fp, index))
-        .or_else(|| try_structural_anchored(fp, index))
-        .or_else(|| try_structural_anchored_alternate(fp, index))
-        .or_else(|| try_feature_similarity(fp, index))
-        .or_else(|| try_feature_similarity_alternate(fp, index))
-        .or_else(|| try_structural_only(fp, index))
-        .or_else(|| try_structural_only_alternate(fp, index))
 }
 
-/// Cascade per function, collecting up to 5 ranked candidates per function.
+/// Strict per-function candidate collection.
 ///
-/// Each candidate is the best match the corresponding tier could produce.
-/// The order is significant: index 0 is the top-tier candidate (Exact when
-/// available), index 1 the next tier, and so on. Both
-/// [`assign_globally`] (for cross-package collision resolution) and
-/// [`crate::acceptance::classify`] (for per-fp confidence margin) consume
-/// this list; classify in particular relies on the runner-up entries to
-/// distinguish a confident match from an ambiguous one.
+/// The pipeline accepts only exact primary AST matches. Lower-strength tier
+/// functions remain available as explicit APIs in [`crate::tier`], but this
+/// orchestration layer no longer chains them implicitly.
 #[must_use]
 pub fn cascade_candidates(
     fp: &FunctionFingerprint,
@@ -39,27 +24,6 @@ pub fn cascade_candidates(
 ) -> Vec<FunctionMatch> {
     let mut all = Vec::new();
     if let Some(m) = try_exact(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_exact_alternate(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_structural_anchored(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_structural_anchored_alternate(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_feature_similarity(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_feature_similarity_alternate(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_structural_only(fp, index) {
-        all.push(m);
-    }
-    if let Some(m) = try_structural_only_alternate(fp, index) {
         all.push(m);
     }
     all
@@ -92,8 +56,8 @@ impl GlobalAssignment {
 /// Assign bundle functions to package candidates globally using the Hungarian
 /// algorithm, resolving cross-package collisions optimally instead of greedily.
 ///
-/// For each bundle function, the cascade tiers are evaluated to collect up to
-/// 5 ranked candidates. A bipartite weight matrix is built over all unique
+/// For each bundle function, exact candidates are evaluated. A bipartite
+/// weight matrix is built over all unique
 /// `(package, external_function_id)` pairs seen across all candidate lists,
 /// and `assign_max_weight` picks the globally optimal one-to-one assignment.
 #[must_use]
@@ -192,6 +156,10 @@ mod tests {
         Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
     };
 
+    use crate::tier::{
+        try_exact_alternate, try_feature_similarity, try_structural_anchored, try_structural_only,
+    };
+
     fn sample_axes(ast: u64) -> AxisHashes {
         AxisHashes {
             ast,
@@ -283,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn match_function_falls_through_to_exact_alternate() {
+    fn exact_alternate_tier_is_explicit_only() {
         let mut idx = InMemoryFingerprintIndex::new();
         // No primary exact match; an alternate matches at ast=222
         idx.insert_exact(
@@ -319,7 +287,11 @@ mod tests {
             }],
         };
 
-        let m = match_function(&fp, &idx).expect("alternate match");
+        assert!(
+            match_function(&fp, &idx).is_none(),
+            "main matcher must not consume alternate exact tier implicitly"
+        );
+        let m = try_exact_alternate(&fp, &idx).expect("alternate match");
         assert_eq!(m.tier, MatchTier::ExactAlternate);
         assert_eq!(
             m.matched_alternate,
@@ -368,7 +340,7 @@ mod tests {
             alternates: Vec::new(),
         };
 
-        let m = match_function(&fp, &idx).expect("structural-anchored match");
+        let m = try_structural_anchored(&fp, &idx).expect("structural-anchored match");
         assert_eq!(m.tier, MatchTier::StructuralAnchored);
     }
 
@@ -406,7 +378,7 @@ mod tests {
             alternates: Vec::new(),
         };
 
-        assert!(match_function(&fp, &idx).is_none());
+        assert!(try_structural_anchored(&fp, &idx).is_none());
     }
 
     #[test]
@@ -488,7 +460,7 @@ mod tests {
             alternates: Vec::new(),
         };
 
-        let m = match_function(&fp, &idx).expect("similarity match");
+        let m = try_feature_similarity(&fp, &idx).expect("similarity match");
         assert_eq!(m.tier, MatchTier::FeatureSimilarity);
     }
 
@@ -538,7 +510,7 @@ mod tests {
             alternates: Vec::new(),
         };
 
-        assert!(match_function(&fp, &idx).is_none());
+        assert!(try_feature_similarity(&fp, &idx).is_none());
     }
 
     #[test]
@@ -572,7 +544,7 @@ mod tests {
             alternates: Vec::new(),
         };
 
-        let m = match_function(&fp, &idx).expect("structural-only match");
+        let m = try_structural_only(&fp, &idx).expect("structural-only match");
         assert_eq!(m.tier, MatchTier::StructuralOnly);
     }
 
@@ -611,18 +583,17 @@ mod tests {
         };
 
         assert!(
-            match_function(&fp, &idx).is_none(),
+            try_structural_only(&fp, &idx).is_none(),
             "high-frequency hash must be rejected"
         );
     }
 
     #[test]
-    fn global_assignment_exposes_full_candidate_list_to_callers() {
+    fn global_assignment_exposes_exact_candidates_only_to_callers() {
         // Build an index where one fp can match at TWO tiers (Exact via
         // primary ast, plus StructuralAnchored via cfg + literal_anchor).
-        // assign_globally must surface both candidates so downstream code
-        // (e.g. `acceptance::classify`) can compute a real margin instead
-        // of seeing only the Hungarian winner.
+        // assign_globally must surface only the exact candidate; weaker
+        // structural evidence is available through explicit tier APIs.
         let mut idx = InMemoryFingerprintIndex::new();
         let pkg_top = PackageId {
             name: "exactpkg".into(),
@@ -697,21 +668,14 @@ mod tests {
             .expect("Hungarian must pick a winner");
         assert_eq!(chosen.tier, MatchTier::Exact);
         assert_eq!(chosen.candidate.package.name, "exactpkg");
-        // …but the runner-up StructuralAnchored candidate must still appear in
-        // the candidate list so classify() can see a real margin instead of
-        // assuming a single-element slice.
+        assert_eq!(out[0].candidates.len(), 1);
         assert!(
-            out[0].candidates.len() >= 2,
-            "expected ≥2 cascade candidates exposed for classify(); got {}",
-            out[0].candidates.len(),
-        );
-        assert!(
-            out[0]
+            !out[0]
                 .candidates
                 .iter()
                 .any(|m| m.tier == MatchTier::StructuralAnchored
                     && m.candidate.package.name == "structpkg"),
-            "structural-anchored runner-up must appear in candidates list",
+            "structural-anchored tier must stay outside implicit pipeline",
         );
     }
 

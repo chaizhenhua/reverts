@@ -148,35 +148,34 @@ pub struct IdentifierReadFact {
 
 #[must_use]
 pub fn source_type_candidates(path_hint: Option<&Path>, goal: ParseGoal) -> Vec<SourceType> {
-    let mut candidates = Vec::new();
-    if let Some(path_hint) = path_hint
-        && let Ok(source_type) = SourceType::from_path(path_hint)
-    {
-        push_unique(&mut candidates, source_type);
-    }
-
-    match goal {
-        ParseGoal::JavaScript => {
-            push_unique(&mut candidates, SourceType::mjs());
-            push_unique(&mut candidates, SourceType::cjs());
-            push_unique(&mut candidates, SourceType::jsx());
-        }
-        ParseGoal::TypeScript => {
-            push_unique(&mut candidates, SourceType::tsx());
-            push_unique(&mut candidates, SourceType::ts());
-            push_unique(&mut candidates, SourceType::mjs().with_typescript(true));
-            push_unique(&mut candidates, SourceType::mjs());
-            push_unique(&mut candidates, SourceType::cjs());
-            push_unique(&mut candidates, SourceType::jsx());
-        }
-    }
-
-    candidates
+    vec![source_type_for_parse(path_hint, goal)]
 }
 
-fn push_unique(candidates: &mut Vec<SourceType>, source_type: SourceType) {
-    if !candidates.contains(&source_type) {
-        candidates.push(source_type);
+#[must_use]
+pub fn source_type_for_parse(path_hint: Option<&Path>, goal: ParseGoal) -> SourceType {
+    match goal {
+        ParseGoal::JavaScript => {
+            if let Some(path_hint) = path_hint
+                && let Ok(source_type) = SourceType::from_path(path_hint)
+            {
+                return source_type;
+            }
+            SourceType::mjs()
+        }
+        ParseGoal::TypeScript => {
+            if let Some(path_hint) = path_hint {
+                let extension = path_hint
+                    .extension()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or_default();
+                if matches!(extension, "ts" | "tsx" | "mts" | "cts")
+                    && let Ok(source_type) = SourceType::from_path(path_hint)
+                {
+                    return source_type;
+                }
+            }
+            SourceType::tsx()
+        }
     }
 }
 
@@ -5698,9 +5697,9 @@ fn module_export_name_text(name: &ModuleExportName<'_>) -> Option<String> {
     }
 }
 
-fn parse_options_for(source_type: SourceType) -> ParseOptions {
+fn parse_options_for(_source_type: SourceType) -> ParseOptions {
     ParseOptions {
-        allow_return_outside_function: source_type.is_script(),
+        allow_return_outside_function: true,
         ..Default::default()
     }
 }

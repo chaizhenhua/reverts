@@ -509,8 +509,8 @@ pub struct VersionedPackageMatchReport {
 /// Unified package matching pipeline output.
 ///
 /// This is the single matcher-side orchestration point for the module/source
-/// version matcher, the function-level cascade matcher, structural-bag
-/// ownership, and dependency-closure ownership promotion. CLI callers should
+/// version matcher, the function-level cascade matcher, and dependency-closure
+/// ownership promotion. CLI callers should
 /// use this instead of manually running those tracks in parallel.
 pub struct PackageMatchingPipelineReport {
     /// Module-level package attributions/surfaces plus all promoted ownership
@@ -520,8 +520,6 @@ pub struct PackageMatchingPipelineReport {
     /// `package_report` so callers may persist or inspect function-span rows
     /// without treating them as a second generation input path.
     pub cascade_report: CascadeMatchReport,
-    /// Late ownership-only aggregate structural evidence.
-    pub structural_bag_report: StructuralBagMatchReport,
 }
 
 /// Runs the complete package matching pipeline through one matcher-owned
@@ -556,16 +554,11 @@ pub fn match_packages_with_pipeline(
         &mut package_report,
     );
 
-    let structural_bag_report = StructuralBagMatchReport {
-        matches: Vec::new(),
-        audit: AuditReport::default(),
-    };
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
 
     PackageMatchingPipelineReport {
         package_report,
         cascade_report,
-        structural_bag_report,
     }
 }
 
@@ -1753,9 +1746,9 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
     ))
 }
 
-fn parse_options_for(source_type: oxc_span::SourceType) -> ParseOptions {
+fn parse_options_for(_source_type: oxc_span::SourceType) -> ParseOptions {
     ParseOptions {
-        allow_return_outside_function: source_type.is_script(),
+        allow_return_outside_function: true,
         ..Default::default()
     }
 }

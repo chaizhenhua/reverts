@@ -52,14 +52,12 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
         )
         .expect("seed rows");
 
-    // Dry-run: synthetic extracted modules live only in-memory and are
-    // not persisted as `modules` rows, so an `apply: true` would violate
-    // the `package_attributions.module_id` foreign key. Persistence of
-    // extracted modules is Phase β.
+    // Apply mode must persist synthetic extracted modules before any package
+    // or function attribution writes reference them.
     let args = reverts_cli::MatchPackagesArgs {
         input: PathBuf::from("unused.db"),
         project_id: 1,
-        apply: false,
+        apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
         materialize_package_sources: false,
@@ -67,11 +65,6 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
     let outcome = reverts_cli::match_packages_from_connection(&mut connection, &args)
         .expect("match should succeed");
 
-    // Phase α acceptance: extraction has produced a package-kind module
-    // for `node_modules/example/index.js`. Whether the cascade then
-    // matches a function inside that body depends on fingerprinting
-    // behaviour against block-nested function declarations, which is
-    // tracked separately as a Phase β follow-up.
     assert!(
         outcome.loaded_package_modules >= 1,
         "extraction should have produced ≥1 package module: {outcome:?}"
@@ -80,8 +73,15 @@ fn cascade_matches_function_inside_esbuild_extracted_body() {
         outcome.audit.is_clean(),
         "audit must be clean (no errors): {outcome:?}"
     );
-    // Sanity: cascade ran (attribution count is in-memory only because
-    // apply: false). The exact number depends on the matcher; assert
-    // that the pipeline made it through to the matcher stage.
-    let _ = outcome.cascade_attributions;
+    let synthetic_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM modules WHERE id > 10 AND module_category = 'package'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count synthetic package modules");
+    assert!(
+        synthetic_count >= 1,
+        "apply mode must persist extracted package modules"
+    );
 }

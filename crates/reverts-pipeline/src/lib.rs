@@ -2476,14 +2476,14 @@ mod tests {
     }
 
     #[test]
-    fn rollup_object_freeze_pattern_emits_rollup_banner() {
+    fn rollup_object_freeze_pattern_alone_does_not_emit_rollup_banner() {
         let source = "var frozen = Object.freeze({ answer: 42 });\n";
         let run = run_with_source(source, &["frozen"]);
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: rollup"),
-            "rollup fixture must carry rollup banner, got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: rollup"),
+            "Object.freeze alone must not trigger rollup banner, got:\n{emitted}",
         );
     }
 
@@ -2505,6 +2505,7 @@ mod tests {
         // statement is a no-op in ESM output. When the module is classified
         // as Babel, the lowering pipeline must strip it from the emit.
         let source = "Object.defineProperty(exports, \"__esModule\", { value: true });\n\
+                      function _interopRequireDefault(e) { return e && e.__esModule ? e : { default: e }; }\n\
                       function load(mod) {\n  return _interopRequireDefault(mod);\n}\n";
         let run = run_with_source(source, &["load"]);
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
@@ -2514,7 +2515,7 @@ mod tests {
             "babel fixture must keep its banner, got:\n{emitted}",
         );
         assert!(
-            !emitted.contains("__esModule"),
+            !emitted.contains("Object.defineProperty(exports, \"__esModule\""),
             "babel lowering must strip the __esModule marker, got:\n{emitted}",
         );
         assert!(

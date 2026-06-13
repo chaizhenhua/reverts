@@ -8,7 +8,7 @@ use std::path::Path;
 
 fn classify_is_plain(src: &str) -> bool {
     matches!(
-        classify(Path::new("fixture.js"), src),
+        classify(Path::new("fixture.js"), src).expect("parseable adversarial fixture"),
         BundleClassification::Plain
     )
 }

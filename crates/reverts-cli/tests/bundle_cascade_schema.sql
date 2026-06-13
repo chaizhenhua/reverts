@@ -10,7 +10,9 @@ CREATE TABLE modules (
     package_name TEXT,
     package_version TEXT,
     byte_start INTEGER,
-    byte_end INTEGER
+    byte_end INTEGER,
+    created_at TEXT,
+    updated_at TEXT
 );
 CREATE TABLE symbols (
     module_id INTEGER,
