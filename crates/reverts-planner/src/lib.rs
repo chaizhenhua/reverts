@@ -22,6 +22,7 @@ pub struct EmitPlan {
 
 impl EmitPlan {
     pub fn push_file(&mut self, mut file: PlannedFile) {
+        file.coalesce_consecutive_uninitialized_var_declarations();
         file.coalesce_generated_named_imports();
         self.files.push(file);
     }
@@ -135,6 +136,12 @@ impl PlannedFile {
             }
         }
         self.body = merged;
+    }
+
+    fn coalesce_consecutive_uninitialized_var_declarations(&mut self) {
+        for source in &mut self.body {
+            *source = coalesce_consecutive_uninitialized_var_declarations(source);
+        }
     }
 
     #[must_use]
@@ -8110,6 +8117,52 @@ fn variable_declaration_statement<'a>(bindings: impl Iterator<Item = &'a Binding
     format!("var {names};")
 }
 
+fn coalesce_consecutive_uninitialized_var_declarations(source: &str) -> String {
+    let mut output = Vec::<String>::new();
+    let mut pending = Vec::<String>::new();
+    for line in source.lines() {
+        if let Some(binding) = parse_single_uninitialized_var_line(line) {
+            pending.push(binding.to_string());
+            continue;
+        }
+        flush_uninitialized_var_run(&mut output, &mut pending);
+        output.push(line.to_string());
+    }
+    flush_uninitialized_var_run(&mut output, &mut pending);
+    if source.ends_with('\n') {
+        format!("{}\n", output.join("\n"))
+    } else {
+        output.join("\n")
+    }
+}
+
+fn flush_uninitialized_var_run(output: &mut Vec<String>, pending: &mut Vec<String>) {
+    if pending.is_empty() {
+        return;
+    }
+    if pending.len() == 1 {
+        output.push(format!("var {};", pending[0]));
+    } else {
+        output.push(format!("var {};", pending.join(", ")));
+    }
+    pending.clear();
+}
+
+fn parse_single_uninitialized_var_line(line: &str) -> Option<&str> {
+    let line = line.trim();
+    let rest = line.strip_prefix("var ")?;
+    let name = rest.strip_suffix(';')?;
+    let bytes = name.as_bytes();
+    if bytes.is_empty() || !is_identifier_start(bytes[0]) {
+        return None;
+    }
+    if bytes[1..].iter().all(|byte| is_identifier_continue(*byte)) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
 fn relative_import_specifier(from_file: &str, to_file: &str) -> String {
     let from_dir = path_dir_segments(from_file);
     let to_segments = path_file_segments_with_js_extension(to_file);
@@ -8276,6 +8329,40 @@ mod tests {
             1
         );
         assert!(source.contains("import { local } from './local.js';"));
+    }
+
+    #[test]
+    fn emit_plan_coalesces_only_consecutive_plain_var_declarations() {
+        let mut file = PlannedFile::new("modules/runtime/source-1-helpers.ts");
+        file.push_source(concat!(
+            "var alpha;\n",
+            "var beta;\n",
+            "var gamma = 1;\n",
+            "var delta;\n",
+            "// barrier\n",
+            "var epsilon;\n",
+            "var zeta;\n",
+            "function run() {\n",
+            "  var localA;\n",
+            "  var localB;\n",
+            "  var keep = localA;\n",
+            "}\n",
+            "var eta;\n",
+            "var theta;\n",
+        ));
+
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+        let source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(source.contains("var alpha, beta;"));
+        assert!(source.contains("var gamma = 1;"));
+        assert!(source.contains("var delta;\n// barrier\nvar epsilon, zeta;"));
+        assert!(source.contains("var localA, localB;"));
+        assert!(source.contains("var keep = localA;"));
+        assert!(source.contains("var eta, theta;"));
+        assert!(!source.contains("var alpha;\nvar beta;"));
+        assert!(!source.contains("var epsilon;\nvar zeta;"));
     }
 
     #[test]
@@ -11677,8 +11764,10 @@ mod tests {
             "export { Custom, initShared, shared } from './runtime/source-1-helpers.js';"
         ));
         assert!(!entry_source.contains("__reverts_set_shared"));
-        assert!(helper_source.contains("var shared;"));
-        assert!(helper_source.contains("var Custom;"));
+        assert!(
+            helper_source.contains("var shared, Custom;"),
+            "consecutive runtime var declarations should be coalesced:\n{helper_source}"
+        );
         assert!(helper_source.contains("shared = { ['required']: !1, matches: (A) => A.ready };"));
         assert!(
             helper_source
