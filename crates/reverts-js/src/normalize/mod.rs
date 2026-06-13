@@ -45,7 +45,7 @@ pub mod typeof_local_undefined_guarded;
 pub mod void_zero_to_undefined_guarded;
 
 #[must_use]
-pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 33] {
+pub fn stable_passes() -> [Box<dyn NormalizationPass + Send + Sync>; 34] {
     [
         // Strip syntactic-only paren wrappers FIRST so every later
         // pass sees the bare expression and the existing
@@ -140,6 +140,6 @@ mod tests {
             assert!(pass.version() > 0, "pass version must be non-zero");
             assert!(ids.insert(pass.id()), "duplicate pass id: {:?}", pass.id());
         }
-        assert_eq!(ids.len(), 33);
+        assert_eq!(ids.len(), 34);
     }
 }
