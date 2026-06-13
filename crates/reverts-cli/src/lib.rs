@@ -265,7 +265,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} cached source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} audit finding(s)",
+        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} cascade ownership match(es), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
@@ -274,6 +274,7 @@ fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
         outcome.written_surfaces,
         outcome.cascade_attributions,
         outcome.written_cascade_attributions,
+        outcome.cascade_ownership_matches,
         outcome.audit.findings().len()
     );
     if !outcome.audit.is_clean() {
@@ -307,6 +308,10 @@ pub struct MatchPackagesOutcome {
     /// Number of attribution rows produced by the cascade-match pipeline
     /// (computed regardless of whether persistence ran).
     pub cascade_attributions: usize,
+    /// Number of accepted function-level package ownership matches produced by
+    /// the cascade-match pipeline, including source-only evidence that is not
+    /// safe to emit as an external import.
+    pub cascade_ownership_matches: usize,
     /// Number of cascade-match rows actually written to
     /// `package_function_attributions`. Zero when `apply=false`.
     pub written_cascade_attributions: usize,
@@ -470,6 +475,7 @@ pub fn match_packages_from_connection(
         written_attributions,
         written_surfaces,
         cascade_attributions: cascade_report.attributions.len(),
+        cascade_ownership_matches: cascade_report.ownership_matches.len(),
         written_cascade_attributions,
         audit,
     })
@@ -1501,7 +1507,63 @@ fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
 struct LocalPackageMetadata {
     name: String,
     version: String,
-    importable_paths: BTreeMap<String, String>,
+    import_surface: LocalPackageImportSurface,
+}
+
+impl LocalPackageMetadata {
+    fn importable_specifier_for(&self, rel_path: &str) -> Option<String> {
+        if let Some(specifier) = self.import_surface.paths.get(rel_path) {
+            return Some(specifier.clone());
+        }
+        let pattern_specifiers = self
+            .import_surface
+            .patterns
+            .iter()
+            .filter_map(|pattern| pattern.specifier_for_target(rel_path))
+            .collect::<BTreeSet<_>>();
+        (pattern_specifiers.len() == 1).then(|| {
+            pattern_specifiers
+                .into_iter()
+                .next()
+                .expect("one pattern specifier")
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LocalPackageImportSurface {
+    paths: BTreeMap<String, String>,
+    patterns: Vec<LocalPackageImportPattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LocalPackageImportPattern {
+    target_prefix: String,
+    target_suffix: String,
+    specifier_prefix: String,
+    specifier_suffix: String,
+}
+
+impl LocalPackageImportPattern {
+    fn specifier_for_target(&self, target_path: &str) -> Option<String> {
+        if !target_path.starts_with(self.target_prefix.as_str())
+            || !target_path.ends_with(self.target_suffix.as_str())
+        {
+            return None;
+        }
+        let wildcard_end = target_path.len().checked_sub(self.target_suffix.len())?;
+        if wildcard_end < self.target_prefix.len() {
+            return None;
+        }
+        let wildcard = &target_path[self.target_prefix.len()..wildcard_end];
+        if wildcard.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{}{}{}",
+            self.specifier_prefix, wildcard, self.specifier_suffix
+        ))
+    }
 }
 
 fn local_package_metadata(
@@ -1532,7 +1594,7 @@ fn local_package_metadata(
     };
     let package_name = package_name.trim().to_string();
     Ok(Some(LocalPackageMetadata {
-        importable_paths: package_importable_paths(value.as_object(), package_name.as_str()),
+        import_surface: package_importable_surface(value.as_object(), package_name.as_str()),
         name: package_name,
         version: package_version.trim().to_string(),
     }))
@@ -1587,11 +1649,11 @@ fn collect_local_package_sources(
                 }
             })?;
             let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
-            if let Some(export_specifier) = metadata.importable_paths.get(rel_path.as_str()) {
+            if let Some(export_specifier) = metadata.importable_specifier_for(rel_path.as_str()) {
                 sources.push(PackageSource::external(
                     metadata.name.as_str(),
                     metadata.version.as_str(),
-                    export_specifier.as_str(),
+                    export_specifier,
                     source_path,
                     source,
                 ));
@@ -1611,45 +1673,43 @@ fn collect_local_package_sources(
     Ok(())
 }
 
-fn package_importable_paths(
+fn package_importable_surface(
     package_json: Option<&serde_json::Map<String, serde_json::Value>>,
     package_name: &str,
-) -> BTreeMap<String, String> {
-    let mut importable_paths = BTreeMap::new();
+) -> LocalPackageImportSurface {
+    let mut import_surface = LocalPackageImportSurface::default();
     let Some(package_json) = package_json else {
-        return importable_paths;
+        return import_surface;
     };
 
     if let Some(exports) = package_json.get("exports") {
-        collect_exports_importable_paths(exports, package_name, ".", &mut importable_paths);
-        return importable_paths;
+        collect_exports_importable_paths(exports, package_name, ".", &mut import_surface);
+        dedup_import_patterns(&mut import_surface.patterns);
+        return import_surface;
     }
 
     for field in ["module", "main", "browser"] {
         if let Some(target) = package_json.get(field).and_then(serde_json::Value::as_str) {
-            insert_importable_target(&mut importable_paths, target, package_name);
+            insert_importable_exact_target(&mut import_surface.paths, target, package_name);
         }
     }
-    insert_importable_target(&mut importable_paths, "index.js", package_name);
-    importable_paths
+    insert_importable_exact_target(&mut import_surface.paths, "index.js", package_name);
+    import_surface
 }
 
 fn collect_exports_importable_paths(
     value: &serde_json::Value,
     package_name: &str,
     export_key: &str,
-    importable_paths: &mut BTreeMap<String, String>,
+    import_surface: &mut LocalPackageImportSurface,
 ) {
-    let Some(export_specifier) = export_key_to_specifier(package_name, export_key) else {
-        return;
-    };
     match value {
         serde_json::Value::String(target) => {
-            insert_importable_target(importable_paths, target, export_specifier.as_str());
+            insert_export_target(import_surface, target, package_name, export_key);
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_exports_importable_paths(item, package_name, export_key, importable_paths);
+                collect_exports_importable_paths(item, package_name, export_key, import_surface);
             }
         }
         serde_json::Value::Object(object) => {
@@ -1659,7 +1719,7 @@ fn collect_exports_importable_paths(
                         nested_value,
                         package_name,
                         nested_export_key,
-                        importable_paths,
+                        import_surface,
                     );
                 }
             } else {
@@ -1669,7 +1729,7 @@ fn collect_exports_importable_paths(
                             nested_value,
                             package_name,
                             export_key,
-                            importable_paths,
+                            import_surface,
                         );
                     }
                 }
@@ -1677,6 +1737,27 @@ fn collect_exports_importable_paths(
         }
         _ => {}
     }
+}
+
+fn insert_export_target(
+    import_surface: &mut LocalPackageImportSurface,
+    target: &str,
+    package_name: &str,
+    export_key: &str,
+) {
+    if export_key.contains('*') || target.contains('*') {
+        insert_importable_pattern(
+            &mut import_surface.patterns,
+            target,
+            package_name,
+            export_key,
+        );
+        return;
+    }
+    let Some(export_specifier) = export_key_to_specifier(package_name, export_key) else {
+        return;
+    };
+    insert_importable_exact_target(&mut import_surface.paths, target, export_specifier.as_str());
 }
 
 fn export_key_to_specifier(package_name: &str, export_key: &str) -> Option<String> {
@@ -1692,7 +1773,22 @@ fn export_key_to_specifier(package_name: &str, export_key: &str) -> Option<Strin
         .map(|subpath| format!("{package_name}/{subpath}"))
 }
 
-fn insert_importable_target(
+fn export_pattern_to_specifier_parts(
+    package_name: &str,
+    export_key: &str,
+) -> Option<(String, String)> {
+    if export_key.matches('*').count() != 1 {
+        return None;
+    }
+    let subpath = export_key
+        .strip_prefix("./")
+        .filter(|subpath| !subpath.trim().is_empty())?;
+    let specifier_pattern = format!("{package_name}/{subpath}");
+    let (prefix, suffix) = specifier_pattern.split_once('*')?;
+    Some((prefix.to_string(), suffix.to_string()))
+}
+
+fn insert_importable_exact_target(
     importable_paths: &mut BTreeMap<String, String>,
     target: &str,
     export_specifier: &str,
@@ -1707,6 +1803,31 @@ fn insert_importable_target(
     }
 }
 
+fn insert_importable_pattern(
+    patterns: &mut Vec<LocalPackageImportPattern>,
+    target: &str,
+    package_name: &str,
+    export_key: &str,
+) {
+    let Some((specifier_prefix, specifier_suffix)) =
+        export_pattern_to_specifier_parts(package_name, export_key)
+    else {
+        return;
+    };
+    let Some(clean_target) = clean_export_pattern_target(target) else {
+        return;
+    };
+    let Some((target_prefix, target_suffix)) = clean_target.split_once('*') else {
+        return;
+    };
+    patterns.push(LocalPackageImportPattern {
+        target_prefix: target_prefix.to_string(),
+        target_suffix: target_suffix.to_string(),
+        specifier_prefix,
+        specifier_suffix,
+    });
+}
+
 fn clean_export_target(target: &str) -> Option<String> {
     let clean = target
         .trim()
@@ -1715,6 +1836,22 @@ fn clean_export_target(target: &str) -> Option<String> {
     if clean.is_empty()
         || clean == "."
         || clean.contains('*')
+        || clean.starts_with("../")
+        || clean.contains("/../")
+    {
+        return None;
+    }
+    Some(clean.to_string())
+}
+
+fn clean_export_pattern_target(target: &str) -> Option<String> {
+    let clean = target
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    if clean.is_empty()
+        || clean == "."
+        || clean.matches('*').count() != 1
         || clean.starts_with("../")
         || clean.contains("/../")
     {
@@ -1734,6 +1871,11 @@ fn importable_target_candidates(clean_target: &str) -> Vec<String> {
         }
     }
     candidates
+}
+
+fn dedup_import_patterns(patterns: &mut Vec<LocalPackageImportPattern>) {
+    let mut seen = BTreeSet::new();
+    patterns.retain(|pattern| seen.insert(pattern.clone()));
 }
 
 fn should_descend_package_source_dir(path: &Path) -> bool {
@@ -3090,6 +3232,10 @@ mod tests {
             "only lib/add.js should be loaded; tests must be skipped"
         );
         assert_eq!(outcome.matched_modules, 1);
+        assert!(
+            outcome.cascade_ownership_matches >= 1,
+            "source-only roots should still produce ownership evidence"
+        );
         assert_eq!(
             outcome.written_attributions, 1,
             "source-only ownership matches are persisted as application_source decisions"
@@ -3155,6 +3301,7 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
+        assert!(outcome.cascade_ownership_matches >= 1);
         assert_eq!(outcome.written_attributions, 1);
         let (status, emission_mode, package_version, export_specifier): (
             String,
@@ -3176,6 +3323,175 @@ mod tests {
         assert_eq!(emission_mode, "external_import");
         assert_eq!(package_version, "1.2.3");
         assert_eq!(export_specifier, "pkg/add");
+    }
+
+    #[test]
+    fn match_packages_externalizes_wildcard_export_from_package_source_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib/features").as_path())
+            .expect("create package feature dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./features/*":"./lib/features/*.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/features/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert!(outcome.cascade_ownership_matches >= 1);
+        let (status, emission_mode, package_version, export_specifier): (
+            String,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("wildcard export should be externalized");
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(package_version, "1.2.3");
+        assert_eq!(export_specifier, "pkg/features/add");
+    }
+
+    #[test]
+    fn match_packages_externalizes_conditional_wildcard_export_from_package_source_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("cjs/features").as_path())
+            .expect("create package cjs feature dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./features/*":{"require":"./cjs/features/*.cjs","import":"./esm/features/*.js"}}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("cjs/features/add.cjs"),
+            "exports.add = function add(a, b) {\n  return a + b;\n};",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "exports.add=function add(a,b){return a+b};",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        let export_specifier: String = connection
+            .query_row(
+                r"
+                SELECT export_specifier
+                  FROM package_attributions
+                 WHERE module_id = 10
+                   AND status = 'accepted'
+                   AND emission_mode = 'external_import'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .expect("conditional wildcard export should be externalized");
+        assert_eq!(export_specifier, "pkg/features/add");
+    }
+
+    #[test]
+    fn match_packages_keeps_ambiguous_wildcard_export_source_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./a/*":"./lib/*.js","./b/*":"./lib/*.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(
+            outcome.cascade_attributions, 0,
+            "ambiguous wildcard exports must not produce safe external attribution"
+        );
+        let (status, emission_mode, package_version, export_specifier): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("ambiguous wildcard export should write a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert_eq!(export_specifier, None);
     }
 
     #[test]
@@ -3304,6 +3620,10 @@ mod tests {
         assert_eq!(
             outcome.matched_modules, 1,
             "source-only cascade coverage should still count as package ownership"
+        );
+        assert_eq!(
+            outcome.cascade_ownership_matches, 1,
+            "the source-only function should still produce one ownership match"
         );
         assert_eq!(
             outcome.cascade_attributions, 0,
