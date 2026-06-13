@@ -385,23 +385,64 @@ pub fn try_structural_only(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
+    structural_only_for_anchor(
+        fp.param_count,
+        fp.primary.structural_anchor,
+        index,
+        MatchTier::StructuralOnly,
+        None,
+    )
+}
+
+/// Like [`try_structural_only`], but consults each alternate
+/// fingerprint's structural_anchor hash. Returns matches at
+/// [`MatchTier::StructuralOnlyAlternate`] (weight 5) so the Hungarian
+/// global assignment prefers a primary structural-only match over an
+/// alt one when both compete. Useful when a normalization pass (e.g.
+/// `infinite_for_to_while`, `conditional_statement_expanded`) shifts
+/// the loop/cond counts that feed `structural_anchor`.
+#[must_use]
+pub fn try_structural_only_alternate(
+    fp: &FunctionFingerprint,
+    index: &dyn PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
+    for alt in &fp.alternates {
+        if let Some(m) = structural_only_for_anchor(
+            fp.param_count,
+            alt.axes.structural_anchor,
+            index,
+            MatchTier::StructuralOnlyAlternate,
+            Some(alt.pass),
+        ) {
+            return Some(m);
+        }
+    }
+    None
+}
+
+fn structural_only_for_anchor(
+    param_count: u32,
+    structural_anchor: u64,
+    index: &dyn PackageFingerprintIndex,
+    tier: MatchTier,
+    matched_alternate: Option<NormalizationPassId>,
+) -> Option<FunctionMatch> {
     let freq = index
         .corpus_stats()
-        .frequency(AxisKind::StructuralAnchor, fp.primary.structural_anchor);
+        .frequency(AxisKind::StructuralAnchor, structural_anchor);
     if freq > STRUCTURAL_FREQUENCY_LIMIT {
         return None;
     }
 
     let key = StructuralKey {
-        param_count: fp.param_count,
-        structural_anchor: fp.primary.structural_anchor,
+        param_count,
+        structural_anchor,
     };
     let cands = index.query_structural(key);
     if cands.is_empty() {
         return None;
     }
 
-    // Distinct candidates only
     let mut distinct = cands.clone();
     distinct.dedup_by(|a, b| {
         a.package == b.package && a.external_function_id == b.external_function_id
@@ -410,18 +451,16 @@ pub fn try_structural_only(
     if distinct.len() == 1 {
         let only = distinct.into_iter().next()?;
         return Some(FunctionMatch {
-            tier: MatchTier::StructuralOnly,
+            tier,
             candidate: only,
             margin: 1.0,
-            top_score: f64::from(MatchTier::StructuralOnly.weight()),
+            top_score: f64::from(tier.weight()),
             runner_up_score: 0.0,
-            matched_alternate: None,
+            matched_alternate,
             matched_axes: vec![AxisKind::StructuralAnchor],
         });
     }
 
-    // Multiple candidates — we can't rank further with what we have here.
-    // Reject; let global assignment (Phase G) handle disambiguation.
     None
 }
 
@@ -545,6 +584,67 @@ mod tests {
         assert!(m.matched_axes.contains(&AxisKind::LiteralAnchor));
         assert!(m.matched_axes.contains(&AxisKind::CalleeSet));
         assert!(!m.matched_axes.contains(&AxisKind::ThrowSet));
+    }
+
+    #[test]
+    fn structural_only_alternate_uses_alt_structural_anchor() {
+        // Index a candidate keyed on a specific structural_anchor hash.
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1.0".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 9,
+            matched_axis: AxisKind::StructuralAnchor,
+            matched_alternate: None,
+        };
+        let alt_anchor: u64 = 4242;
+        idx.insert_structural(
+            reverts_package_index::StructuralKey {
+                param_count: 1,
+                structural_anchor: alt_anchor,
+            },
+            cand.clone(),
+        );
+
+        // Primary has an unrelated structural_anchor that won't match.
+        let mut primary = sample_axes();
+        primary.structural_anchor = 1;
+
+        // An alternate produced by some normalization pass shifts the
+        // structural_anchor counts to match the indexed candidate.
+        let mut alt_axes = sample_axes();
+        alt_axes.structural_anchor = alt_anchor;
+
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary,
+            alternates: vec![reverts_ir::AlternateAxisHashes {
+                pass: NormalizationPassId::InfiniteForToWhile,
+                statement_count: 1,
+                axes: alt_axes,
+            }],
+        };
+
+        // Primary structural_only doesn't match (different anchor).
+        assert!(try_structural_only(&fp, &idx).is_none());
+
+        // Alt-tier finds the unique candidate via the alt's anchor.
+        let m = try_structural_only_alternate(&fp, &idx).expect("structural-only-alternate match");
+        assert_eq!(m.tier, MatchTier::StructuralOnlyAlternate);
+        assert!(
+            m.tier.weight() < MatchTier::StructuralOnly.weight(),
+            "alternate tier weight must be strictly below primary structural_only"
+        );
+        assert_eq!(
+            m.matched_alternate,
+            Some(NormalizationPassId::InfiniteForToWhile)
+        );
+        assert_eq!(m.matched_axes, vec![AxisKind::StructuralAnchor]);
     }
 
     #[test]

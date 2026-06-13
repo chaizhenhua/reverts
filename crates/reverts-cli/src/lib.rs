@@ -1857,6 +1857,7 @@ fn package_function_attributions_requires_alt_tier_migration(
         .map(|s| {
             !s.contains("structural_anchored_alternate")
                 || !s.contains("feature_similarity_alternate")
+                || !s.contains("structural_only_alternate")
         })
         .unwrap_or(false))
 }
@@ -1925,7 +1926,8 @@ CREATE TABLE IF NOT EXISTS package_function_attributions (
         'structural_anchored_alternate',
         'feature_similarity',
         'feature_similarity_alternate',
-        'structural_only'
+        'structural_only',
+        'structural_only_alternate'
     )),
     CHECK (margin >= 0.0 AND margin <= 1.0)
 );

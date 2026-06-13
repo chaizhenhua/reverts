@@ -5,7 +5,7 @@ use crate::hungarian::assign_max_weight;
 use crate::tier::{
     FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity,
     try_feature_similarity_alternate, try_structural_anchored, try_structural_anchored_alternate,
-    try_structural_only,
+    try_structural_only, try_structural_only_alternate,
 };
 
 #[must_use]
@@ -20,6 +20,7 @@ pub fn match_function(
         .or_else(|| try_feature_similarity(fp, index))
         .or_else(|| try_feature_similarity_alternate(fp, index))
         .or_else(|| try_structural_only(fp, index))
+        .or_else(|| try_structural_only_alternate(fp, index))
 }
 
 /// Cascade per function, collecting up to 5 ranked candidates per function.
@@ -56,6 +57,9 @@ pub fn cascade_candidates(
         all.push(m);
     }
     if let Some(m) = try_structural_only(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_only_alternate(fp, index) {
         all.push(m);
     }
     all

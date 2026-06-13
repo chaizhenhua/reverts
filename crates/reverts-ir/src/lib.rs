@@ -1105,6 +1105,7 @@ pub enum MatchTier {
     FeatureSimilarity,
     FeatureSimilarityAlternate,
     StructuralOnly,
+    StructuralOnlyAlternate,
 }
 
 impl MatchTier {
@@ -1127,6 +1128,9 @@ impl MatchTier {
             // when both compete for the same (package, fn_id).
             Self::FeatureSimilarityAlternate => 50,
             Self::StructuralOnly => 10,
+            // Strictly below `StructuralOnly` so Hungarian prefers a
+            // primary structural-only match over an alt-source one.
+            Self::StructuralOnlyAlternate => 5,
         }
     }
 
@@ -1140,6 +1144,7 @@ impl MatchTier {
             Self::FeatureSimilarity => "feature_similarity",
             Self::FeatureSimilarityAlternate => "feature_similarity_alternate",
             Self::StructuralOnly => "structural_only",
+            Self::StructuralOnlyAlternate => "structural_only_alternate",
         }
     }
 }
@@ -1158,6 +1163,7 @@ mod match_tier_tests {
             MatchTier::FeatureSimilarity.weight(),
             MatchTier::FeatureSimilarityAlternate.weight(),
             MatchTier::StructuralOnly.weight(),
+            MatchTier::StructuralOnlyAlternate.weight(),
         ];
         for window in weights.windows(2) {
             assert!(
@@ -1185,5 +1191,9 @@ mod match_tier_tests {
             "feature_similarity_alternate"
         );
         assert_eq!(MatchTier::StructuralOnly.as_str(), "structural_only");
+        assert_eq!(
+            MatchTier::StructuralOnlyAlternate.as_str(),
+            "structural_only_alternate"
+        );
     }
 }
