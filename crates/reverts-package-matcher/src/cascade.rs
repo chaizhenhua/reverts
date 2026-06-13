@@ -228,6 +228,7 @@ mod tests {
                 external_function_id: 7,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 
@@ -264,6 +265,7 @@ mod tests {
                     external_function_id: fid,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
         }
@@ -299,6 +301,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 
@@ -336,6 +339,7 @@ mod tests {
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
+            external_importable: true,
         };
         idx.insert_cfg(
             reverts_package_index::CfgKey {
@@ -386,6 +390,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::Cfg,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
         // No insert_feature — anchor side empty in index
@@ -416,6 +421,7 @@ mod tests {
             external_function_id: 9,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
+            external_importable: true,
         };
         // Insert under callee_set (the primary distinctive axis)
         idx.insert_feature(
@@ -498,6 +504,7 @@ mod tests {
             external_function_id: 1,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
+            external_importable: true,
         };
         idx.insert_feature(
             FeatureKey {
@@ -551,6 +558,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::StructuralAnchor,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 
@@ -587,6 +595,7 @@ mod tests {
                     external_function_id: i,
                     matched_axis: AxisKind::StructuralAnchor,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
         }
@@ -635,6 +644,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
         idx.insert_cfg(
@@ -648,6 +658,7 @@ mod tests {
                 external_function_id: 2,
                 matched_axis: AxisKind::Cfg,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
         idx.insert_feature(
@@ -662,6 +673,7 @@ mod tests {
                 external_function_id: 2,
                 matched_axis: AxisKind::LiteralAnchor,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 
@@ -737,6 +749,7 @@ mod tests {
                     external_function_id: fid,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
         }
@@ -808,6 +821,7 @@ mod tests {
                 external_function_id: 0,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
         // fp[1] matches pkg_b at ast=200
@@ -823,6 +837,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 

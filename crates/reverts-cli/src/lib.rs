@@ -21,8 +21,8 @@ use reverts_input::{
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch, PackageSource,
-    VersionedPackageMatchReport, VersionedPackageMatcher, match_with_cascade,
+    BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
+    PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher, match_with_cascade,
     package_import_names_from_sources,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
@@ -436,6 +436,12 @@ pub fn match_packages_from_connection(
                 .filter(|a| persisted_ids.contains(&a.module_id))
                 .cloned()
                 .collect(),
+            ownership_matches: cascade_report
+                .ownership_matches
+                .iter()
+                .filter(|ownership| persisted_ids.contains(&ownership.module_id))
+                .cloned()
+                .collect(),
             audit: cascade_report.audit.clone(),
         };
         (
@@ -537,6 +543,7 @@ fn match_with_cascade_scoped_by_module_hints(
 
     let mut merged = CascadeMatchReport {
         attributions: Vec::new(),
+        ownership_matches: Vec::new(),
         audit: AuditReport::default(),
     };
     for ((package_name, package_version), scoped_fingerprints) in grouped_fingerprints {
@@ -557,6 +564,7 @@ fn match_with_cascade_scoped_by_module_hints(
         }
         let report = match_with_cascade(&scoped_fingerprints, &scoped_sources);
         merged.attributions.extend(report.attributions);
+        merged.ownership_matches.extend(report.ownership_matches);
         merged.audit.extend(report.audit);
     }
     merged
@@ -583,13 +591,13 @@ fn promote_cascade_function_coverage_to_module_attributions(
         .iter()
         .map(|package_match| package_match.module_id)
         .collect::<BTreeSet<_>>();
-    let cascade_attributions_by_module = cascade_report.attributions.iter().fold(
-        BTreeMap::<ModuleId, Vec<&PackageAttributionInput>>::new(),
-        |mut by_module, attribution| {
+    let cascade_ownership_by_module = cascade_report.ownership_matches.iter().fold(
+        BTreeMap::<ModuleId, Vec<&CascadeOwnershipMatch>>::new(),
+        |mut by_module, ownership| {
             by_module
-                .entry(attribution.module_id)
+                .entry(ownership.module_id)
                 .or_default()
-                .push(attribution);
+                .push(ownership);
             by_module
         },
     );
@@ -607,34 +615,35 @@ fn promote_cascade_function_coverage_to_module_attributions(
         let Some(fingerprints) = fingerprints_by_module.get(&module.id) else {
             continue;
         };
-        let Some(cascade_attributions) = cascade_attributions_by_module.get(&module.id) else {
+        let Some(cascade_ownership) = cascade_ownership_by_module.get(&module.id) else {
             continue;
         };
-        if fingerprints.is_empty() || cascade_attributions.len() != fingerprints.len() {
+        if fingerprints.is_empty() || cascade_ownership.len() != fingerprints.len() {
             continue;
         }
-        let covered_spans = cascade_attributions
+        let covered_spans = cascade_ownership
             .iter()
-            .filter_map(|attribution| attribution.function_span)
+            .map(|ownership| ownership.function_span)
             .collect::<BTreeSet<_>>();
         if covered_spans.len() != fingerprints.len() {
             continue;
         }
-        let decisions = cascade_attributions
+        let package_versions = cascade_ownership
             .iter()
-            .filter_map(|attribution| {
-                Some((
-                    attribution.package_name.as_str(),
-                    attribution.package_version.as_deref()?,
-                    attribution.export_specifier.as_deref()?,
-                ))
+            .map(|ownership| {
+                (
+                    ownership.package_name.as_str(),
+                    ownership.package_version.as_str(),
+                )
             })
             .collect::<BTreeSet<_>>();
-        if decisions.len() != 1 {
+        if package_versions.len() != 1 {
             continue;
         }
-        let (package_name, package_version, export_specifier) =
-            decisions.into_iter().next().expect("one decision");
+        let (package_name, package_version) = package_versions
+            .into_iter()
+            .next()
+            .expect("one package/version");
         if package_name != expected_package_name {
             continue;
         }
@@ -648,17 +657,30 @@ fn promote_cascade_function_coverage_to_module_attributions(
             continue;
         }
 
-        let mut attribution = PackageAttributionInput::accepted_external(
-            module.id,
-            package_name,
-            package_version,
-            export_specifier,
-        );
-        if let Some(subpath) = package_subpath_from_export_specifier(package_name, export_specifier)
-        {
-            attribution = attribution.with_subpath(subpath);
+        let export_specifiers = cascade_ownership
+            .iter()
+            .map(|ownership| ownership.export_specifier.as_str())
+            .collect::<BTreeSet<_>>();
+        let can_externalize = cascade_ownership
+            .iter()
+            .all(|ownership| ownership.external_importable)
+            && export_specifiers.len() == 1;
+        let export_specifier = export_specifiers.first().copied().unwrap_or(package_name);
+
+        if can_externalize {
+            let mut attribution = PackageAttributionInput::accepted_external(
+                module.id,
+                package_name,
+                package_version,
+                export_specifier,
+            );
+            if let Some(subpath) =
+                package_subpath_from_export_specifier(package_name, export_specifier)
+            {
+                attribution = attribution.with_subpath(subpath);
+            }
+            report.attributions.push(attribution);
         }
-        report.attributions.push(attribution);
         report.matches.push(PackageMatch {
             module_id: module.id,
             package_name: package_name.to_string(),
@@ -669,7 +691,7 @@ fn promote_cascade_function_coverage_to_module_attributions(
             strategy: ModuleMatchStrategy::CascadeFunctionCoverage,
             function_signature_matches: fingerprints.len(),
             string_anchor_matches: 0,
-            external_importable: true,
+            external_importable: can_externalize,
         });
     }
 }
@@ -2033,9 +2055,18 @@ fn rejected_package_attributions_for_unaccepted_modules(
             continue;
         }
 
-        let reason = decision_reasons
-            .get(package_name)
-            .map(String::as_str)
+        let reason = report
+            .matches
+            .iter()
+            .find(|package_match| {
+                package_match.module_id == module.id
+                    && !package_match.external_importable
+                    && package_match.strategy == ModuleMatchStrategy::CascadeFunctionCoverage
+            })
+            .map(|_| {
+                "matched package ownership, but the evidence does not prove a safe single external import"
+            })
+            .or_else(|| decision_reasons.get(package_name).map(String::as_str))
             .unwrap_or("package matcher did not produce an accepted attribution for this package");
         rejected.push(PackageAttributionInput::rejected_source(
             module.id,
@@ -3235,6 +3266,96 @@ mod tests {
         assert_eq!(emission_mode, "external_import");
         assert_eq!(package_version, "1.2.3");
         assert!(evidence.contains("cascade_function_coverage"));
+    }
+
+    #[test]
+    fn match_packages_promotes_source_only_cascade_ownership_without_external_import() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3"}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/add.js"),
+            "const add = function add(a, b) {\n  return a + b;\n};",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "module.exports = function add(a,b){return a+b};",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(
+            outcome.matched_modules, 1,
+            "source-only cascade coverage should still count as package ownership"
+        );
+        assert_eq!(
+            outcome.cascade_attributions, 0,
+            "source-only ownership must not become function-level external attributions"
+        );
+        assert_eq!(outcome.written_cascade_attributions, 0);
+        assert_eq!(
+            outcome.written_attributions, 1,
+            "the module should receive an explicit rejected application-source decision"
+        );
+
+        let (
+            status,
+            emission_mode,
+            package_version,
+            export_specifier,
+            rejection_reason,
+            evidence,
+        ): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier,
+                       rejection_reason, evidence_json
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .expect("source-only cascade ownership should write a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.contains("safe single external import"));
+        assert!(evidence.contains("\"status\":\"rejected\""));
     }
 
     #[test]

@@ -90,6 +90,7 @@ mod tests {
             external_function_id: 1,
             matched_axis: AxisKind::Ast,
             matched_alternate: None,
+            external_importable: true,
         }
     }
 

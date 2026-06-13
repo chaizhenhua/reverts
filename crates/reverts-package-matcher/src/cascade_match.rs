@@ -19,8 +19,8 @@ use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use reverts_graph::FunctionExtractor;
-use reverts_input::PackageAttributionInput;
-use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, FunctionId, ModuleId};
+use reverts_input::{AttributionConfidence, PackageAttributionInput};
+use reverts_ir::{AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_index::{
     Candidate, CfgKey, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
@@ -35,9 +35,23 @@ use crate::cascade::assign_globally;
 pub struct CascadeMatchReport {
     /// Accepted attribution rows enriched with function span and confidence.
     pub attributions: Vec<PackageAttributionInput>,
+    /// Accepted function-level ownership matches, including source-only
+    /// package sources that are useful evidence but unsafe to emit as imports.
+    pub ownership_matches: Vec<CascadeOwnershipMatch>,
     /// Findings produced during the match (parse failures, ambiguity, low
     /// confidence, etc.).
     pub audit: AuditReport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CascadeOwnershipMatch {
+    pub module_id: ModuleId,
+    pub package_name: String,
+    pub package_version: String,
+    pub export_specifier: String,
+    pub function_span: ByteRange,
+    pub confidence: AttributionConfidence,
+    pub external_importable: bool,
 }
 
 /// Runs the cascade + variant + version + Hungarian pipeline against the given
@@ -55,6 +69,7 @@ pub fn match_with_cascade(
     let index = build_index(package_sources, &mut audit);
 
     let mut attributions = Vec::new();
+    let mut ownership_matches = Vec::new();
     for (module_id, fps) in fingerprints_by_module {
         let assignments = assign_globally(fps, &index);
         for assignment in assignments {
@@ -71,19 +86,32 @@ pub fn match_with_cascade(
                     let Some(chosen) = assignment.chosen else {
                         continue;
                     };
-                    attributions.push(build_attribution(
+                    let candidate = &chosen.candidate;
+                    ownership_matches.push(build_ownership_match(
                         *module_id,
                         fn_id,
-                        &chosen.candidate,
-                        confidence,
+                        candidate,
+                        confidence.clone(),
                     ));
+                    if candidate.external_importable {
+                        attributions
+                            .push(build_attribution(*module_id, fn_id, candidate, confidence));
+                    }
                 }
                 AcceptanceDecision::AcceptedWithCaveat { confidence } => {
                     let Some(chosen) = assignment.chosen else {
                         continue;
                     };
                     let cand = &chosen.candidate;
-                    attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
+                    ownership_matches.push(build_ownership_match(
+                        *module_id,
+                        fn_id,
+                        cand,
+                        confidence.clone(),
+                    ));
+                    if cand.external_importable {
+                        attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
+                    }
                     audit.push(
                         AuditFinding::warning(
                             FindingCode::LowConfidenceAttribution,
@@ -118,6 +146,7 @@ pub fn match_with_cascade(
 
     CascadeMatchReport {
         attributions,
+        ownership_matches,
         audit,
     }
 }
@@ -128,14 +157,6 @@ fn build_index(
 ) -> InMemoryFingerprintIndex {
     let mut index = InMemoryFingerprintIndex::new();
     for (idx, source) in package_sources.iter().enumerate() {
-        if !source.external_importable {
-            // The cascade pipeline emits accepted external attribution rows.
-            // Source-only roots are useful ownership evidence for the
-            // versioned matcher, but they may point at private files that are
-            // not valid package import specifiers; do not index them here
-            // until an import-shape resolver proves they are safe.
-            continue;
-        }
         let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
@@ -168,6 +189,7 @@ fn build_index(
                 external_function_id: external_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: source.external_importable,
             };
 
             // Exact key: primary AST hash.
@@ -239,11 +261,28 @@ fn build_index(
     index
 }
 
+fn build_ownership_match(
+    module_id: ModuleId,
+    fn_id: FunctionId,
+    candidate: &Candidate,
+    confidence: AttributionConfidence,
+) -> CascadeOwnershipMatch {
+    CascadeOwnershipMatch {
+        module_id,
+        package_name: candidate.package.name.clone(),
+        package_version: candidate.package.version.clone(),
+        export_specifier: candidate.variant_path.clone(),
+        function_span: fn_id.span,
+        confidence,
+        external_importable: candidate.external_importable,
+    }
+}
+
 fn build_attribution(
     module_id: ModuleId,
     fn_id: FunctionId,
     candidate: &Candidate,
-    confidence: reverts_input::AttributionConfidence,
+    confidence: AttributionConfidence,
 ) -> PackageAttributionInput {
     PackageAttributionInput::accepted_external(
         module_id,
@@ -339,10 +378,15 @@ mod tests {
         assert_eq!(attr.export_specifier.as_deref(), Some("pkg/add"));
         assert!(attr.function_span.is_some(), "function_span must be set");
         assert!(attr.confidence.is_some(), "confidence must be set");
+        assert_eq!(report.ownership_matches.len(), report.attributions.len());
+        assert_eq!(report.ownership_matches[0].package_name, "pkg");
+        assert_eq!(report.ownership_matches[0].package_version, "1.0.0");
+        assert_eq!(report.ownership_matches[0].export_specifier, "pkg/add");
+        assert!(report.ownership_matches[0].external_importable);
     }
 
     #[test]
-    fn cascade_match_ignores_source_only_package_sources() {
+    fn cascade_match_records_source_only_ownership_without_external_attribution() {
         let bundle_source = "function f(a, b) { return a + b; }";
         let bundle_fps = FunctionExtractor::fingerprint(ModuleId(10), bundle_source);
         let mut fps_map: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
@@ -361,6 +405,13 @@ mod tests {
             report.attributions.is_empty(),
             "source-only package roots must not emit external cascade attributions"
         );
+        assert_eq!(report.ownership_matches.len(), 1);
+        let ownership = &report.ownership_matches[0];
+        assert_eq!(ownership.module_id, ModuleId(10));
+        assert_eq!(ownership.package_name, "pkg");
+        assert_eq!(ownership.package_version, "1.0.0");
+        assert_eq!(ownership.export_specifier, "pkg/internal/add.js");
+        assert!(!ownership.external_importable);
         assert!(report.audit.is_clean());
     }
 
@@ -372,6 +423,7 @@ mod tests {
 
         let report = match_with_cascade(&fps_map, &[]);
         assert!(report.attributions.is_empty());
+        assert!(report.ownership_matches.is_empty());
         assert!(report.audit.is_clean());
     }
 

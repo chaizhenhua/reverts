@@ -102,6 +102,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     external_function_id: pkg_a_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
             idx.insert_exact(
@@ -116,6 +117,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     external_function_id: pkg_b_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
         } else {
@@ -133,6 +135,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     external_function_id: pkg_b_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
             idx.insert_exact(
@@ -147,6 +150,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     external_function_id: pkg_a_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
             );
         }
@@ -230,6 +234,7 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
                 external_function_id: a_fn_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
         // Slot's alt hash → pkg_b candidate (unique per slot)
@@ -245,6 +250,7 @@ fn hungarian_assigns_all_fps_when_candidates_overlap() {
                 external_function_id: b_fn_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
     }

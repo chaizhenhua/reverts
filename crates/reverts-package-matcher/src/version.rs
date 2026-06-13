@@ -143,6 +143,7 @@ mod tests {
                     external_function_id: i as u64,
                     matched_axis: reverts_ir::AxisKind::Ast,
                     matched_alternate: None,
+                    external_importable: true,
                 },
                 margin: 1.0,
                 top_score: f64::from(MatchTier::Exact.weight()),

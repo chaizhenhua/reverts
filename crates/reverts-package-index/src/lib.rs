@@ -41,6 +41,7 @@ pub struct Candidate {
     pub external_function_id: u64,
     pub matched_axis: AxisKind,
     pub matched_alternate: Option<NormalizationPassId>,
+    pub external_importable: bool,
 }
 
 #[derive(Debug, Default, Clone)]

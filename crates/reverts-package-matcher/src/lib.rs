@@ -8,7 +8,7 @@ pub mod version;
 
 pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
-pub use cascade_match::{CascadeMatchReport, match_with_cascade};
+pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
 pub use tier::{
     FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,

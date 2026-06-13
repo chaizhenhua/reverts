@@ -554,6 +554,7 @@ mod tests {
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
+            external_importable: true,
         };
         idx.insert_cfg(
             CfgKey {
@@ -618,6 +619,7 @@ mod tests {
             external_function_id: 33,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
+            external_importable: true,
         };
         // Index the primary-axis (CalleeSet=99) and exactly one of the
         // remaining axes (LiteralAnchor=10) — half of the two-axis
@@ -731,6 +733,7 @@ mod tests {
             external_function_id: 9,
             matched_axis: AxisKind::StructuralAnchor,
             matched_alternate: None,
+            external_importable: true,
         };
         let alt_anchor: u64 = 4242;
         idx.insert_structural(
@@ -791,6 +794,7 @@ mod tests {
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
+            external_importable: true,
         };
         idx.insert_cfg(
             CfgKey {
@@ -870,6 +874,7 @@ mod tests {
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
+                external_importable: true,
             },
         );
 
