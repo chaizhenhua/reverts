@@ -143,6 +143,7 @@ pub struct IdentifierReadFact {
     pub byte_start: u32,
     pub byte_end: u32,
     pub is_call_callee: bool,
+    pub call_arg_count: Option<u32>,
 }
 
 #[must_use]
@@ -357,28 +358,43 @@ impl<'a> Visit<'a> for StringLiteralCollector {
 
 #[derive(Debug, Default)]
 struct IdentifierReadCollector {
-    facts: BTreeMap<(u32, u32, String), bool>,
+    facts: BTreeMap<(u32, u32, String), IdentifierReadAccumulator>,
+}
+
+#[derive(Debug, Default)]
+struct IdentifierReadAccumulator {
+    is_call_callee: bool,
+    call_arg_count: Option<u32>,
 }
 
 impl IdentifierReadCollector {
-    fn push_identifier(&mut self, identifier: &IdentifierReference<'_>, is_call_callee: bool) {
+    fn push_identifier(
+        &mut self,
+        identifier: &IdentifierReference<'_>,
+        is_call_callee: bool,
+        call_arg_count: Option<u32>,
+    ) {
         let span = identifier.span();
         let entry = self
             .facts
             .entry((span.start, span.end, identifier.name.as_str().to_string()))
-            .or_insert(false);
-        *entry |= is_call_callee;
+            .or_default();
+        entry.is_call_callee |= is_call_callee;
+        if call_arg_count.is_some() {
+            entry.call_arg_count = call_arg_count;
+        }
     }
 
     fn into_facts(self) -> Vec<IdentifierReadFact> {
         self.facts
             .into_iter()
             .map(
-                |((byte_start, byte_end, name), is_call_callee)| IdentifierReadFact {
+                |((byte_start, byte_end, name), accumulator)| IdentifierReadFact {
                     name,
                     byte_start,
                     byte_end,
-                    is_call_callee,
+                    is_call_callee: accumulator.is_call_callee,
+                    call_arg_count: accumulator.call_arg_count,
                 },
             )
             .collect()
@@ -391,9 +407,7 @@ impl<'a> Visit<'a> for IdentifierReadCollector {
             for specifier in &declaration.specifiers {
                 if let Some(local) = module_export_name_text(&specifier.local) {
                     let span = specifier.local.span();
-                    self.facts
-                        .entry((span.start, span.end, local))
-                        .or_insert(false);
+                    self.facts.entry((span.start, span.end, local)).or_default();
                 }
             }
         }
@@ -402,20 +416,20 @@ impl<'a> Visit<'a> for IdentifierReadCollector {
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if let Expression::Identifier(callee) = &call.callee {
-            self.push_identifier(callee, true);
+            self.push_identifier(callee, true, Some(call.arguments.len() as u32));
         }
         walk_call_expression(self, call);
     }
 
     fn visit_new_expression(&mut self, expression: &NewExpression<'a>) {
         if let Expression::Identifier(callee) = &expression.callee {
-            self.push_identifier(callee, true);
+            self.push_identifier(callee, true, None);
         }
         walk_new_expression(self, expression);
     }
 
     fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
-        self.push_identifier(identifier, false);
+        self.push_identifier(identifier, false, None);
     }
 }
 
@@ -3885,53 +3899,26 @@ pub fn verify_only_immediate_call_references(
     if binding_names.is_empty() {
         return out;
     }
-    let allocator = Allocator::default();
-    for source_type in source_type_candidates(path_hint, goal) {
-        let parsed = Parser::new(&allocator, source, source_type)
-            .with_options(parse_options_for(source_type))
-            .parse();
-        if !parsed.errors.is_empty() || parsed.panicked {
+    let Ok(facts) = collect_identifier_read_facts(source, path_hint, goal) else {
+        return out;
+    };
+    let mut call_count = BTreeMap::<String, u32>::new();
+    let mut total_count = BTreeMap::<String, u32>::new();
+    for fact in facts {
+        if !binding_names.contains(fact.name.as_str()) {
             continue;
         }
-        let mut collector = CallFormCollector {
-            targets: binding_names,
-            call_count: BTreeMap::new(),
-            total_count: BTreeMap::new(),
-        };
-        collector.visit_program(&parsed.program);
-        for name in binding_names {
-            let total = collector.total_count.get(name).copied().unwrap_or(0);
-            let calls = collector.call_count.get(name).copied().unwrap_or(0);
-            out.insert(name.clone(), total == 0 || total == calls);
+        *total_count.entry(fact.name.clone()).or_insert(0) += 1;
+        if fact.call_arg_count == Some(0) {
+            *call_count.entry(fact.name).or_insert(0) += 1;
         }
-        return out;
+    }
+    for name in binding_names {
+        let total = total_count.get(name).copied().unwrap_or(0);
+        let calls = call_count.get(name).copied().unwrap_or(0);
+        out.insert(name.clone(), total == 0 || total == calls);
     }
     out
-}
-
-struct CallFormCollector<'a> {
-    targets: &'a std::collections::BTreeSet<String>,
-    call_count: BTreeMap<String, u32>,
-    total_count: BTreeMap<String, u32>,
-}
-
-impl<'a> Visit<'a> for CallFormCollector<'_> {
-    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        if call.arguments.is_empty()
-            && let Expression::Identifier(callee) = &call.callee
-            && self.targets.contains(callee.name.as_str())
-        {
-            *self.call_count.entry(callee.name.to_string()).or_insert(0) += 1;
-        }
-        walk_call_expression(self, call);
-    }
-
-    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
-        let name = identifier.name.as_str();
-        if self.targets.contains(name) {
-            *self.total_count.entry(name.to_string()).or_insert(0) += 1;
-        }
-    }
 }
 
 /// AST-level body classifier for `lazyModule((exports, module) => { BODY })`
@@ -5916,6 +5903,20 @@ mod tests {
         assert!(callees.contains("packageInit"));
         assert!(callees.contains("Constructed"));
         assert!(!callees.contains("alloc"));
+        assert_eq!(
+            facts
+                .iter()
+                .find(|fact| fact.name == "packageInit" && fact.is_call_callee)
+                .and_then(|fact| fact.call_arg_count),
+            Some(0)
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .find(|fact| fact.name == "Constructed" && fact.is_call_callee)
+                .and_then(|fact| fact.call_arg_count),
+            None
+        );
     }
 
     #[test]
@@ -7500,6 +7501,18 @@ mod tests {
         // thunk-call pattern. The binding is being used as a callable
         // value directly; eagerifying would change the call semantics.
         let source = concat!("import { foo } from './x.js';\n", "foo();\n", "foo(1);\n",);
+        let result = verify_only_immediate_call_references(
+            source,
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+        assert_eq!(result.get("foo"), Some(&false));
+    }
+
+    #[test]
+    fn rejects_immediate_call_form_when_constructed() {
+        let source = concat!("import { foo } from './x.js';\n", "new foo();\n",);
         let result = verify_only_immediate_call_references(
             source,
             &binding_set(&["foo"]),
