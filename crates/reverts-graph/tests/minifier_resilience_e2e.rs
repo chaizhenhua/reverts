@@ -675,6 +675,33 @@ fn pipeline_aligns_finite_for_with_while_when_no_init_or_update() {
 }
 
 #[test]
+fn pipeline_aligns_nullish_assignment_with_explicit_if() {
+    // Minified or hand-written source might use either form; the
+    // `nullish_assignment_compacted` pass canonicalises both to the
+    // compact `??=` so they converge.
+    let explicit = "function f(x, val) { if (x == null) x = val; }";
+    let compact = "function f(x, val) { x ??= val; }";
+    let fp_e = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(explicit));
+    let fp_c = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(compact));
+    assert_eq!(
+        fp_e[0].primary.ast, fp_c[0].primary.ast,
+        "if(x==null) x=val and x??=val must converge after pipeline"
+    );
+}
+
+#[test]
+fn pipeline_aligns_nullish_assignment_on_member_with_explicit_if() {
+    let explicit = "function f(obj, val) { if (obj.field == null) obj.field = val; }";
+    let compact = "function f(obj, val) { obj.field ??= val; }";
+    let fp_e = FunctionExtractor::fingerprint(ModuleId(1), &apply_all_passes(explicit));
+    let fp_c = FunctionExtractor::fingerprint(ModuleId(2), &apply_all_passes(compact));
+    assert_eq!(
+        fp_e[0].primary.ast, fp_c[0].primary.ast,
+        "if(obj.field==null) obj.field=val must converge with obj.field??=val"
+    );
+}
+
+#[test]
 fn axes_match_across_all_dimensions_after_full_pipeline() {
     let minified = "function f(x) { x && doA(); x || doB(); }";
     let source = "function f(x) { if (x) doA(); if (!x) doB(); }";
