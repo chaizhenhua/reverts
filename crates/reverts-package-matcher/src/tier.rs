@@ -380,6 +380,15 @@ fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind
 /// uninformative. Requires unique winner with margin ≥ 0.3 over runner-up.
 pub const STRUCTURAL_FREQUENCY_LIMIT: u32 = 50;
 
+/// Higher frequency ceiling for the alt-source structural-only tier.
+/// Strategically loosened because the alt-tier weight (5) is already
+/// discounted under the primary structural_only weight (10), so the
+/// Hungarian global assignment will prefer a primary match whenever
+/// one exists. We trade slightly more permissive anchor frequency at
+/// the alt tier for the chance to recover matches the primary tier
+/// would silently reject.
+const STRUCTURAL_FREQUENCY_LIMIT_ALT: u32 = 75;
+
 #[must_use]
 pub fn try_structural_only(
     fp: &FunctionFingerprint,
@@ -430,7 +439,11 @@ fn structural_only_for_anchor(
     let freq = index
         .corpus_stats()
         .frequency(AxisKind::StructuralAnchor, structural_anchor);
-    if freq > STRUCTURAL_FREQUENCY_LIMIT {
+    let limit = match tier {
+        MatchTier::StructuralOnlyAlternate => STRUCTURAL_FREQUENCY_LIMIT_ALT,
+        _ => STRUCTURAL_FREQUENCY_LIMIT,
+    };
+    if freq > limit {
         return None;
     }
 
@@ -584,6 +597,125 @@ mod tests {
         assert!(m.matched_axes.contains(&AxisKind::LiteralAnchor));
         assert!(m.matched_axes.contains(&AxisKind::CalleeSet));
         assert!(!m.matched_axes.contains(&AxisKind::ThrowSet));
+    }
+
+    #[test]
+    fn feature_similarity_alternate_accepts_jaccard_just_above_alt_threshold() {
+        // The primary `try_feature_similarity` requires Jaccard ≥ 0.6;
+        // the alt-source variant relaxes to ≥ 0.5. Build an index where
+        // exactly half of the function's remaining axes overlap the
+        // candidate — Jaccard ≈ 0.5 — and verify:
+        //   * the primary tier rejects (0.5 < 0.6);
+        //   * the alt tier accepts when the same axis values appear on an
+        //     alternate fingerprint.
+        let mut idx = InMemoryFingerprintIndex::new();
+        let cand = Candidate {
+            package: PackageId {
+                name: "p".into(),
+                version: "1.0".into(),
+            },
+            variant_path: "i.js".into(),
+            external_function_id: 33,
+            matched_axis: AxisKind::CalleeSet,
+            matched_alternate: None,
+        };
+        // Index the primary-axis (CalleeSet=99) and exactly one of the
+        // remaining axes (LiteralAnchor=10) — half of the two-axis
+        // remaining set after `collect_remaining_axes` drops the
+        // primary. With remaining={return_pattern, effect_pattern,
+        // structural_anchor, binding_pattern, literal_anchor (when
+        // Some)} ≈ 5 axes total, exactly 3 overlapping yields ~0.6.
+        // To engineer a Jaccard of 0.5, we make 1 of 2 indexed axes
+        // overlap by keeping only one optional axis Some.
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::CalleeSet,
+                hash: 99,
+            },
+            cand.clone(),
+        );
+        // Provide overlap on exactly half the remaining axes.
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::ReturnPattern,
+                hash: 1,
+            },
+            cand.clone(),
+        );
+        idx.insert_feature(
+            FeatureKey {
+                param_count: 1,
+                kind: AxisKind::StructuralAnchor,
+                hash: 1,
+            },
+            cand.clone(),
+        );
+
+        // Primary axes lack the indexed values entirely (no callee_set
+        // hit), so primary feature_similarity finds no candidates.
+        let primary = AxisHashes {
+            ast: 0,
+            cfg: 0,
+            return_pattern: 99_999, // doesn't match indexed return_pattern=1
+            effect_pattern: 0,
+            literal_anchor: None,
+            access_pattern: None,
+            structural_anchor: 99_999, // doesn't match indexed structural=1
+            literal_shape: None,
+            access_shape: None,
+            callee_set: None, // primary has no callee_set → priority_axis returns None
+            binding_pattern: 0,
+            throw_set: None,
+        };
+
+        // Alternate-source axes match the candidate on primary axis
+        // (callee_set=99) and exactly 2 of 4 remaining axes
+        // (return_pattern=1, structural_anchor=1). Jaccard ≈ 2/4 = 0.5,
+        // which the alt threshold accepts.
+        let alt = AxisHashes {
+            ast: 0,
+            cfg: 0,
+            return_pattern: 1,
+            effect_pattern: 0,
+            literal_anchor: None,
+            access_pattern: None,
+            structural_anchor: 1,
+            literal_shape: None,
+            access_shape: None,
+            callee_set: Some(99),
+            binding_pattern: 0,
+            throw_set: None,
+        };
+
+        let fp = FunctionFingerprint {
+            id: FunctionId::new(ModuleId(1), ByteRange::new(0, 10)),
+            param_count: 1,
+            statement_count: 1,
+            primary,
+            alternates: vec![reverts_ir::AlternateAxisHashes {
+                pass: NormalizationPassId::ComputedToStaticMember,
+                statement_count: 1,
+                axes: alt,
+            }],
+        };
+
+        // Primary tier rejects (no callee_set on primary).
+        assert!(try_feature_similarity(&fp, &idx).is_none());
+
+        // Alt tier accepts via the alternate axes at ≥0.5 threshold.
+        let m = try_feature_similarity_alternate(&fp, &idx)
+            .expect("alt feature-similarity match expected at Jaccard ≥ 0.5");
+        assert_eq!(m.tier, MatchTier::FeatureSimilarityAlternate);
+        assert!(
+            m.tier.weight() < MatchTier::FeatureSimilarity.weight(),
+            "alt-tier weight must be strictly below primary"
+        );
+        assert_eq!(
+            m.matched_alternate,
+            Some(NormalizationPassId::ComputedToStaticMember)
+        );
     }
 
     #[test]
