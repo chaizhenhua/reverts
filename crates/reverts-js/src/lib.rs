@@ -2812,6 +2812,8 @@ fn apply_babel_source_level_lowerings(
 #[derive(Debug, Clone)]
 struct TinyReturnHelperCandidate {
     name: String,
+    params: Vec<String>,
+    enhanced: bool,
     declaration_span: Span,
     return_expression_span: Span,
 }
@@ -2832,11 +2834,15 @@ fn inline_single_use_tiny_return_helpers(
             continue;
         }
 
+        let allow_enhanced = allow_enhanced_tiny_return_inlining(path_hint);
         let mut candidates = BTreeMap::<String, TinyReturnHelperCandidate>::new();
         for statement in &parsed.program.body {
             let Some(candidate) = tiny_return_helper_candidate(statement, source) else {
                 continue;
             };
+            if candidate.enhanced && !allow_enhanced {
+                continue;
+            }
             candidates
                 .entry(candidate.name.clone())
                 .or_insert(candidate);
@@ -2845,9 +2851,12 @@ fn inline_single_use_tiny_return_helpers(
             return source.to_string();
         }
 
-        let candidate_names = candidates.keys().cloned().collect::<BTreeSet<_>>();
+        let candidate_arities = candidates
+            .iter()
+            .map(|(name, candidate)| (name.clone(), candidate.params.len()))
+            .collect::<BTreeMap<_, _>>();
         let mut uses = TinyReturnHelperUseCollector {
-            candidates: &candidate_names,
+            candidates: &candidate_arities,
             total_refs: BTreeMap::new(),
             call_spans: BTreeMap::new(),
         };
@@ -2882,8 +2891,11 @@ fn inline_single_use_tiny_return_helpers(
             }) {
                 continue;
             }
-            let expression = &source[candidate.return_expression_span.start as usize
-                ..candidate.return_expression_span.end as usize];
+            let Some(expression) =
+                tiny_return_inlined_expression_source(source, &candidate, call_span)
+            else {
+                continue;
+            };
             edits.push((
                 candidate.declaration_span.start,
                 candidate.declaration_span.end,
@@ -2909,23 +2921,62 @@ fn tiny_return_helper_candidate(
     statement: &Statement<'_>,
     source: &str,
 ) -> Option<TinyReturnHelperCandidate> {
-    let Statement::FunctionDeclaration(function) = statement else {
-        return None;
-    };
-    if function.r#async
-        || function.generator
-        || !function.params.items.is_empty()
-        || statement.span().size() > TINY_RETURN_HELPER_MAX_DECL_BYTES
-    {
+    if statement.span().size() > TINY_RETURN_HELPER_MAX_DECL_BYTES {
         return None;
     }
-    let name = function.id.as_ref()?.name.as_str().to_string();
-    let body = function.body.as_ref()?;
-    let [Statement::ReturnStatement(return_statement)] = body.statements.as_slice() else {
-        return None;
+    let (name, params, expression) = match statement {
+        Statement::FunctionDeclaration(function) => {
+            if function.r#async || function.generator {
+                return None;
+            }
+            (
+                function.id.as_ref()?.name.as_str().to_string(),
+                tiny_return_parameter_names(&function.params)?,
+                function_return_expression(function)?,
+            )
+        }
+        Statement::VariableDeclaration(declaration) => {
+            if declaration.declarations.len() != 1 {
+                return None;
+            }
+            let declarator = &declaration.declarations[0];
+            let BindingPatternKind::BindingIdentifier(identifier) = &declarator.id.kind else {
+                return None;
+            };
+            let init = declarator.init.as_ref()?;
+            match init {
+                Expression::ArrowFunctionExpression(arrow) => {
+                    if arrow.r#async {
+                        return None;
+                    }
+                    (
+                        identifier.name.as_str().to_string(),
+                        tiny_return_parameter_names(&arrow.params)?,
+                        arrow_return_expression(arrow)?,
+                    )
+                }
+                Expression::FunctionExpression(function) => {
+                    if function.r#async || function.generator {
+                        return None;
+                    }
+                    (
+                        identifier.name.as_str().to_string(),
+                        tiny_return_parameter_names(&function.params)?,
+                        function_return_expression(function)?,
+                    )
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
     };
-    let expression = return_statement.argument.as_ref()?;
+    if params.len() > 1 {
+        return None;
+    }
     if !tiny_return_expression_is_safe(expression) {
+        return None;
+    }
+    if !params.is_empty() && tiny_return_expression_blocks_parameter_substitution(expression) {
         return None;
     }
     let expression_span = expression.span();
@@ -2933,11 +2984,184 @@ fn tiny_return_helper_candidate(
     if expression_source.len() > TINY_RETURN_HELPER_MAX_DECL_BYTES as usize {
         return None;
     }
+    let enhanced = !params.is_empty() || matches!(statement, Statement::VariableDeclaration(_));
     Some(TinyReturnHelperCandidate {
         name,
+        params,
+        enhanced,
         declaration_span: statement.span(),
         return_expression_span: expression_span,
     })
+}
+
+fn allow_enhanced_tiny_return_inlining(path_hint: Option<&Path>) -> bool {
+    path_hint.is_some_and(|path| {
+        let path = path.to_string_lossy();
+        path.contains("modules/runtime/")
+            || path.starts_with("modules/runtime/")
+            || path.contains("modules\\runtime\\")
+            || path.starts_with("modules\\runtime\\")
+    })
+}
+
+fn tiny_return_parameter_names(params: &oxc_ast::ast::FormalParameters<'_>) -> Option<Vec<String>> {
+    if params.rest.is_some() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(params.items.len());
+    for param in &params.items {
+        let BindingPatternKind::BindingIdentifier(identifier) = &param.pattern.kind else {
+            return None;
+        };
+        names.push(identifier.name.as_str().to_string());
+    }
+    Some(names)
+}
+
+fn function_return_expression<'a>(function: &'a Function<'a>) -> Option<&'a Expression<'a>> {
+    let body = function.body.as_ref()?;
+    let [Statement::ReturnStatement(return_statement)] = body.statements.as_slice() else {
+        return None;
+    };
+    return_statement.argument.as_ref()
+}
+
+fn arrow_return_expression<'a>(
+    arrow: &'a ArrowFunctionExpression<'a>,
+) -> Option<&'a Expression<'a>> {
+    let [statement] = arrow.body.statements.as_slice() else {
+        return None;
+    };
+    if arrow.expression {
+        let Statement::ExpressionStatement(statement) = statement else {
+            return None;
+        };
+        Some(&statement.expression)
+    } else {
+        let Statement::ReturnStatement(statement) = statement else {
+            return None;
+        };
+        statement.argument.as_ref()
+    }
+}
+
+fn tiny_return_inlined_expression_source(
+    source: &str,
+    candidate: &TinyReturnHelperCandidate,
+    call_span: Span,
+) -> Option<String> {
+    let expression = &source[candidate.return_expression_span.start as usize
+        ..candidate.return_expression_span.end as usize];
+    let [] = candidate.params.as_slice() else {
+        let [param] = candidate.params.as_slice() else {
+            return None;
+        };
+        return tiny_return_substituted_expression_source(source, candidate, call_span, param);
+    };
+    Some(expression.to_string())
+}
+
+fn tiny_return_substituted_expression_source(
+    source: &str,
+    candidate: &TinyReturnHelperCandidate,
+    call_span: Span,
+    param: &str,
+) -> Option<String> {
+    let call_source = &source[call_span.start as usize..call_span.end as usize];
+    let arg_source = single_call_argument_source(call_source)?;
+    if !tiny_inline_argument_is_safe(arg_source) {
+        return None;
+    }
+    let mut collector = ParameterReferenceSpanCollector {
+        target: param,
+        spans: Vec::new(),
+    };
+    let expression_source = &source[candidate.return_expression_span.start as usize
+        ..candidate.return_expression_span.end as usize];
+    let allocator = Allocator::default();
+    let wrapped = format!("({expression_source});");
+    let parsed = Parser::new(&allocator, wrapped.as_str(), SourceType::ts()).parse();
+    if !parsed.errors.is_empty() || parsed.panicked {
+        return None;
+    }
+    if let Some(Statement::ExpressionStatement(statement)) = parsed.program.body.first()
+        && let Expression::ParenthesizedExpression(parenthesized) = &statement.expression
+    {
+        collector.visit_expression(&parenthesized.expression);
+    }
+    let mut output = expression_source.to_string();
+    let replacement = format!("({arg_source})");
+    for span in collector.spans.iter().rev() {
+        let start = span.start as usize - 1; // account for the wrapper `(`
+        let end = span.end as usize - 1;
+        output.replace_range(start..end, replacement.as_str());
+    }
+    Some(output)
+}
+
+fn single_call_argument_source(call_source: &str) -> Option<&str> {
+    let open = call_source.find('(')?;
+    let close = call_source.rfind(')')?;
+    let arg = call_source.get(open + 1..close)?.trim();
+    (!arg.is_empty() && !arg.contains(',')).then_some(arg)
+}
+
+fn tiny_inline_argument_is_safe(source: &str) -> bool {
+    let allocator = Allocator::default();
+    let wrapped = format!("({source});");
+    let parsed = Parser::new(&allocator, wrapped.as_str(), SourceType::ts()).parse();
+    if !parsed.errors.is_empty() || parsed.panicked {
+        return false;
+    }
+    let Some(Statement::ExpressionStatement(statement)) = parsed.program.body.first() else {
+        return false;
+    };
+    let Expression::ParenthesizedExpression(parenthesized) = &statement.expression else {
+        return false;
+    };
+    matches!(
+        &parenthesized.expression,
+        Expression::Identifier(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::NullLiteral(_)
+            | Expression::BigIntLiteral(_)
+            | Expression::RegExpLiteral(_)
+    )
+}
+
+fn tiny_return_expression_blocks_parameter_substitution(expression: &Expression<'_>) -> bool {
+    let mut visitor = ParameterSubstitutionBlocker { blocked: false };
+    visitor.visit_expression(expression);
+    visitor.blocked
+}
+
+struct ParameterSubstitutionBlocker {
+    blocked: bool,
+}
+
+impl<'a> Visit<'a> for ParameterSubstitutionBlocker {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if matches!(expression, Expression::ObjectExpression(_)) {
+            self.blocked = true;
+            return;
+        }
+        walk_expression(self, expression);
+    }
+}
+
+struct ParameterReferenceSpanCollector<'a> {
+    target: &'a str,
+    spans: Vec<Span>,
+}
+
+impl<'a> Visit<'a> for ParameterReferenceSpanCollector<'_> {
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if identifier.name.as_str() == self.target {
+            self.spans.push(identifier.span());
+        }
+    }
 }
 
 fn tiny_return_expression_is_safe(expression: &Expression<'_>) -> bool {
@@ -2980,16 +3204,18 @@ impl<'a> Visit<'a> for TinyReturnExpressionSafety {
 }
 
 struct TinyReturnHelperUseCollector<'a> {
-    candidates: &'a BTreeSet<String>,
+    candidates: &'a BTreeMap<String, usize>,
     total_refs: BTreeMap<String, u32>,
     call_spans: BTreeMap<String, Vec<Span>>,
 }
 
 impl<'a> Visit<'a> for TinyReturnHelperUseCollector<'_> {
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
-        if call.arguments.is_empty()
-            && let Expression::Identifier(callee) = &call.callee
-            && self.candidates.contains(callee.name.as_str())
+        if let Expression::Identifier(callee) = &call.callee
+            && self
+                .candidates
+                .get(callee.name.as_str())
+                .is_some_and(|arity| *arity == call.arguments.len())
         {
             self.call_spans
                 .entry(callee.name.as_str().to_string())
@@ -3001,7 +3227,7 @@ impl<'a> Visit<'a> for TinyReturnHelperUseCollector<'_> {
 
     fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
         let name = identifier.name.as_str();
-        if self.candidates.contains(name) {
+        if self.candidates.contains_key(name) {
             *self.total_refs.entry(name.to_string()).or_insert(0) += 1;
         }
     }
@@ -3010,7 +3236,7 @@ impl<'a> Visit<'a> for TinyReturnHelperUseCollector<'_> {
         if declaration.source.is_none() {
             for specifier in &declaration.specifiers {
                 if let Some(local) = module_export_name_text(&specifier.local)
-                    && self.candidates.contains(local.as_str())
+                    && self.candidates.contains_key(local.as_str())
                 {
                     *self.total_refs.entry(local).or_insert(0) += 1;
                 }
@@ -5395,7 +5621,7 @@ mod tests {
             "const answer = __pkg.answer;",
             &[GeneratedImport::new("__pkg", "pkg")],
             &[GeneratedExport::new("answer")],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5412,7 +5638,7 @@ mod tests {
             "import { join as localJoin } from 'path';\nimport * as pathNS from 'path';\nimport { dirname as localDir, join as otherJoin } from 'path';\nconsole.log(pathNS, localJoin, localDir, otherJoin);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5431,7 +5657,7 @@ mod tests {
             "import * as pkgNS from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta } from 'pkg';\nconsole.log(pkgNS, alpha, beta);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5448,7 +5674,7 @@ mod tests {
             "import defaultPkg from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta as localBeta } from 'pkg';\nconsole.log(defaultPkg, alpha, localBeta);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5464,7 +5690,7 @@ mod tests {
             "import defaultPkg from 'pkg';\nimport * as pkgNS from 'pkg';\nconsole.log(defaultPkg, pkgNS);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5480,7 +5706,7 @@ mod tests {
             "import defaultPkg, { alpha } from 'pkg';\nimport * as pkgNS from 'pkg';\nconsole.log(defaultPkg, alpha, pkgNS);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5497,7 +5723,7 @@ mod tests {
             "import first from 'pkg';\nimport second from 'pkg';\nimport { alpha } from 'pkg';\nconsole.log(first, second, alpha);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5513,7 +5739,7 @@ mod tests {
             "import first, { alpha } from 'pkg';\nimport second, { beta } from 'pkg';\nconsole.log(first, second, alpha, beta);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5529,7 +5755,7 @@ mod tests {
             "import firstDefault, * as firstNS from 'pkg';\nimport secondDefault, * as secondNS from 'pkg';\nconsole.log(firstDefault, firstNS, secondDefault, secondNS);",
             &[],
             &[],
-            Some(Path::new("src/index.ts")),
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
             ParseGoal::TypeScript,
             CompilerLowering::None,
         )
@@ -5644,6 +5870,54 @@ mod tests {
     }
 
     #[test]
+    fn module_item_formatting_inlines_single_use_const_arrow_helper() {
+        let formatted = format_source_with_module_items(
+            "const value = 1;\nconst readValue = () => value;\nconsole.log(readValue());",
+            &[],
+            &[],
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(!formatted.contains("readValue ="));
+        assert!(formatted.contains("console.log(value);"));
+    }
+
+    #[test]
+    fn module_item_formatting_inlines_single_use_function_expression_helper() {
+        let formatted = format_source_with_module_items(
+            "const value = 1;\nconst readValue = function() { return value; };\nconsole.log(readValue());",
+            &[],
+            &[],
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(!formatted.contains("readValue ="));
+        assert!(formatted.contains("console.log(value);"));
+    }
+
+    #[test]
+    fn module_item_formatting_inlines_single_use_one_param_helper() {
+        let formatted = format_source_with_module_items(
+            "function readName(item) { return item.name; }\nconst user = { name: 'Ada' };\nconsole.log(readName(user));",
+            &[],
+            &[],
+            Some(Path::new("modules/runtime/source-1-helpers.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(!formatted.contains("function readName"));
+        assert!(formatted.contains("console.log(user.name);"));
+    }
+
+    #[test]
     fn module_item_formatting_keeps_multi_use_tiny_return_helper() {
         let formatted = format_source_with_module_items(
             "const value = 1;\nfunction readValue() { return value; }\nconsole.log(readValue(), readValue());",
@@ -5689,6 +5963,54 @@ mod tests {
 
         assert!(formatted.contains("function readThis"));
         assert!(formatted.contains("readThis()"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_one_param_helper_with_impure_arg() {
+        let formatted = format_source_with_module_items(
+            "function readName(item) { return item.name; }\nconsole.log(readName(makeUser()));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function readName"));
+        assert!(formatted.contains("readName(makeUser())"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_enhanced_tiny_helper_outside_runtime() {
+        let formatted = format_source_with_module_items(
+            "function compute(input) { return input * 2; }\nvar entry = compute(21);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function compute"));
+        assert!(formatted.contains("var entry = compute(21);"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_one_param_helper_with_object_shorthand() {
+        let formatted = format_source_with_module_items(
+            "const wrap = (item) => ({ item });\nconsole.log(wrap(user));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const wrap ="));
+        assert!(formatted.contains("wrap(user)"));
     }
 
     #[test]
