@@ -342,6 +342,13 @@ struct PackageModuleSourceQualityCounts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceUnitPackagePathHint {
+    package_name: String,
+    package_version: Option<String>,
+    semantic_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractAssetsOutcome {
     pub project_id: u32,
     pub referenced_assets: usize,
@@ -405,6 +412,7 @@ pub fn match_packages_from_connection(
     // modules table so cascade attributions can FK them.
     let synthetic_modules: Vec<reverts_input::ModuleInput> = extraction.new_modules.clone();
     extraction.merge_into(&mut rows);
+    enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
 
     let package_names = package_source_filter(&rows, &args.package_names);
     let source_quality_counts = package_module_source_quality_counts(
@@ -582,6 +590,188 @@ fn package_module_source_quality_counts(
         }
     }
     counts
+}
+
+fn enrich_package_modules_from_source_units(
+    connection: &Connection,
+    rows: &mut InputRows,
+    project_id: u32,
+) -> Result<(), MatchPackagesError> {
+    let hints = load_source_unit_package_path_hints(connection, project_id)?;
+    if hints.is_empty() {
+        return Ok(());
+    }
+    for module in &mut rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        let Some(package_name) = module.package_name.as_deref() else {
+            continue;
+        };
+        let Some(file_hints) = hints.get(&source_file_id) else {
+            continue;
+        };
+        let Some(hint) = file_hints
+            .iter()
+            .find(|hint| hint.package_name == package_name)
+        else {
+            continue;
+        };
+        if clean_package_semantic_path_hint(package_name, module.semantic_path.as_str()).is_none()
+            || hint.semantic_path.len() > module.semantic_path.len()
+        {
+            module.semantic_path = hint.semantic_path.clone();
+        }
+        if module.package_version.is_none() {
+            module.package_version = hint.package_version.clone();
+        }
+    }
+    Ok(())
+}
+
+fn load_source_unit_package_path_hints(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<BTreeMap<u32, Vec<SourceUnitPackagePathHint>>, MatchPackagesError> {
+    if !sqlite_table_exists(connection, "source_units")
+        .map_err(MatchPackagesError::QueryPackageSources)?
+    {
+        return Ok(BTreeMap::new());
+    }
+    for column in ["file_id", "logical_path", "package_name", "package_version"] {
+        if !sqlite_table_has_column(connection, "source_units", column)
+            .map_err(MatchPackagesError::QueryPackageSources)?
+        {
+            return Ok(BTreeMap::new());
+        }
+    }
+
+    let mut statement = connection
+        .prepare(
+            r"
+            SELECT file_id, logical_path, package_name, package_version
+              FROM source_units
+             WHERE project_id = ?1
+               AND file_id IS NOT NULL
+               AND TRIM(COALESCE(logical_path, '')) != ''
+            ",
+        )
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let rows = statement
+        .query_map([i64::from(project_id)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let raw_rows = collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)?;
+    let mut hints = BTreeMap::<u32, Vec<SourceUnitPackagePathHint>>::new();
+    for (file_id, logical_path, package_name, package_version) in raw_rows {
+        let Ok(file_id) = u32::try_from(file_id) else {
+            continue;
+        };
+        let Some((package_name, semantic_path)) =
+            source_unit_package_semantic_path(package_name.as_deref(), logical_path.as_str())
+        else {
+            continue;
+        };
+        hints
+            .entry(file_id)
+            .or_default()
+            .push(SourceUnitPackagePathHint {
+                package_name,
+                package_version: package_version
+                    .map(|version| version.trim().to_string())
+                    .filter(|version| is_exact_package_version_hint(version)),
+                semantic_path,
+            });
+    }
+    for file_hints in hints.values_mut() {
+        file_hints.sort_by(|left, right| {
+            right
+                .semantic_path
+                .len()
+                .cmp(&left.semantic_path.len())
+                .then_with(|| left.semantic_path.cmp(&right.semantic_path))
+        });
+        file_hints.dedup();
+    }
+    Ok(hints)
+}
+
+fn source_unit_package_semantic_path(
+    package_name_hint: Option<&str>,
+    logical_path: &str,
+) -> Option<(String, String)> {
+    let clean = logical_path
+        .trim()
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(logical_path)
+        .replace('\\', "/");
+    if clean.is_empty() {
+        return None;
+    }
+
+    if let Some(package_name) = package_name_hint
+        .map(str::trim)
+        .filter(|package_name| is_valid_package_name(package_name))
+        && let Some(rest) = package_subpath_from_logical_path(package_name, clean.as_str())
+    {
+        return Some((package_name.to_string(), format!("{package_name}/{rest}")));
+    }
+
+    let marker = "node_modules/";
+    let index = clean.rfind(marker)?;
+    let after = clean.get(index + marker.len()..)?.trim_start_matches('/');
+    let mut segments = after.split('/').filter(|segment| !segment.is_empty());
+    let first = segments.next()?;
+    let package_name = if first.starts_with('@') {
+        let second = segments.next()?;
+        format!("{first}/{second}")
+    } else {
+        first.to_string()
+    };
+    if !is_valid_package_name(package_name.as_str()) {
+        return None;
+    }
+    let rest = segments.collect::<Vec<_>>().join("/");
+    if rest.is_empty() {
+        return None;
+    }
+    Some((
+        package_name.clone(),
+        format!("{package_name}/{}", strip_source_extension(rest.as_str())),
+    ))
+}
+
+fn package_subpath_from_logical_path<'a>(
+    package_name: &str,
+    logical_path: &'a str,
+) -> Option<&'a str> {
+    let package_path = package_name.trim_start_matches('@');
+    for marker in [
+        format!("node_modules/{package_name}/"),
+        format!("node_modules/{package_path}/"),
+        format!("/{package_name}/"),
+        format!("/{package_path}/"),
+        format!("{package_name}/"),
+        format!("{package_path}/"),
+    ] {
+        if let Some(index) = logical_path.find(marker.as_str()) {
+            let rest = logical_path.get(index + marker.len()..)?;
+            if !rest.trim_matches('/').is_empty() {
+                return Some(strip_source_extension(rest.trim_matches('/')));
+            }
+        }
+    }
+    None
 }
 
 fn match_with_cascade_scoped_by_module_hints(
@@ -2483,12 +2673,14 @@ fn filter_package_sources_to_best_build_variants(
             .map(|(family, paths)| {
                 let matched_hints = hints
                     .iter()
-                    .filter(|hint| {
+                    .map(|hint| {
                         paths
                             .iter()
-                            .any(|path| package_source_path_matches_hint(path, hint))
+                            .map(|path| package_source_path_hint_score(path, hint))
+                            .max()
+                            .unwrap_or(0)
                     })
-                    .count();
+                    .sum::<usize>();
                 (family, matched_hints)
             })
             .filter(|(_family, matched_hints)| *matched_hints > 0)
@@ -2725,20 +2917,29 @@ fn build_variant_family_rank(family: &str) -> u8 {
     }
 }
 
-fn package_source_path_matches_hint(source_path: &str, hint: &str) -> bool {
+fn package_source_path_hint_score(source_path: &str, hint: &str) -> usize {
     let source_normalized = normalize_path_for_hint_match(source_path);
+    let hint_normalized = normalize_path_for_hint_match(hint);
+    if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
+        return 2;
+    }
     let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
     let hint_last_normalized = normalize_path_for_hint_match(hint_last_segment);
     if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
     {
-        return true;
+        return 1;
     }
     let source_tokens = path_hint_tokens(source_path);
     let hint_tokens = path_hint_tokens(hint_last_segment);
-    !hint_tokens.is_empty()
+    if !hint_tokens.is_empty()
         && hint_tokens
             .iter()
             .all(|token| source_tokens.contains(token))
+    {
+        1
+    } else {
+        0
+    }
 }
 
 fn normalize_path_for_hint_match(value: &str) -> String {
@@ -4160,6 +4361,76 @@ mod tests {
                 .all(|source| source.source_path.contains("/dist/esm/")),
             "{sources:?}"
         );
+    }
+
+    #[test]
+    fn package_source_build_variant_selection_prefers_full_source_unit_variant_hint() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "rxjs/dist/esm/operators/sample",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        ));
+        let mut sources = vec![
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/operators/sample",
+                "rxjs@7.8.2/dist/cjs/operators/sample.js",
+                "exports.sample = sample;",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/operators/sample",
+                "rxjs@7.8.2/dist/esm/operators/sample.js",
+                "export function sample() {}",
+            ),
+        ];
+
+        super::filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].source_path.contains("/dist/esm/"));
+    }
+
+    #[test]
+    fn source_unit_path_hints_enrich_package_module_semantic_path() {
+        let connection = Connection::open_in_memory().expect("open in-memory database");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE source_units (
+                    project_id INTEGER NOT NULL,
+                    file_id INTEGER,
+                    logical_path TEXT NOT NULL,
+                    package_name TEXT,
+                    package_version TEXT
+                );
+                INSERT INTO source_units
+                    (project_id, file_id, logical_path, package_name, package_version)
+                VALUES
+                    (1, 7, 'webpack://app/./node_modules/rxjs/dist/esm/operators/sample.js',
+                     'rxjs', '7.8.2');
+                ",
+            )
+            .expect("seed source_units");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(
+            ModuleInput::package(ModuleId(10), "m10", "modules/10.ts", "rxjs", None)
+                .with_source_file(7),
+        );
+
+        super::enrich_package_modules_from_source_units(&connection, &mut rows, 1)
+            .expect("enrich from source_units");
+
+        assert_eq!(
+            rows.modules[0].semantic_path,
+            "rxjs/dist/esm/operators/sample"
+        );
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("7.8.2"));
     }
 
     #[test]
