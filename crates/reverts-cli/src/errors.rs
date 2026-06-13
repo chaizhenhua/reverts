@@ -16,6 +16,8 @@ pub enum CliError {
     MissingCommand,
     MissingArgument(&'static str),
     InvalidProjectId(String),
+    InvalidLimit(String),
+    InvalidByteLimit(String),
     InvalidPackageName(String),
     UnknownCommand(String),
     UnknownArgument(String),
@@ -27,6 +29,8 @@ impl fmt::Display for CliError {
             Self::MissingCommand => write!(formatter, "missing command"),
             Self::MissingArgument(argument) => write!(formatter, "missing argument {argument}"),
             Self::InvalidProjectId(value) => write!(formatter, "invalid project id {value}"),
+            Self::InvalidLimit(value) => write!(formatter, "invalid limit {value}"),
+            Self::InvalidByteLimit(value) => write!(formatter, "invalid byte limit {value}"),
             Self::InvalidPackageName(value) => write!(formatter, "invalid package name {value}"),
             Self::UnknownCommand(command) => write!(formatter, "unknown command {command}"),
             Self::UnknownArgument(argument) => write!(formatter, "unknown argument {argument}"),
@@ -268,12 +272,49 @@ impl Error for ExtractAssetsError {
 }
 
 #[derive(Debug)]
+pub enum RuntimeInventoryError {
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    QueryProjects(rusqlite::Error),
+    LoadInput(SqliteInputError),
+    Pipeline(PipelineError),
+}
+
+impl fmt::Display for RuntimeInventoryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenDatabase { path, source } => {
+                write!(formatter, "failed to open {}: {source}", path.display())
+            }
+            Self::QueryProjects(source) => {
+                write!(formatter, "failed to query project ids: {source}")
+            }
+            Self::LoadInput(source) => write!(formatter, "{source}"),
+            Self::Pipeline(source) => write!(formatter, "{source}"),
+        }
+    }
+}
+
+impl Error for RuntimeInventoryError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenDatabase { source, .. } | Self::QueryProjects(source) => Some(source),
+            Self::LoadInput(source) => Some(source),
+            Self::Pipeline(source) => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum CliRunError {
     Args(CliError),
     LoadInput(SqliteInputError),
     Pipeline(PipelineError),
     MatchPackages(MatchPackagesError),
     ExtractAssets(ExtractAssetsError),
+    RuntimeInventory(RuntimeInventoryError),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -287,6 +328,7 @@ impl fmt::Display for CliRunError {
             Self::Pipeline(source) => write!(formatter, "{source}"),
             Self::MatchPackages(source) => write!(formatter, "{source}"),
             Self::ExtractAssets(source) => write!(formatter, "{source}"),
+            Self::RuntimeInventory(source) => write!(formatter, "{source}"),
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -315,6 +357,7 @@ impl Error for CliRunError {
             Self::Pipeline(source) => Some(source),
             Self::MatchPackages(source) => Some(source),
             Self::ExtractAssets(source) => Some(source),
+            Self::RuntimeInventory(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
             Self::AuditRejected(_) | Self::UnsafeOutputPath(_) => None,
         }

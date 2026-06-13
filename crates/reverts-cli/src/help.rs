@@ -8,6 +8,7 @@ pub enum HelpTopic {
     GenerateProjectV2,
     MatchPackages,
     ExtractAssets,
+    RuntimeInventory,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub struct CommandSpec {
 pub const GENERATE_PROJECT_V2_COMMAND: &str = "generate-project-v2";
 pub const MATCH_PACKAGES_COMMAND: &str = "match-packages";
 pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
+pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -36,6 +38,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: GENERATE_PROJECT_V2_COMMAND,
         topic: HelpTopic::GenerateProjectV2,
         summary: "Generate a TypeScript project from SQLite input",
+    },
+    CommandSpec {
+        name: RUNTIME_INVENTORY_COMMAND,
+        topic: HelpTopic::RuntimeInventory,
+        summary: "Measure emitted runtime helpers and generated internal names",
     },
 ];
 
@@ -56,7 +63,7 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages        Populate package_attributions/package_surfaces in SQLite\n    extract-assets        Populate project_assets from asset references in source slices\n    generate-project-v2   Generate a TypeScript project from SQLite input\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages        Populate package_attributions/package_surfaces in SQLite\n    extract-assets        Populate project_assets from asset references in source slices\n    generate-project-v2   Generate a TypeScript project from SQLite input\n    runtime-inventory     Measure emitted runtime helpers and generated internal names\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
         }
         HelpTopic::GenerateProjectV2 => {
             "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
@@ -66,6 +73,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::ExtractAssets => {
             "reverts-cli extract-assets\n\nUSAGE:\n    reverts-cli extract-assets --input <DB> --project-id <ID> [--asset-root <DIR-OR-BUN-EXE>]... [--apply]\n\nOPTIONS:\n    --input <DB>                    SQLite input database\n    --project-id <ID>               Positive project id\n    --asset-root <DIR-OR-BUN-EXE>   Root directory for asset files, or a Bun standalone executable for /$bunfs/root assets (repeatable)\n    --apply                         Persist discovered project_assets rows"
+        }
+        HelpTopic::RuntimeInventory => {
+            "reverts-cli runtime-inventory\n\nUSAGE:\n    reverts-cli runtime-inventory --input <DB> (--project-id <ID> | --all-projects) [--limit <N>] [--newest] [--max-source-bytes <N>]\n\nOPTIONS:\n    --input <DB>                SQLite input database\n    --project-id <ID>           Positive project id to inspect\n    --all-projects              Inspect every project id in the database\n    --limit <N>                 Maximum number of project ids to inspect when --all-projects is used\n    --newest                    Visit highest project ids first when --all-projects is used\n    --max-source-bytes <N>      Skip projects whose source_files total exceeds this byte limit"
         }
     }
 }

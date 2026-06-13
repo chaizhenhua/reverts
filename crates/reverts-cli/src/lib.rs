@@ -3,7 +3,9 @@ mod errors;
 mod help;
 
 pub use commands::generate_project::GenerateProjectV2Args;
-pub use errors::{CliError, CliRunError, ExtractAssetsError, MatchPackagesError};
+pub use errors::{
+    CliError, CliRunError, ExtractAssetsError, MatchPackagesError, RuntimeInventoryError,
+};
 pub use help::{HelpTopic, help_text, version_text};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use reverts_input::sqlite::load_project_rows_from_connection;
+use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
     AssetKind, InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
     PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
@@ -27,7 +29,10 @@ use reverts_package_matcher::{
     VersionedPackageMatchReport, match_packages_with_pipeline, package_import_names_from_sources,
     package_module_source_quality,
 };
-use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
+use reverts_pipeline::{
+    AssetReference, EmittedFile, collect_required_asset_references_from_rows,
+    generate_project_from_input,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,12 +140,74 @@ impl ExtractAssetsArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInventoryArgs {
+    pub input: PathBuf,
+    pub project_id: Option<u32>,
+    pub all_projects: bool,
+    pub limit: Option<u32>,
+    pub newest: bool,
+    pub max_source_bytes: Option<u64>,
+}
+
+impl RuntimeInventoryArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut project_id = None;
+        let mut all_projects = false;
+        let mut limit = None;
+        let mut newest = false;
+        let mut max_source_bytes = None;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|argument| argument == help::RUNTIME_INVENTORY_COMMAND)
+        {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--project-id" => {
+                    project_id = Some(parse_project_id(next_value(&mut args, "--project-id")?)?);
+                }
+                "--all-projects" => all_projects = true,
+                "--limit" => limit = Some(parse_limit(next_value(&mut args, "--limit")?)?),
+                "--newest" => newest = true,
+                "--max-source-bytes" => {
+                    max_source_bytes = Some(parse_byte_limit(next_value(
+                        &mut args,
+                        "--max-source-bytes",
+                    )?)?);
+                }
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        match (project_id, all_projects) {
+            (Some(_), true) => Err(CliError::UnknownArgument("--all-projects".to_string())),
+            (None, false) => Err(CliError::MissingArgument("--project-id")),
+            _ => Ok(Self {
+                input: input.ok_or(CliError::MissingArgument("--input"))?,
+                project_id,
+                all_projects,
+                limit,
+                newest,
+                max_source_bytes,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     Help(HelpTopic),
     Version,
     GenerateProjectV2(GenerateProjectV2Args),
     MatchPackages(MatchPackagesArgs),
     ExtractAssets(ExtractAssetsArgs),
+    RuntimeInventory(RuntimeInventoryArgs),
 }
 
 impl CliCommand {
@@ -165,6 +232,9 @@ impl CliCommand {
                         }
                         HelpTopic::ExtractAssets => {
                             Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
+                        }
+                        HelpTopic::RuntimeInventory => {
+                            Ok(Self::RuntimeInventory(RuntimeInventoryArgs::parse(args)?))
                         }
                         HelpTopic::TopLevel => Ok(Self::Help(HelpTopic::TopLevel)),
                     }
@@ -248,6 +318,28 @@ pub(crate) fn parse_project_id(value: String) -> Result<u32, CliError> {
     }
 }
 
+pub(crate) fn parse_limit(value: String) -> Result<u32, CliError> {
+    let parsed = value
+        .parse::<u32>()
+        .map_err(|_error| CliError::InvalidLimit(value.clone()))?;
+    if parsed == 0 {
+        Err(CliError::InvalidLimit(value))
+    } else {
+        Ok(parsed)
+    }
+}
+
+pub(crate) fn parse_byte_limit(value: String) -> Result<u64, CliError> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_error| CliError::InvalidByteLimit(value.clone()))?;
+    if parsed == 0 {
+        Err(CliError::InvalidByteLimit(value))
+    } else {
+        Ok(parsed)
+    }
+}
+
 pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
     match CliCommand::parse(args).map_err(CliRunError::Args)? {
         CliCommand::Help(topic) => {
@@ -261,6 +353,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::GenerateProjectV2(args) => commands::generate_project::run(args),
         CliCommand::MatchPackages(args) => run_match_packages(args),
         CliCommand::ExtractAssets(args) => run_extract_assets(args),
+        CliCommand::RuntimeInventory(args) => run_runtime_inventory(args),
     }
 }
 
@@ -298,6 +391,56 @@ fn run_extract_assets(args: ExtractAssetsArgs) -> Result<(), CliRunError> {
         outcome.matched_assets,
         outcome.missing_assets,
         outcome.written_assets
+    );
+    Ok(())
+}
+
+fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
+    let outcome = runtime_inventory_from_sqlite(&args).map_err(CliRunError::RuntimeInventory)?;
+    println!(
+        "runtime inventory for {} project(s), {} skipped",
+        outcome.projects.len(),
+        outcome.skipped_projects
+    );
+    for project in &outcome.projects {
+        println!(
+            "project {}: source_bytes={}, skipped={}, files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}",
+            project.project_id,
+            project.source_bytes,
+            project.skipped,
+            project.counts.files,
+            project.counts.source_lines,
+            project.counts.runtime_files,
+            project.counts.runtime_lines,
+            project.counts.runtime_reexport_only_files,
+            project.counts.runtime_import_statements,
+            project.counts.runtime_reexport_statements,
+            project.counts.setter_occurrences,
+            project.counts.setter_import_statements,
+            project.counts.setter_function_definitions,
+            project.counts.reverts_internal_occurrences,
+            project.counts.named_import_statements,
+            project.counts.named_export_statements,
+            project.audit_findings,
+        );
+    }
+    println!(
+        "total: files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}, skipped_source_bytes={}",
+        outcome.totals.files,
+        outcome.totals.source_lines,
+        outcome.totals.runtime_files,
+        outcome.totals.runtime_lines,
+        outcome.totals.runtime_reexport_only_files,
+        outcome.totals.runtime_import_statements,
+        outcome.totals.runtime_reexport_statements,
+        outcome.totals.setter_occurrences,
+        outcome.totals.setter_import_statements,
+        outcome.totals.setter_function_definitions,
+        outcome.totals.reverts_internal_occurrences,
+        outcome.totals.named_import_statements,
+        outcome.totals.named_export_statements,
+        outcome.audit_findings,
+        outcome.skipped_source_bytes,
     );
     Ok(())
 }
@@ -353,6 +496,47 @@ pub struct ExtractAssetsOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInventoryOutcome {
+    pub projects: Vec<RuntimeInventoryProject>,
+    pub totals: RuntimeInventoryCounts,
+    pub audit_findings: usize,
+    pub skipped_projects: usize,
+    pub skipped_source_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInventoryProject {
+    pub project_id: u32,
+    pub source_bytes: u64,
+    pub skipped: bool,
+    pub counts: RuntimeInventoryCounts,
+    pub audit_findings: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeInventoryCounts {
+    pub files: usize,
+    pub source_lines: usize,
+    pub runtime_files: usize,
+    pub runtime_lines: usize,
+    pub runtime_reexport_only_files: usize,
+    pub runtime_import_statements: usize,
+    pub runtime_reexport_statements: usize,
+    pub setter_occurrences: usize,
+    pub setter_import_statements: usize,
+    pub setter_function_definitions: usize,
+    pub reverts_internal_occurrences: usize,
+    pub named_import_statements: usize,
+    pub named_export_statements: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RuntimeInventoryProjectSelection {
+    project_id: u32,
+    source_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct DiscoveredProjectAsset {
     reference: AssetReference,
     source: DiscoveredAssetSource,
@@ -365,6 +549,220 @@ struct DiscoveredProjectAsset {
 enum DiscoveredAssetSource {
     File(PathBuf),
     EmbeddedBunFile { bytes: Vec<u8> },
+}
+
+pub fn runtime_inventory_from_sqlite(
+    args: &RuntimeInventoryArgs,
+) -> Result<RuntimeInventoryOutcome, RuntimeInventoryError> {
+    let selections = runtime_inventory_project_selections(args)?;
+    let mut projects = Vec::with_capacity(selections.len());
+    let mut totals = RuntimeInventoryCounts::default();
+    let mut audit_findings = 0usize;
+    let mut skipped_projects = 0usize;
+    let mut skipped_source_bytes = 0u64;
+
+    for selection in selections {
+        if args
+            .max_source_bytes
+            .is_some_and(|max_source_bytes| selection.source_bytes > max_source_bytes)
+        {
+            skipped_projects += 1;
+            skipped_source_bytes += selection.source_bytes;
+            projects.push(RuntimeInventoryProject {
+                project_id: selection.project_id,
+                source_bytes: selection.source_bytes,
+                skipped: true,
+                counts: RuntimeInventoryCounts::default(),
+                audit_findings: 0,
+            });
+            continue;
+        }
+
+        let input = load_project_bundle_from_sqlite(args.input.as_path(), selection.project_id)
+            .map_err(RuntimeInventoryError::LoadInput)?;
+        let run = generate_project_from_input(input).map_err(RuntimeInventoryError::Pipeline)?;
+        let counts = runtime_inventory_counts_from_files(&run.project.files);
+        let project_audit_findings = run.audit.findings().len();
+        totals.add(counts);
+        audit_findings += project_audit_findings;
+        projects.push(RuntimeInventoryProject {
+            project_id: selection.project_id,
+            source_bytes: selection.source_bytes,
+            skipped: false,
+            counts,
+            audit_findings: project_audit_findings,
+        });
+    }
+
+    Ok(RuntimeInventoryOutcome {
+        projects,
+        totals,
+        audit_findings,
+        skipped_projects,
+        skipped_source_bytes,
+    })
+}
+
+fn runtime_inventory_project_selections(
+    args: &RuntimeInventoryArgs,
+) -> Result<Vec<RuntimeInventoryProjectSelection>, RuntimeInventoryError> {
+    let connection =
+        Connection::open_with_flags(args.input.as_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|source| RuntimeInventoryError::OpenDatabase {
+                path: args.input.clone(),
+                source,
+            })?;
+
+    if let Some(project_id) = args.project_id {
+        let selection = connection
+            .query_row(
+                r"
+                SELECT ?1, COALESCE(SUM(sf.file_size), 0)
+                FROM project_files pf
+                JOIN source_files sf ON sf.id = pf.file_id
+                WHERE pf.project_id = ?1
+                ",
+                params![i64::from(project_id)],
+                runtime_inventory_project_selection_from_row,
+            )
+            .map_err(RuntimeInventoryError::QueryProjects)?;
+        return Ok(vec![selection]);
+    }
+
+    let order = if args.newest { "DESC" } else { "ASC" };
+    let sql = if args.limit.is_some() {
+        format!(
+            r"
+            SELECT p.id, COALESCE(SUM(sf.file_size), 0)
+            FROM projects p
+            LEFT JOIN project_files pf ON pf.project_id = p.id
+            LEFT JOIN source_files sf ON sf.id = pf.file_id
+            GROUP BY p.id
+            ORDER BY p.id {order}
+            LIMIT ?1
+            "
+        )
+    } else {
+        format!(
+            r"
+            SELECT p.id, COALESCE(SUM(sf.file_size), 0)
+            FROM projects p
+            LEFT JOIN project_files pf ON pf.project_id = p.id
+            LEFT JOIN source_files sf ON sf.id = pf.file_id
+            GROUP BY p.id
+            ORDER BY p.id {order}
+            "
+        )
+    };
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(RuntimeInventoryError::QueryProjects)?;
+    if let Some(limit) = args.limit {
+        let rows = statement
+            .query_map(
+                [i64::from(limit)],
+                runtime_inventory_project_selection_from_row,
+            )
+            .map_err(RuntimeInventoryError::QueryProjects)?;
+        collect_sqlite_rows(rows).map_err(RuntimeInventoryError::QueryProjects)
+    } else {
+        let rows = statement
+            .query_map([], runtime_inventory_project_selection_from_row)
+            .map_err(RuntimeInventoryError::QueryProjects)?;
+        collect_sqlite_rows(rows).map_err(RuntimeInventoryError::QueryProjects)
+    }
+}
+
+fn runtime_inventory_project_selection_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RuntimeInventoryProjectSelection> {
+    Ok(RuntimeInventoryProjectSelection {
+        project_id: row.get(0)?,
+        source_bytes: row.get(1)?,
+    })
+}
+
+fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> RuntimeInventoryCounts {
+    let mut counts = RuntimeInventoryCounts {
+        files: files.len(),
+        ..Default::default()
+    };
+    for file in files {
+        let is_runtime_file = file.path.starts_with("modules/runtime/");
+        counts.source_lines += file.source.lines().count();
+        if is_runtime_file {
+            counts.runtime_files += 1;
+            counts.runtime_lines += file.source.lines().count();
+            if is_runtime_reexport_only_source(file.source.as_str()) {
+                counts.runtime_reexport_only_files += 1;
+            }
+        }
+        counts.setter_occurrences += count_substring(file.source.as_str(), "__reverts_set_");
+        counts.reverts_internal_occurrences += count_substring(file.source.as_str(), "__reverts_");
+        for line in file.source.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("import {") {
+                counts.named_import_statements += 1;
+            }
+            if trimmed.starts_with("export {") {
+                counts.named_export_statements += 1;
+            }
+            if trimmed.starts_with("import ") && line_contains_runtime_path(trimmed) {
+                counts.runtime_import_statements += 1;
+            }
+            if trimmed.starts_with("import ") && trimmed.contains("__reverts_set_") {
+                counts.setter_import_statements += 1;
+            }
+            if trimmed.starts_with("function __reverts_set_") {
+                counts.setter_function_definitions += 1;
+            }
+            if is_runtime_file && trimmed.starts_with("export {") && trimmed.contains(" from ") {
+                counts.runtime_reexport_statements += 1;
+            }
+        }
+    }
+    counts
+}
+
+fn is_runtime_reexport_only_source(source: &str) -> bool {
+    let mut saw_relevant_line = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        saw_relevant_line = true;
+        if !(trimmed.starts_with("export {") && trimmed.contains(" from ")) {
+            return false;
+        }
+    }
+    saw_relevant_line
+}
+
+fn line_contains_runtime_path(line: &str) -> bool {
+    line.contains("/runtime/")
+}
+
+fn count_substring(haystack: &str, needle: &str) -> usize {
+    haystack.match_indices(needle).count()
+}
+
+impl RuntimeInventoryCounts {
+    fn add(&mut self, other: Self) {
+        self.files += other.files;
+        self.source_lines += other.source_lines;
+        self.runtime_files += other.runtime_files;
+        self.runtime_lines += other.runtime_lines;
+        self.runtime_reexport_only_files += other.runtime_reexport_only_files;
+        self.runtime_import_statements += other.runtime_import_statements;
+        self.runtime_reexport_statements += other.runtime_reexport_statements;
+        self.setter_occurrences += other.setter_occurrences;
+        self.setter_import_statements += other.setter_import_statements;
+        self.setter_function_definitions += other.setter_function_definitions;
+        self.reverts_internal_occurrences += other.reverts_internal_occurrences;
+        self.named_import_statements += other.named_import_statements;
+        self.named_export_statements += other.named_export_statements;
+    }
 }
 
 pub fn match_packages_from_sqlite(
@@ -3787,10 +4185,11 @@ mod tests {
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, collect_local_package_sources, dedup_audit_report,
+        MatchPackagesArgs, RuntimeInventoryArgs, collect_local_package_sources, dedup_audit_report,
         extract_bun_embedded_asset_from_bytes, help_text, load_package_sources,
         local_package_metadata, match_packages_from_connection,
-        package_version_hints_for_materialization, persist_package_source_cache, run, version_text,
+        package_version_hints_for_materialization, persist_package_source_cache, run,
+        runtime_inventory_counts_from_files, runtime_inventory_project_selections, version_text,
     };
 
     #[test]
@@ -3884,6 +4283,41 @@ mod tests {
     }
 
     #[test]
+    fn parses_runtime_inventory_command() {
+        let args = RuntimeInventoryArgs::parse([
+            "runtime-inventory".to_string(),
+            "--input".to_string(),
+            "input.db".to_string(),
+            "--all-projects".to_string(),
+            "--limit".to_string(),
+            "25".to_string(),
+            "--newest".to_string(),
+            "--max-source-bytes".to_string(),
+            "1000000".to_string(),
+        ])
+        .expect("args should parse");
+
+        assert_eq!(args.input, PathBuf::from("input.db"));
+        assert_eq!(args.project_id, None);
+        assert!(args.all_projects);
+        assert_eq!(args.limit, Some(25));
+        assert!(args.newest);
+        assert_eq!(args.max_source_bytes, Some(1_000_000));
+
+        let command = CliCommand::parse([
+            "runtime-inventory".to_string(),
+            "--input".to_string(),
+            "input.db".to_string(),
+            "--project-id".to_string(),
+            "13495".to_string(),
+        ])
+        .expect("command should parse");
+        assert!(
+            matches!(command, CliCommand::RuntimeInventory(parsed) if parsed.project_id == Some(13495))
+        );
+    }
+
+    #[test]
     fn parses_top_level_help_and_version_without_required_command_args() {
         assert_eq!(
             CliCommand::parse(Vec::<String>::new()).expect("empty args should show help"),
@@ -3932,6 +4366,11 @@ mod tests {
                 .expect("extract help should parse"),
             CliCommand::Help(HelpTopic::ExtractAssets)
         );
+        assert_eq!(
+            CliCommand::parse(["runtime-inventory".to_string(), "--help".to_string()])
+                .expect("inventory help should parse"),
+            CliCommand::Help(HelpTopic::RuntimeInventory)
+        );
     }
 
     #[test]
@@ -3950,7 +4389,94 @@ mod tests {
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
         assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
+        assert!(help_text(HelpTopic::RuntimeInventory).contains("--all-projects"));
         assert!(version_text().starts_with("reverts-cli "));
+    }
+
+    #[test]
+    fn runtime_inventory_counts_runtime_helpers_and_internal_names() {
+        let files = vec![
+            EmittedFile {
+                path: "modules/runtime/source-1-helpers.ts".to_string(),
+                source: "// @ts-nocheck\nexport { X } from '../real.js';\nfunction __reverts_set_X(v) { X = v; return v; }\n".to_string(),
+            },
+            EmittedFile {
+                path: "modules/consumer.ts".to_string(),
+                source: "import { __reverts_set_X } from './runtime/source-1-helpers.js';\n__reverts_set_X(1);\n".to_string(),
+            },
+        ];
+
+        let counts = runtime_inventory_counts_from_files(&files);
+
+        assert_eq!(counts.files, 2);
+        assert_eq!(counts.runtime_files, 1);
+        assert_eq!(counts.runtime_lines, 3);
+        assert_eq!(counts.runtime_import_statements, 1);
+        assert_eq!(counts.runtime_reexport_statements, 1);
+        assert_eq!(counts.setter_function_definitions, 1);
+        assert_eq!(counts.setter_import_statements, 1);
+        assert_eq!(counts.setter_occurrences, 3);
+        assert_eq!(counts.reverts_internal_occurrences, 3);
+        assert_eq!(counts.named_import_statements, 1);
+        assert_eq!(counts.named_export_statements, 1);
+    }
+
+    #[test]
+    fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let database_path = tempdir.path().join("input.db");
+        let connection = Connection::open(database_path.as_path()).expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                CREATE TABLE source_files (
+                    id INTEGER PRIMARY KEY,
+                    file_path TEXT NOT NULL,
+                    file_size INTEGER NOT NULL
+                );
+                CREATE TABLE project_files (project_id INTEGER NOT NULL, file_id INTEGER NOT NULL);
+
+                INSERT INTO projects (id, name) VALUES (1, 'old'), (2, 'middle'), (3, 'new');
+                INSERT INTO source_files (id, file_path, file_size)
+                    VALUES (10, 'one.js', 100), (11, 'two.js', 25), (12, 'three.js', 7);
+                INSERT INTO project_files (project_id, file_id)
+                    VALUES (1, 10), (1, 11), (2, 12);
+                ",
+            )
+            .expect("schema");
+
+        let newest_args = RuntimeInventoryArgs {
+            input: database_path.clone(),
+            project_id: None,
+            all_projects: true,
+            limit: Some(2),
+            newest: true,
+            max_source_bytes: Some(10),
+        };
+        let selections =
+            runtime_inventory_project_selections(&newest_args).expect("select newest projects");
+
+        assert_eq!(selections.len(), 2);
+        assert_eq!(selections[0].project_id, 3);
+        assert_eq!(selections[0].source_bytes, 0);
+        assert_eq!(selections[1].project_id, 2);
+        assert_eq!(selections[1].source_bytes, 7);
+
+        let single_project_args = RuntimeInventoryArgs {
+            input: database_path,
+            project_id: Some(1),
+            all_projects: false,
+            limit: None,
+            newest: false,
+            max_source_bytes: None,
+        };
+        let selections = runtime_inventory_project_selections(&single_project_args)
+            .expect("select single project");
+
+        assert_eq!(selections.len(), 1);
+        assert_eq!(selections[0].project_id, 1);
+        assert_eq!(selections[0].source_bytes, 125);
     }
 
     #[test]
