@@ -21,8 +21,9 @@ use reverts_input::{
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    BestVersionMatch, CascadeMatchReport, PackageMatch, PackageSource, VersionedPackageMatchReport,
-    VersionedPackageMatcher, match_with_cascade, package_import_names_from_sources,
+    BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch, PackageSource,
+    VersionedPackageMatchReport, VersionedPackageMatcher, match_with_cascade,
+    package_import_names_from_sources,
 };
 use reverts_pipeline::{AssetReference, collect_required_asset_references_from_rows};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
@@ -380,7 +381,7 @@ pub fn match_packages_from_connection(
     let package_names = package_source_filter(&rows, &args.package_names);
     let package_sources =
         load_package_sources(connection, &package_names, &args.package_source_roots)?;
-    let report = if args.package_names.is_empty() {
+    let mut report = if args.package_names.is_empty() {
         VersionedPackageMatcher::default().match_rows(&rows, &package_sources)
     } else {
         VersionedPackageMatcher::default().match_rows_for_packages(
@@ -395,7 +396,14 @@ pub fn match_packages_from_connection(
         &rows,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
-    let cascade_report = match_with_cascade(&fingerprints_by_module, &package_sources);
+    let cascade_report =
+        match_with_cascade_scoped_by_module_hints(&rows, &fingerprints_by_module, &package_sources);
+    promote_cascade_function_coverage_to_module_attributions(
+        &rows,
+        &fingerprints_by_module,
+        &cascade_report,
+        &mut report,
+    );
 
     let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
         // Persist synthetic modules first so the FK from
@@ -488,6 +496,196 @@ fn fingerprints_from_rows(
         }
     }
     out
+}
+
+fn match_with_cascade_scoped_by_module_hints(
+    rows: &InputRows,
+    fingerprints_by_module: &BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
+    package_sources: &[PackageSource],
+) -> CascadeMatchReport {
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut grouped_fingerprints = BTreeMap::<
+        (Option<String>, Option<String>),
+        BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
+    >::new();
+    for (module_id, fingerprints) in fingerprints_by_module {
+        let scope = modules_by_id.get(module_id).and_then(|module| {
+            if module.kind != ModuleKind::Package {
+                return None;
+            }
+            let package_name = module.package_name.as_ref()?.trim();
+            if package_name.is_empty() {
+                return None;
+            }
+            let package_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty())
+                .map(ToString::to_string);
+            Some((Some(package_name.to_string()), package_version))
+        });
+        grouped_fingerprints
+            .entry(scope.unwrap_or((None, None)))
+            .or_default()
+            .insert(*module_id, fingerprints.clone());
+    }
+
+    let mut merged = CascadeMatchReport {
+        attributions: Vec::new(),
+        audit: AuditReport::default(),
+    };
+    for ((package_name, package_version), scoped_fingerprints) in grouped_fingerprints {
+        let scoped_sources = package_sources
+            .iter()
+            .filter(|source| {
+                package_name
+                    .as_deref()
+                    .map_or(true, |name| source.package_name == name)
+                    && package_version
+                        .as_deref()
+                        .map_or(true, |version| source.package_version == version)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if scoped_sources.is_empty() {
+            continue;
+        }
+        let report = match_with_cascade(&scoped_fingerprints, &scoped_sources);
+        merged.attributions.extend(report.attributions);
+        merged.audit.extend(report.audit);
+    }
+    merged
+}
+
+fn promote_cascade_function_coverage_to_module_attributions(
+    rows: &InputRows,
+    fingerprints_by_module: &BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
+    cascade_report: &CascadeMatchReport,
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = report
+        .attributions
+        .iter()
+        .chain(rows.package_attributions.iter())
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    let matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let cascade_attributions_by_module = cascade_report.attributions.iter().fold(
+        BTreeMap::<ModuleId, Vec<&PackageAttributionInput>>::new(),
+        |mut by_module, attribution| {
+            by_module
+                .entry(attribution.module_id)
+                .or_default()
+                .push(attribution);
+            by_module
+        },
+    );
+
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package
+            || already_accepted.contains(&module.id)
+            || matched_modules.contains(&module.id)
+        {
+            continue;
+        }
+        let Some(expected_package_name) = module.package_name.as_deref() else {
+            continue;
+        };
+        let Some(fingerprints) = fingerprints_by_module.get(&module.id) else {
+            continue;
+        };
+        let Some(cascade_attributions) = cascade_attributions_by_module.get(&module.id) else {
+            continue;
+        };
+        if fingerprints.is_empty() || cascade_attributions.len() != fingerprints.len() {
+            continue;
+        }
+        let covered_spans = cascade_attributions
+            .iter()
+            .filter_map(|attribution| attribution.function_span)
+            .collect::<BTreeSet<_>>();
+        if covered_spans.len() != fingerprints.len() {
+            continue;
+        }
+        let decisions = cascade_attributions
+            .iter()
+            .filter_map(|attribution| {
+                Some((
+                    attribution.package_name.as_str(),
+                    attribution.package_version.as_deref()?,
+                    attribution.export_specifier.as_deref()?,
+                ))
+            })
+            .collect::<BTreeSet<_>>();
+        if decisions.len() != 1 {
+            continue;
+        }
+        let (package_name, package_version, export_specifier) =
+            decisions.into_iter().next().expect("one decision");
+        if package_name != expected_package_name {
+            continue;
+        }
+        if module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .is_some_and(|expected_version| package_version != expected_version)
+        {
+            continue;
+        }
+
+        let mut attribution = PackageAttributionInput::accepted_external(
+            module.id,
+            package_name,
+            package_version,
+            export_specifier,
+        );
+        if let Some(subpath) = package_subpath_from_export_specifier(package_name, export_specifier)
+        {
+            attribution = attribution.with_subpath(subpath);
+        }
+        report.attributions.push(attribution);
+        report.matches.push(PackageMatch {
+            module_id: module.id,
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            export_specifier: export_specifier.to_string(),
+            source_path: format!("cascade:{export_specifier}"),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::CascadeFunctionCoverage,
+            function_signature_matches: fingerprints.len(),
+            string_anchor_matches: 0,
+            external_importable: true,
+        });
+    }
+}
+
+fn package_subpath_from_export_specifier(
+    package_name: &str,
+    export_specifier: &str,
+) -> Option<String> {
+    if export_specifier == package_name {
+        return None;
+    }
+    export_specifier
+        .strip_prefix(package_name)
+        .and_then(|subpath| subpath.strip_prefix('/'))
+        .filter(|subpath| !subpath.trim().is_empty())
+        .map(ToString::to_string)
 }
 
 pub fn extract_assets_from_sqlite(
@@ -1248,20 +1446,13 @@ fn load_package_sources_from_roots(
     for root in package_source_roots {
         for package_name in package_names {
             for package_dir in package_dir_candidates(root.as_path(), package_name.as_str()) {
-                let Some((declared_name, package_version)) =
-                    local_package_metadata(package_dir.as_path())?
-                else {
+                let Some(metadata) = local_package_metadata(package_dir.as_path())? else {
                     continue;
                 };
-                if declared_name != *package_name {
+                if metadata.name != *package_name {
                     continue;
                 }
-                collect_local_package_sources(
-                    package_dir.as_path(),
-                    declared_name.as_str(),
-                    package_version.as_str(),
-                    &mut sources,
-                )?;
+                collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)?;
             }
         }
     }
@@ -1284,9 +1475,16 @@ fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalPackageMetadata {
+    name: String,
+    version: String,
+    importable_paths: BTreeMap<String, String>,
+}
+
 fn local_package_metadata(
     package_dir: &Path,
-) -> Result<Option<(String, String)>, MatchPackagesError> {
+) -> Result<Option<LocalPackageMetadata>, MatchPackagesError> {
     let package_json_path = package_dir.join("package.json");
     if !package_json_path.is_file() {
         return Ok(None);
@@ -1310,16 +1508,17 @@ fn local_package_metadata(
     else {
         return Ok(None);
     };
-    Ok(Some((
-        package_name.trim().to_string(),
-        package_version.trim().to_string(),
-    )))
+    let package_name = package_name.trim().to_string();
+    Ok(Some(LocalPackageMetadata {
+        importable_paths: package_importable_paths(value.as_object(), package_name.as_str()),
+        name: package_name,
+        version: package_version.trim().to_string(),
+    }))
 }
 
 fn collect_local_package_sources(
     package_dir: &Path,
-    package_name: &str,
-    package_version: &str,
+    metadata: &LocalPackageMetadata,
     sources: &mut Vec<PackageSource>,
 ) -> Result<(), MatchPackagesError> {
     let mut stack = vec![package_dir.to_path_buf()];
@@ -1365,18 +1564,154 @@ fn collect_local_package_sources(
                     source,
                 }
             })?;
-            let export_specifier = package_export_specifier(package_name, rel_path.as_str());
-            let source_path = format!("{package_name}@{package_version}/{rel_path}");
-            sources.push(PackageSource::source_only(
-                package_name,
-                package_version,
-                export_specifier,
-                source_path,
-                source,
-            ));
+            let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
+            if let Some(export_specifier) = metadata.importable_paths.get(rel_path.as_str()) {
+                sources.push(PackageSource::external(
+                    metadata.name.as_str(),
+                    metadata.version.as_str(),
+                    export_specifier.as_str(),
+                    source_path,
+                    source,
+                ));
+            } else {
+                let export_specifier =
+                    package_export_specifier(metadata.name.as_str(), rel_path.as_str());
+                sources.push(PackageSource::source_only(
+                    metadata.name.as_str(),
+                    metadata.version.as_str(),
+                    export_specifier,
+                    source_path,
+                    source,
+                ));
+            }
         }
     }
     Ok(())
+}
+
+fn package_importable_paths(
+    package_json: Option<&serde_json::Map<String, serde_json::Value>>,
+    package_name: &str,
+) -> BTreeMap<String, String> {
+    let mut importable_paths = BTreeMap::new();
+    let Some(package_json) = package_json else {
+        return importable_paths;
+    };
+
+    if let Some(exports) = package_json.get("exports") {
+        collect_exports_importable_paths(exports, package_name, ".", &mut importable_paths);
+        return importable_paths;
+    }
+
+    for field in ["module", "main", "browser"] {
+        if let Some(target) = package_json.get(field).and_then(serde_json::Value::as_str) {
+            insert_importable_target(&mut importable_paths, target, package_name);
+        }
+    }
+    insert_importable_target(&mut importable_paths, "index.js", package_name);
+    importable_paths
+}
+
+fn collect_exports_importable_paths(
+    value: &serde_json::Value,
+    package_name: &str,
+    export_key: &str,
+    importable_paths: &mut BTreeMap<String, String>,
+) {
+    let Some(export_specifier) = export_key_to_specifier(package_name, export_key) else {
+        return;
+    };
+    match value {
+        serde_json::Value::String(target) => {
+            insert_importable_target(importable_paths, target, export_specifier.as_str());
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_exports_importable_paths(item, package_name, export_key, importable_paths);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if object.keys().any(|key| key == "." || key.starts_with("./")) {
+                for (nested_export_key, nested_value) in object {
+                    collect_exports_importable_paths(
+                        nested_value,
+                        package_name,
+                        nested_export_key,
+                        importable_paths,
+                    );
+                }
+            } else {
+                for condition in ["import", "require", "default", "node", "browser"] {
+                    if let Some(nested_value) = object.get(condition) {
+                        collect_exports_importable_paths(
+                            nested_value,
+                            package_name,
+                            export_key,
+                            importable_paths,
+                        );
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn export_key_to_specifier(package_name: &str, export_key: &str) -> Option<String> {
+    if export_key.contains('*') {
+        return None;
+    }
+    if export_key == "." {
+        return Some(package_name.to_string());
+    }
+    export_key
+        .strip_prefix("./")
+        .filter(|subpath| !subpath.trim().is_empty())
+        .map(|subpath| format!("{package_name}/{subpath}"))
+}
+
+fn insert_importable_target(
+    importable_paths: &mut BTreeMap<String, String>,
+    target: &str,
+    export_specifier: &str,
+) {
+    let Some(clean_target) = clean_export_target(target) else {
+        return;
+    };
+    for candidate in importable_target_candidates(clean_target.as_str()) {
+        importable_paths
+            .entry(candidate)
+            .or_insert_with(|| export_specifier.to_string());
+    }
+}
+
+fn clean_export_target(target: &str) -> Option<String> {
+    let clean = target
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/');
+    if clean.is_empty()
+        || clean == "."
+        || clean.contains('*')
+        || clean.starts_with("../")
+        || clean.contains("/../")
+    {
+        return None;
+    }
+    Some(clean.to_string())
+}
+
+fn importable_target_candidates(clean_target: &str) -> Vec<String> {
+    let mut candidates = vec![clean_target.to_string()];
+    if Path::new(clean_target).extension().is_none() {
+        for extension in ["js", "mjs", "cjs", "ts", "tsx"] {
+            candidates.push(format!("{clean_target}.{extension}"));
+        }
+        for extension in ["js", "mjs", "cjs", "ts", "tsx"] {
+            candidates.push(format!("{clean_target}/index.{extension}"));
+        }
+    }
+    candidates
 }
 
 fn should_descend_package_source_dir(path: &Path) -> bool {
@@ -2756,6 +3091,63 @@ mod tests {
     }
 
     #[test]
+    fn match_packages_externalizes_public_export_from_package_source_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./add":"./lib/add.js"}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("lib/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.written_attributions, 1);
+        let (status, emission_mode, package_version, export_specifier): (
+            String,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("public export should be externalized");
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(package_version, "1.2.3");
+        assert_eq!(export_specifier, "pkg/add");
+    }
+
+    #[test]
     fn match_packages_uses_package_source_root_without_cache_table() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let package_dir = tempdir.path().join("node_modules/pkg");
@@ -2794,6 +3186,110 @@ mod tests {
         assert_eq!(outcome.matched_modules, 1);
         assert_eq!(outcome.cascade_attributions, 0);
         assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_promotes_full_cascade_function_coverage_to_module_attribution() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "module.exports = function add(a,b){return a+b};",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "const add = function add(a, b) {\n  return a + b;\n};",
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            outcome.matched_modules, 1,
+            "legacy module-level matcher should be rescued by cascade coverage"
+        );
+        assert_eq!(outcome.written_attributions, 1);
+        assert!(outcome.written_cascade_attributions >= 1);
+        let (status, emission_mode, package_version, evidence): (String, String, String, String) =
+            connection
+                .query_row(
+                    r"
+                SELECT status, emission_mode, package_version, evidence_json
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("cascade module attribution should be written");
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(package_version, "1.2.3");
+        assert!(evidence.contains("cascade_function_coverage"));
+    }
+
+    #[test]
+    fn match_packages_scopes_cascade_by_module_package_version_hint() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "module.exports = function add(a,b){return a+b};",
+            &[
+                (
+                    "pkg",
+                    "1.0.0",
+                    "add.js",
+                    "const add = function add(a, b) {\n  return a + b;\n};",
+                ),
+                (
+                    "pkg",
+                    "2.0.0",
+                    "add.js",
+                    "const add = function add(a, b) {\n  return a + b;\n};",
+                ),
+            ],
+        );
+        connection
+            .execute(
+                "UPDATE modules SET package_version = '2.0.0' WHERE id = 10",
+                [],
+            )
+            .expect("set package version hint");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.matched_modules, 1);
+        let package_version: String = connection
+            .query_row(
+                r"
+                SELECT package_version
+                  FROM package_attributions
+                 WHERE module_id = 10
+                   AND status = 'accepted'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .expect("cascade module attribution should be written");
+        assert_eq!(package_version, "2.0.0");
     }
 
     #[test]

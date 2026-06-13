@@ -175,6 +175,9 @@ pub enum ModuleMatchStrategy {
     NormalizedSourceHash,
     /// Function signatures plus string anchors matched the package source.
     FunctionSignatureAndStringAnchors,
+    /// Every function fingerprint in the module was attributed to one package
+    /// version by the cascade matcher.
+    CascadeFunctionCoverage,
 }
 
 impl ModuleMatchStrategy {
@@ -183,6 +186,7 @@ impl ModuleMatchStrategy {
         match self {
             Self::NormalizedSourceHash => "normalized_source_hash",
             Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
+            Self::CascadeFunctionCoverage => "cascade_function_coverage",
         }
     }
 }
