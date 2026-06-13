@@ -18,7 +18,7 @@ use oxc_ast::{
     },
     visit::walk::{
         walk_arrow_function_expression, walk_assignment_expression, walk_call_expression,
-        walk_export_all_declaration, walk_export_named_declaration, walk_function,
+        walk_export_all_declaration, walk_export_named_declaration, walk_expression, walk_function,
         walk_import_declaration, walk_import_expression, walk_new_expression, walk_object_property,
         walk_static_member_expression, walk_string_literal, walk_unary_expression,
         walk_update_expression,
@@ -2749,6 +2749,16 @@ fn apply_source_level_lowerings(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> String {
+    let lowered = apply_babel_source_level_lowerings(source, path_hint, goal, lowering);
+    inline_single_use_tiny_return_helpers(lowered.as_str(), path_hint, goal)
+}
+
+fn apply_babel_source_level_lowerings(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    lowering: CompilerLowering,
+) -> String {
     if !matches!(lowering, CompilerLowering::Babel) {
         return source.to_string();
     }
@@ -2797,6 +2807,217 @@ fn apply_source_level_lowerings(
     // No source type parsed cleanly. Defer the parse-failure surface to the
     // downstream format pass.
     source.to_string()
+}
+
+#[derive(Debug, Clone)]
+struct TinyReturnHelperCandidate {
+    name: String,
+    declaration_span: Span,
+    return_expression_span: Span,
+}
+
+const TINY_RETURN_HELPER_MAX_DECL_BYTES: u32 = 120;
+
+fn inline_single_use_tiny_return_helpers(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> String {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+
+        let mut candidates = BTreeMap::<String, TinyReturnHelperCandidate>::new();
+        for statement in &parsed.program.body {
+            let Some(candidate) = tiny_return_helper_candidate(statement, source) else {
+                continue;
+            };
+            candidates
+                .entry(candidate.name.clone())
+                .or_insert(candidate);
+        }
+        if candidates.is_empty() {
+            return source.to_string();
+        }
+
+        let candidate_names = candidates.keys().cloned().collect::<BTreeSet<_>>();
+        let mut uses = TinyReturnHelperUseCollector {
+            candidates: &candidate_names,
+            total_refs: BTreeMap::new(),
+            call_spans: BTreeMap::new(),
+        };
+        uses.visit_program(&parsed.program);
+
+        let initially_selected = candidates
+            .into_iter()
+            .filter_map(|(name, candidate)| {
+                let total_refs = uses.total_refs.get(name.as_str()).copied().unwrap_or(0);
+                let call_spans = uses.call_spans.get(name.as_str())?;
+                (total_refs == 1 && call_spans.len() == 1).then(|| (candidate, call_spans[0]))
+            })
+            .collect::<Vec<_>>();
+        if initially_selected.is_empty() {
+            return source.to_string();
+        }
+
+        let removal_spans = initially_selected
+            .iter()
+            .map(|(candidate, _)| candidate.declaration_span)
+            .collect::<Vec<_>>();
+        let mut edits = Vec::<(u32, u32, String)>::new();
+        for (candidate, call_span) in initially_selected {
+            // Avoid overlapping edits: if the only call sits inside another
+            // helper declaration that is itself being removed, leave this
+            // candidate alone for this pass. The emitted code stays correct;
+            // we just skip a marginal dead-code cleanup opportunity.
+            if removal_spans.iter().any(|span| {
+                span.start != candidate.declaration_span.start
+                    && span.start <= call_span.start
+                    && call_span.end <= span.end
+            }) {
+                continue;
+            }
+            let expression = &source[candidate.return_expression_span.start as usize
+                ..candidate.return_expression_span.end as usize];
+            edits.push((
+                candidate.declaration_span.start,
+                candidate.declaration_span.end,
+                String::new(),
+            ));
+            edits.push((call_span.start, call_span.end, format!("({expression})")));
+        }
+        if edits.is_empty() {
+            return source.to_string();
+        }
+        edits.sort_by_key(|edit| edit.0);
+        let mut output = source.to_string();
+        for (start, end, replacement) in edits.iter().rev() {
+            output.replace_range(*start as usize..*end as usize, replacement);
+        }
+        return output;
+    }
+
+    source.to_string()
+}
+
+fn tiny_return_helper_candidate(
+    statement: &Statement<'_>,
+    source: &str,
+) -> Option<TinyReturnHelperCandidate> {
+    let Statement::FunctionDeclaration(function) = statement else {
+        return None;
+    };
+    if function.r#async
+        || function.generator
+        || !function.params.items.is_empty()
+        || statement.span().size() > TINY_RETURN_HELPER_MAX_DECL_BYTES
+    {
+        return None;
+    }
+    let name = function.id.as_ref()?.name.as_str().to_string();
+    let body = function.body.as_ref()?;
+    let [Statement::ReturnStatement(return_statement)] = body.statements.as_slice() else {
+        return None;
+    };
+    let expression = return_statement.argument.as_ref()?;
+    if !tiny_return_expression_is_safe(expression) {
+        return None;
+    }
+    let expression_span = expression.span();
+    let expression_source = &source[expression_span.start as usize..expression_span.end as usize];
+    if expression_source.len() > TINY_RETURN_HELPER_MAX_DECL_BYTES as usize {
+        return None;
+    }
+    Some(TinyReturnHelperCandidate {
+        name,
+        declaration_span: statement.span(),
+        return_expression_span: expression_span,
+    })
+}
+
+fn tiny_return_expression_is_safe(expression: &Expression<'_>) -> bool {
+    let mut safety = TinyReturnExpressionSafety { safe: true };
+    safety.visit_expression(expression);
+    safety.safe
+}
+
+struct TinyReturnExpressionSafety {
+    safe: bool,
+}
+
+impl<'a> Visit<'a> for TinyReturnExpressionSafety {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if !self.safe {
+            return;
+        }
+        match expression {
+            Expression::ThisExpression(_)
+            | Expression::Super(_)
+            | Expression::MetaProperty(_)
+            | Expression::AwaitExpression(_)
+            | Expression::YieldExpression(_)
+            | Expression::FunctionExpression(_)
+            | Expression::ArrowFunctionExpression(_)
+            | Expression::ClassExpression(_) => {
+                self.safe = false;
+                return;
+            }
+            _ => {}
+        }
+        walk_expression(self, expression);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if identifier.name.as_str() == "arguments" {
+            self.safe = false;
+        }
+    }
+}
+
+struct TinyReturnHelperUseCollector<'a> {
+    candidates: &'a BTreeSet<String>,
+    total_refs: BTreeMap<String, u32>,
+    call_spans: BTreeMap<String, Vec<Span>>,
+}
+
+impl<'a> Visit<'a> for TinyReturnHelperUseCollector<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if call.arguments.is_empty()
+            && let Expression::Identifier(callee) = &call.callee
+            && self.candidates.contains(callee.name.as_str())
+        {
+            self.call_spans
+                .entry(callee.name.as_str().to_string())
+                .or_default()
+                .push(call.span());
+        }
+        walk_call_expression(self, call);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        let name = identifier.name.as_str();
+        if self.candidates.contains(name) {
+            *self.total_refs.entry(name.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_none() {
+            for specifier in &declaration.specifiers {
+                if let Some(local) = module_export_name_text(&specifier.local)
+                    && self.candidates.contains(local.as_str())
+                {
+                    *self.total_refs.entry(local).or_insert(0) += 1;
+                }
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
 }
 
 /// Recognise the canonical Babel interop wrapper `HELPER(require("X"))` for
@@ -5404,6 +5625,70 @@ mod tests {
 
         assert!(formatted.contains("import * as pkgNS from 'pkg';"));
         assert!(formatted.contains("pkgNS.join"));
+    }
+
+    #[test]
+    fn module_item_formatting_inlines_single_use_tiny_return_helper() {
+        let formatted = format_source_with_module_items(
+            "const value = 1;\nfunction readValue() { return value; }\nconsole.log(readValue());",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(!formatted.contains("function readValue"));
+        assert!(formatted.contains("console.log(value);"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_multi_use_tiny_return_helper() {
+        let formatted = format_source_with_module_items(
+            "const value = 1;\nfunction readValue() { return value; }\nconsole.log(readValue(), readValue());",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function readValue"));
+        assert!(formatted.contains("readValue(), readValue()"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_exported_tiny_return_helper() {
+        let formatted = format_source_with_module_items(
+            "const value = 1;\nfunction readValue() { return value; }\nconsole.log(readValue());\nexport { readValue };",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function readValue"));
+        assert!(formatted.contains("export { readValue };"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_this_based_tiny_return_helper() {
+        let formatted = format_source_with_module_items(
+            "function readThis() { return this.value; }\nconsole.log(readThis());",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function readThis"));
+        assert!(formatted.contains("readThis()"));
     }
 
     #[test]
