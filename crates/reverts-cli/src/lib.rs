@@ -624,32 +624,44 @@ fn promote_cascade_function_coverage_to_module_attributions(
         let Some(cascade_ownership) = cascade_ownership_by_module.get(&module.id) else {
             continue;
         };
-        if fingerprints.is_empty() || cascade_ownership.len() != fingerprints.len() {
+        if fingerprints.is_empty() {
             continue;
         }
-        let covered_spans = cascade_ownership
-            .iter()
-            .map(|ownership| ownership.function_span)
-            .collect::<BTreeSet<_>>();
-        if covered_spans.len() != fingerprints.len() {
-            continue;
-        }
-        let package_versions = cascade_ownership
-            .iter()
-            .map(|ownership| {
-                (
+        let mut ownership_by_package_version =
+            BTreeMap::<(&str, &str), Vec<&CascadeOwnershipMatch>>::new();
+        for ownership in cascade_ownership {
+            ownership_by_package_version
+                .entry((
                     ownership.package_name.as_str(),
                     ownership.package_version.as_str(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        if package_versions.len() != 1 {
-            continue;
+                ))
+                .or_default()
+                .push(*ownership);
         }
-        let (package_name, package_version) = package_versions
+        let mut ranked_ownership = ownership_by_package_version
             .into_iter()
-            .next()
-            .expect("one package/version");
+            .map(|(package_version, ownership)| {
+                let covered_spans = ownership
+                    .iter()
+                    .map(|ownership| ownership.function_span)
+                    .collect::<BTreeSet<_>>();
+                (package_version, ownership, covered_spans)
+            })
+            .collect::<Vec<_>>();
+        ranked_ownership.sort_by(|left, right| {
+            right
+                .2
+                .len()
+                .cmp(&left.2.len())
+                .then_with(|| left.0.cmp(&right.0))
+        });
+        let Some(((package_name, package_version), selected_ownership, covered_spans)) =
+            ranked_ownership.first()
+        else {
+            continue;
+        };
+        let package_name = *package_name;
+        let package_version = *package_version;
         if package_name != expected_package_name {
             continue;
         }
@@ -663,14 +675,39 @@ fn promote_cascade_function_coverage_to_module_attributions(
             continue;
         }
 
-        let export_specifiers = cascade_ownership
+        let covered_count = covered_spans.len();
+        let runner_up_count = ranked_ownership.get(1).map_or(0, |ranked| ranked.2.len());
+        let is_full_coverage =
+            covered_count == fingerprints.len() && cascade_ownership.len() == fingerprints.len();
+        if !is_full_coverage
+            && !accept_partial_cascade_coverage(
+                fingerprints.len(),
+                covered_count,
+                cascade_ownership
+                    .iter()
+                    .map(|ownership| ownership.function_span)
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                runner_up_count,
+            )
+        {
+            continue;
+        }
+
+        let export_specifiers = selected_ownership
             .iter()
             .map(|ownership| ownership.export_specifier.as_str())
             .collect::<BTreeSet<_>>();
-        let can_externalize = cascade_ownership
-            .iter()
-            .all(|ownership| ownership.external_importable)
+        let can_externalize = is_full_coverage
+            && selected_ownership
+                .iter()
+                .all(|ownership| ownership.external_importable)
             && export_specifiers.len() == 1;
+        let strategy = if is_full_coverage {
+            ModuleMatchStrategy::CascadeFunctionCoverage
+        } else {
+            ModuleMatchStrategy::CascadePartialFunctionCoverage
+        };
         let export_specifier = export_specifiers.first().copied().unwrap_or(package_name);
 
         if can_externalize {
@@ -694,12 +731,30 @@ fn promote_cascade_function_coverage_to_module_attributions(
             export_specifier: export_specifier.to_string(),
             source_path: format!("cascade:{export_specifier}"),
             normalized_source_hash: String::new(),
-            strategy: ModuleMatchStrategy::CascadeFunctionCoverage,
-            function_signature_matches: fingerprints.len(),
+            strategy,
+            function_signature_matches: covered_count,
             string_anchor_matches: 0,
             external_importable: can_externalize,
         });
     }
+}
+
+fn accept_partial_cascade_coverage(
+    total_functions: usize,
+    covered_functions: usize,
+    ownership_spans: usize,
+    runner_up_functions: usize,
+) -> bool {
+    if total_functions < 3 || covered_functions < 2 {
+        return false;
+    }
+    if covered_functions * 100 < total_functions * 65 {
+        return false;
+    }
+    if ownership_spans == 0 || covered_functions * 100 < ownership_spans * 80 {
+        return false;
+    }
+    runner_up_functions == 0 || covered_functions >= runner_up_functions.saturating_mul(3)
 }
 
 fn package_subpath_from_export_specifier(
@@ -2203,7 +2258,11 @@ fn rejected_package_attributions_for_unaccepted_modules(
             .find(|package_match| {
                 package_match.module_id == module.id
                     && !package_match.external_importable
-                    && package_match.strategy == ModuleMatchStrategy::CascadeFunctionCoverage
+                    && matches!(
+                        package_match.strategy,
+                        ModuleMatchStrategy::CascadeFunctionCoverage
+                            | ModuleMatchStrategy::CascadePartialFunctionCoverage
+                    )
             })
             .map(|_| {
                 "matched package ownership, but the evidence does not prove a safe single external import"
@@ -3676,6 +3735,107 @@ mod tests {
         assert_eq!(export_specifier, None);
         assert!(rejection_reason.contains("safe single external import"));
         assert!(evidence.contains("\"status\":\"rejected\""));
+    }
+
+    #[test]
+    fn match_packages_promotes_partial_cascade_coverage_to_source_ownership() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            r#"
+            function first(value) {
+              if (value > 0) {
+                return value + 1;
+              }
+              return 0;
+            }
+            function second(limit) {
+              let total = 0;
+              for (let i = 0; i < limit; i++) {
+                total += i;
+              }
+              return total;
+            }
+            function localOnly() { return 3; }
+            exports.value = first(1) + second(2) + localOnly();
+            "#,
+            &[(
+                "pkg",
+                "1.2.3",
+                "partial.js",
+                r#"
+                function first(value) {
+                  if (value > 0) {
+                    return value + 1;
+                  }
+                  return 0;
+                }
+                function second(limit) {
+                  let total = 0;
+                  for (let i = 0; i < limit; i++) {
+                    total += i;
+                  }
+                  return total;
+                }
+                exports.value = first(1) + second(2);
+                "#,
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            outcome.matched_modules, 1,
+            "2/3 function ownership should pass the partial cascade threshold"
+        );
+        assert_eq!(
+            outcome.written_attributions, 1,
+            "partial ownership must be persisted as a rejected source decision"
+        );
+        assert!(
+            outcome.written_cascade_attributions >= 2,
+            "function-level cascade evidence should still be recorded"
+        );
+        let (status, emission_mode, package_version, export_specifier, rejection_reason): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, package_version, export_specifier,
+                       rejection_reason
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("partial cascade ownership should write a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.contains("safe single external import"));
     }
 
     #[test]

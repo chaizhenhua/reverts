@@ -43,7 +43,10 @@ use reverts_input::{
 use reverts_ir::hash::{
     FNV_OFFSET_BASIS, fnv1a_hex as stable_hash, update_fnv1a as update_stable_hash,
 };
-use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
+use reverts_ir::{
+    ModuleId, ModuleKind, NormalizationPassId, is_valid_package_name, split_bare_specifier,
+};
+use reverts_js::normalize::{apply_to_source, stable_passes};
 use reverts_js::{
     JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
     source_type_candidates,
@@ -138,6 +141,9 @@ pub struct ModuleMatchFingerprint {
     pub package_name: Option<String>,
     /// stable hash of the AST-normalized source body.
     pub normalized_source_hash: String,
+    /// Stable hashes of normalized source variants produced by one
+    /// normalization pass. Includes `normalized_source_hash`.
+    pub normalized_source_hashes: BTreeSet<String>,
     /// AST-derived function signature hashes.
     pub function_signature_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
@@ -151,6 +157,9 @@ pub struct PackageSourceFingerprint<'a> {
     pub source: &'a PackageSource,
     /// stable hash of the AST-normalized source body.
     pub normalized_source_hash: String,
+    /// Stable hashes of normalized source variants produced by one
+    /// normalization pass. Includes `normalized_source_hash`.
+    pub normalized_source_hashes: BTreeSet<String>,
     /// AST-derived function signature hashes.
     pub function_signature_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
@@ -178,6 +187,11 @@ pub enum ModuleMatchStrategy {
     /// Every function fingerprint in the module was attributed to one package
     /// version by the cascade matcher.
     CascadeFunctionCoverage,
+    /// A dominant subset of function fingerprints in the module was
+    /// attributed to one package version by the cascade matcher. This proves
+    /// package ownership only; it is not sufficient to externalize the whole
+    /// module as an import.
+    CascadePartialFunctionCoverage,
 }
 
 impl ModuleMatchStrategy {
@@ -187,6 +201,7 @@ impl ModuleMatchStrategy {
             Self::NormalizedSourceHash => "normalized_source_hash",
             Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
             Self::CascadeFunctionCoverage => "cascade_function_coverage",
+            Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
         }
     }
 }
@@ -991,6 +1006,7 @@ fn module_match_fingerprint(
         module_id: module.id,
         package_name: module.package_name.clone(),
         normalized_source_hash: source_fingerprint.normalized_source_hash,
+        normalized_source_hashes: source_fingerprint.normalized_source_hashes,
         function_signature_hashes: source_fingerprint.function_signature_hashes,
         string_anchors: source_fingerprint.string_anchors,
     })
@@ -1003,6 +1019,7 @@ fn package_source_fingerprint<'a>(
     Ok(PackageSourceFingerprint {
         source,
         normalized_source_hash: fingerprint.normalized_source_hash,
+        normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
         string_anchors: fingerprint.string_anchors,
     })
@@ -1011,6 +1028,7 @@ fn package_source_fingerprint<'a>(
 #[derive(Debug)]
 struct SourceFingerprint {
     normalized_source_hash: String,
+    normalized_source_hashes: BTreeSet<String>,
     function_signature_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
 }
@@ -1018,8 +1036,26 @@ struct SourceFingerprint {
 fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint, String> {
     let normalized = normalize_source(path, source)?;
     let ast = ast_fingerprint(path, normalized.as_str())?;
+    let normalized_source_hash = stable_hash(normalized.as_bytes());
+    let mut normalized_source_hashes = BTreeSet::new();
+    normalized_source_hashes.insert(normalized_source_hash.clone());
+    if normalized.len() <= MODULE_SOURCE_HASH_ALTERNATE_MAX_BYTES {
+        for pass in stable_passes() {
+            if !module_source_hash_alternate_pass_enabled(pass.id()) {
+                continue;
+            }
+            let Ok(transformed) = apply_to_source(pass.as_ref(), normalized.as_str()) else {
+                continue;
+            };
+            let Ok(renormalized) = normalize_source(path, transformed.as_str()) else {
+                continue;
+            };
+            normalized_source_hashes.insert(stable_hash(renormalized.as_bytes()));
+        }
+    }
     Ok(SourceFingerprint {
-        normalized_source_hash: stable_hash(normalized.as_bytes()),
+        normalized_source_hash,
+        normalized_source_hashes,
         function_signature_hashes: ast.function_signature_hashes,
         string_anchors: ast.string_anchors,
     })
@@ -1280,12 +1316,17 @@ fn best_source_match(
     module: &ModuleMatchFingerprint,
     config: &VersionedPackageMatcherConfig,
 ) -> Option<ModulePackageMatch> {
-    let exact_candidates = candidates_for_source_hash(
-        version.sources.as_slice(),
-        module.normalized_source_hash.as_str(),
-    );
-    if let Some(candidates) = exact_candidates {
-        if let Some(source) = unique_source_candidate(candidates) {
+    let exact_candidates = version
+        .sources
+        .iter()
+        .filter(|source| {
+            !source
+                .normalized_source_hashes
+                .is_disjoint(&module.normalized_source_hashes)
+        })
+        .collect::<Vec<_>>();
+    if !exact_candidates.is_empty() {
+        if let Some(source) = unique_source_candidate_refs(exact_candidates.as_slice()) {
             return Some(module_package_match(
                 module,
                 source,
@@ -1356,29 +1397,8 @@ fn best_source_match(
     ))
 }
 
-fn candidates_for_source_hash<'a>(
-    sources: &'a [PackageSourceFingerprint<'a>],
-    hash: &str,
-) -> Option<&'a [PackageSourceFingerprint<'a>]> {
-    let index = sources
-        .binary_search_by(|source| source.normalized_source_hash.as_str().cmp(hash))
-        .ok()?;
-
-    let mut start = index;
-    while start > 0 && sources[start - 1].normalized_source_hash == hash {
-        start -= 1;
-    }
-
-    let mut end = index + 1;
-    while end < sources.len() && sources[end].normalized_source_hash == hash {
-        end += 1;
-    }
-
-    Some(&sources[start..end])
-}
-
-fn unique_source_candidate<'a>(
-    candidates: &'a [PackageSourceFingerprint<'a>],
+fn unique_source_candidate_refs<'a>(
+    candidates: &[&'a PackageSourceFingerprint<'a>],
 ) -> Option<&'a PackageSourceFingerprint<'a>> {
     let unique_keys = candidates
         .iter()
@@ -1392,7 +1412,7 @@ fn unique_source_candidate<'a>(
         })
         .collect::<BTreeSet<_>>();
     if unique_keys.len() == 1 {
-        candidates.first()
+        candidates.first().copied()
     } else {
         None
     }
@@ -1465,6 +1485,21 @@ const SOURCE_HASH_WEIGHT: u32 = 10_000;
 const MODULE_MATCH_WEIGHT: u32 = 1_000;
 const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
 const STRING_ANCHOR_WEIGHT: u32 = 1;
+const MODULE_SOURCE_HASH_ALTERNATE_MAX_BYTES: usize = 64 * 1024;
+
+fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool {
+    matches!(
+        pass,
+        NormalizationPassId::TsRuntimeErased
+            | NormalizationPassId::JsxRuntimeNormalized
+            | NormalizationPassId::BundlerWrapperUnwrapped
+            | NormalizationPassId::HelperIdentityInlined
+            | NormalizationPassId::ExportBoundaryNormalized
+            | NormalizationPassId::BooleanUndefinedCanonicalised
+            | NormalizationPassId::ComputedToStaticMember
+            | NormalizationPassId::VoidZeroToUndefinedGuarded
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -1518,6 +1553,37 @@ mod tests {
             Some("pkg/add")
         );
         assert_eq!(report.attributions[0].subpath.as_deref(), Some("add"));
+    }
+
+    #[test]
+    fn versioned_matcher_uses_module_level_normalization_alternates() {
+        let rows = rows_with_package_source("export function add(a,b){return a+b}");
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/add",
+            "add.js",
+            "function add(a, b) {\n  return a + b;\n}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::NormalizedSourceHash,
+            "export-boundary normalization should rescue this as a source hash match, not a weaker signature fallback"
+        );
+        let selected = report
+            .version_matches
+            .iter()
+            .find_map(|decision| match decision {
+                BestVersionMatch::Selected { score, .. } => Some(score),
+                _ => None,
+            })
+            .expect("best version should be selected");
+        assert_eq!(selected.source_hash_matches, 1);
     }
 
     #[test]
@@ -1778,7 +1844,7 @@ mod tests {
     #[test]
     fn versioned_matcher_can_match_by_function_signatures_and_string_anchors() {
         let rows = rows_with_package_source(
-            "export function first(){return 'stable-anchor'}\nexport function second(){return 'other-anchor'}",
+            "const bundleMarker = 1;\nexport function first(){return 'stable-anchor'}\nexport function second(){return 'other-anchor'}",
         );
         let package_sources = [PackageSource::external(
             "pkg",
