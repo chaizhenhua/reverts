@@ -10,21 +10,27 @@ use std::mem;
 use super::NormalizationPass;
 
 /// `IfReturnElseFlattened` removes the `else` clause from an
-/// `if (cond) { return ...; } else { ... }` when the consequent
-/// terminates control flow with `return` or `throw`. The else body
-/// is hoisted to immediately follow the `if`, producing
-/// `if (cond) { return ...; } ...rest`.
+/// `if (cond) <terminator> else { ... }` when the consequent
+/// terminates control flow. The else body is hoisted to immediately
+/// follow the `if`, producing `if (cond) <terminator>; ...rest`.
 ///
-/// The rewrite is **strictly spec-equivalent** because reaching the
-/// else branch requires the consequent NOT to take effect — which
-/// only happens when `cond` is falsy. Whether the else is attached
-/// to the `if` or floated as a sibling statement does not change
-/// any observable execution: in the truthy branch the function has
-/// already returned, in the falsy branch the rest-after-if runs
-/// (whether labelled `else` or not).
+/// Terminators recognized: `return`, `throw`, `break`, `continue`.
+/// After any of these, control cannot fall through to the statement
+/// immediately following the `if`, so post-if statements run *only*
+/// when the consequent did not execute — exactly the semantics the
+/// explicit `else` provides.
 ///
-/// This rewrite involves only pure syntax — no identifier dispatch,
-/// no shadowing concerns.
+/// The rewrite is **strictly spec-equivalent** for every terminator
+/// kind:
+///
+/// * `return` / `throw`: function/scope exit — the post-if code only
+///   runs in the falsy branch.
+/// * `break` / `continue`: leaves or restarts the enclosing iteration —
+///   any sibling statement that follows the `if` is only reached when
+///   the consequent did not break/continue, identical to what the
+///   `else` semantics already provided.
+///
+/// Pure syntax — no identifier dispatch, no shadowing concerns.
 pub struct IfReturnElseFlattened;
 
 impl NormalizationPass for IfReturnElseFlattened {
@@ -32,7 +38,7 @@ impl NormalizationPass for IfReturnElseFlattened {
         NormalizationPassId::IfReturnElseFlattened
     }
     fn version(&self) -> u32 {
-        1
+        2
     }
     fn apply<'a>(&self, alloc: &'a Allocator, program: &mut Program<'a>) {
         let mut visitor = Flattener {
@@ -102,13 +108,22 @@ fn has_terminating_consequent_with_else(if_stmt: &oxc_ast::ast::IfStatement<'_>)
     stmt_terminates(&if_stmt.consequent)
 }
 
-/// Whether the statement always exits the function on its execution
-/// path. Conservative: only return-statement (with or without value)
-/// and throw-statement count, plus block-statements whose last
-/// statement also terminates.
+/// Whether the statement always exits the surrounding control-flow
+/// path on execution. Recognised terminators:
+///
+/// * `return` / `throw` — exit the enclosing function.
+/// * `break` / `continue` (with or without label) — exit/restart the
+///   enclosing iteration. Any statement immediately following the
+///   `if` is unreachable from the consequent's branch in both cases,
+///   so the `else` wrapper is redundant.
+///
+/// Block-statements terminate when their last inner statement does.
 fn stmt_terminates(stmt: &Statement<'_>) -> bool {
     match stmt {
-        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
+        Statement::ReturnStatement(_)
+        | Statement::ThrowStatement(_)
+        | Statement::BreakStatement(_)
+        | Statement::ContinueStatement(_) => true,
         Statement::BlockStatement(b) => match b.body.last() {
             Some(last) => stmt_terminates(last),
             None => false,
@@ -174,6 +189,31 @@ mod tests {
         let src = "function f(x) { if (x) return 1; doMore(); }";
         let out = apply_to_source(&IfReturnElseFlattened, src).expect("parse");
         assert!(out.contains("return 1"), "got: {out}");
+    }
+
+    #[test]
+    fn flattens_if_break_else_in_loop() {
+        // `break` inside a loop body — same rationale as `return`:
+        // the else is unreachable from the consequent's path.
+        let out = apply_to_source(
+            &IfReturnElseFlattened,
+            "function f(xs) { for (let x of xs) { if (x < 0) { break; } else { handle(x); } } }",
+        )
+        .expect("parse");
+        assert!(!out.contains("else"), "got: {out}");
+        assert!(out.contains("break"), "got: {out}");
+        assert!(out.contains("handle(x)"), "got: {out}");
+    }
+
+    #[test]
+    fn flattens_if_continue_else_in_loop() {
+        let out = apply_to_source(
+            &IfReturnElseFlattened,
+            "function f(xs) { for (let x of xs) { if (x < 0) continue; else handle(x); } }",
+        )
+        .expect("parse");
+        assert!(!out.contains("else"), "got: {out}");
+        assert!(out.contains("continue"), "got: {out}");
     }
 
     #[test]
