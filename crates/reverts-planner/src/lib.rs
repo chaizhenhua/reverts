@@ -557,6 +557,40 @@ impl ImportExportPlanner {
                 .difference(&migrated_locally)
                 .cloned()
                 .collect();
+            let remaining_runtime_helpers: BTreeSet<BindingName> = if let Some(lowered_source) =
+                lowered_source
+                && !written_runtime_helpers.is_empty()
+            {
+                let rewritten =
+                    rewrite_runtime_helper_writes(&lowered_source.source, &written_runtime_helpers);
+                let mut refs_after_write_rewrite = runtime_import_identifiers_in_source(&rewritten)
+                    .into_iter()
+                    .map(BindingName::new)
+                    .collect::<BTreeSet<_>>();
+                refs_after_write_rewrite.extend(
+                    program
+                        .model()
+                        .graph()
+                        .import_export()
+                        .exports_for(module.id)
+                        .into_iter(),
+                );
+                if let Some(exports) = source_module_wiring.exports_by_module.get(&module.id) {
+                    refs_after_write_rewrite.extend(exports.iter().cloned());
+                }
+                if let Some((_stripped, exports)) = strip_top_level_named_exports(&rewritten) {
+                    refs_after_write_rewrite.extend(exports);
+                }
+                remaining_runtime_helpers
+                    .into_iter()
+                    .filter(|binding| {
+                        migrated_extra_runtime_deps.contains(binding)
+                            || refs_after_write_rewrite.contains(binding)
+                    })
+                    .collect()
+            } else {
+                remaining_runtime_helpers
+            };
 
             let runtime_import_groups = group_runtime_imports(runtime_imports);
             let mut runtime_import_partitions = Vec::<(u32, RuntimeReexportImportPartition)>::new();
@@ -617,7 +651,9 @@ impl ImportExportPlanner {
                 }
             }
             if let Some(lowered_source) = lowered_source
-                && (!remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty())
+                && (!remaining_runtime_helpers.is_empty()
+                    || !written_runtime_helpers.is_empty()
+                    || !lazy_helper_names.is_empty())
             {
                 emit_direct_owner_imports(
                     program,
@@ -628,7 +664,10 @@ impl ImportExportPlanner {
                     &lowered_import_partition.direct_imports,
                 );
                 let remaining_runtime_helpers = lowered_import_partition.runtime_bindings.clone();
-                if !remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty() {
+                if !remaining_runtime_helpers.is_empty()
+                    || !written_runtime_helpers.is_empty()
+                    || !lazy_helper_names.is_empty()
+                {
                     used_runtime_helper_files
                         .entry(lowered_source.source_file_id)
                         .or_default();
@@ -659,7 +698,10 @@ impl ImportExportPlanner {
                     path,
                     runtime_helpers_path(lowered_source.source_file_id).as_str(),
                 );
-                if !remaining_runtime_helpers.is_empty() || !lazy_helper_names.is_empty() {
+                if !remaining_runtime_helpers.is_empty()
+                    || !written_runtime_helpers.is_empty()
+                    || !lazy_helper_names.is_empty()
+                {
                     file.push_source(runtime_helper_import_statement(
                         &remaining_runtime_helpers,
                         &written_runtime_helpers,
@@ -10886,8 +10928,9 @@ mod tests {
 
         assert!(
             entry_source
-                .contains("import { yA, __reverts_set_yA } from './runtime/source-1-helpers.js';")
+                .contains("import { __reverts_set_yA } from './runtime/source-1-helpers.js';")
         );
+        assert!(!entry_source.contains("import { yA, __reverts_set_yA }"));
         assert!(entry_source.contains("__reverts_set_yA(() => 'linux');"));
         assert!(
             cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';")
@@ -10902,7 +10945,13 @@ mod tests {
             helper_source
                 .contains("function __reverts_set_yA(value) { yA = value; return value; }")
         );
-        assert!(helper_source.contains("export { __reverts_set_yA, main, yA };"));
+        let export_line = helper_source
+            .lines()
+            .find(|line| line.starts_with("export {"))
+            .expect("helper should export runtime bindings");
+        assert!(export_line.contains("__reverts_set_yA"));
+        assert!(export_line.contains("main"));
+        assert!(export_line.contains("yA"));
     }
 
     #[test]
@@ -12069,7 +12118,62 @@ mod tests {
             helper_source
                 .contains("function __reverts_set_shared(value) { shared = value; return value; }")
         );
-        assert!(helper_source.contains("export { __reverts_set_shared, shared };"));
+        let export_line = helper_source
+            .lines()
+            .find(|line| line.starts_with("export {"))
+            .expect("helper should export runtime bindings");
+        assert!(export_line.contains("__reverts_set_shared"));
+        assert!(export_line.contains("shared"));
+    }
+
+    #[test]
+    fn write_only_runtime_prelude_binding_imports_setter_without_value() {
+        let planner = ImportExportPlanner;
+        // Object literal initializer keeps the binding in runtime so this test
+        // focuses on the setter import surface, not migration.
+        let prelude = "var shared = {};\n";
+        let body = "shared = 1;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(
+            entry_source
+                .contains("import { __reverts_set_shared } from './runtime/source-1-helpers.js';")
+        );
+        assert!(!entry_source.contains("import { shared, __reverts_set_shared }"));
+        assert!(entry_source.contains("__reverts_set_shared(1);"));
+        assert!(!entry_source.contains("export { shared };"));
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { shared = value; return value; }")
+        );
+        let export_line = helper_source
+            .lines()
+            .find(|line| line.starts_with("export {"))
+            .expect("helper should export runtime bindings");
+        assert!(export_line.contains("__reverts_set_shared"));
+        assert!(export_line.contains("shared"));
     }
 
     #[test]
