@@ -688,6 +688,7 @@ fn audit_namespace_object_member_consistency(
                 .map(|member| member.as_str())
                 .filter(|member| {
                     !namespace_member_access_present(emitted.source.as_str(), namespace, member)
+                        && !named_import_specifier_present(emitted.source.as_str(), member)
                 })
                 .collect();
             if missing.is_empty() {
@@ -730,6 +731,35 @@ fn namespace_member_access_present(source: &str, namespace: &str, member: &str) 
     }
     let single_quoted = format!("{namespace}['{member}']");
     contains_identifier(source, &single_quoted)
+}
+
+fn named_import_specifier_present(source: &str, member: &str) -> bool {
+    for import_tail in source.split("import ").skip(1) {
+        let Some((import_clause, _)) = import_tail.split_once(" from ") else {
+            continue;
+        };
+        let Some(start) = import_clause.find('{') else {
+            continue;
+        };
+        let Some(end) = import_clause[start + 1..].find('}') else {
+            continue;
+        };
+        let named_specifiers = &import_clause[start + 1..start + 1 + end];
+        for specifier in named_specifiers.split(',') {
+            let specifier = specifier.trim();
+            if specifier == member
+                || specifier
+                    .strip_prefix(member)
+                    .is_some_and(|rest| rest.trim_start().starts_with("as "))
+                || specifier
+                    .rsplit_once(" as ")
+                    .is_some_and(|(_, local)| local.trim() == member)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_member_name_identifier(name: &str) -> bool {
@@ -1368,6 +1398,20 @@ mod tests {
     }
 
     #[test]
+    fn module_exports_object_drives_late_name_and_shorthand() {
+        let rows =
+            rows_with_application_source("const a = 1; module.exports = { createClient: a };");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("const createClient = 1;"));
+        assert!(source.contains("module.exports = { createClient };"));
+    }
+
+    #[test]
     fn duplicate_named_imports_are_merged_and_sorted_late() {
         let rows = rows_with_application_source(
             "import { z } from './utils'; import { a } from './utils'; console.log(z, a);",
@@ -1380,6 +1424,23 @@ mod tests {
         let source = run.project.files[0].source.as_str();
         assert_eq!(source.matches("from './utils'").count(), 1);
         assert!(source.contains("import { a, z } from './utils';"));
+    }
+
+    #[test]
+    fn namespace_imports_are_split_and_merged_late_when_safe() {
+        let rows = rows_with_application_source(
+            "import * as utils from './utils'; import { a } from './utils'; console.log(utils.z, a);",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert_eq!(source.matches("from './utils'").count(), 1);
+        assert!(source.contains("import { a, z } from './utils';"));
+        assert!(source.contains("console.log(z, a);"));
+        assert!(!source.contains("utils.z"));
     }
 
     #[test]

@@ -8,25 +8,32 @@ use oxc_ast::{
     AstBuilder, NONE, Visit, VisitMut,
     ast::{
         Argument, ArrowFunctionExpression, AssignmentExpression, BindingIdentifier,
-        BindingPatternKind, CallExpression, Declaration, ExportAllDeclaration,
+        BindingPatternKind, CallExpression, Class, ClassType, Declaration, ExportAllDeclaration,
         ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, Function, FunctionType,
         IdentifierReference, ImportDeclaration, ImportDeclarationSpecifier, ImportExpression,
-        ImportOrExportKind, ModuleExportName, NewExpression, ObjectProperty, Program, PropertyKey,
-        Statement, StringLiteral, VariableDeclarationKind, VariableDeclarator,
+        ImportOrExportKind, ModuleExportName, NewExpression, ObjectExpression, ObjectProperty,
+        ObjectPropertyKind, Program, PropertyKey, PropertyKind, SimpleAssignmentTarget, Statement,
+        StaticMemberExpression, StringLiteral, UnaryExpression, VariableDeclarationKind,
+        VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_assignment_expression, walk_call_expression,
         walk_export_all_declaration, walk_export_named_declaration, walk_function,
         walk_import_declaration, walk_import_expression, walk_new_expression, walk_object_property,
-        walk_string_literal,
+        walk_static_member_expression, walk_string_literal, walk_unary_expression,
+        walk_update_expression,
     },
-    visit::walk_mut::walk_object_property as walk_object_property_mut,
+    visit::walk_mut::{
+        walk_expression as walk_expression_mut, walk_object_property as walk_object_property_mut,
+    },
 };
 use oxc_codegen::{CodeGenerator, CodegenOptions};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_semantic::SemanticBuilder;
 use oxc_span::{GetSpan, SPAN, SourceType, Span};
-use oxc_syntax::{reference::ReferenceId, scope::ScopeFlags, symbol::SymbolId};
+use oxc_syntax::{
+    operator::UnaryOperator, reference::ReferenceId, scope::ScopeFlags, symbol::SymbolId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
@@ -809,13 +816,26 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
     }
 
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        if expression.operator.is_assign()
-            && let Some(exported) = commonjs_export_property_name(&expression.left)
-            && let Expression::Identifier(identifier) = &expression.right
-        {
-            self.push_rename(identifier.name.as_str(), exported.as_str());
+        if expression.operator.is_assign() {
+            if let Some(exported) = commonjs_export_property_name(&expression.left)
+                && let Expression::Identifier(identifier) = &expression.right
+            {
+                self.push_rename(identifier.name.as_str(), exported.as_str());
+            }
+            if commonjs_module_exports_target(&expression.left)
+                && let Expression::ObjectExpression(object) = &expression.right
+            {
+                collect_object_export_readability_renames(self, object);
+            }
         }
         walk_assignment_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if let Some((exported, local)) = object_define_property_export_getter(expression) {
+            self.push_rename(local.as_str(), exported.as_str());
+        }
+        walk_call_expression(self, expression);
     }
 
     fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
@@ -828,6 +848,25 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector<'_> {
             self.push_rename(identifier.name.as_str(), property_name.as_str());
         }
         walk_object_property(self, property);
+    }
+}
+
+fn collect_object_export_readability_renames(
+    collector: &mut LateReadabilityRenameCollector<'_>,
+    object: &ObjectExpression<'_>,
+) {
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        if !property.computed
+            && !property.method
+            && !property.shorthand
+            && let Some(property_name) = property_key_readability_name(&property.key)
+            && let Expression::Identifier(identifier) = &property.value
+        {
+            collector.push_rename(identifier.name.as_str(), property_name.as_str());
+        }
     }
 }
 
@@ -891,21 +930,126 @@ fn property_key_readability_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 fn commonjs_export_property_name(target: &oxc_ast::ast::AssignmentTarget<'_>) -> Option<String> {
-    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = target else {
-        return None;
-    };
-    if expression_identifier(&member.object) == Some("exports") {
-        return Some(member.property.name.as_str().to_string());
-    }
-    let Expression::StaticMemberExpression(object) = &member.object else {
-        return None;
-    };
-    if expression_identifier(&object.object) == Some("module")
-        && object.property.name.as_str() == "exports"
-    {
-        return Some(member.property.name.as_str().to_string());
+    match target {
+        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+            if expression_is_commonjs_exports_object(&member.object) {
+                return Some(member.property.name.as_str().to_string());
+            }
+        }
+        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+            if expression_is_commonjs_exports_object(&member.object)
+                && let Expression::StringLiteral(property) = &member.expression
+            {
+                return Some(property.value.as_str().to_string());
+            }
+        }
+        _ => {}
     }
     None
+}
+
+fn commonjs_module_exports_target(target: &oxc_ast::ast::AssignmentTarget<'_>) -> bool {
+    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = target else {
+        return false;
+    };
+    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
+}
+
+fn expression_is_commonjs_exports_object(expression: &Expression<'_>) -> bool {
+    if expression_identifier(expression) == Some("exports") {
+        return true;
+    }
+    let Expression::StaticMemberExpression(member) = expression else {
+        return false;
+    };
+    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
+}
+
+fn object_define_property_export_getter(call: &CallExpression<'_>) -> Option<(String, String)> {
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return None;
+    };
+    if expression_identifier(&callee.object) != Some("Object")
+        || callee.property.name != "defineProperty"
+        || call.arguments.len() < 3
+    {
+        return None;
+    }
+    if !argument_is_commonjs_exports_object(&call.arguments[0]) {
+        return None;
+    }
+    let exported = argument_string_literal(&call.arguments[1])?;
+    let descriptor = argument_object_expression(&call.arguments[2])?;
+    let local = descriptor_getter_return_identifier(descriptor)?;
+    Some((exported, local))
+}
+
+fn argument_is_commonjs_exports_object(argument: &Argument<'_>) -> bool {
+    match argument {
+        Argument::Identifier(identifier) => identifier.name == "exports",
+        Argument::StaticMemberExpression(member) => {
+            expression_identifier(&member.object) == Some("module")
+                && member.property.name == "exports"
+        }
+        _ => false,
+    }
+}
+
+fn argument_string_literal(argument: &Argument<'_>) -> Option<String> {
+    let Argument::StringLiteral(literal) = argument else {
+        return None;
+    };
+    Some(literal.value.as_str().to_string())
+}
+
+fn argument_object_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a ObjectExpression<'a>> {
+    let Argument::ObjectExpression(object) = argument else {
+        return None;
+    };
+    Some(object)
+}
+
+fn descriptor_getter_return_identifier(descriptor: &ObjectExpression<'_>) -> Option<String> {
+    for property in &descriptor.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        if property.computed
+            || property_key_readability_name(&property.key).as_deref() != Some("get")
+        {
+            continue;
+        }
+        if let Some(identifier) = returned_identifier_from_invokable(&property.value) {
+            return Some(identifier);
+        }
+    }
+    None
+}
+
+fn returned_identifier_from_invokable(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::ArrowFunctionExpression(arrow) => {
+            single_returned_identifier_from_body(&arrow.body)
+        }
+        Expression::FunctionExpression(function) => function
+            .body
+            .as_deref()
+            .and_then(single_returned_identifier_from_body),
+        _ => None,
+    }
+}
+
+fn single_returned_identifier_from_body(body: &oxc_ast::ast::FunctionBody<'_>) -> Option<String> {
+    if !body.directives.is_empty() || body.statements.len() != 1 {
+        return None;
+    }
+    let Statement::ReturnStatement(statement) = &body.statements[0] else {
+        return None;
+    };
+    let Some(Expression::Identifier(identifier)) = &statement.argument else {
+        return None;
+    };
+    Some(identifier.name.as_str().to_string())
 }
 
 fn is_generated_package_namespace_alias(local: &str) -> bool {
@@ -962,8 +1106,10 @@ fn readable_namespace_name_for_import(specifier: &str) -> Option<String> {
 
 fn apply_emit_readability_polish<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
     recover_function_declarations(allocator, program);
+    recover_class_declarations(allocator, program);
     inline_simple_root_aliases(allocator, program);
-    apply_object_property_shorthand(program);
+    apply_object_property_readability(program);
+    split_safe_namespace_imports(allocator, program);
     merge_and_sort_named_imports(allocator, program);
 }
 
@@ -1061,13 +1207,36 @@ struct CommonJsExportedLocalCollector {
 
 impl<'a> Visit<'a> for CommonJsExportedLocalCollector {
     fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
-        if expression.operator.is_assign()
-            && commonjs_export_property_name(&expression.left).is_some()
-            && let Expression::Identifier(identifier) = &expression.right
-        {
-            self.names.insert(identifier.name.as_str().to_string());
+        if expression.operator.is_assign() {
+            if commonjs_export_property_name(&expression.left).is_some()
+                && let Expression::Identifier(identifier) = &expression.right
+            {
+                self.names.insert(identifier.name.as_str().to_string());
+            }
+            if commonjs_module_exports_target(&expression.left)
+                && let Expression::ObjectExpression(object) = &expression.right
+            {
+                for property in &object.properties {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    if property.computed || property.method || property.shorthand {
+                        continue;
+                    }
+                    if let Expression::Identifier(identifier) = &property.value {
+                        self.names.insert(identifier.name.as_str().to_string());
+                    }
+                }
+            }
         }
         walk_assignment_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if let Some((_, local)) = object_define_property_export_getter(expression) {
+            self.names.insert(local);
+        }
+        walk_call_expression(self, expression);
     }
 }
 
@@ -1271,14 +1440,120 @@ fn function_declaration_replacement<'a>(
     Some(function)
 }
 
-fn apply_object_property_shorthand(program: &mut Program<'_>) {
-    let mut shorthand = ObjectPropertyShorthand;
+#[derive(Debug, Clone)]
+struct ClassDeclarationCandidate {
+    statement_start: u32,
+    binding_name: String,
+}
+
+fn recover_class_declarations<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+    let candidates = {
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let symbols = semantic.symbols();
+        let root_scope_id = semantic.scopes().root_scope_id();
+        collect_class_declaration_candidates(program)
+            .into_iter()
+            .filter(|candidate| {
+                symbols
+                    .symbol_ids()
+                    .find(|symbol_id| {
+                        symbols.get_scope_id(*symbol_id) == root_scope_id
+                            && symbols.get_name(*symbol_id) == candidate.binding_name
+                    })
+                    .is_some_and(|symbol_id| {
+                        symbols.get_resolved_references(symbol_id).all(|reference| {
+                            semantic.reference_span(reference).start > candidate.statement_start
+                        })
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let names_by_statement = candidates
+        .into_iter()
+        .map(|candidate| (candidate.statement_start, candidate.binding_name))
+        .collect::<BTreeMap<_, _>>();
+    let builder = AstBuilder::new(allocator);
+    for statement in program.body.iter_mut() {
+        let Some(binding_name) = names_by_statement.get(&statement.span().start).cloned() else {
+            continue;
+        };
+        let replacement = class_declaration_replacement(&builder, statement, binding_name);
+        if let Some(class) = replacement {
+            *statement = Statement::ClassDeclaration(class);
+        }
+    }
+}
+
+fn collect_class_declaration_candidates(program: &Program<'_>) -> Vec<ClassDeclarationCandidate> {
+    program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                return None;
+            };
+            if declaration.kind != VariableDeclarationKind::Const
+                || declaration.declare
+                || declaration.declarations.len() != 1
+            {
+                return None;
+            }
+            let declarator = &declaration.declarations[0];
+            if declarator.definite
+                || declarator.id.type_annotation.is_some()
+                || declarator.id.optional
+            {
+                return None;
+            }
+            let BindingPatternKind::BindingIdentifier(binding) = &declarator.id.kind else {
+                return None;
+            };
+            let Expression::ClassExpression(class) = declarator.init.as_ref()? else {
+                return None;
+            };
+            if let Some(class_id) = &class.id
+                && class_id.name != binding.name
+            {
+                return None;
+            }
+            Some(ClassDeclarationCandidate {
+                statement_start: statement.span().start,
+                binding_name: binding.name.as_str().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn class_declaration_replacement<'a>(
+    builder: &AstBuilder<'a>,
+    statement: &mut Statement<'a>,
+    binding_name: String,
+) -> Option<oxc_allocator::Box<'a, Class<'a>>> {
+    let Statement::VariableDeclaration(declaration) = statement else {
+        return None;
+    };
+    let declarator = &mut declaration.declarations[0];
+    let init = declarator.init.take()?;
+    let Expression::ClassExpression(mut class) = init else {
+        declarator.init = Some(init);
+        return None;
+    };
+    class.r#type = ClassType::ClassDeclaration;
+    class.id = Some(builder.binding_identifier(SPAN, binding_name.as_str()));
+    Some(class)
+}
+
+fn apply_object_property_readability(program: &mut Program<'_>) {
+    let mut shorthand = ObjectPropertyReadability;
     shorthand.visit_program(program);
 }
 
-struct ObjectPropertyShorthand;
+struct ObjectPropertyReadability;
 
-impl<'a> VisitMut<'a> for ObjectPropertyShorthand {
+impl<'a> VisitMut<'a> for ObjectPropertyReadability {
     fn visit_object_property(&mut self, property: &mut ObjectProperty<'a>) {
         if !property.computed
             && !property.method
@@ -1289,7 +1564,367 @@ impl<'a> VisitMut<'a> for ObjectPropertyShorthand {
         {
             property.shorthand = true;
         }
+        if property.kind == PropertyKind::Init
+            && !property.computed
+            && !property.method
+            && !property.shorthand
+            && let Expression::FunctionExpression(function) = &property.value
+            && function.id.is_none()
+        {
+            property.method = true;
+        }
         walk_object_property_mut(self, property);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NamespaceImportCandidate {
+    local_name: String,
+    local_symbol: SymbolId,
+}
+
+#[derive(Debug, Clone)]
+struct NamespaceImportSplit {
+    namespace: String,
+    members: BTreeSet<String>,
+    member_by_reference: BTreeMap<ReferenceId, String>,
+}
+
+fn split_safe_namespace_imports<'a>(allocator: &'a Allocator, program: &mut Program<'a>) {
+    let splits = plan_safe_namespace_import_splits(program);
+    if splits.is_empty() {
+        return;
+    }
+    let builder = AstBuilder::new(allocator);
+    let members_by_namespace = splits
+        .iter()
+        .map(|split| (split.namespace.clone(), split.members.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for statement in program.body.iter_mut() {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(namespace) = splittable_namespace_import_name(declaration) else {
+            continue;
+        };
+        let Some(members) = members_by_namespace.get(&namespace) else {
+            continue;
+        };
+        replace_namespace_import_with_named_specifiers(&builder, declaration, members);
+    }
+
+    let member_by_reference = splits
+        .into_iter()
+        .flat_map(|split| split.member_by_reference)
+        .collect::<BTreeMap<_, _>>();
+    let mut rewriter = NamespaceImportMemberRewriter {
+        builder,
+        member_by_reference,
+    };
+    rewriter.visit_program(program);
+}
+
+fn plan_safe_namespace_import_splits(program: &Program<'_>) -> Vec<NamespaceImportSplit> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let symbols = semantic.symbols();
+    let root_scope_id = semantic.scopes().root_scope_id();
+    let candidates = collect_namespace_import_candidates(program);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let candidate_symbols = candidates
+        .iter()
+        .map(|candidate| candidate.local_symbol)
+        .collect::<BTreeSet<_>>();
+    let mut occupied_names = symbols
+        .symbol_ids()
+        .filter(|symbol_id| {
+            symbols.get_scope_id(*symbol_id) == root_scope_id
+                && !candidate_symbols.contains(symbol_id)
+        })
+        .map(|symbol_id| symbols.get_name(symbol_id).to_string())
+        .collect::<BTreeSet<_>>();
+    occupied_names.extend(
+        semantic
+            .scopes()
+            .root_unresolved_references()
+            .keys()
+            .map(|name| name.as_str().to_string()),
+    );
+
+    let mut reference_to_namespace = BTreeMap::<ReferenceId, String>::new();
+    for candidate in &candidates {
+        for reference_id in symbols.get_resolved_reference_ids(candidate.local_symbol) {
+            reference_to_namespace.insert(*reference_id, candidate.local_name.clone());
+        }
+    }
+    let usage = collect_namespace_import_usage(program, reference_to_namespace);
+    let mut splits = Vec::new();
+    for candidate in candidates {
+        if usage.invalid_namespaces.contains(&candidate.local_name) {
+            continue;
+        }
+        let expected_references = symbols
+            .get_resolved_reference_ids(candidate.local_symbol)
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let member_by_reference = usage
+            .member_by_reference
+            .get(&candidate.local_name)
+            .cloned()
+            .unwrap_or_default();
+        let observed_references = member_by_reference.keys().copied().collect::<BTreeSet<_>>();
+        if expected_references.is_empty() || expected_references != observed_references {
+            continue;
+        }
+        let members = member_by_reference
+            .values()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if members.iter().any(|member| {
+            member == "default"
+                || sanitize_identifier(member) != *member
+                || occupied_names.contains(member)
+        }) {
+            continue;
+        }
+        occupied_names.extend(members.iter().cloned());
+        splits.push(NamespaceImportSplit {
+            namespace: candidate.local_name,
+            members,
+            member_by_reference,
+        });
+    }
+    splits
+}
+
+fn collect_namespace_import_candidates(program: &Program<'_>) -> Vec<NamespaceImportCandidate> {
+    program
+        .body
+        .iter()
+        .filter_map(|statement| {
+            let Statement::ImportDeclaration(declaration) = statement else {
+                return None;
+            };
+            if !import_is_splittable_namespace_only(declaration) {
+                return None;
+            }
+            let specifiers = declaration.specifiers.as_ref()?;
+            let ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) = &specifiers[0]
+            else {
+                return None;
+            };
+            Some(NamespaceImportCandidate {
+                local_name: specifier.local.name.as_str().to_string(),
+                local_symbol: specifier.local.symbol_id.get()?,
+            })
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct NamespaceImportUsage {
+    member_by_reference: BTreeMap<String, BTreeMap<ReferenceId, String>>,
+    invalid_namespaces: BTreeSet<String>,
+}
+
+fn collect_namespace_import_usage(
+    program: &Program<'_>,
+    reference_to_namespace: BTreeMap<ReferenceId, String>,
+) -> NamespaceImportUsage {
+    let mut collector = NamespaceImportUsageCollector {
+        reference_to_namespace,
+        usage: NamespaceImportUsage::default(),
+    };
+    collector.visit_program(program);
+    collector.usage
+}
+
+struct NamespaceImportUsageCollector {
+    reference_to_namespace: BTreeMap<ReferenceId, String>,
+    usage: NamespaceImportUsage,
+}
+
+impl NamespaceImportUsageCollector {
+    fn namespace_for_reference(&self, reference_id: ReferenceId) -> Option<&str> {
+        self.reference_to_namespace
+            .get(&reference_id)
+            .map(String::as_str)
+    }
+
+    fn invalidate_reference(&mut self, reference_id: ReferenceId) {
+        if let Some(namespace) = self.namespace_for_reference(reference_id) {
+            self.usage.invalid_namespaces.insert(namespace.to_string());
+        }
+    }
+}
+
+impl<'a> Visit<'a> for NamespaceImportUsageCollector {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if let Some(reference_id) =
+            assignment_target_namespace_object_reference_id(&expression.left)
+        {
+            self.invalidate_reference(reference_id);
+        }
+        walk_assignment_expression(self, expression);
+    }
+
+    fn visit_update_expression(&mut self, expression: &oxc_ast::ast::UpdateExpression<'a>) {
+        if let Some(reference_id) =
+            simple_assignment_target_namespace_object_reference_id(&expression.argument)
+        {
+            self.invalidate_reference(reference_id);
+        }
+        walk_update_expression(self, expression);
+    }
+
+    fn visit_unary_expression(&mut self, expression: &UnaryExpression<'a>) {
+        if expression.operator == UnaryOperator::Delete
+            && let Some(reference_id) =
+                expression_static_namespace_member_reference_id(&expression.argument)
+        {
+            self.invalidate_reference(reference_id);
+        }
+        walk_unary_expression(self, expression);
+    }
+
+    fn visit_static_member_expression(&mut self, member: &StaticMemberExpression<'a>) {
+        let Some(reference_id) = expression_identifier_reference_id(&member.object) else {
+            walk_static_member_expression(self, member);
+            return;
+        };
+        if let Some(namespace) = self.namespace_for_reference(reference_id) {
+            let property = member.property.name.as_str();
+            if member.optional || property == "default" || sanitize_identifier(property) != property
+            {
+                self.usage.invalid_namespaces.insert(namespace.to_string());
+            } else {
+                self.usage
+                    .member_by_reference
+                    .entry(namespace.to_string())
+                    .or_default()
+                    .insert(reference_id, property.to_string());
+            }
+        }
+        walk_static_member_expression(self, member);
+    }
+}
+
+fn assignment_target_namespace_object_reference_id(
+    target: &oxc_ast::ast::AssignmentTarget<'_>,
+) -> Option<ReferenceId> {
+    match target {
+        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+            expression_identifier_reference_id(&member.object)
+        }
+        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+            expression_identifier_reference_id(&member.object)
+        }
+        _ => None,
+    }
+}
+
+fn simple_assignment_target_namespace_object_reference_id(
+    target: &SimpleAssignmentTarget<'_>,
+) -> Option<ReferenceId> {
+    match target {
+        SimpleAssignmentTarget::StaticMemberExpression(member) => {
+            expression_identifier_reference_id(&member.object)
+        }
+        SimpleAssignmentTarget::ComputedMemberExpression(member) => {
+            expression_identifier_reference_id(&member.object)
+        }
+        _ => None,
+    }
+}
+
+fn expression_static_namespace_member_reference_id(
+    expression: &Expression<'_>,
+) -> Option<ReferenceId> {
+    let Expression::StaticMemberExpression(member) = expression else {
+        return None;
+    };
+    expression_identifier_reference_id(&member.object)
+}
+
+fn expression_identifier_reference_id(expression: &Expression<'_>) -> Option<ReferenceId> {
+    let Expression::Identifier(identifier) = expression else {
+        return None;
+    };
+    identifier.reference_id.get()
+}
+
+fn import_is_splittable_namespace_only(declaration: &ImportDeclaration<'_>) -> bool {
+    if declaration.phase.is_some()
+        || declaration.with_clause.is_some()
+        || declaration.import_kind.is_type()
+    {
+        return false;
+    }
+    let Some(specifiers) = &declaration.specifiers else {
+        return false;
+    };
+    specifiers.len() == 1
+        && matches!(
+            specifiers[0],
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_)
+        )
+}
+
+fn splittable_namespace_import_name(declaration: &ImportDeclaration<'_>) -> Option<String> {
+    if !import_is_splittable_namespace_only(declaration) {
+        return None;
+    }
+    let specifiers = declaration.specifiers.as_ref()?;
+    let ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) = &specifiers[0] else {
+        return None;
+    };
+    Some(specifier.local.name.as_str().to_string())
+}
+
+fn replace_namespace_import_with_named_specifiers<'a>(
+    builder: &AstBuilder<'a>,
+    declaration: &mut ImportDeclaration<'a>,
+    members: &BTreeSet<String>,
+) {
+    let Some(specifiers) = &mut declaration.specifiers else {
+        return;
+    };
+    specifiers.clear();
+    for member in members {
+        let imported = builder.module_export_name_identifier_name(SPAN, member.as_str());
+        let local = builder.binding_identifier(SPAN, member.as_str());
+        specifiers.push(builder.import_declaration_specifier_import_specifier(
+            SPAN,
+            imported,
+            local,
+            ImportOrExportKind::Value,
+        ));
+    }
+}
+
+struct NamespaceImportMemberRewriter<'a> {
+    builder: AstBuilder<'a>,
+    member_by_reference: BTreeMap<ReferenceId, String>,
+}
+
+impl<'a> VisitMut<'a> for NamespaceImportMemberRewriter<'a> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        let replacement = match expression {
+            Expression::StaticMemberExpression(member) if !member.optional => {
+                expression_identifier_reference_id(&member.object)
+                    .and_then(|reference_id| self.member_by_reference.get(&reference_id).cloned())
+            }
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            *expression = self
+                .builder
+                .expression_identifier_reference(SPAN, replacement.as_str());
+            return;
+        }
+        walk_expression_mut(self, expression);
     }
 }
 
@@ -1299,10 +1934,12 @@ fn merge_and_sort_named_imports<'a>(allocator: &'a Allocator, program: &mut Prog
     let mut first_by_source = BTreeMap::<String, usize>::new();
     for statement in program.body.drain(..) {
         if let Statement::ImportDeclaration(mut declaration) = statement {
-            if import_is_mergeable_named_only(&declaration) {
+            if import_is_mergeable_value_import(&declaration) {
                 let source = declaration.source.value.as_str().to_string();
                 if let Some(first_index) = first_by_source.get(&source).copied() {
-                    if let Statement::ImportDeclaration(first) = &mut next[first_index]
+                    if let Statement::ImportDeclaration(first) = &next[first_index]
+                        && can_merge_import_declarations(first, &declaration)
+                        && let Statement::ImportDeclaration(first) = &mut next[first_index]
                         && let (Some(first_specifiers), Some(specifiers)) =
                             (&mut first.specifiers, &mut declaration.specifiers)
                     {
@@ -1330,7 +1967,7 @@ fn merge_and_sort_named_imports<'a>(allocator: &'a Allocator, program: &mut Prog
     program.body = next;
 }
 
-fn import_is_mergeable_named_only(declaration: &ImportDeclaration<'_>) -> bool {
+fn import_is_mergeable_value_import(declaration: &ImportDeclaration<'_>) -> bool {
     if declaration.phase.is_some()
         || declaration.with_clause.is_some()
         || declaration.import_kind.is_type()
@@ -1341,9 +1978,31 @@ fn import_is_mergeable_named_only(declaration: &ImportDeclaration<'_>) -> bool {
         return false;
     };
     !specifiers.is_empty()
-        && specifiers
-            .iter()
-            .all(|specifier| matches!(specifier, ImportDeclarationSpecifier::ImportSpecifier(_)))
+        && specifiers.iter().all(|specifier| {
+            matches!(
+                specifier,
+                ImportDeclarationSpecifier::ImportSpecifier(_)
+                    | ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+            )
+        })
+}
+
+fn can_merge_import_declarations(
+    first: &ImportDeclaration<'_>,
+    next: &ImportDeclaration<'_>,
+) -> bool {
+    !(import_has_default_specifier(first) && import_has_default_specifier(next))
+}
+
+fn import_has_default_specifier(declaration: &ImportDeclaration<'_>) -> bool {
+    declaration.specifiers.as_ref().is_some_and(|specifiers| {
+        specifiers.iter().any(|specifier| {
+            matches!(
+                specifier,
+                ImportDeclarationSpecifier::ImportDefaultSpecifier(_)
+            )
+        })
+    })
 }
 
 fn sort_and_dedup_import_specifiers(
@@ -1360,13 +2019,18 @@ fn sort_and_dedup_import_specifiers(
 }
 
 fn import_specifier_sort_key(specifier: &ImportDeclarationSpecifier<'_>) -> (String, String) {
-    let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
-        return (String::new(), String::new());
-    };
-    (
-        module_export_sort_name(&specifier.imported),
-        specifier.local.name.as_str().to_string(),
-    )
+    match specifier {
+        ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+            (String::new(), specifier.local.name.as_str().to_string())
+        }
+        ImportDeclarationSpecifier::ImportSpecifier(specifier) => (
+            module_export_sort_name(&specifier.imported),
+            specifier.local.name.as_str().to_string(),
+        ),
+        ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+            ("*".to_string(), specifier.local.name.as_str().to_string())
+        }
+    }
 }
 
 fn module_export_sort_name(name: &ModuleExportName<'_>) -> String {
@@ -3176,7 +3840,7 @@ mod tests {
     #[test]
     fn readability_renames_namespace_import_keeps_handwritten_alias() {
         let formatted = format_source_with_module_items_and_renames(
-            "import * as utilities from 'lodash'; console.log(utilities.map);",
+            "import * as utilities from 'lodash'; console.log(utilities, utilities.map);",
             &[],
             &[],
             &[],
@@ -3187,7 +3851,7 @@ mod tests {
         .expect("fixture should format");
 
         assert!(formatted.contains("import * as utilities from 'lodash';"));
-        assert!(formatted.contains("console.log(utilities.map);"));
+        assert!(formatted.contains("console.log(utilities, utilities.map);"));
     }
 
     #[test]
@@ -3241,6 +3905,58 @@ mod tests {
         assert!(formatted.contains("function createClient()"));
         assert!(formatted.contains("exports.createClient = createClient;"));
         assert!(!formatted.contains("const a = function"));
+    }
+
+    #[test]
+    fn readability_renames_from_commonjs_bracket_export_property() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = 1; exports['createClient'] = a;",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const createClient = 1;"));
+        assert!(formatted.contains("exports['createClient'] = createClient;"));
+    }
+
+    #[test]
+    fn readability_renames_from_module_exports_object_and_uses_shorthand() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = 1; module.exports = { createClient: a };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const createClient = 1;"));
+        assert!(formatted.contains("module.exports = { createClient };"));
+    }
+
+    #[test]
+    fn readability_renames_from_object_define_property_getter() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = 1; Object.defineProperty(exports, 'createClient', { get: function() { return a; } });",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const createClient = 1;"));
+        assert!(formatted.contains("get()"));
+        assert!(formatted.contains("return createClient;"));
     }
 
     #[test]
@@ -3311,6 +4027,95 @@ mod tests {
 
         assert_eq!(formatted.matches("from 'pkg'").count(), 1);
         assert!(formatted.contains("import { a, z } from 'pkg';"));
+    }
+
+    #[test]
+    fn readability_polish_merges_default_and_named_imports() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import React from 'react'; import { useMemo } from 'react'; console.log(React, useMemo);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert_eq!(formatted.matches("from 'react'").count(), 1);
+        assert!(formatted.contains("import React, { useMemo } from 'react';"));
+        assert!(formatted.contains("console.log(React, useMemo);"));
+    }
+
+    #[test]
+    fn readability_polish_splits_safe_namespace_imports() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import * as lodash from 'lodash'; console.log(lodash.map(items, fn), lodash.filter(items, fn));",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { filter, map } from 'lodash';"));
+        assert!(formatted.contains("console.log(map(items, fn), filter(items, fn));"));
+        assert!(!formatted.contains("lodash.map"));
+    }
+
+    #[test]
+    fn readability_polish_keeps_namespace_import_when_namespace_escapes() {
+        let formatted = format_source_with_module_items_and_renames(
+            "import * as lodash from 'lodash'; console.log(lodash, lodash.map);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as lodash from 'lodash';"));
+        assert!(formatted.contains("console.log(lodash, lodash.map);"));
+    }
+
+    #[test]
+    fn readability_polish_recovers_class_declaration() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const Client = class { connect() { return 1; } }; console.log(new Client());",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("class Client"));
+        assert!(formatted.contains("connect()"));
+        assert!(formatted.contains("console.log(new Client());"));
+        assert!(!formatted.contains("const Client = class"));
+    }
+
+    #[test]
+    fn readability_polish_recovers_object_method_shorthand() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const api = { createClient: function() { return 1; } };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("createClient()"));
+        assert!(!formatted.contains("createClient: function"));
     }
 
     #[test]

@@ -223,7 +223,7 @@ mod tests {
             },
             source_backed: false,
         });
-        file.push_source("const _class = pkg_name_value.answer;");
+        file.push_source("const _class = pkg_name_value.answer; console.log(pkg_name_value);");
         file.add_export(BindingName::new("class"));
         let mut plan = EmitPlan::default();
         plan.push_file(file);
@@ -232,6 +232,7 @@ mod tests {
 
         let source = project.files[0].source.as_str();
         assert!(source.contains("import * as pkg_name_value from 'pkg-name/value';"));
+        assert!(source.contains("console.log(pkg_name_value);"));
         assert!(source.contains("export { _class };"));
     }
 
