@@ -689,6 +689,11 @@ fn audit_namespace_object_member_consistency(
                 .filter(|member| {
                     !namespace_member_access_present(emitted.source.as_str(), namespace, member)
                         && !named_import_specifier_present(emitted.source.as_str(), member)
+                        && !object_destructure_specifier_present(
+                            emitted.source.as_str(),
+                            namespace,
+                            member,
+                        )
                 })
                 .collect();
             if missing.is_empty() {
@@ -760,6 +765,71 @@ fn named_import_specifier_present(source: &str, member: &str) -> bool {
         }
     }
     false
+}
+
+fn object_destructure_specifier_present(source: &str, namespace: &str, member: &str) -> bool {
+    let mut cursor = 0usize;
+    while let Some(offset) = source[cursor..].find('=') {
+        let equals = cursor + offset;
+        cursor = equals + 1;
+
+        let after_equals = source[equals + 1..].trim_start();
+        if !starts_with_identifier(after_equals, namespace) {
+            continue;
+        }
+
+        let before_equals = source[..equals].trim_end();
+        let Some(close_brace) = before_equals.rfind('}') else {
+            continue;
+        };
+        if close_brace + 1 != before_equals.len() {
+            continue;
+        }
+        let Some(open_brace) = matching_open_brace_before(before_equals, close_brace) else {
+            continue;
+        };
+        let specifiers = &before_equals[open_brace + 1..close_brace];
+        if destructure_specifier_mentions_member(specifiers, member) {
+            return true;
+        }
+    }
+    false
+}
+
+fn starts_with_identifier(source: &str, identifier: &str) -> bool {
+    let Some(rest) = source.strip_prefix(identifier) else {
+        return false;
+    };
+    rest.as_bytes()
+        .first()
+        .is_none_or(|byte| !is_identifier_part(*byte))
+}
+
+fn matching_open_brace_before(source: &str, close_brace: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for index in (0..=close_brace).rev() {
+        match source.as_bytes()[index] {
+            b'}' => depth += 1,
+            b'{' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn destructure_specifier_mentions_member(specifiers: &str, member: &str) -> bool {
+    specifiers.split(',').any(|specifier| {
+        let specifier = specifier.trim();
+        specifier == member
+            || specifier
+                .strip_prefix(member)
+                .is_some_and(|rest| rest.trim_start().starts_with(':'))
+    })
 }
 
 fn is_member_name_identifier(name: &str) -> bool {
@@ -1426,6 +1496,22 @@ mod tests {
         assert!(source.contains("export { createClient };"));
         assert!(source.contains("const obj = { internalName: createClient };"));
         assert!(!source.contains("const internalName = 1;"));
+    }
+
+    #[test]
+    fn readability_polish_recovers_destructuring_and_usage_names_in_pipeline() {
+        let rows = rows_with_application_source(
+            "const api = { createClient() { return 1; }, close() {} }; const client = api.createClient; const close = api.close; class Logger {}; const a = new Logger(); console.log(client, close, a);",
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "{:?}", run.audit.findings());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("const { createClient: client, close } = api;"));
+        assert!(source.contains("const logger = new Logger();"));
+        assert!(source.contains("console.log(client, close, logger);"));
     }
 
     #[test]
@@ -2112,6 +2198,40 @@ mod tests {
             files: vec![EmittedFile {
                 path: "src/index.ts".to_string(),
                 source: r#"ns.plain; ns["must-be-quoted"]; ns['with space'];"#.to_string(),
+            }],
+        };
+
+        let audit = audit_namespace_object_member_consistency(&plan, &project);
+        assert!(
+            audit.findings().is_empty(),
+            "expected no findings, got: {:?}",
+            audit.findings(),
+        );
+    }
+
+    #[test]
+    fn namespace_object_member_audit_accepts_object_destructuring() {
+        let mut file = PlannedFile::new("src/index.ts");
+        let mut known = BTreeSet::new();
+        known.insert(BindingName::new("createClient"));
+        known.insert(BindingName::new("close"));
+        file.add_binding(
+            PlannedBinding::new(
+                BindingName::new("api"),
+                BindingName::new("api"),
+                BindingShape::NamespaceObject,
+                true,
+            )
+            .with_known_members(known),
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/index.ts".to_string(),
+                source: "const { createClient: client, close } = api;\nclient(); close();"
+                    .to_string(),
             }],
         };
 

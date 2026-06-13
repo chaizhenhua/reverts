@@ -716,6 +716,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ReadabilityRenameSource {
+    UsagePattern,
     ObjectProperty,
     PackageNamespace,
     ImportExportPublic,
@@ -730,6 +731,7 @@ impl ReadabilityRenameSource {
             Self::ImportExportPublic | Self::CommonJsExport => 90,
             Self::PackageNamespace => 80,
             Self::ObjectProperty => 50,
+            Self::UsagePattern => 40,
         }
     }
 
@@ -740,6 +742,7 @@ impl ReadabilityRenameSource {
             Self::CommonJsExport => "commonjs_export",
             Self::PackageNamespace => "package_namespace",
             Self::ObjectProperty => "object_property",
+            Self::UsagePattern => "usage_pattern",
         }
     }
 }
@@ -951,6 +954,7 @@ impl LateReadabilityRenameCollector {
 impl<'a> Visit<'a> for LateReadabilityRenameCollector {
     fn visit_program(&mut self, program: &Program<'a>) {
         collect_import_alias_readability_renames(program, self);
+        collect_usage_readability_rename_hints(program, self);
         oxc_ast::visit::walk::walk_program(self, program);
     }
 
@@ -1094,6 +1098,126 @@ fn collect_import_alias_readability_renames(
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => {}
             }
         }
+    }
+}
+
+fn collect_usage_readability_rename_hints(
+    program: &Program<'_>,
+    collector: &mut LateReadabilityRenameCollector,
+) {
+    for statement in &program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        if declaration.declare || declaration.declarations.len() != 1 {
+            continue;
+        }
+        let declarator = &declaration.declarations[0];
+        if declarator.definite || declarator.id.type_annotation.is_some() || declarator.id.optional
+        {
+            continue;
+        }
+        let BindingPatternKind::BindingIdentifier(binding) = &declarator.id.kind else {
+            continue;
+        };
+        let local = binding.name.as_str();
+        if !looks_generated_binding_name(local) {
+            continue;
+        }
+        let Some(init) = declarator.init.as_ref() else {
+            continue;
+        };
+        let Some(candidate) = usage_based_name_for_initializer(init) else {
+            continue;
+        };
+        collector.push_hint(
+            local,
+            candidate.as_str(),
+            ReadabilityRenameSource::UsagePattern,
+        );
+    }
+}
+
+fn looks_generated_binding_name(name: &str) -> bool {
+    let name = name.trim_start_matches('_');
+    name.starts_with('$') || name.chars().count() == 1 || looks_like_letter_number_binding(name)
+}
+
+fn looks_like_letter_number_binding(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && !chars.as_str().is_empty()
+        && chars.as_str().chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn usage_based_name_for_initializer(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::NewExpression(expression) => usage_name_from_constructor(&expression.callee),
+        Expression::CallExpression(expression) => usage_name_from_call_callee(&expression.callee),
+        _ => None,
+    }
+}
+
+fn usage_name_from_constructor(callee: &Expression<'_>) -> Option<String> {
+    match callee {
+        Expression::Identifier(identifier) => lower_type_name(identifier.name.as_str()),
+        Expression::StaticMemberExpression(member) => {
+            lower_type_name(member.property.name.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn usage_name_from_call_callee(callee: &Expression<'_>) -> Option<String> {
+    let name = match callee {
+        Expression::Identifier(identifier) => identifier.name.as_str(),
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        _ => return None,
+    };
+    let suffix = strip_factory_prefix(name)?;
+    lower_type_name(suffix)
+}
+
+fn strip_factory_prefix(name: &str) -> Option<&str> {
+    for prefix in [
+        "create", "make", "build", "get", "load", "init", "use", "open", "read", "parse",
+    ] {
+        let Some(suffix) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        if suffix
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
+        {
+            return Some(suffix);
+        }
+    }
+    None
+}
+
+fn lower_type_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let lowered = if name.chars().all(|ch| ch.is_ascii_uppercase()) {
+        name.to_ascii_lowercase()
+    } else {
+        let mut chars = name.chars();
+        let first = chars.next()?;
+        let mut lowered = String::new();
+        lowered.extend(first.to_lowercase());
+        lowered.push_str(chars.as_str());
+        lowered
+    };
+    let sanitized = sanitize_identifier(lowered.as_str());
+    if sanitized == lowered {
+        Some(lowered)
+    } else {
+        None
     }
 }
 
@@ -1298,6 +1422,7 @@ fn apply_emit_readability_polish<'a>(
     recover_function_declarations(allocator, program, report);
     recover_class_declarations(allocator, program, report);
     inline_simple_root_aliases(allocator, program, report);
+    recover_object_destructuring(allocator, program, report);
     apply_object_property_readability(program, report);
     split_safe_namespace_imports(allocator, program, report);
     merge_and_sort_named_imports(allocator, program, report);
@@ -1814,6 +1939,188 @@ impl<'a> VisitMut<'a> for ObjectPropertyReadability<'_> {
         }
         walk_object_property_mut(self, property);
     }
+}
+
+#[derive(Debug, Clone)]
+struct ObjectDestructureCandidate {
+    statement_index: usize,
+    object_name: String,
+    property_name: String,
+    local_name: String,
+}
+
+fn recover_object_destructuring<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
+    let candidates = collect_object_destructure_candidates(program);
+    if candidates.len() < 2 {
+        return;
+    }
+    let candidates_by_index = candidates
+        .into_iter()
+        .map(|candidate| (candidate.statement_index, candidate))
+        .collect::<BTreeMap<_, _>>();
+    let builder = AstBuilder::new(allocator);
+    let mut replacements = BTreeMap::<usize, Statement<'a>>::new();
+    let mut removals = BTreeSet::<usize>::new();
+    let mut index = 0usize;
+    while index < program.body.len() {
+        let Some(first) = candidates_by_index.get(&index) else {
+            index += 1;
+            continue;
+        };
+        let mut group = vec![first.clone()];
+        let mut next_index = index + 1;
+        while let Some(candidate) = candidates_by_index.get(&next_index) {
+            if candidate.object_name != first.object_name {
+                break;
+            }
+            group.push(candidate.clone());
+            next_index += 1;
+        }
+        if group.len() < 2 || !object_destructure_group_is_safe(&group) {
+            index += 1;
+            continue;
+        }
+        let replacement = object_destructure_statement(&builder, &group);
+        replacements.insert(index, replacement);
+        for candidate in group.iter().skip(1) {
+            removals.insert(candidate.statement_index);
+        }
+        report.push(format!(
+            "recovered object destructuring {} -> {{{}}}",
+            first.object_name,
+            group
+                .iter()
+                .map(|candidate| {
+                    if candidate.property_name == candidate.local_name {
+                        candidate.property_name.clone()
+                    } else {
+                        format!("{}: {}", candidate.property_name, candidate.local_name)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+        index = next_index;
+    }
+    if replacements.is_empty() {
+        return;
+    }
+
+    let mut next_body = builder.vec();
+    for (statement_index, statement) in program.body.drain(..).enumerate() {
+        if let Some(replacement) = replacements.remove(&statement_index) {
+            next_body.push(replacement);
+            continue;
+        }
+        if removals.contains(&statement_index) {
+            continue;
+        }
+        next_body.push(statement);
+    }
+    program.body = next_body;
+}
+
+fn collect_object_destructure_candidates(program: &Program<'_>) -> Vec<ObjectDestructureCandidate> {
+    program
+        .body
+        .iter()
+        .enumerate()
+        .filter_map(|(statement_index, statement)| {
+            let Statement::VariableDeclaration(declaration) = statement else {
+                return None;
+            };
+            if declaration.kind != VariableDeclarationKind::Const
+                || declaration.declare
+                || declaration.declarations.len() != 1
+            {
+                return None;
+            }
+            let declarator = &declaration.declarations[0];
+            if declarator.definite
+                || declarator.id.type_annotation.is_some()
+                || declarator.id.optional
+            {
+                return None;
+            }
+            let BindingPatternKind::BindingIdentifier(local) = &declarator.id.kind else {
+                return None;
+            };
+            let Expression::StaticMemberExpression(member) = declarator.init.as_ref()? else {
+                return None;
+            };
+            if member.optional {
+                return None;
+            }
+            let Expression::Identifier(object) = &member.object else {
+                return None;
+            };
+            let object_name = object.name.as_str();
+            let property_name = member.property.name.as_str();
+            let local_name = local.name.as_str();
+            if object_name == local_name
+                || sanitize_identifier(property_name) != property_name
+                || sanitize_identifier(local_name) != local_name
+            {
+                return None;
+            }
+            Some(ObjectDestructureCandidate {
+                statement_index,
+                object_name: object_name.to_string(),
+                property_name: property_name.to_string(),
+                local_name: local_name.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn object_destructure_group_is_safe(group: &[ObjectDestructureCandidate]) -> bool {
+    let mut properties = BTreeSet::new();
+    let mut locals = BTreeSet::new();
+    group.iter().all(|candidate| {
+        properties.insert(candidate.property_name.as_str())
+            && locals.insert(candidate.local_name.as_str())
+    })
+}
+
+fn object_destructure_statement<'a>(
+    builder: &AstBuilder<'a>,
+    group: &[ObjectDestructureCandidate],
+) -> Statement<'a> {
+    let mut properties = builder.vec();
+    for candidate in group {
+        let key = builder.property_key_identifier_name(SPAN, candidate.property_name.as_str());
+        let value_kind =
+            builder.binding_pattern_kind_binding_identifier(SPAN, candidate.local_name.as_str());
+        let value = builder.binding_pattern(value_kind, NONE, false);
+        properties.push(builder.binding_property(
+            SPAN,
+            key,
+            value,
+            candidate.property_name == candidate.local_name,
+            false,
+        ));
+    }
+    let pattern_kind = builder.binding_pattern_kind_object_pattern(SPAN, properties, NONE);
+    let pattern = builder.binding_pattern(pattern_kind, NONE, false);
+    let init = Some(builder.expression_identifier_reference(SPAN, group[0].object_name.as_str()));
+    let mut declarations = builder.vec();
+    declarations.push(builder.variable_declarator(
+        SPAN,
+        VariableDeclarationKind::Const,
+        pattern,
+        init,
+        false,
+    ));
+    Statement::VariableDeclaration(builder.alloc_variable_declaration(
+        SPAN,
+        VariableDeclarationKind::Const,
+        declarations,
+        false,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -4239,6 +4546,27 @@ mod tests {
     }
 
     #[test]
+    fn readability_renames_api_object_exports_and_recovers_functions() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = function() { return 1; }; const b = function() { return 2; }; module.exports = { createClient: a, close: b };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("function createClient()"));
+        assert!(formatted.contains("function close()"));
+        let compact = formatted.split_whitespace().collect::<String>();
+        assert!(compact.contains("module.exports={createClient,close};"));
+        assert!(!formatted.contains("const a = function"));
+        assert!(!formatted.contains("const b = function"));
+    }
+
+    #[test]
     fn readability_renames_from_object_define_property_getter() {
         let formatted = format_source_with_module_items_and_renames(
             "const a = 1; Object.defineProperty(exports, 'createClient', { get: function() { return a; } });",
@@ -4302,6 +4630,61 @@ mod tests {
     }
 
     #[test]
+    fn readability_usage_based_names_generated_bindings_from_initializers() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = new Client(); const b = createLogger(); console.log(a, b);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const client = new Client();"));
+        assert!(formatted.contains("const logger = createLogger();"));
+        assert!(formatted.contains("console.log(client, logger);"));
+    }
+
+    #[test]
+    fn readability_usage_based_name_does_not_override_public_export_name() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const a = createLogger(); export { a as createClient };",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const createClient = createLogger();"));
+        assert!(formatted.contains("export { createClient };"));
+        assert!(!formatted.contains("const logger = createLogger();"));
+    }
+
+    #[test]
+    fn readability_usage_based_names_keep_readable_short_bindings() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const id = new Client(); const v1 = createLogger(); console.log(id, v1);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const id = new Client();"));
+        assert!(formatted.contains("const logger = createLogger();"));
+        assert!(formatted.contains("console.log(id, logger);"));
+        assert!(!formatted.contains("const client = new Client();"));
+    }
+
+    #[test]
     fn readability_polish_keeps_exported_aliases() {
         let formatted = format_source_with_module_items_and_renames(
             "const settings = 1; const alias = settings; console.log(alias); export { alias };",
@@ -4334,6 +4717,49 @@ mod tests {
 
         assert!(formatted.contains("const alias = settings;"));
         assert!(formatted.contains("return alias;"));
+    }
+
+    #[test]
+    fn readability_polish_recovers_object_destructuring() {
+        let (formatted, report) = format_source_with_module_items_and_renames_with_report(
+            "const createClient = api.createClient; const close = api.close; console.log(createClient, close);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const { createClient, close } = api;"));
+        assert!(formatted.contains("console.log(createClient, close);"));
+        assert!(!formatted.contains("const close = api.close;"));
+        assert!(
+            report
+                .entries
+                .iter()
+                .any(|entry| entry.contains("recovered object destructuring api"))
+        );
+    }
+
+    #[test]
+    fn readability_polish_recovers_aliased_object_destructuring() {
+        let formatted = format_source_with_module_items_and_renames(
+            "const client = api.createClient; const close = api.close; console.log(client, close);",
+            &[],
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("const { createClient: client, close } = api;"));
+        assert!(formatted.contains("console.log(client, close);"));
+        assert!(!formatted.contains("const client = api.createClient;"));
+        assert!(!formatted.contains("const close = api.close;"));
     }
 
     #[test]
