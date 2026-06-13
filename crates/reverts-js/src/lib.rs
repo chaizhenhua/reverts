@@ -699,6 +699,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
+        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -4206,6 +4207,266 @@ fn simple_named_import_statement<'a, 'b>(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompatibleImportDetails {
+    Named(BTreeSet<SimpleNamedImportSpecifier>),
+    Default {
+        local: String,
+    },
+    DefaultNamed {
+        local: String,
+        named: BTreeSet<SimpleNamedImportSpecifier>,
+    },
+    Namespace {
+        local: String,
+    },
+    DefaultNamespace {
+        _default_local: String,
+        _namespace_local: String,
+    },
+}
+
+#[derive(Debug, Default, Clone)]
+struct MixedImportState {
+    named_indices: Vec<usize>,
+    named_specifiers: BTreeSet<SimpleNamedImportSpecifier>,
+    default_target: Option<(usize, String, BTreeSet<SimpleNamedImportSpecifier>)>,
+    namespace_target: Option<(usize, String)>,
+}
+
+fn coalesce_compatible_mixed_imports_in_program<'a>(
+    program: &mut Program<'a>,
+    builder: &AstBuilder<'a>,
+) {
+    let mut states = BTreeMap::<String, MixedImportState>::new();
+
+    for (index, statement) in program.body.iter().enumerate() {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        let Some(details) = compatible_import_details(declaration) else {
+            continue;
+        };
+        let state = states
+            .entry(declaration.source.value.as_str().to_string())
+            .or_default();
+        match details {
+            CompatibleImportDetails::Named(specifiers) => {
+                state.named_indices.push(index);
+                state.named_specifiers.extend(specifiers);
+            }
+            CompatibleImportDetails::Default { local } => {
+                state
+                    .default_target
+                    .get_or_insert_with(|| (index, local, BTreeSet::new()));
+            }
+            CompatibleImportDetails::DefaultNamed { local, named } => {
+                state
+                    .default_target
+                    .get_or_insert_with(|| (index, local, named));
+            }
+            CompatibleImportDetails::Namespace { local } => {
+                state.namespace_target.get_or_insert_with(|| (index, local));
+            }
+            CompatibleImportDetails::DefaultNamespace { .. } => {}
+        }
+    }
+
+    let mut replacements = BTreeMap::<usize, Statement<'a>>::new();
+    let mut duplicate_indices = BTreeSet::<usize>::new();
+    for (source, state) in states {
+        if let Some((default_index, default_local, mut named_specifiers)) =
+            state.default_target.clone()
+            && !state.named_indices.is_empty()
+        {
+            named_specifiers.extend(state.named_specifiers);
+            let replacement_index = state
+                .named_indices
+                .iter()
+                .copied()
+                .chain([default_index])
+                .min()
+                .unwrap_or(default_index);
+            replacements.insert(
+                replacement_index,
+                default_named_import_statement(
+                    builder,
+                    source.as_str(),
+                    default_local.as_str(),
+                    named_specifiers.iter(),
+                ),
+            );
+            for index in state.named_indices.iter().copied().chain([default_index]) {
+                if index != replacement_index {
+                    duplicate_indices.insert(index);
+                }
+            }
+            continue;
+        }
+
+        if state.named_indices.is_empty()
+            && let (
+                Some((default_index, default_local, _)),
+                Some((namespace_index, namespace_local)),
+            ) = (state.default_target, state.namespace_target)
+        {
+            let replacement_index = default_index.min(namespace_index);
+            replacements.insert(
+                replacement_index,
+                default_namespace_import_statement(
+                    builder,
+                    source.as_str(),
+                    default_local.as_str(),
+                    namespace_local.as_str(),
+                ),
+            );
+            if default_index != replacement_index {
+                duplicate_indices.insert(default_index);
+            }
+            if namespace_index != replacement_index {
+                duplicate_indices.insert(namespace_index);
+            }
+        }
+    }
+
+    if duplicate_indices.is_empty() {
+        return;
+    }
+    let mut merged = builder.vec();
+    for (index, statement) in program.body.drain(..).enumerate() {
+        if duplicate_indices.contains(&index) {
+            continue;
+        }
+        if let Some(replacement) = replacements.remove(&index) {
+            merged.push(replacement);
+        } else {
+            merged.push(statement);
+        }
+    }
+    program.body = merged;
+}
+
+fn compatible_import_details(
+    declaration: &ImportDeclaration<'_>,
+) -> Option<CompatibleImportDetails> {
+    if declaration.import_kind != ImportOrExportKind::Value
+        || declaration.phase.is_some()
+        || declaration.with_clause.is_some()
+    {
+        return None;
+    }
+    let specifiers = declaration.specifiers.as_ref()?;
+    if specifiers.is_empty() {
+        return None;
+    }
+
+    let mut default_local = None::<String>;
+    let mut namespace_local = None::<String>;
+    let mut named = BTreeSet::<SimpleNamedImportSpecifier>::new();
+    for specifier in specifiers {
+        match specifier {
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                if default_local.is_some() {
+                    return None;
+                }
+                default_local = Some(specifier.local.name.as_str().to_string());
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                if namespace_local.is_some() {
+                    return None;
+                }
+                namespace_local = Some(specifier.local.name.as_str().to_string());
+            }
+            ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                if specifier.import_kind != ImportOrExportKind::Value {
+                    return None;
+                }
+                named.insert(SimpleNamedImportSpecifier {
+                    imported: module_export_name_text(&specifier.imported)?,
+                    local: specifier.local.name.as_str().to_string(),
+                });
+            }
+        }
+    }
+
+    match (default_local, namespace_local, named.is_empty()) {
+        (Some(local), None, true) => Some(CompatibleImportDetails::Default { local }),
+        (Some(local), None, false) => Some(CompatibleImportDetails::DefaultNamed { local, named }),
+        (None, Some(local), true) => Some(CompatibleImportDetails::Namespace { local }),
+        (Some(_default_local), Some(_namespace_local), true) => {
+            Some(CompatibleImportDetails::DefaultNamespace {
+                _default_local,
+                _namespace_local,
+            })
+        }
+        (None, None, false) => Some(CompatibleImportDetails::Named(named)),
+        _ => None,
+    }
+}
+
+fn default_named_import_statement<'a, 'b>(
+    builder: &AstBuilder<'a>,
+    source: &str,
+    default_local: &str,
+    named_specifiers: impl Iterator<Item = &'b SimpleNamedImportSpecifier>,
+) -> Statement<'a> {
+    let mut specifiers = builder.vec1(
+        builder.import_declaration_specifier_import_default_specifier(
+            SPAN,
+            builder.binding_identifier(SPAN, default_local),
+        ),
+    );
+    for specifier in named_specifiers {
+        let imported =
+            builder.module_export_name_identifier_name(SPAN, specifier.imported.as_str());
+        let local = builder.binding_identifier(SPAN, specifier.local.as_str());
+        specifiers.push(builder.import_declaration_specifier_import_specifier(
+            SPAN,
+            imported,
+            local,
+            ImportOrExportKind::Value,
+        ));
+    }
+    let source = builder.string_literal(SPAN, source, None);
+    Statement::ImportDeclaration(builder.alloc_import_declaration(
+        SPAN,
+        Some(specifiers),
+        source,
+        None,
+        NONE,
+        ImportOrExportKind::Value,
+    ))
+}
+
+fn default_namespace_import_statement<'a>(
+    builder: &AstBuilder<'a>,
+    source: &str,
+    default_local: &str,
+    namespace_local: &str,
+) -> Statement<'a> {
+    let mut specifiers = builder.vec1(
+        builder.import_declaration_specifier_import_default_specifier(
+            SPAN,
+            builder.binding_identifier(SPAN, default_local),
+        ),
+    );
+    specifiers.push(
+        builder.import_declaration_specifier_import_namespace_specifier(
+            SPAN,
+            builder.binding_identifier(SPAN, namespace_local),
+        ),
+    );
+    let source = builder.string_literal(SPAN, source, None);
+    Statement::ImportDeclaration(builder.alloc_import_declaration(
+        SPAN,
+        Some(specifiers),
+        source,
+        None,
+        NONE,
+        ImportOrExportKind::Value,
+    ))
+}
+
 fn coalesce_simple_local_named_exports_in_program<'a>(
     program: &mut Program<'a>,
     builder: &AstBuilder<'a>,
@@ -4591,9 +4852,9 @@ mod tests {
     }
 
     #[test]
-    fn module_item_formatting_keeps_default_imports_separate() {
+    fn module_item_formatting_keeps_namespace_and_named_imports_separate() {
         let formatted = format_source_with_module_items(
-            "import defaultPkg from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta } from 'pkg';\nconsole.log(defaultPkg, alpha, beta);",
+            "import * as pkgNS from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta } from 'pkg';\nconsole.log(pkgNS, alpha, beta);",
             &[],
             &[],
             Some(Path::new("src/index.ts")),
@@ -4602,8 +4863,57 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import defaultPkg from 'pkg';"));
+        assert!(formatted.contains("import * as pkgNS from 'pkg';"));
         assert!(formatted.contains("import { alpha, beta } from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 2);
+    }
+
+    #[test]
+    fn module_item_formatting_merges_default_and_named_imports() {
+        let formatted = format_source_with_module_items(
+            "import defaultPkg from 'pkg';\nimport { alpha } from 'pkg';\nimport { beta as localBeta } from 'pkg';\nconsole.log(defaultPkg, alpha, localBeta);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import defaultPkg, { alpha, beta as localBeta } from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_merges_default_and_namespace_imports() {
+        let formatted = format_source_with_module_items(
+            "import defaultPkg from 'pkg';\nimport * as pkgNS from 'pkg';\nconsole.log(defaultPkg, pkgNS);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import defaultPkg, * as pkgNS from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_multiple_default_aliases() {
+        let formatted = format_source_with_module_items(
+            "import first from 'pkg';\nimport second from 'pkg';\nimport { alpha } from 'pkg';\nconsole.log(first, second, alpha);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import first, { alpha } from 'pkg';"));
+        assert!(formatted.contains("import second from 'pkg';"));
         assert_eq!(formatted.matches("from 'pkg'").count(), 2);
     }
 
