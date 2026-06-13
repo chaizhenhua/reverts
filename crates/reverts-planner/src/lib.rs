@@ -9,8 +9,8 @@ use reverts_graph::{
 use reverts_input::{ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    ImportUsageScope, ParseGoal, classify_import_usage_scope, format_source_pretty,
-    parse_error_message, verify_only_immediate_call_references,
+    ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
+    format_source_pretty, parse_error_message, verify_only_immediate_call_references,
 };
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
@@ -4255,54 +4255,60 @@ fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
 }
 
 fn call_identifiers_in_source(source: &str) -> BTreeSet<String> {
-    let mut identifiers = BTreeSet::new();
-    let class_field_bindings = class_field_bindings_in_source(source);
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'`' => cursor = collect_template_value_identifiers(source, cursor, &mut identifiers),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            byte if is_identifier_start(byte) => {
-                let start = cursor;
-                cursor += 1;
-                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                    cursor += 1;
-                }
-                let identifier = &source[start..cursor];
-                if !is_js_keyword(identifier)
-                    && !is_runtime_global_identifier(identifier)
-                    && !class_field_bindings.contains_key(&start)
-                    && bytes.get(skip_ws(bytes, cursor)) == Some(&b'(')
-                    && identifier_occurrence_is_value_reference(source, start, cursor)
-                {
-                    identifiers.insert(identifier.to_string());
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    identifiers
+    identifier_read_facts_in_source(source)
+        .into_iter()
+        .filter(|fact| fact.is_call_callee)
+        .map(|fact| fact.name)
+        .filter(|identifier| !is_runtime_global_identifier(identifier))
+        .collect()
 }
 
 fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
-    let mut identifiers = BTreeSet::new();
+    identifier_read_facts_in_source(source)
+        .into_iter()
+        .map(|fact| fact.name)
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentifierReadUsage {
+    name: String,
+    byte_end: usize,
+    is_call_callee: bool,
+}
+
+fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
+    if let Ok(facts) = collect_identifier_read_facts(source, None, ParseGoal::TypeScript) {
+        return facts
+            .into_iter()
+            .map(|fact| IdentifierReadUsage {
+                name: fact.name,
+                byte_end: fact.byte_end as usize,
+                is_call_callee: fact.is_call_callee,
+            })
+            .collect();
+    }
+    lexical_identifier_read_facts_in_source(source)
+}
+
+fn lexical_identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
+    lexical_identifier_read_facts_with_offset(source, 0)
+}
+
+fn lexical_identifier_read_facts_with_offset(
+    source: &str,
+    offset: usize,
+) -> Vec<IdentifierReadUsage> {
+    let mut facts = Vec::new();
     let class_field_bindings = class_field_bindings_in_source(source);
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         match bytes[cursor] {
             b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'`' => cursor = collect_template_value_identifiers(source, cursor, &mut identifiers),
+            b'`' => {
+                cursor = collect_template_identifier_read_facts(source, cursor, offset, &mut facts)
+            }
             b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
                 cursor = skip_line_comment(bytes, cursor + 2);
             }
@@ -4323,19 +4329,24 @@ fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
                     && !class_field_bindings.contains_key(&start)
                     && identifier_occurrence_is_value_reference(source, start, cursor)
                 {
-                    identifiers.insert(identifier.to_string());
+                    facts.push(IdentifierReadUsage {
+                        name: identifier.to_string(),
+                        byte_end: offset + cursor,
+                        is_call_callee: bytes.get(skip_ws(bytes, cursor)) == Some(&b'('),
+                    });
                 }
             }
             _ => cursor += 1,
         }
     }
-    identifiers
+    facts
 }
 
-fn collect_template_value_identifiers(
+fn collect_template_identifier_read_facts(
     source: &str,
     start: usize,
-    identifiers: &mut BTreeSet<String>,
+    offset: usize,
+    facts: &mut Vec<IdentifierReadUsage>,
 ) -> usize {
     let bytes = source.as_bytes();
     let mut cursor = start + 1;
@@ -4348,7 +4359,10 @@ fn collect_template_value_identifiers(
                 let Some(close) = find_matching_brace(source, open) else {
                     return skip_quoted(bytes, start, b'`');
                 };
-                identifiers.extend(value_identifiers_in_source(&source[open + 1..close]));
+                facts.extend(lexical_identifier_read_facts_with_offset(
+                    &source[open + 1..close],
+                    offset + open + 1,
+                ));
                 cursor = close + 1;
             }
             _ => cursor += 1,
@@ -6432,7 +6446,10 @@ fn lazy_value_factory_is_zero_arg_arrow(factory: &str) -> bool {
 fn local_lazy_value_helper_name(source: &str) -> String {
     let mut name = "_$l".to_string();
     let mut suffix = 0usize;
-    while contains_identifier_reference(source, name.as_str()) {
+    let local_bindings = local_bindings_in_source(source);
+    while local_bindings.contains(name.as_str())
+        || contains_identifier_reference(source, name.as_str())
+    {
         suffix += 1;
         name = format!("_$l{suffix}");
     }
@@ -7837,62 +7854,7 @@ fn find_matching_paren(source: &str, open: usize) -> Option<usize> {
 }
 
 fn identifiers_in_source(source: &str) -> BTreeSet<String> {
-    let mut identifiers = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'`' => cursor = collect_template_identifiers(source, cursor, &mut identifiers),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            byte if is_identifier_start(byte) => {
-                let start = cursor;
-                cursor += 1;
-                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                    cursor += 1;
-                }
-                let identifier = &source[start..cursor];
-                if !is_js_keyword(identifier) {
-                    identifiers.insert(identifier.to_string());
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    identifiers
-}
-
-fn collect_template_identifiers(
-    source: &str,
-    start: usize,
-    identifiers: &mut BTreeSet<String>,
-) -> usize {
-    let bytes = source.as_bytes();
-    let mut cursor = start + 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor += 2,
-            b'`' => return cursor + 1,
-            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
-                let open = cursor + 1;
-                let Some(close) = find_matching_brace(source, open) else {
-                    return skip_quoted(bytes, start, b'`');
-                };
-                identifiers.extend(identifiers_in_source(&source[open + 1..close]));
-                cursor = close + 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    bytes.len()
+    value_identifiers_in_source(source)
 }
 
 fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
@@ -8725,64 +8687,26 @@ fn find_assignment_rhs_end(source: &str, mut cursor: usize) -> usize {
 }
 
 fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
-    identifier_reference_positions(source, identifier).any(|cursor| {
-        let after = skip_ws(source.as_bytes(), cursor);
-        source.as_bytes().get(after) == Some(&b'(')
-    })
+    identifier_read_facts_in_source(source)
+        .into_iter()
+        .any(|fact| fact.name == identifier && fact.is_call_callee)
 }
 
 fn contains_identifier_reference(source: &str, identifier: &str) -> bool {
-    identifiers_in_source(source).contains(identifier)
+    identifier_read_facts_in_source(source)
+        .into_iter()
+        .any(|fact| fact.name == identifier)
 }
 
+#[cfg(test)]
 fn identifier_reference_positions<'a>(
     source: &'a str,
     identifier: &'a str,
 ) -> impl Iterator<Item = usize> + 'a {
-    let mut positions = Vec::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            byte if is_identifier_start(byte) => {
-                let start = cursor;
-                cursor += 1;
-                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                    cursor += 1;
-                }
-                if &source[start..cursor] == identifier {
-                    // `obj.X` and `obj#X` access X as a property name, not
-                    // a binding reference — skip. But `...X` (spread) is
-                    // a value read of X, so when the preceding byte is
-                    // `.` we have to peek further: a SECOND preceding
-                    // `.` indicates the trailing dot of `...` and the
-                    // identifier IS a binding reference.
-                    let prev = start.checked_sub(1).and_then(|index| bytes.get(index));
-                    if prev == Some(&b'#') {
-                        continue;
-                    }
-                    if prev == Some(&b'.')
-                        && start.checked_sub(2).and_then(|index| bytes.get(index)) != Some(&b'.')
-                    {
-                        continue;
-                    }
-                    positions.push(cursor);
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    positions.into_iter()
+    identifier_read_facts_in_source(source)
+        .into_iter()
+        .filter(move |fact| fact.name == identifier)
+        .map(|fact| fact.byte_end)
 }
 
 fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {

@@ -137,6 +137,14 @@ pub struct PathBuilderCallFact {
     pub byte_end: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifierReadFact {
+    pub name: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub is_call_callee: bool,
+}
+
 #[must_use]
 pub fn source_type_candidates(path_hint: Option<&Path>, goal: ParseGoal) -> Vec<SourceType> {
     let mut candidates = Vec::new();
@@ -303,6 +311,34 @@ pub fn collect_path_builder_calls(
     Err(JsError::ParseFailed(errors))
 }
 
+pub fn collect_identifier_read_facts(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<IdentifierReadFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = IdentifierReadCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.into_facts());
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
 #[derive(Debug, Default)]
 struct StringLiteralCollector {
     literals: Vec<StringLiteralFact>,
@@ -316,6 +352,70 @@ impl<'a> Visit<'a> for StringLiteralCollector {
             byte_end: literal.span.end,
         });
         walk_string_literal(self, literal);
+    }
+}
+
+#[derive(Debug, Default)]
+struct IdentifierReadCollector {
+    facts: BTreeMap<(u32, u32, String), bool>,
+}
+
+impl IdentifierReadCollector {
+    fn push_identifier(&mut self, identifier: &IdentifierReference<'_>, is_call_callee: bool) {
+        let span = identifier.span();
+        let entry = self
+            .facts
+            .entry((span.start, span.end, identifier.name.as_str().to_string()))
+            .or_insert(false);
+        *entry |= is_call_callee;
+    }
+
+    fn into_facts(self) -> Vec<IdentifierReadFact> {
+        self.facts
+            .into_iter()
+            .map(
+                |((byte_start, byte_end, name), is_call_callee)| IdentifierReadFact {
+                    name,
+                    byte_start,
+                    byte_end,
+                    is_call_callee,
+                },
+            )
+            .collect()
+    }
+}
+
+impl<'a> Visit<'a> for IdentifierReadCollector {
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_none() {
+            for specifier in &declaration.specifiers {
+                if let Some(local) = module_export_name_text(&specifier.local) {
+                    let span = specifier.local.span();
+                    self.facts
+                        .entry((span.start, span.end, local))
+                        .or_insert(false);
+                }
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Expression::Identifier(callee) = &call.callee {
+            self.push_identifier(callee, true);
+        }
+        walk_call_expression(self, call);
+    }
+
+    fn visit_new_expression(&mut self, expression: &NewExpression<'a>) {
+        if let Expression::Identifier(callee) = &expression.callee {
+            self.push_identifier(callee, true);
+        }
+        walk_new_expression(self, expression);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        self.push_identifier(identifier, false);
     }
 }
 
@@ -5663,7 +5763,8 @@ mod tests {
         CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename, ImportUsageScope,
         JsError, LazyBodyClassification, ParseGoal, classify_import_usage_scope,
         classify_lazy_module_body, collect_file_url_source_location_rewrites,
-        collect_path_builder_calls, collect_static_resource_specifiers, collect_string_literals,
+        collect_identifier_read_facts, collect_path_builder_calls,
+        collect_static_resource_specifiers, collect_string_literals,
         extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
         format_source_with_module_items_and_renames,
         format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
@@ -5699,6 +5800,60 @@ mod tests {
                 .iter()
                 .all(|literal| literal.byte_end > literal.byte_start)
         );
+    }
+
+    #[test]
+    fn collects_identifier_reads_from_ast_without_string_scanner() {
+        let source = r#"
+            const { local } = source;
+            const copy = [...shared, local];
+            class Transport extends Base {
+                field = Buffer.alloc(0);
+                method(event) { return event.ready + shared; }
+            }
+            packageInit();
+            object.packageInit();
+            new Constructed();
+            const template = `${source}-${shared}`;
+            const ignored = "packageInit()";
+            export { shared as exportedShared };
+            export { externalOnly } from "./external";
+        "#;
+
+        let facts = collect_identifier_read_facts(
+            source,
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("identifier reads should be collected from parseable source");
+        let names = facts
+            .iter()
+            .map(|fact| fact.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(names.contains("source"));
+        assert!(names.contains("shared"));
+        assert!(names.contains("Base"));
+        assert!(names.contains("Buffer"));
+        assert!(names.contains("event"));
+        assert!(names.contains("packageInit"));
+        assert!(names.contains("object"));
+        assert!(names.contains("Constructed"));
+        assert!(names.contains("shared"));
+        assert!(!names.contains("Transport"));
+        assert!(!names.contains("field"));
+        assert!(!names.contains("method"));
+        assert!(!names.contains("ready"));
+        assert!(!names.contains("ignored"));
+        assert!(!names.contains("externalOnly"));
+
+        let callees = facts
+            .iter()
+            .filter(|fact| fact.is_call_callee)
+            .map(|fact| fact.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(callees.contains("packageInit"));
+        assert!(callees.contains("Constructed"));
+        assert!(!callees.contains("alloc"));
     }
 
     #[test]
