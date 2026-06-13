@@ -4609,16 +4609,16 @@ fn span_text<'a>(node: &impl oxc_span::GetSpan, source: &'a str) -> &'a str {
     &source[span.start as usize..span.end as usize]
 }
 
-pub fn parse_error_message(error: &JsError, fallback: &str) -> String {
+pub fn parse_error_message(error: &JsError, context: &str) -> String {
     match error {
         JsError::ParseFailed(errors) => errors.first().map_or_else(
-            || fallback.to_string(),
+            || context.to_string(),
             |error| {
                 let diagnostic = error
                     .diagnostics
                     .first()
                     .map_or("no diagnostic", String::as_str);
-                format!("{fallback} as {}: {diagnostic}", error.source_type)
+                format!("{context} as {}: {diagnostic}", error.source_type)
             },
         ),
     }
@@ -5830,7 +5830,7 @@ mod tests {
     }
 
     #[test]
-    fn collects_string_literal_facts_from_ast_without_source_scanning_fallback() {
+    fn collects_string_literal_facts_from_ast_only() {
         let source =
             "import './tree-sitter.wasm';\nconst native = require('/$bunfs/root/addon.node');";
 

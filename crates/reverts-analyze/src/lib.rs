@@ -515,21 +515,18 @@ fn detect_module_compiler_profile(
 
     let compiler = if collect_runtime_identifier_evidence(
         identifiers,
-        source,
         WEBPACK_RUNTIME_IDENTIFIERS,
         &mut evidence,
     ) {
         CompilerKind::Webpack
     } else if collect_runtime_identifier_evidence(
         identifiers,
-        source,
         ESBUILD_RUNTIME_IDENTIFIERS,
         &mut evidence,
     ) {
         CompilerKind::Esbuild
     } else if collect_runtime_identifier_evidence(
         identifiers,
-        source,
         ROLLUP_RUNTIME_IDENTIFIERS,
         &mut evidence,
     ) || collect_source_pattern_evidence(source, ROLLUP_SOURCE_PATTERNS, &mut evidence)
@@ -537,7 +534,6 @@ fn detect_module_compiler_profile(
         CompilerKind::Rollup
     } else if collect_runtime_identifier_evidence(
         identifiers,
-        source,
         BABEL_RUNTIME_IDENTIFIERS,
         &mut evidence,
     ) || collect_source_pattern_evidence(source, BABEL_SOURCE_PATTERNS, &mut evidence)
@@ -556,13 +552,11 @@ fn detect_module_compiler_profile(
     ModuleCompilerProfile::new(compiler, minified, evidence)
 }
 
-/// Identifier-based detection that falls back to raw-source scanning when the
-/// graph's module-scope rule filters runtime identifiers (typical for bundles
-/// whose runtime lives inside an IIFE). AST-fact hits are recorded as
-/// `Identifier` evidence; raw-source hits as `SourcePattern` to preserve provenance.
+/// Identifier-based detection. Runtime helper names are accepted only when the
+/// AST fact extractor reports them as identifier evidence; raw source text is
+/// reserved for explicit source-pattern detectors.
 fn collect_runtime_identifier_evidence(
     identifiers: &BTreeSet<String>,
-    source: &str,
     candidates: &[&'static str],
     evidence: &mut Vec<CompilerEvidence>,
 ) -> bool {
@@ -570,9 +564,6 @@ fn collect_runtime_identifier_evidence(
     for candidate in candidates {
         if identifiers.contains(*candidate) {
             evidence.push(CompilerEvidence::Identifier((*candidate).to_string()));
-            matched = true;
-        } else if source.contains(*candidate) {
-            evidence.push(CompilerEvidence::SourcePattern(candidate));
             matched = true;
         }
     }

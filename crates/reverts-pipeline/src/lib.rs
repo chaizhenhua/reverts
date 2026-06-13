@@ -187,8 +187,8 @@ fn collect_required_asset_references_from_parts(
             Some(Path::new(source_file_path.as_str())),
             ParseGoal::TypeScript,
         ) else {
-            // No heuristic fallback: parse failures are already surfaced by
-            // AstFactExtractionFailed during enrichment.
+            // Parse failures are already surfaced by AstFactExtractionFailed
+            // during enrichment.
             continue;
         };
         for literal in literals {
@@ -1043,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_rejects_asset_reference_missing_from_project_assets_without_fallback() {
+    fn pipeline_rejects_asset_reference_missing_from_project_assets() {
         let rows = rows_with_application_source(
             "const native = require('/$bunfs/root/addon.node'); export { native };",
         );
@@ -2392,11 +2392,10 @@ mod tests {
     }
 
     #[test]
-    fn webpack_runtime_identifier_inside_function_still_classifies_as_webpack() {
-        // Real webpack bundles wrap their runtime in an IIFE; identifiers like
-        // __webpack_require__ live inside function bodies and are filtered out
-        // of AST facts by the module-scope rule. The compiler detector must
-        // fall back to raw-source scanning so these bundles still get classified.
+    fn webpack_runtime_identifier_inside_function_does_not_classify_as_webpack() {
+        // Runtime helper names inside function bodies are filtered out by the
+        // module-scope AST fact rule. Compiler detection must not classify
+        // those bundles from raw text alone.
         let source = "function activate() {\n  __webpack_require__(1);\n  return 42;\n}\n";
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
@@ -2418,8 +2417,8 @@ mod tests {
         );
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
-            "in-function webpack runtime identifier must still trigger webpack banner, got:\n{emitted}",
+            !emitted.contains("// reverts-recovery: webpack"),
+            "in-function webpack runtime identifier must not trigger webpack banner, got:\n{emitted}",
         );
     }
 

@@ -28,8 +28,7 @@ pub struct EsbuildHelperAliases {
 
 /// Walk top-level variable declarations and identify ones whose
 /// initializer matches the esbuild `__commonJS` or `__esm` helper shape.
-/// Returns the local names. The canonical `__commonJS` / `__esm` names
-/// are NOT included here — call sites add them as static fallbacks.
+/// Returns exactly the local names proven by the helper initializer shape.
 #[must_use]
 pub fn discover_aliases(program: &Program<'_>) -> EsbuildHelperAliases {
     let mut out = EsbuildHelperAliases::default();
@@ -237,9 +236,8 @@ mod tests {
 
     #[test]
     fn finds_canonical_unminified_names() {
-        // The un-minified names are also valid helper shapes. The
-        // detector returns them too — call sites already add the
-        // canonical names as static fallbacks, so duplication is fine.
+        // The un-minified names are valid helper shapes and are returned only
+        // when the matching definitions are present in the parsed program.
         let src = r#"
             var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
             var __esm=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);

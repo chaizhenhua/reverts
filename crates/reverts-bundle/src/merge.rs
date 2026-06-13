@@ -47,48 +47,12 @@ pub fn merge_classification(
         BundleClassification::Marked(meta) => meta.inner_modules.clone(),
     };
 
-    // Index inners by their virtual_id so the loop below can find a
-    // by-name match in O(1). Bundler-aware extractors emit
-    // `<bundler>:<binding>` as the virtual_id (e.g. `esbuild:vG`); the
-    // upstream's `original_name` is just the binding (`vG`). We match
-    // both with and without the bundler prefix.
-    let mut inners_by_name: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::with_capacity(inners.len() * 2);
-    for (i, inner) in inners.iter().enumerate() {
-        inners_by_name.insert(inner.virtual_id.as_str(), i);
-        if let Some((_, suffix)) = inner.virtual_id.split_once(':') {
-            inners_by_name.entry(suffix).or_insert(i);
-        }
-    }
-
-    // Per-upstream: prefer a by-name match against an inner's virtual
-    // id; fall back to span-overlap ranking. Name matching is decisive
-    // when legacy `source_span` byte ranges are stale (e.g. the bundle
-    // file was rebuilt after the rows were recorded) but the binding
-    // names still align.
+    // Per-upstream: use span-overlap ranking only. Stale or missing spans are
+    // reported through the audit instead of silently switching match strategy.
     let mut consumed_inner_indices = std::collections::BTreeSet::<usize>::new();
     for upstream in upstream_modules {
         if upstream.source_file_id != Some(source_file_id) {
             updated.push(upstream.clone());
-            continue;
-        }
-
-        // Name-based shortcut: if an inner's virtual_id ends with the
-        // upstream's original_name (or matches it directly), that inner
-        // wins. We only honour this when the inner hasn't already been
-        // claimed by an earlier upstream.
-        let upstream_name = upstream.original_name.as_str();
-        if let Some(&candidate_idx) = inners_by_name.get(upstream_name)
-            && !consumed_inner_indices.contains(&candidate_idx)
-        {
-            let mut row = upstream.clone();
-            let body = inners[candidate_idx].body_span;
-            row.source_span = Some(SourceSpan {
-                byte_start: body.start,
-                byte_end: body.end,
-            });
-            updated.push(row);
-            consumed_inner_indices.insert(candidate_idx);
             continue;
         }
 

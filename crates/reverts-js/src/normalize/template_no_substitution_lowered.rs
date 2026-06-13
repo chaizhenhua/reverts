@@ -64,13 +64,12 @@ impl<'a> VisitMut<'a> for Lowerer<'a> {
             return;
         };
         // Untagged template literals never carry invalid escape
-        // sequences, so `cooked` is always present. Fall back to `raw`
-        // defensively rather than panicking.
+        // sequences, so `cooked` is required here.
         let value = quasi
             .value
             .cooked
             .as_deref()
-            .unwrap_or(quasi.value.raw.as_str())
+            .expect("untagged no-substitution template literal must have cooked text")
             .to_owned();
         let placeholder = self.builder.expression_null_literal(SPAN);
         let _ = mem::replace(expr, placeholder);

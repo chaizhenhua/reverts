@@ -13,16 +13,13 @@ use crate::inner_module::{BundlerKind, InnerModule};
 /// un-minified `__commonJS({"path": fn, ...})` map and the minified
 /// `var <name> = <alias>(fn)` per-module call.
 ///
-/// The detector first discovers any local aliases of the `__commonJS`
-/// helper by AST shape (see [`discover_aliases`]) then matches every
-/// call/assignment that uses one of those aliases (plus the canonical
-/// name `__commonJS`).
+/// The detector first discovers local names bound to the `__commonJS` helper
+/// by AST shape (see [`discover_aliases`]) then matches every call/assignment
+/// that uses one of those proven helper names.
 #[must_use]
 pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
     let aliases = discover_aliases(program);
-    let mut callees: Vec<String> = vec!["__commonJS".to_string()];
-    callees.extend(aliases.commonjs.iter().cloned());
-    let mut out = detect_named_registry(program, parent_module_id, &callees);
+    let mut out = detect_named_registry(program, parent_module_id, &aliases.commonjs);
     out.extend(detect_var_assignment_modules(
         program,
         parent_module_id,
@@ -37,9 +34,7 @@ pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec
 #[must_use]
 pub fn detect_esm(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
     let aliases = discover_aliases(program);
-    let mut callees: Vec<String> = vec!["__esm".to_string()];
-    callees.extend(aliases.esm.iter().cloned());
-    let mut out = detect_named_registry(program, parent_module_id, &callees);
+    let mut out = detect_named_registry(program, parent_module_id, &aliases.esm);
     out.extend(detect_var_assignment_modules(
         program,
         parent_module_id,
@@ -205,6 +200,7 @@ mod tests {
     #[test]
     fn detect_commonjs_extracts_arrow_module_body() {
         let src = r#"
+            var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
             var x = __commonJS({
                 "node_modules/lodash/index.js": (exports, module) => {
                     module.exports = { map: function () {} };
@@ -227,6 +223,7 @@ mod tests {
     #[test]
     fn detect_commonjs_extracts_multiple_entries() {
         let src = r#"
+            var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
             var x = __commonJS({
                 "a.js": (exports, module) => { module.exports = 1; },
                 "b.js": (exports, module) => { module.exports = 2; }
@@ -254,13 +251,13 @@ mod tests {
 
     #[test]
     fn detect_commonjs_ignores_calls_with_non_object_arg() {
-        let src = r#"var x = __commonJS([]);"#;
+        let src = r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports); var x = __commonJS([]);"#;
         assert!(extract(src).is_empty());
     }
 
     #[test]
     fn detect_commonjs_returns_body_span_not_full_function_span() {
-        let src = r#"var x = __commonJS({ "a": (e, m) => { var y = 1; m.exports = y; } });"#;
+        let src = r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports); var x = __commonJS({ "a": (e, m) => { var y = 1; m.exports = y; } });"#;
         let modules = extract(src);
         let m = &modules[0];
         let body_text = &src[m.body_span.start as usize..m.body_span.end as usize];
@@ -272,6 +269,7 @@ mod tests {
     #[test]
     fn detect_esm_extracts_zero_arg_arrow_body() {
         let src = r#"
+        var __esm=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
         var x = __esm({
             "lib/foo.js": () => {
                 init_lib();

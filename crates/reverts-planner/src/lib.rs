@@ -4278,97 +4278,15 @@ struct IdentifierReadUsage {
 }
 
 fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
-    if let Ok(facts) = collect_identifier_read_facts(source, None, ParseGoal::TypeScript) {
-        return facts
-            .into_iter()
-            .map(|fact| IdentifierReadUsage {
-                name: fact.name,
-                byte_end: fact.byte_end as usize,
-                is_call_callee: fact.is_call_callee,
-            })
-            .collect();
-    }
-    lexical_identifier_read_facts_in_source(source)
-}
-
-fn lexical_identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
-    lexical_identifier_read_facts_with_offset(source, 0)
-}
-
-fn lexical_identifier_read_facts_with_offset(
-    source: &str,
-    offset: usize,
-) -> Vec<IdentifierReadUsage> {
-    let mut facts = Vec::new();
-    let class_field_bindings = class_field_bindings_in_source(source);
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'`' => {
-                cursor = collect_template_identifier_read_facts(source, cursor, offset, &mut facts)
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            byte if is_identifier_start(byte) => {
-                let start = cursor;
-                cursor += 1;
-                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                    cursor += 1;
-                }
-                let identifier = &source[start..cursor];
-                if !is_js_keyword(identifier)
-                    && !class_field_bindings.contains_key(&start)
-                    && identifier_occurrence_is_value_reference(source, start, cursor)
-                {
-                    facts.push(IdentifierReadUsage {
-                        name: identifier.to_string(),
-                        byte_end: offset + cursor,
-                        is_call_callee: bytes.get(skip_ws(bytes, cursor)) == Some(&b'('),
-                    });
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    facts
-}
-
-fn collect_template_identifier_read_facts(
-    source: &str,
-    start: usize,
-    offset: usize,
-    facts: &mut Vec<IdentifierReadUsage>,
-) -> usize {
-    let bytes = source.as_bytes();
-    let mut cursor = start + 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor += 2,
-            b'`' => return cursor + 1,
-            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
-                let open = cursor + 1;
-                let Some(close) = find_matching_brace(source, open) else {
-                    return skip_quoted(bytes, start, b'`');
-                };
-                facts.extend(lexical_identifier_read_facts_with_offset(
-                    &source[open + 1..close],
-                    offset + open + 1,
-                ));
-                cursor = close + 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    bytes.len()
+    collect_identifier_read_facts(source, None, ParseGoal::TypeScript)
+        .expect("planner identifier reads require parseable TypeScript source")
+        .into_iter()
+        .map(|fact| IdentifierReadUsage {
+            name: fact.name,
+            byte_end: fact.byte_end as usize,
+            is_call_callee: fact.is_call_callee,
+        })
+        .collect()
 }
 
 fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usize) -> bool {
