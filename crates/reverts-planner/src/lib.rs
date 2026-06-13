@@ -1524,12 +1524,14 @@ fn pure_reexport_bypass_plan(
         let Some(source) = program.model().input().module_source_slice(module.id) else {
             continue;
         };
-        let Some(reexports) = pure_direct_named_reexports(source.source) else {
+        let Some(reexports) = pure_named_barrel_reexports(source.source) else {
             continue;
         };
-        if reexports.is_empty()
-            || !module_has_internal_source_consumers(source_module_wiring, module.id)
-        {
+        let Some(consumed_reexports) = source_module_wiring.exports_by_module.get(&module.id)
+        else {
+            continue;
+        };
+        if reexports.is_empty() || consumed_reexports != &reexports {
             continue;
         }
         let mut redirects = BTreeMap::<BindingName, ModuleId>::new();
@@ -1571,16 +1573,6 @@ fn pure_reexport_bypass_plan(
     }
 
     plan
-}
-
-fn module_has_internal_source_consumers(
-    source_module_wiring: &SourceModuleWiring,
-    module_id: ModuleId,
-) -> bool {
-    source_module_wiring
-        .imports_by_module
-        .values()
-        .any(|imports_by_target| imports_by_target.contains_key(&module_id))
 }
 
 /// Phase 10: vars currently declared inside `source-<N>-helpers.ts` that
@@ -5810,39 +5802,66 @@ fn source_definition_bindings(
 }
 
 fn named_reexported_bindings(source: &str) -> BTreeSet<BindingName> {
-    export_from_statements(source)
+    source_statements(source)
         .into_iter()
+        .filter(|statement| statement.starts_with("export {") && statement.contains("} from "))
         .flat_map(|statement| named_reexport_specifiers(statement).unwrap_or_default())
         .map(|specifier| BindingName::new(specifier.exported))
         .collect()
 }
 
-fn pure_direct_named_reexports(source: &str) -> Option<BTreeSet<BindingName>> {
-    let statements = export_from_statements(source);
+fn pure_named_barrel_reexports(source: &str) -> Option<BTreeSet<BindingName>> {
+    let statements = source_statements(source);
     if statements.is_empty() {
         return None;
     }
-    let mut bindings = BTreeSet::<BindingName>::new();
-    let mut consumed = 0usize;
+    let mut direct_reexports = BTreeSet::<BindingName>::new();
+    let mut imported_locals = BTreeSet::<BindingName>::new();
+    let mut local_exports = BTreeSet::<BindingName>::new();
     for statement in statements {
-        consumed += statement.len();
-        let specifiers = named_reexport_specifiers(statement)?;
-        if specifiers.is_empty() || specifiers.iter().any(|specifier| specifier.is_aliased) {
-            return None;
+        if statement.starts_with("export {") && statement.contains("} from ") {
+            let specifiers = named_reexport_specifiers(statement)?;
+            if specifiers.is_empty() || specifiers.iter().any(|specifier| specifier.is_aliased) {
+                return None;
+            }
+            direct_reexports.extend(
+                specifiers
+                    .into_iter()
+                    .map(|specifier| BindingName::new(specifier.exported)),
+            );
+            continue;
         }
-        bindings.extend(
-            specifiers
-                .into_iter()
-                .map(|specifier| BindingName::new(specifier.exported)),
-        );
+        if statement.starts_with("import ") {
+            let specifiers = named_import_specifiers(statement)?;
+            if specifiers.is_empty() || specifiers.iter().any(|specifier| specifier.is_aliased) {
+                return None;
+            }
+            imported_locals.extend(
+                specifiers
+                    .into_iter()
+                    .map(|specifier| BindingName::new(specifier.local)),
+            );
+            continue;
+        }
+        if statement.starts_with("export {") {
+            let specifiers = local_named_export_specifiers(statement)?;
+            if specifiers.is_empty() || specifiers.iter().any(|specifier| specifier.is_aliased) {
+                return None;
+            }
+            local_exports.extend(
+                specifiers
+                    .into_iter()
+                    .map(|specifier| BindingName::new(specifier.exported)),
+            );
+            continue;
+        }
+        return None;
     }
-    let non_statement_bytes = source
-        .split(';')
-        .filter(|part| !part.trim().is_empty())
-        .filter(|part| !part.trim_start().starts_with("export {"))
-        .map(str::len)
-        .sum::<usize>();
-    (non_statement_bytes == 0 && consumed > 0).then_some(bindings)
+    if imported_locals != local_exports {
+        return None;
+    }
+    direct_reexports.extend(local_exports);
+    (!direct_reexports.is_empty()).then_some(direct_reexports)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5851,11 +5870,17 @@ struct NamedReexportSpecifier {
     is_aliased: bool,
 }
 
-fn export_from_statements(source: &str) -> Vec<&str> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NamedImportSpecifier {
+    local: String,
+    is_aliased: bool,
+}
+
+fn source_statements(source: &str) -> Vec<&str> {
     source
         .split(';')
         .map(str::trim)
-        .filter(|statement| statement.starts_with("export {") && statement.contains("} from "))
+        .filter(|statement| !statement.is_empty())
         .collect()
 }
 
@@ -5885,6 +5910,58 @@ fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifi
         });
     }
     Some(specifiers)
+}
+
+fn local_named_export_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
+    let rest = statement.strip_prefix("export {")?;
+    let (inner, after) = rest.split_once('}')?;
+    if !after.trim().is_empty() {
+        return None;
+    }
+    parse_named_export_inner(inner)
+}
+
+fn parse_named_export_inner(inner: &str) -> Option<Vec<NamedReexportSpecifier>> {
+    let mut specifiers = Vec::new();
+    for raw in inner.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.starts_with("type ") {
+            return None;
+        }
+        let (imported, exported, is_aliased) = raw
+            .split_once(" as ")
+            .map_or((raw, raw, false), |(imported, exported)| {
+                (imported.trim(), exported.trim(), true)
+            });
+        if !is_identifier_like(imported) || !is_identifier_like(exported) {
+            return None;
+        }
+        specifiers.push(NamedReexportSpecifier {
+            exported: exported.to_string(),
+            is_aliased,
+        });
+    }
+    Some(specifiers)
+}
+
+fn named_import_specifiers(statement: &str) -> Option<Vec<NamedImportSpecifier>> {
+    let rest = statement.strip_prefix("import ")?.trim();
+    if rest.starts_with("type ") || rest.contains(" with ") || rest.contains(" assert ") {
+        return None;
+    }
+    let (clause, _specifier) = split_import_clause_and_specifier(rest)?;
+    if !clause.starts_with('{') {
+        return None;
+    }
+    Some(
+        parse_named_import_clause(clause)?
+            .into_iter()
+            .map(|(imported, local)| NamedImportSpecifier {
+                is_aliased: imported != local,
+                local,
+            })
+            .collect(),
+    )
 }
 
 fn extra_exports_for_module<'a>(
@@ -13554,6 +13631,53 @@ mod tests {
     }
 
     #[test]
+    fn pure_import_then_export_barrel_with_internal_consumers_is_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "barrel.js",
+            Some("import { value } from './target.js';\nexport { value };\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("console.log(value);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "barrel", "modules/barrel.ts")
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(planned_source_opt(&plan, "modules/barrel.ts").is_none());
+        assert!(consumer_source.contains("import { value } from './target.js';"));
+        assert!(!consumer_source.contains("from './barrel.js'"));
+    }
+
+    #[test]
     fn pure_reexport_alias_stub_is_not_bypassed() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
@@ -13598,6 +13722,120 @@ mod tests {
 
         assert!(consumer_source.contains("import { renamed } from './barrel.js';"));
         assert!(barrel_source.contains("export { value as renamed } from './target.js';"));
+    }
+
+    #[test]
+    fn import_alias_then_export_barrel_is_not_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "barrel.js",
+            Some(
+                "import { value as renamed } from './target.js';\nexport { renamed };\n"
+                    .to_string(),
+            ),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("console.log(renamed);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "barrel", "modules/barrel.ts")
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let barrel_source = planned_source(&plan, "modules/barrel.ts");
+
+        assert!(consumer_source.contains("import { renamed } from './barrel.js';"));
+        assert!(barrel_source.contains("import { value as renamed } from './target.js';"));
+        assert!(barrel_source.contains("export { renamed };"));
+    }
+
+    #[test]
+    fn direct_reexport_with_extra_import_barrel_is_not_bypassed() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "target.js",
+            Some("export const value = 1;\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "side.js",
+            Some("export const side = 2;\nconsole.log(side);\n".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "barrel.js",
+            Some(
+                "import { side } from './side.js';\nexport { value } from './target.js';\n"
+                    .to_string(),
+            ),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            4,
+            "consumer.js",
+            Some("console.log(value);\n".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "target", "modules/target.ts")
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "side", "modules/side.ts").with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "barrel", "modules/barrel.ts")
+                .with_source_file(3),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(4), "consumer", "modules/consumer.ts")
+                .with_source_file(4),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(4),
+            target: ModuleDependencyTarget::Module(ModuleId(3)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let barrel_source = planned_source(&plan, "modules/barrel.ts");
+
+        assert!(consumer_source.contains("import { value } from './barrel.js';"));
+        assert!(barrel_source.contains("import { side } from './side.js';"));
+        assert!(barrel_source.contains("export { value } from './target.js';"));
     }
 
     #[test]
