@@ -4231,6 +4231,8 @@ struct MixedImportState {
     named_indices: Vec<usize>,
     named_specifiers: BTreeSet<SimpleNamedImportSpecifier>,
     default_target: Option<(usize, String, BTreeSet<SimpleNamedImportSpecifier>)>,
+    duplicate_default_indices: Vec<usize>,
+    duplicate_default_specifiers: BTreeSet<SimpleNamedImportSpecifier>,
     namespace_target: Option<(usize, String)>,
 }
 
@@ -4256,14 +4258,29 @@ fn coalesce_compatible_mixed_imports_in_program<'a>(
                 state.named_specifiers.extend(specifiers);
             }
             CompatibleImportDetails::Default { local } => {
-                state
-                    .default_target
-                    .get_or_insert_with(|| (index, local, BTreeSet::new()));
+                if state.default_target.is_some() {
+                    state.duplicate_default_indices.push(index);
+                    state
+                        .duplicate_default_specifiers
+                        .insert(default_import_specifier(local.as_str()));
+                } else {
+                    state
+                        .default_target
+                        .get_or_insert_with(|| (index, local, BTreeSet::new()));
+                }
             }
             CompatibleImportDetails::DefaultNamed { local, named } => {
-                state
-                    .default_target
-                    .get_or_insert_with(|| (index, local, named));
+                if state.default_target.is_some() {
+                    state.duplicate_default_indices.push(index);
+                    state
+                        .duplicate_default_specifiers
+                        .insert(default_import_specifier(local.as_str()));
+                    state.named_specifiers.extend(named);
+                } else {
+                    state
+                        .default_target
+                        .get_or_insert_with(|| (index, local, named));
+                }
             }
             CompatibleImportDetails::Namespace { local } => {
                 state.namespace_target.get_or_insert_with(|| (index, local));
@@ -4277,13 +4294,15 @@ fn coalesce_compatible_mixed_imports_in_program<'a>(
     for (source, state) in states {
         if let Some((default_index, default_local, mut named_specifiers)) =
             state.default_target.clone()
-            && !state.named_indices.is_empty()
+            && (!state.named_indices.is_empty() || !state.duplicate_default_indices.is_empty())
         {
             named_specifiers.extend(state.named_specifiers);
+            named_specifiers.extend(state.duplicate_default_specifiers);
             let replacement_index = state
                 .named_indices
                 .iter()
                 .copied()
+                .chain(state.duplicate_default_indices.iter().copied())
                 .chain([default_index])
                 .min()
                 .unwrap_or(default_index);
@@ -4296,7 +4315,13 @@ fn coalesce_compatible_mixed_imports_in_program<'a>(
                     named_specifiers.iter(),
                 ),
             );
-            for index in state.named_indices.iter().copied().chain([default_index]) {
+            for index in state
+                .named_indices
+                .iter()
+                .copied()
+                .chain(state.duplicate_default_indices.iter().copied())
+                .chain([default_index])
+            {
                 if index != replacement_index {
                     duplicate_indices.insert(index);
                 }
@@ -4465,6 +4490,13 @@ fn default_namespace_import_statement<'a>(
         NONE,
         ImportOrExportKind::Value,
     ))
+}
+
+fn default_import_specifier(local: &str) -> SimpleNamedImportSpecifier {
+    SimpleNamedImportSpecifier {
+        imported: "default".to_string(),
+        local: local.to_string(),
+    }
 }
 
 fn coalesce_simple_local_named_exports_in_program<'a>(
@@ -4901,7 +4933,7 @@ mod tests {
     }
 
     #[test]
-    fn module_item_formatting_keeps_multiple_default_aliases() {
+    fn module_item_formatting_merges_multiple_default_aliases_as_named_default() {
         let formatted = format_source_with_module_items(
             "import first from 'pkg';\nimport second from 'pkg';\nimport { alpha } from 'pkg';\nconsole.log(first, second, alpha);",
             &[],
@@ -4912,8 +4944,40 @@ mod tests {
         )
         .expect("fixture should format");
 
-        assert!(formatted.contains("import first, { alpha } from 'pkg';"));
-        assert!(formatted.contains("import second from 'pkg';"));
+        assert!(formatted.contains("import first, { alpha, default as second } from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_merges_duplicate_default_named_imports() {
+        let formatted = format_source_with_module_items(
+            "import first, { alpha } from 'pkg';\nimport second, { beta } from 'pkg';\nconsole.log(first, second, alpha, beta);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import first, { alpha, beta, default as second } from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_duplicate_default_namespace_imports() {
+        let formatted = format_source_with_module_items(
+            "import firstDefault, * as firstNS from 'pkg';\nimport secondDefault, * as secondNS from 'pkg';\nconsole.log(firstDefault, firstNS, secondDefault, secondNS);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import firstDefault, * as firstNS from 'pkg';"));
+        assert!(formatted.contains("import secondDefault, * as secondNS from 'pkg';"));
         assert_eq!(formatted.matches("from 'pkg'").count(), 2);
     }
 
