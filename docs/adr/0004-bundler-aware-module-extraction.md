@@ -39,7 +39,7 @@ The crate is organised around three architectural commitments:
    one of `Plain` (no extraction), `Marked` (per-bundler template
    extraction), or `Iife` (monolithic vendored bundle requiring cluster
    recovery). Downstream stages branch on this classification; there is no
-   silent fallback that treats an unsupported shape as `Plain`.
+   silent mode switch that treats an unsupported shape as `Plain`.
 
 2. **Per-bundler templates, dispatched by `CompilerKind`.** Each bundler shape
    has a dedicated detector function fed by `reverts-analyze`'s existing
@@ -72,7 +72,7 @@ The crate is organised around three architectural commitments:
   `~/.reverts/.reverts.db` corpus.
 - Sourcemap-based extraction is deferred to a later iteration. Production
   bundles routinely strip sourcemaps, and verification of the AST-based
-  normalisation pipeline must succeed without that fallback before sourcemap
+  normalisation pipeline must succeed before sourcemap
   fast-paths are added.
 - Existing `ModuleInput.source_span` values from upstream (DB) loaders are
   reconciled with extractor output by an explicit merge rule: extractor output

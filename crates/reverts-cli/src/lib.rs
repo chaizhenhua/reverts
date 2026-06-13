@@ -3109,13 +3109,13 @@ fn rejection_reason_from_decision(decision: &BestVersionMatch) -> String {
             "selected package version did not match this module source".to_string()
         }
         BestVersionMatch::Ambiguous { .. } => {
-            "package version search found more than one best version".to_string()
+            "package version matching found more than one best version".to_string()
         }
         BestVersionMatch::NoMatch { scores, .. } if scores.is_empty() => {
             "no cached package source was available for this package".to_string()
         }
         BestVersionMatch::NoMatch { .. } => {
-            "package version search found no usable evidence".to_string()
+            "package version matching found no usable evidence".to_string()
         }
         BestVersionMatch::InsufficientEvidence { .. } => {
             "package version evidence did not satisfy the acceptance threshold".to_string()
@@ -4828,7 +4828,7 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(
             outcome.matched_modules, 1,
-            "legacy module-level matcher should be rescued by cascade coverage"
+            "legacy module-level matcher should be covered by cascade evidence"
         );
         assert_eq!(outcome.written_attributions, 1);
         assert!(outcome.written_cascade_attributions >= 1);
@@ -4946,7 +4946,7 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_promotes_structural_bag_ownership_after_cascade() {
+    fn match_packages_does_not_promote_structural_bag_ownership() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -4978,54 +4978,30 @@ mod tests {
 
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(
-            outcome.matched_modules, 1,
-            "structural bag should rescue aggregate ownership when exact/signature/cascade do not"
+            outcome.matched_modules, 0,
+            "structural bag evidence is not promoted by the package matching pipeline"
         );
         assert_eq!(
             outcome.cascade_ownership_matches, 0,
-            "this fixture should be matched by the late structural bag fallback, not cascade"
+            "this fixture should not be matched by cascade"
         );
         assert_eq!(
             outcome.written_attributions, 1,
-            "ownership-only structural matches should persist an explicit rejected source decision"
+            "unmatched package modules still receive an explicit rejected source decision"
         );
-        let (status, emission_mode, package_version, export_specifier, rejection_reason, evidence): (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            String,
-        ) = connection
+        let (attribution_count, evidence): (i64, String) = connection
             .query_row(
                 r"
-                SELECT status, emission_mode, package_version, export_specifier,
-                       rejection_reason, evidence_json
+                SELECT COUNT(*), COALESCE(MAX(evidence_json), '')
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
                 [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("structural ownership should write a rejected attribution");
-        assert_eq!(status, "rejected");
-        assert_eq!(emission_mode, "application_source");
-        assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert_eq!(export_specifier, None);
-        assert!(rejection_reason.contains("safe single external import"));
-        assert!(evidence.contains("aggregate_structural_bag_similarity"));
-        assert!(evidence.contains("pair_coverage="));
-        assert!(evidence.contains("shape_function_coverage="));
-        assert!(evidence.contains("\"writes_external_import\":false"));
+            .expect("count attribution rows");
+        assert_eq!(attribution_count, 1);
+        assert!(!evidence.contains("aggregate_structural_bag_similarity"));
     }
 
     #[test]

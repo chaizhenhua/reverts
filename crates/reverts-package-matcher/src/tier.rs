@@ -374,7 +374,7 @@ fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind
     out
 }
 
-/// Tier 4: structural_anchor fallback for functions with no literal/property
+/// Tier 4: structural_anchor-only match for functions with no literal/property
 /// hooks. Rejects candidates whose structural_anchor frequency in the
 /// corpus exceeds STRUCTURAL_FREQUENCY_LIMIT — common shapes are
 /// uninformative. Requires unique winner with margin ≥ 0.3 over runner-up.

@@ -3070,7 +3070,7 @@ mod tests {
             if (flag) {
                 work();
             } else {
-                fallback();
+                recover();
             }
             while (flag) {
                 tick();

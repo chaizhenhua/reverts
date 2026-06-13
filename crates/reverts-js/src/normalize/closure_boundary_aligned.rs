@@ -17,7 +17,7 @@ use super::NormalizationPass;
 ///
 /// All three conditions below must hold; otherwise the pass leaves the
 /// source untouched. Each precondition exists at the source — not as a
-/// fallback — because lifting an IIFE that violates any of them would
+/// recovery path — because lifting an IIFE that violates any of them would
 /// change observable semantics:
 ///
 /// * **`!arrow.r#async`** — an async IIFE returns a Promise; the outer

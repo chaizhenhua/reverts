@@ -153,7 +153,7 @@ struct SurvivalCounts {
 fn count_axis_survival(a: &[FunctionFingerprint], b: &[FunctionFingerprint]) -> SurvivalCounts {
     // Functions correspond by position in the synthetic fixtures (each
     // version preserves declaration order). For real corpora we'd want
-    // ast-hash-based matching with order as a fallback; the synthetic
+    // ast-hash-based matching with order as an additional weak signal; the synthetic
     // case lets us avoid that complexity.
     let mut counts = SurvivalCounts::default();
     for (fp_a, fp_b) in a.iter().zip(b.iter()) {

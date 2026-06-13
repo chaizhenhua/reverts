@@ -184,7 +184,7 @@ struct AxisPairKey {
 /// identifier renaming and most minifier formatting changes.
 ///
 /// It intentionally excludes exact AST and literal/callee anchors. Those are
-/// already represented by individual axis keys; the shape key is the fallback
+/// already represented by individual axis keys; the shape key is the coarse key
 /// for real bundles where individual low-cardinality axes are too common but
 /// their combination is still distinctive for a package version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1054,7 +1054,7 @@ mod tests {
 
         assert_eq!(
             score.matched_weight, 0,
-            "shape fallback should not rely on common individual axes"
+            "shape-only matching should not rely on common individual axes"
         );
         assert_eq!(score.matched_pairs, 1);
         assert_eq!(score.matched_shapes, 3);

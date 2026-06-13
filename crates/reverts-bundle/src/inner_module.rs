@@ -41,7 +41,7 @@ pub struct InnerModule {
     /// Stable identifier within the parent bundle. Strategies:
     /// - esbuild `__commonJS`: the registration key, e.g. `"node_modules/lodash/index.js"`
     /// - webpack: the module id (string or number stringified)
-    /// - rollup / umd / fallback: `"<bundler>:<seq>"`, e.g. `"rollup_cjs:0"`.
+    /// - rollup / umd / generated ids: `"<bundler>:<seq>"`, e.g. `"rollup_cjs:0"`.
     pub virtual_id: String,
     /// Byte range of the body inside the parent file's source. Always
     /// slices a parseable JavaScript program unit.
