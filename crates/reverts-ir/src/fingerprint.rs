@@ -105,6 +105,7 @@ pub enum NormalizationPassId {
     ForToWhileFiniteCanonical,
     TypeofLocalUndefinedGuarded,
     ConditionalNegationFlipped,
+    NullishAssignmentCompacted,
 }
 
 impl NormalizationPassId {
@@ -142,6 +143,7 @@ impl NormalizationPassId {
             Self::ForToWhileFiniteCanonical => "for_to_while_finite_canonical",
             Self::TypeofLocalUndefinedGuarded => "typeof_local_undefined_guarded",
             Self::ConditionalNegationFlipped => "conditional_negation_flipped",
+            Self::NullishAssignmentCompacted => "nullish_assignment_compacted",
         }
     }
 }
