@@ -698,14 +698,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         );
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
-        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
-        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
-        flatten_node_builtin_namespace_imports_in_program(&mut parsed.program, &builder);
-        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
-        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
-        prune_unused_import_specifiers_in_program(&mut parsed.program, &builder);
-        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
-        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
+        normalize_imports_after_emit(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -2572,18 +2565,17 @@ fn merge_and_sort_named_imports<'a>(
         if let Statement::ImportDeclaration(mut declaration) = statement {
             if import_is_mergeable_value_import(&declaration) {
                 let source = declaration.source.value.as_str().to_string();
-                if let Some(first_index) = first_by_source.get(&source).copied() {
-                    if let Statement::ImportDeclaration(first) = &next[first_index]
-                        && can_merge_import_declarations(first, &declaration)
-                        && let Statement::ImportDeclaration(first) = &mut next[first_index]
-                        && let (Some(first_specifiers), Some(specifiers)) =
-                            (&mut first.specifiers, &mut declaration.specifiers)
-                    {
-                        first_specifiers.extend(specifiers.drain(..));
-                        sort_and_dedup_import_specifiers(first_specifiers);
-                        report.push(format!("merged imports from {source}"));
-                        continue;
-                    }
+                if let Some(first_index) = first_by_source.get(&source).copied()
+                    && let Statement::ImportDeclaration(first) = &next[first_index]
+                    && can_merge_import_declarations(first, &declaration)
+                    && let Statement::ImportDeclaration(first) = &mut next[first_index]
+                    && let (Some(first_specifiers), Some(specifiers)) =
+                        (&mut first.specifiers, &mut declaration.specifiers)
+                {
+                    first_specifiers.extend(specifiers.drain(..));
+                    sort_and_dedup_import_specifiers(first_specifiers);
+                    report.push(format!("merged imports from {source}"));
+                    continue;
                 }
                 sort_and_dedup_import_specifiers(
                     declaration
@@ -2602,6 +2594,29 @@ fn merge_and_sort_named_imports<'a>(
         }
     }
     program.body = next;
+}
+
+fn normalize_imports_after_emit<'a>(program: &mut Program<'a>, builder: &AstBuilder<'a>) {
+    // These passes intentionally run in phases rather than as one monolithic
+    // import rewriter:
+    //
+    // 1. merge the import surface created by source + generated imports;
+    // 2. flatten safe Node builtin namespace member reads, which may synthesize
+    //    new named imports;
+    // 3. merge again so those synthesized imports join existing imports;
+    // 4. prune unused specifiers after readability renames/flattening;
+    // 5. merge once more because pruning can convert mixed imports into a
+    //    shape that is mergeable with a sibling import.
+    coalesce_imports_in_program(program, builder);
+    flatten_node_builtin_namespace_imports_in_program(program, builder);
+    coalesce_imports_in_program(program, builder);
+    prune_unused_import_specifiers_in_program(program, builder);
+    coalesce_imports_in_program(program, builder);
+}
+
+fn coalesce_imports_in_program<'a>(program: &mut Program<'a>, builder: &AstBuilder<'a>) {
+    coalesce_simple_named_imports_in_program(program, builder);
+    coalesce_compatible_mixed_imports_in_program(program, builder);
 }
 
 fn import_is_mergeable_value_import(declaration: &ImportDeclaration<'_>) -> bool {
@@ -4730,13 +4745,11 @@ fn coalesce_compatible_mixed_imports_in_program<'a>(
                         .insert(default_import_specifier(local.as_str()));
                     state.named_specifiers.extend(named);
                 } else {
-                    state
-                        .default_target
-                        .get_or_insert_with(|| (index, local, named));
+                    state.default_target.get_or_insert((index, local, named));
                 }
             }
             CompatibleImportDetails::Namespace { local } => {
-                state.namespace_target.get_or_insert_with(|| (index, local));
+                state.namespace_target.get_or_insert((index, local));
             }
             CompatibleImportDetails::DefaultNamespace { .. } => {}
         }

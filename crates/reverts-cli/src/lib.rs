@@ -550,15 +550,14 @@ fn fingerprints_from_rows(
 ) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
     let mut out = BTreeMap::new();
     for module in &rows.modules {
-        if let Some(package_filter) = package_filter {
-            if module.kind != ModuleKind::Package
+        if let Some(package_filter) = package_filter
+            && (module.kind != ModuleKind::Package
                 || !module
                     .package_name
                     .as_deref()
-                    .is_some_and(|package_name| package_filter.contains(package_name))
-            {
-                continue;
-            }
+                    .is_some_and(|package_name| package_filter.contains(package_name)))
+        {
+            continue;
         }
         if let Some(slice) = rows.module_source_slice(module.id) {
             if module.kind == ModuleKind::Package
@@ -836,10 +835,10 @@ fn match_with_cascade_scoped_by_module_hints(
             .filter(|source| {
                 package_name
                     .as_deref()
-                    .map_or(true, |name| source.package_name == name)
+                    .is_none_or(|name| source.package_name == name)
                     && package_version
                         .as_deref()
-                        .map_or(true, |version| source.package_version == version)
+                        .is_none_or(|version| source.package_version == version)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -2346,10 +2345,11 @@ fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
     let package_path = package_name
         .split('/')
         .fold(PathBuf::new(), |path, segment| path.join(segment));
-    let mut candidates = Vec::new();
-    candidates.push(root.join("node_modules").join(&package_path));
-    candidates.push(root.join(&package_path));
-    candidates.push(root.to_path_buf());
+    let candidates = vec![
+        root.join("node_modules").join(&package_path),
+        root.join(&package_path),
+        root.to_path_buf(),
+    ];
     let mut seen = BTreeSet::new();
     candidates
         .into_iter()

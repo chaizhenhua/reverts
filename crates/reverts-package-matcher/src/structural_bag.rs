@@ -112,7 +112,7 @@ fn candidate_modules<'a>(
         module.kind == ModuleKind::Package
             && !excluded_modules.contains(&module.id)
             && !has_accepted_external_attribution(rows, module.id)
-            && package_filter.map_or(true, |filter| {
+            && package_filter.is_none_or(|filter| {
                 module
                     .package_name
                     .as_deref()

@@ -2441,6 +2441,13 @@ fn compute_runtime_var_migration_plan(
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let read_index = runtime_source_read_index(prelude, folded_chunks);
+        let reader_cluster_context = RuntimeReaderClusterContext {
+            program,
+            lowered_runtime_sources,
+            prelude,
+            read_index: &read_index,
+            movable_bindings: &movable_bindings,
+        };
         for (binding, owner_module, initializer) in candidates {
             // The binding must have a setter (zero-writer or shared
             // bindings never enter `written_helpers`, but the prelude may
@@ -2463,14 +2470,10 @@ fn compute_runtime_var_migration_plan(
                     RuntimeBindingReadProfile::SnippetReaders(readers) => {
                         let Some((extra_snippets, extra_runtime_deps)) =
                             migratable_runtime_reader_cluster(
-                                program,
-                                lowered_runtime_sources,
-                                prelude,
-                                &read_index,
+                                &reader_cluster_context,
                                 owner_module,
                                 &binding,
                                 readers,
-                                &movable_bindings,
                             )
                         else {
                             continue;
@@ -2599,15 +2602,19 @@ fn runtime_binding_read_profile(
     }
 }
 
+struct RuntimeReaderClusterContext<'a> {
+    program: &'a EnrichedProgram,
+    lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    prelude: &'a RuntimePrelude,
+    read_index: &'a RuntimeSourceReadIndex,
+    movable_bindings: &'a BTreeSet<BindingName>,
+}
+
 fn migratable_runtime_reader_cluster(
-    program: &EnrichedProgram,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    prelude: &RuntimePrelude,
-    read_index: &RuntimeSourceReadIndex,
+    ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
     initial_readers: BTreeSet<BindingName>,
-    movable_bindings: &BTreeSet<BindingName>,
 ) -> Option<(BTreeSet<BindingName>, BTreeSet<BindingName>)> {
     if initial_readers.is_empty() {
         return Some((BTreeSet::new(), BTreeSet::new()));
@@ -2619,10 +2626,10 @@ fn migratable_runtime_reader_cluster(
         if !moved_snippets.insert(reader.clone()) {
             continue;
         }
-        if runtime_binding_is_used_by_non_snippet_runtime(read_index, &reader) {
+        if runtime_binding_is_used_by_non_snippet_runtime(ctx.read_index, &reader) {
             return None;
         }
-        let snippet = prelude.snippets.get(&reader)?;
+        let snippet = ctx.prelude.snippets.get(&reader)?;
         if !is_migratable_reader_function_snippet(&reader, snippet.source.as_str()) {
             return None;
         }
@@ -2631,7 +2638,7 @@ fn migratable_runtime_reader_cluster(
         // mutable state. Keep the first cluster pass read-only.
         if implicit_global_writes_in_source(snippet.source.as_str())
             .into_iter()
-            .any(|write| prelude.defines(&write) || write == *binding)
+            .any(|write| ctx.prelude.defines(&write) || write == *binding)
         {
             return None;
         }
@@ -2640,7 +2647,8 @@ fn migratable_runtime_reader_cluster(
         // force runtime -> owner imports. Pull function dependents into the same
         // cluster instead; reject later if one of them is not a simple function
         // declaration.
-        for dependent in read_index
+        for dependent in ctx
+            .read_index
             .snippet_readers_by_binding
             .get(&reader)
             .into_iter()
@@ -2653,7 +2661,7 @@ fn migratable_runtime_reader_cluster(
     }
 
     if !moved_snippets.iter().all(|snippet| {
-        read_index
+        ctx.read_index
             .snippet_readers_by_binding
             .get(snippet)
             .into_iter()
@@ -2665,23 +2673,23 @@ fn migratable_runtime_reader_cluster(
 
     let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
     for snippet in &moved_snippets {
-        let free_runtime_bindings = read_index.free_bindings_by_snippet.get(snippet)?;
+        let free_runtime_bindings = ctx.read_index.free_bindings_by_snippet.get(snippet)?;
         for dep in free_runtime_bindings {
             if dep == binding || moved_snippets.contains(dep) {
                 continue;
             }
-            if movable_bindings.contains(dep) {
+            if ctx.movable_bindings.contains(dep) {
                 return None;
             }
-            if !prelude.defines(dep) {
+            if !ctx.prelude.defines(dep) {
                 return None;
             }
             extra_runtime_deps.insert(dep.clone());
         }
     }
 
-    let owner_source = lowered_runtime_sources.get(&owner_module)?;
-    let source_imports = program.model().graph().ast_imports_for(owner_module);
+    let owner_source = ctx.lowered_runtime_sources.get(&owner_module)?;
+    let source_imports = ctx.program.model().graph().ast_imports_for(owner_module);
     let mut owner_conflicts = owner_source.local_definitions.clone();
     owner_conflicts.extend(source_imports);
     if moved_snippets
@@ -3194,23 +3202,21 @@ fn pure_runtime_value_bindings(source: &str) -> BTreeSet<BindingName> {
             continue;
         }
         if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
-            if keyword_at(source, cursor, "function") {
-                if let Some((binding, next)) =
+            if keyword_at(source, cursor, "function")
+                && let Some((binding, next)) =
                     parse_identifier_after_keyword(source, cursor, "function")
-                {
-                    bindings.insert(BindingName::new(binding));
-                    cursor = next;
-                    continue;
-                }
+            {
+                bindings.insert(BindingName::new(binding));
+                cursor = next;
+                continue;
             }
-            if keyword_at(source, cursor, "class") {
-                if let Some((binding, next)) =
+            if keyword_at(source, cursor, "class")
+                && let Some((binding, next)) =
                     parse_identifier_after_keyword(source, cursor, "class")
-                {
-                    bindings.insert(BindingName::new(binding));
-                    cursor = next;
-                    continue;
-                }
+            {
+                bindings.insert(BindingName::new(binding));
+                cursor = next;
+                continue;
             }
             if let Some((binding, value, after)) = parse_pure_top_level_var_value(source, cursor) {
                 if is_pure_initializer_expression(value) {
@@ -9402,9 +9408,7 @@ fn parse_generated_named_export_statement(source: &str) -> Option<BTreeSet<Bindi
         if name.is_empty() {
             return None;
         }
-        let Some((identifier, end)) = parse_identifier(name, 0) else {
-            return None;
-        };
+        let (identifier, end) = parse_identifier(name, 0)?;
         if end != name.len() || is_js_keyword(identifier) {
             return None;
         }
