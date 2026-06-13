@@ -6684,21 +6684,14 @@ fn try_parse_lazy_value_declaration(
     }
     let body_end = find_matching_brace(source, cursor)?;
     let body = &source[cursor + 1..body_end];
-    // Fast path: byte-level scanner for `return PURE_EXPR;`. Falls
-    // back to the OXC-AST classifier when the body is wrapped in an
-    // IIFE, contains intermediate `var X;` declarations, or uses
-    // assignment chains the byte path doesn't recognize.
-    let value_expr = match extract_pure_return_expression(body) {
-        Some(expr) => expr,
-        None => reverts_js::extract_lazy_module_eager_value_with_safe_deps(
-            body,
-            "",
-            None,
-            None,
-            ParseGoal::TypeScript,
-            eager_safe_call_targets,
-        )?,
-    };
+    let value_expr = reverts_js::extract_lazy_module_eager_value_with_safe_deps(
+        body,
+        "",
+        None,
+        None,
+        ParseGoal::TypeScript,
+        eager_safe_call_targets,
+    )?;
     let after_body = skip_ws(bytes, body_end + 1);
     if bytes.get(after_body) != Some(&b')') {
         return None;
@@ -6779,31 +6772,14 @@ fn try_parse_lazy_module_declaration(
     }
     let body_end = find_matching_brace(source, cursor)?;
     let body = &source[cursor + 1..body_end];
-    // Body extraction has three fallback layers, tried in order of
-    // cost. The byte-level scanners (1) and (2) cover the bulk of
-    // simple shapes the bundler emits directly. Only when both fail
-    // do we reach for the OXC-AST classifier (3), which adds support
-    // for IIFE wrappers, assignment chains, harmless interleaved
-    // declarations, and `Object.defineProperty(exports, ...)` patterns
-    // — at the cost of an extra parse per declaration.
-    let value_expr = if let Some(module_name) = module_param
-        && let Some(expr) = extract_module_exports_assignment(body, module_name)
-    {
-        expr
-    } else if let Some(expr) = extract_exports_properties_as_object_literal(body, exports_param) {
-        expr
-    } else if let Some(expr) = reverts_js::extract_lazy_module_eager_value_with_safe_deps(
+    let value_expr = reverts_js::extract_lazy_module_eager_value_with_safe_deps(
         body,
         exports_param,
         module_param,
         None,
         ParseGoal::TypeScript,
         eager_safe_call_targets,
-    ) {
-        expr
-    } else {
-        return None;
-    };
+    )?;
     let after_body = skip_ws(bytes, body_end + 1);
     if bytes.get(after_body) != Some(&b')') {
         return None;
@@ -6821,136 +6797,6 @@ fn try_parse_lazy_module_declaration(
         },
         stmt_end,
     ))
-}
-
-/// Match a body that is one or more `<exports_param>.<key> = PURE_EXPR;`
-/// statements (and nothing else) and build the equivalent object literal
-/// `{ key1: expr1, key2: expr2, ... }`. Property insertion order is preserved
-/// so the rewritten value matches the CommonJS exports object's own-key
-/// iteration order. Rejects duplicate keys, non-pure expressions, anything
-/// other than `IDENT` keys (no `exports['foo']`), and any non-property
-/// statement.
-fn extract_exports_properties_as_object_literal(body: &str, exports_param: &str) -> Option<String> {
-    let statements: Vec<&str> = top_level_statement_slices(body)
-        .into_iter()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if statements.is_empty() {
-        return None;
-    }
-    let prefix = format!("{exports_param}.");
-    let mut properties: Vec<(String, String)> = Vec::new();
-    let mut seen_keys = BTreeSet::new();
-    for stmt_text in &statements {
-        let stmt = stmt_text.trim_end_matches(';').trim();
-        let rest = stmt.strip_prefix(&prefix)?;
-        let key_bytes = rest.as_bytes();
-        if key_bytes.is_empty() || !is_identifier_start(key_bytes[0]) {
-            return None;
-        }
-        let mut key_end = 1;
-        while key_end < key_bytes.len() && is_identifier_continue(key_bytes[key_end]) {
-            key_end += 1;
-        }
-        let key = &rest[..key_end];
-        if !seen_keys.insert(key.to_string()) {
-            return None;
-        }
-        let after_key = rest[key_end..].trim_start();
-        let after_eq = after_key.strip_prefix('=')?;
-        // Reject `==`, `===`, `=>` — these aren't assignments.
-        if after_eq.starts_with('=') || after_eq.starts_with('>') {
-            return None;
-        }
-        let value = after_eq.trim();
-        if value.is_empty() {
-            return None;
-        }
-        if !is_pure_initializer_expression(value) {
-            return None;
-        }
-        properties.push((key.to_string(), value.to_string()));
-    }
-    if properties.is_empty() {
-        return None;
-    }
-    let formatted = properties
-        .iter()
-        .map(|(k, v)| format!("{k}: {v}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("{{ {formatted} }}"))
-}
-
-/// Match a body that is exactly `<module_param>.exports = PURE_EXPR;` and
-/// return the pure expression on the right-hand side. The check rejects bodies
-/// with other statements, with non-pure expressions, or with assignments
-/// targeting anything other than `<module_param>.exports`.
-fn extract_module_exports_assignment(body: &str, module_param: &str) -> Option<String> {
-    let statements: Vec<&str> = top_level_statement_slices(body)
-        .into_iter()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if statements.len() != 1 {
-        return None;
-    }
-    let stmt = statements[0].trim_end_matches(';').trim();
-    let prefix = format!("{module_param}.exports");
-    let rest = stmt.strip_prefix(&prefix)?;
-    // After the prefix, the next non-identifier-continue byte must be `=`,
-    // otherwise we matched `module.exportsCache` or similar.
-    let rest = rest.trim_start();
-    let mut chars = rest.chars();
-    let first = chars.next()?;
-    if first != '=' {
-        return None;
-    }
-    let second = chars.next();
-    // Reject `==`, `===`, `=>`.
-    if matches!(second, Some('=') | Some('>')) {
-        return None;
-    }
-    let expr = rest[1..].trim();
-    if expr.is_empty() {
-        return None;
-    }
-    if !is_pure_initializer_expression(expr) {
-        return None;
-    }
-    Some(expr.to_string())
-}
-
-fn extract_pure_return_expression(body: &str) -> Option<String> {
-    let statements: Vec<&str> = top_level_statement_slices(body)
-        .into_iter()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    if statements.len() != 1 {
-        return None;
-    }
-    let stmt = statements[0].trim_end_matches(';').trim();
-    if !stmt.starts_with("return") {
-        return None;
-    }
-    // Reject "returnable" / "returns" etc. — the `return` keyword must be
-    // followed by whitespace or an opening paren, not an identifier continue.
-    let rest = &stmt["return".len()..];
-    match rest.as_bytes().first() {
-        None => return None,
-        Some(byte) if is_identifier_continue(*byte) => return None,
-        _ => {}
-    }
-    let expr = rest.trim();
-    if expr.is_empty() {
-        return None;
-    }
-    if !is_pure_initializer_expression(expr) {
-        return None;
-    }
-    Some(expr.to_string())
 }
 
 /// Walk `source` looking for every identifier reference that equals `binding`,

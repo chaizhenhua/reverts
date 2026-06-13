@@ -4068,10 +4068,33 @@ pub fn classify_lazy_module_body(
 #[derive(Debug, Default)]
 struct LazyBodyAnalysisState {
     captured_value: Option<String>,
-    property_writes: BTreeMap<String, String>,
+    property_writes: Vec<(String, String)>,
     prologue: Vec<String>,
     call_deps: BTreeSet<String>,
     impure: bool,
+}
+
+impl LazyBodyAnalysisState {
+    fn push_property_write(&mut self, key: String, value: String) -> bool {
+        if self
+            .property_writes
+            .iter()
+            .any(|(existing_key, _)| existing_key == &key)
+        {
+            return false;
+        }
+        self.property_writes.push((key, value));
+        true
+    }
+
+    fn extend_property_writes(&mut self, writes: Vec<(String, String)>) -> bool {
+        for (key, value) in writes {
+            if !self.push_property_write(key, value) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 fn analyze_lazy_body_statements(
@@ -4120,8 +4143,10 @@ fn analyze_lazy_body_statements(
                     state.call_deps.extend(inner_state.call_deps);
                     if let Some(value) = inner_state.captured_value {
                         state.captured_value = Some(value);
-                    } else if !inner_state.property_writes.is_empty() {
-                        state.property_writes.extend(inner_state.property_writes);
+                    } else if !inner_state.property_writes.is_empty()
+                        && !state.extend_property_writes(inner_state.property_writes)
+                    {
+                        state.impure = true;
                     }
                     // If inner had only prologue (init-only), the IIFE
                     // contributes no value but its prologue's side
@@ -4151,7 +4176,7 @@ fn analyze_lazy_body_statements(
                             state.impure = true;
                             continue;
                         }
-                        if state.property_writes.insert(key, value).is_some() {
+                        if !state.push_property_write(key, value) {
                             state.impure = true;
                         }
                         continue;
@@ -4167,7 +4192,7 @@ fn analyze_lazy_body_statements(
                             state.impure = true;
                             continue;
                         }
-                        if state.property_writes.insert(key, value).is_some() {
+                        if !state.push_property_write(key, value) {
                             state.impure = true;
                         }
                         continue;
@@ -7736,6 +7761,20 @@ mod tests {
             ParseGoal::TypeScript,
         );
         assert_eq!(value.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn lazy_body_classifier_collapses_exports_property_assignments() {
+        let body = "exports.foo = 1; exports.bar = 2;";
+        let value = extract_lazy_module_eager_value(
+            body,
+            "exports",
+            Some("module"),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+
+        assert_eq!(value.as_deref(), Some("{ foo: 1, bar: 2 }"));
     }
 
     #[test]
