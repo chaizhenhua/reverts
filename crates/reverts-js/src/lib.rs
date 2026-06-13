@@ -700,6 +700,9 @@ pub fn format_source_with_module_items_and_renames_with_report(
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
         coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
         coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
+        flatten_node_builtin_namespace_imports_in_program(&mut parsed.program, &builder);
+        coalesce_simple_named_imports_in_program(&mut parsed.program, &builder);
+        coalesce_compatible_mixed_imports_in_program(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));
         }
@@ -4331,9 +4334,10 @@ fn coalesce_compatible_mixed_imports_in_program<'a>(
 
         if state.named_indices.is_empty()
             && let (
-                Some((default_index, default_local, _)),
+                Some((default_index, default_local, default_named_specifiers)),
                 Some((namespace_index, namespace_local)),
             ) = (state.default_target, state.namespace_target)
+            && default_named_specifiers.is_empty()
         {
             let replacement_index = default_index.min(namespace_index);
             replacements.insert(
@@ -4497,6 +4501,323 @@ fn default_import_specifier(local: &str) -> SimpleNamedImportSpecifier {
         imported: "default".to_string(),
         local: local.to_string(),
     }
+}
+
+#[derive(Debug, Default, Clone)]
+struct NamespaceFlattenSourceState {
+    namespace_imports: Vec<(usize, String)>,
+    existing_named_aliases: BTreeMap<String, String>,
+}
+
+fn flatten_node_builtin_namespace_imports_in_program<'a>(
+    program: &mut Program<'a>,
+    builder: &AstBuilder<'a>,
+) {
+    let mut states = BTreeMap::<String, NamespaceFlattenSourceState>::new();
+    for (index, statement) in program.body.iter().enumerate() {
+        let Statement::ImportDeclaration(declaration) = statement else {
+            continue;
+        };
+        if !import_declaration_can_be_merged(declaration)
+            || !is_node_builtin_namespace_flatten_source(declaration.source.value.as_str())
+        {
+            continue;
+        }
+        let source = declaration.source.value.as_str().to_string();
+        let state = states.entry(source).or_default();
+        if let Some(local) = namespace_only_import_local(declaration) {
+            state.namespace_imports.push((index, local));
+        }
+        for specifier in named_import_aliases(declaration) {
+            state
+                .existing_named_aliases
+                .entry(specifier.imported.clone())
+                .and_modify(|current| {
+                    if specifier.local.len() < current.len() {
+                        *current = specifier.local.clone();
+                    }
+                })
+                .or_insert(specifier.local);
+        }
+    }
+    states.retain(|_, state| !state.namespace_imports.is_empty());
+    if states.is_empty() {
+        return;
+    }
+
+    let namespace_locals = states
+        .values()
+        .flat_map(|state| {
+            state
+                .namespace_imports
+                .iter()
+                .map(|(_, local)| local.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let mut analysis = NamespaceImportUseAnalysis {
+        namespace_locals: &namespace_locals,
+        properties_by_local: BTreeMap::new(),
+        bad_locals: BTreeSet::new(),
+    };
+    analysis.visit_program(program);
+
+    let mut binding_names = BindingNameCollector::default();
+    binding_names.visit_program(program);
+
+    let mut member_replacements = BTreeMap::<(String, String), String>::new();
+    let mut generated_specifiers_by_source =
+        BTreeMap::<String, BTreeSet<SimpleNamedImportSpecifier>>::new();
+    let mut removable_namespace_indices = BTreeSet::<usize>::new();
+    for (source, state) in &states {
+        for (index, namespace_local) in &state.namespace_imports {
+            if analysis.bad_locals.contains(namespace_local) {
+                continue;
+            }
+            let Some(properties) = analysis.properties_by_local.get(namespace_local) else {
+                continue;
+            };
+            if properties.is_empty() || properties.contains("default") {
+                continue;
+            }
+
+            let mut local_replacements = Vec::<(String, String)>::new();
+            let mut generated_specifiers = Vec::<SimpleNamedImportSpecifier>::new();
+            for property in properties {
+                if let Some(existing) = state.existing_named_aliases.get(property) {
+                    local_replacements.push((property.clone(), existing.clone()));
+                    continue;
+                }
+                let alias =
+                    unique_namespace_member_alias(namespace_local, property, &mut binding_names);
+                generated_specifiers.push(SimpleNamedImportSpecifier {
+                    imported: property.clone(),
+                    local: alias.clone(),
+                });
+                local_replacements.push((property.clone(), alias));
+            }
+
+            for specifier in generated_specifiers {
+                generated_specifiers_by_source
+                    .entry(source.clone())
+                    .or_default()
+                    .insert(specifier);
+            }
+            for (property, alias) in local_replacements {
+                member_replacements.insert((namespace_local.clone(), property), alias);
+            }
+            removable_namespace_indices.insert(*index);
+        }
+    }
+    if removable_namespace_indices.is_empty() {
+        return;
+    }
+
+    let mut rewriter = NamespaceMemberRewriter {
+        replacements: &member_replacements,
+        builder,
+    };
+    rewriter.visit_program(program);
+
+    let mut replacement_by_index = BTreeMap::<usize, Statement<'a>>::new();
+    for (source, specifiers) in generated_specifiers_by_source {
+        if specifiers.is_empty() {
+            continue;
+        }
+        let Some(first_index) = states.get(source.as_str()).and_then(|state| {
+            state
+                .namespace_imports
+                .iter()
+                .map(|(index, _)| *index)
+                .filter(|index| removable_namespace_indices.contains(index))
+                .min()
+        }) else {
+            continue;
+        };
+        replacement_by_index.insert(
+            first_index,
+            simple_named_import_statement(builder, source.as_str(), specifiers.iter()),
+        );
+    }
+
+    let mut merged = builder.vec();
+    for (index, statement) in program.body.drain(..).enumerate() {
+        if let Some(replacement) = replacement_by_index.remove(&index) {
+            merged.push(replacement);
+            continue;
+        }
+        if removable_namespace_indices.contains(&index) {
+            continue;
+        }
+        merged.push(statement);
+    }
+    program.body = merged;
+}
+
+fn import_declaration_can_be_merged(declaration: &ImportDeclaration<'_>) -> bool {
+    declaration.import_kind == ImportOrExportKind::Value
+        && declaration.phase.is_none()
+        && declaration.with_clause.is_none()
+}
+
+fn namespace_only_import_local(declaration: &ImportDeclaration<'_>) -> Option<String> {
+    let specifiers = declaration.specifiers.as_ref()?;
+    if specifiers.len() != 1 {
+        return None;
+    }
+    let ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) = &specifiers[0] else {
+        return None;
+    };
+    Some(specifier.local.name.as_str().to_string())
+}
+
+fn named_import_aliases(
+    declaration: &ImportDeclaration<'_>,
+) -> BTreeSet<SimpleNamedImportSpecifier> {
+    let Some(specifiers) = declaration.specifiers.as_ref() else {
+        return BTreeSet::new();
+    };
+    specifiers
+        .iter()
+        .filter_map(|specifier| {
+            let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                return None;
+            };
+            if specifier.import_kind != ImportOrExportKind::Value {
+                return None;
+            }
+            Some(SimpleNamedImportSpecifier {
+                imported: module_export_name_text(&specifier.imported)?,
+                local: specifier.local.name.as_str().to_string(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct NamespaceImportUseAnalysis<'a> {
+    namespace_locals: &'a BTreeSet<String>,
+    properties_by_local: BTreeMap<String, BTreeSet<String>>,
+    bad_locals: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for NamespaceImportUseAnalysis<'_> {
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_none() {
+            for specifier in &declaration.specifiers {
+                if let Some(local) = module_export_name_text(&specifier.local)
+                    && self.namespace_locals.contains(local.as_str())
+                {
+                    self.bad_locals.insert(local);
+                }
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_static_member_expression(&mut self, expression: &StaticMemberExpression<'a>) {
+        if let Expression::Identifier(object) = &expression.object {
+            let local = object.name.as_str();
+            if self.namespace_locals.contains(local) {
+                self.properties_by_local
+                    .entry(local.to_string())
+                    .or_default()
+                    .insert(expression.property.name.as_str().to_string());
+                return;
+            }
+        }
+        oxc_ast::visit::walk::walk_static_member_expression(self, expression);
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        let local = identifier.name.as_str();
+        if self.namespace_locals.contains(local) {
+            self.bad_locals.insert(local.to_string());
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BindingNameCollector {
+    names: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for BindingNameCollector {
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        self.names.insert(identifier.name.as_str().to_string());
+    }
+}
+
+fn unique_namespace_member_alias(
+    namespace_local: &str,
+    property: &str,
+    binding_names: &mut BindingNameCollector,
+) -> String {
+    let base = sanitize_identifier(format!("__reverts_{namespace_local}_{property}").as_str());
+    let mut candidate = base.clone();
+    let mut suffix = 2usize;
+    while binding_names.names.contains(candidate.as_str()) {
+        candidate = format!("{base}_{suffix}");
+        suffix += 1;
+    }
+    binding_names.names.insert(candidate.clone());
+    candidate
+}
+
+struct NamespaceMemberRewriter<'b, 'a> {
+    replacements: &'b BTreeMap<(String, String), String>,
+    builder: &'b AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for NamespaceMemberRewriter<'_, 'a> {
+    fn visit_expression(&mut self, expression: &mut Expression<'a>) {
+        if let Expression::StaticMemberExpression(member) = expression
+            && let Expression::Identifier(object) = &member.object
+        {
+            let key = (
+                object.name.as_str().to_string(),
+                member.property.name.as_str().to_string(),
+            );
+            if let Some(replacement) = self.replacements.get(&key) {
+                *expression = self
+                    .builder
+                    .expression_identifier_reference(SPAN, replacement.as_str());
+                return;
+            }
+        }
+        oxc_ast::visit::walk_mut::walk_expression(self, expression);
+    }
+}
+
+fn is_node_builtin_namespace_flatten_source(source: &str) -> bool {
+    let source = source.strip_prefix("node:").unwrap_or(source);
+    matches!(
+        source,
+        "assert"
+            | "async_hooks"
+            | "buffer"
+            | "child_process"
+            | "crypto"
+            | "events"
+            | "fs"
+            | "fs/promises"
+            | "http"
+            | "https"
+            | "module"
+            | "net"
+            | "os"
+            | "path"
+            | "perf_hooks"
+            | "process"
+            | "querystring"
+            | "readline"
+            | "stream"
+            | "timers"
+            | "tty"
+            | "url"
+            | "util"
+            | "worker_threads"
+            | "zlib"
+    )
 }
 
 fn coalesce_simple_local_named_exports_in_program<'a>(
@@ -4933,6 +5254,23 @@ mod tests {
     }
 
     #[test]
+    fn module_item_formatting_keeps_default_named_import_when_namespace_exists() {
+        let formatted = format_source_with_module_items(
+            "import defaultPkg, { alpha } from 'pkg';\nimport * as pkgNS from 'pkg';\nconsole.log(defaultPkg, alpha, pkgNS);",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import defaultPkg, { alpha } from 'pkg';"));
+        assert!(formatted.contains("import * as pkgNS from 'pkg';"));
+        assert_eq!(formatted.matches("from 'pkg'").count(), 2);
+    }
+
+    #[test]
     fn module_item_formatting_merges_multiple_default_aliases_as_named_default() {
         let formatted = format_source_with_module_items(
             "import first from 'pkg';\nimport second from 'pkg';\nimport { alpha } from 'pkg';\nconsole.log(first, second, alpha);",
@@ -4979,6 +5317,93 @@ mod tests {
         assert!(formatted.contains("import firstDefault, * as firstNS from 'pkg';"));
         assert!(formatted.contains("import secondDefault, * as secondNS from 'pkg';"));
         assert_eq!(formatted.matches("from 'pkg'").count(), 2);
+    }
+
+    #[test]
+    fn module_item_formatting_flattens_node_builtin_namespace_members() {
+        let formatted = format_source_with_module_items(
+            "import * as pathNS from 'path';\nconsole.log(pathNS.join('a', 'b'), pathNS.resolve('x'));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains(
+            "import { join as __reverts_pathNS_join, resolve as __reverts_pathNS_resolve } from 'path';"
+        ));
+        assert!(formatted.contains(
+            "console.log(__reverts_pathNS_join('a', 'b'), __reverts_pathNS_resolve('x'));"
+        ));
+        assert!(!formatted.contains("pathNS."));
+    }
+
+    #[test]
+    fn module_item_formatting_reuses_existing_named_alias_for_namespace_member() {
+        let formatted = format_source_with_module_items(
+            "import { join as j } from 'path';\nimport * as pathNS from 'path';\nconsole.log(pathNS.join('a', 'b'));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import { join as j } from 'path';"));
+        assert!(formatted.contains("console.log(j('a', 'b'));"));
+        assert_eq!(formatted.matches("from 'path'").count(), 1);
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_namespace_import_used_as_value() {
+        let formatted = format_source_with_module_items(
+            "import * as pathNS from 'path';\nconsole.log(pathNS, pathNS.join('a', 'b'));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as pathNS from 'path';"));
+        assert!(formatted.contains("pathNS.join"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_exported_namespace_imports() {
+        let formatted = format_source_with_module_items(
+            "import * as pathNS from 'path';\nconsole.log(pathNS.join('a', 'b'));\nexport { pathNS };",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as pathNS from 'path';"));
+        assert!(formatted.contains("pathNS.join"));
+        assert!(formatted.contains("export { pathNS };"));
+    }
+
+    #[test]
+    fn module_item_formatting_keeps_non_builtin_namespace_imports() {
+        let formatted = format_source_with_module_items(
+            "import * as pkgNS from 'pkg';\nconsole.log(pkgNS.join('a', 'b'));",
+            &[],
+            &[],
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(formatted.contains("import * as pkgNS from 'pkg';"));
+        assert!(formatted.contains("pkgNS.join"));
     }
 
     #[test]
