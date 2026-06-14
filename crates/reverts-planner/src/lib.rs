@@ -3925,13 +3925,26 @@ fn static_class_element_is_eager(source: &str, after_static: usize, close: usize
             // evaluated until the method is called after the writer module's
             // same-module assignment has run.
             b'(' => return false,
-            // Static fields evaluate during class definition and would read
-            // the migrated var before the writer's assignment.
-            b'=' | b';' | b'{' => return true,
+            b'=' => return static_field_initializer_is_eager(source, cursor, close),
+            // Empty static fields don't read migrated runtime state.
+            b';' => return false,
+            // Static blocks run immediately while the class is being defined.
+            b'{' => return true,
             _ => cursor += 1,
         }
     }
     false
+}
+
+fn static_field_initializer_is_eager(source: &str, equals: usize, close: usize) -> bool {
+    let bytes = source.as_bytes();
+    let initializer_start = skip_ws_and_comments(bytes, equals + 1, close);
+    if initializer_start >= close {
+        return false;
+    }
+    let initializer_end = find_statement_end(&source[..close], initializer_start).unwrap_or(close);
+    let initializer = source[initializer_start..initializer_end].trim();
+    !initializer.is_empty() && !is_pure_initializer_expression(initializer)
 }
 
 fn variable_declaration_names_function_like_binding(source: &str, binding: &BindingName) -> bool {
@@ -14471,7 +14484,7 @@ mod tests {
     fn reader_cluster_runtime_var_migration_moves_static_method_class_reader_with_writer() {
         let prelude = concat!(
             "var shared;\n",
-            "class ReadsShared { static value() { return shared; } }\n",
+            "class ReadsShared { static ready = false; static value() { return shared; } }\n",
         );
         let writer_body = "shared = 1;\nexport { shared };\n";
         let consumer_body = "var value = ReadsShared.value();\nexport { value };\n";
@@ -14505,7 +14518,12 @@ mod tests {
             "{writer_source}"
         );
         assert!(writer_source.contains("var shared;"), "{writer_source}");
-        assert!(writer_source.contains("class ReadsShared { static value() { return shared; } }"));
+        assert!(
+            writer_source.contains(
+                "class ReadsShared { static ready = false; static value() { return shared; } }"
+            ),
+            "{writer_source}"
+        );
         assert!(writer_source.contains("shared = 1;"));
         assert!(writer_source.contains("export { ReadsShared };"));
         assert!(consumer_source.contains("import { ReadsShared } from './writer.js';"));
