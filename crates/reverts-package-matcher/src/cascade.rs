@@ -138,9 +138,14 @@ pub fn assign_globally(
     let n_rows = out.len();
     let n_cols = col_keys.len();
 
-    // Build cost matrix (max-weight).
-    let mut cost = vec![vec![0.0_f64; n_cols]; n_rows];
+    // Build a sparse row/column graph first. Real bundles usually split into
+    // many independent candidate components; running Hungarian over one large
+    // dense matrix turns those independent sub-problems into unnecessary
+    // cubic work.
+    let mut row_edges = vec![Vec::<(usize, f64)>::new(); n_rows];
+    let mut col_rows = vec![Vec::<usize>::new(); n_cols];
     for (row, assignment) in out.iter().enumerate() {
+        let mut row_best_by_col = std::collections::BTreeMap::<usize, f64>::new();
         for (rank, cand) in assignment.candidates.iter().enumerate() {
             let key = (
                 cand.candidate.package.clone(),
@@ -149,34 +154,103 @@ pub fn assign_globally(
             if let Some(&col) = col_index.get(&key) {
                 let r = rank.min(4) as f64;
                 let weight = f64::from(cand.tier.weight()) * (1.0 - 0.1 * r);
-                if weight > cost[row][col] {
-                    cost[row][col] = weight;
+                row_best_by_col
+                    .entry(col)
+                    .and_modify(|existing| *existing = existing.max(weight))
+                    .or_insert(weight);
+            }
+        }
+        for (col, weight) in row_best_by_col {
+            row_edges[row].push((col, weight));
+            col_rows[col].push(row);
+        }
+    }
+
+    let mut seen_rows = vec![false; n_rows];
+    let mut seen_cols = vec![false; n_cols];
+    for start_row in 0..n_rows {
+        if seen_rows[start_row] || row_edges[start_row].is_empty() {
+            continue;
+        }
+        let mut component_rows = Vec::new();
+        let mut component_cols = Vec::new();
+        let mut row_queue = std::collections::VecDeque::from([start_row]);
+        seen_rows[start_row] = true;
+        while let Some(row) = row_queue.pop_front() {
+            component_rows.push(row);
+            for (col, _weight) in &row_edges[row] {
+                if !seen_cols[*col] {
+                    seen_cols[*col] = true;
+                    component_cols.push(*col);
+                    for next_row in &col_rows[*col] {
+                        if !seen_rows[*next_row] {
+                            seen_rows[*next_row] = true;
+                            row_queue.push_back(*next_row);
+                        }
+                    }
                 }
             }
         }
-    }
 
-    let assign = assign_max_weight(&cost);
-
-    // Map row → matched candidate (skip unassigned or zero-weight padding rows).
-    for (row, &col) in assign.iter().enumerate() {
-        if col == usize::MAX || col >= n_cols {
+        if component_rows.len() == 1 {
+            let row = component_rows[0];
+            if let Some((col, _weight)) = row_edges[row]
+                .iter()
+                .max_by(|left, right| left.1.total_cmp(&right.1))
+            {
+                choose_global_assignment(&mut out, &col_keys, row, *col);
+            }
             continue;
         }
-        if cost[row][col] <= 0.0 {
-            continue; // zero weight = unmatched (padding column)
-        }
-        let key_pair = &col_keys[col];
-        let chosen = out[row]
-            .candidates
+
+        let local_col_by_global = component_cols
             .iter()
-            .find(|m| {
-                m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
-            })
-            .cloned();
-        out[row].chosen = chosen;
+            .enumerate()
+            .map(|(local, global)| (*global, local))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut cost = vec![vec![0.0_f64; component_cols.len()]; component_rows.len()];
+        for (local_row, row) in component_rows.iter().enumerate() {
+            for (global_col, weight) in &row_edges[*row] {
+                if let Some(local_col) = local_col_by_global.get(global_col).copied() {
+                    cost[local_row][local_col] = *weight;
+                }
+            }
+        }
+
+        let assign = assign_max_weight(&cost);
+        for (local_row, &local_col) in assign.iter().enumerate() {
+            if local_col == usize::MAX || local_col >= component_cols.len() {
+                continue;
+            }
+            if cost[local_row][local_col] <= 0.0 {
+                continue;
+            }
+            choose_global_assignment(
+                &mut out,
+                &col_keys,
+                component_rows[local_row],
+                component_cols[local_col],
+            );
+        }
     }
     out
+}
+
+fn choose_global_assignment(
+    out: &mut [GlobalAssignment],
+    col_keys: &[(reverts_package_index::PackageId, u64)],
+    row: usize,
+    col: usize,
+) {
+    let key_pair = &col_keys[col];
+    let chosen = out[row]
+        .candidates
+        .iter()
+        .find(|m| {
+            m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
+        })
+        .cloned();
+    out[row].chosen = chosen;
 }
 
 #[cfg(test)]

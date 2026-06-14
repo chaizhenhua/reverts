@@ -590,6 +590,7 @@ impl SourceModuleFacts {
 struct PlannerAnalysis {
     external_package_adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     externalized_packages: BTreeSet<ModuleId>,
+    source_suppressed_packages: BTreeSet<ModuleId>,
     source_module_wiring: SourceModuleWiring,
     lowered_runtime_sources: BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: RuntimeLazyFoldPlan,
@@ -600,14 +601,27 @@ impl PlannerAnalysis {
         let source_facts = SourceModuleFacts::from_program(program);
         let accepted_externalized_packages =
             accepted_external_module_ids(&program.model().input().package_attributions);
-        let external_package_adapters =
-            external_package_adapter_plans(program, &accepted_externalized_packages, &source_facts);
-        let adapter_required_packages = external_package_adapters
+        let adapter_analysis = external_package_adapter_analysis(
+            program,
+            &accepted_externalized_packages,
+            &source_facts,
+        );
+        let external_package_adapters = adapter_analysis.adapters;
+        let adapter_required_packages = adapter_analysis.adapter_required_packages;
+        let externalized_packages = accepted_externalized_packages
+            .difference(&adapter_required_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let adapter_backed_packages = external_package_adapters
             .keys()
             .copied()
             .collect::<BTreeSet<_>>();
-        let externalized_packages = accepted_externalized_packages
-            .difference(&adapter_required_packages)
+        let source_preserved_packages = adapter_required_packages
+            .difference(&adapter_backed_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let source_suppressed_packages = accepted_externalized_packages
+            .difference(&source_preserved_packages)
             .copied()
             .collect::<BTreeSet<_>>();
         let source_module_wiring =
@@ -621,7 +635,7 @@ impl PlannerAnalysis {
             program,
             &source_module_wiring,
             &eager_safe_analysis,
-            &externalized_packages,
+            &source_suppressed_packages,
         );
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
@@ -629,6 +643,7 @@ impl PlannerAnalysis {
         Self {
             external_package_adapters,
             externalized_packages,
+            source_suppressed_packages,
             source_module_wiring,
             lowered_runtime_sources,
             runtime_lazy_folds,
@@ -648,7 +663,7 @@ impl ImportExportPlanner {
             &analysis.source_module_wiring,
             &analysis.lowered_runtime_sources,
             &analysis.runtime_lazy_folds,
-            &analysis.externalized_packages,
+            &analysis.source_suppressed_packages,
         )
     }
 
@@ -665,6 +680,7 @@ impl ImportExportPlanner {
         let analysis = PlannerAnalysis::from_program(program);
         let external_package_adapters = &analysis.external_package_adapters;
         let externalized_packages = &analysis.externalized_packages;
+        let source_suppressed_packages = &analysis.source_suppressed_packages;
         let source_module_wiring = &analysis.source_module_wiring;
         let lowered_runtime_sources = &analysis.lowered_runtime_sources;
         let runtime_lazy_folds = &analysis.runtime_lazy_folds;
@@ -677,14 +693,14 @@ impl ImportExportPlanner {
             source_module_wiring,
             lowered_runtime_sources,
             runtime_lazy_folds,
-            externalized_packages,
+            source_suppressed_packages,
         );
         let package_runtime_islands = package_runtime_island_plan(
             program,
             lowered_runtime_sources,
             runtime_lazy_folds,
             &runtime_var_migrations,
-            externalized_packages,
+            source_suppressed_packages,
         );
         let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
         let runtime_singleton_inlines = runtime_singleton_inline_plan(
@@ -694,7 +710,7 @@ impl ImportExportPlanner {
             runtime_lazy_folds,
             &runtime_var_migrations,
             &runtime_prelude_direct_imports,
-            externalized_packages,
+            source_suppressed_packages,
         );
         let mut used_package_runtime_helper_files =
             BTreeMap::<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>::new();
@@ -731,7 +747,7 @@ impl ImportExportPlanner {
                 .module_path(module.id)
                 .unwrap_or(module.semantic_path.as_str());
             let package_runtime_owner =
-                package_runtime_owner_for_module(module, externalized_packages);
+                package_runtime_owner_for_module(module, source_suppressed_packages);
             let mut file = PlannedFile::new(path);
             let compiler_profile = program.compiler_profile().module(module.id);
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
@@ -8966,19 +8982,179 @@ struct ExternalPackageAdapterPlan {
     kind: ExternalPackageAdapterKind,
 }
 
-fn external_package_adapter_plans(
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalPackageAdapterAnalysis {
+    adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
+    adapter_required_packages: BTreeSet<ModuleId>,
+}
+
+fn external_package_adapter_analysis(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
-) -> BTreeMap<ModuleId, ExternalPackageAdapterPlan> {
-    adapter_required_package_modules(program, externalized_packages, source_facts)
-        .into_iter()
-        .map(|module_id| {
-            let bindings = package_adapter_export_bindings(program, module_id, source_facts);
-            let kind = external_package_adapter_kind(program, module_id, &bindings);
-            (module_id, ExternalPackageAdapterPlan { bindings, kind })
+) -> ExternalPackageAdapterAnalysis {
+    let adapter_required_packages =
+        adapter_required_package_modules(program, externalized_packages, source_facts);
+    let adapters = adapter_required_packages
+        .iter()
+        .filter_map(|module_id| {
+            let bindings = package_adapter_export_bindings(program, *module_id, source_facts);
+            let kind = external_package_adapter_kind(program, *module_id, &bindings);
+            adapter_plan_is_safe(program, *module_id, &bindings)
+                .then_some((*module_id, ExternalPackageAdapterPlan { bindings, kind }))
         })
-        .collect()
+        .collect();
+    ExternalPackageAdapterAnalysis {
+        adapters,
+        adapter_required_packages,
+    }
+}
+
+fn adapter_plan_is_safe(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    bindings: &BTreeSet<BindingName>,
+) -> bool {
+    let original_name = program
+        .model()
+        .modules()
+        .iter()
+        .find(|module| module.id == module_id)
+        .map(|module| module.original_name.as_str());
+    if adapter_source_has_implicit_side_effect_exports(program, module_id, original_name) {
+        return false;
+    }
+    bindings.iter().all(|binding| {
+        if Some(binding.as_str()) == original_name {
+            return true;
+        }
+        external_adapter_non_original_binding_is_safe(program, module_id, binding)
+            && !binding_has_non_empty_call_in_program(program, binding)
+    })
+}
+
+fn adapter_source_has_implicit_side_effect_exports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    original_name: Option<&str>,
+) -> bool {
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return false;
+    };
+    let compact = compact_js_source(source.source);
+    if compact.contains("return_$module.exports;") || compact.contains("module.exports") {
+        return false;
+    }
+    if call_identifiers_in_source(source.source)
+        .into_iter()
+        .any(|callee| {
+            Some(callee.as_str()) != original_name
+                && !matches!(
+                    callee.as_str(),
+                    "E" | "lazyValue" | "lazyModule" | "p" | "__commonJS"
+                )
+        })
+    {
+        return true;
+    }
+    implicit_global_writes_in_source(source.source)
+        .into_iter()
+        .any(|binding| Some(binding.as_str()) != original_name)
+}
+
+fn external_adapter_non_original_binding_is_safe(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return false;
+    };
+    let compact = compact_js_source(source.source);
+    compact_source_declares_adapter_safe_binding(compact.as_str(), binding.as_str())
+}
+
+fn compact_source_declares_adapter_safe_binding(compact_source: &str, binding: &str) -> bool {
+    [
+        format!("function{binding}("),
+        format!("asyncfunction{binding}("),
+        format!("var{binding}=function"),
+        format!("let{binding}=function"),
+        format!("const{binding}=function"),
+        format!("var{binding}=asyncfunction"),
+        format!("let{binding}=asyncfunction"),
+        format!("const{binding}=asyncfunction"),
+        format!("var{binding}=()=>"),
+        format!("let{binding}=()=>"),
+        format!("const{binding}=()=>"),
+        format!("var{binding}=(()=>"),
+        format!("let{binding}=(()=>"),
+        format!("const{binding}=(()=>"),
+        format!("var{binding}=E("),
+        format!("let{binding}=E("),
+        format!("const{binding}=E("),
+        format!("var{binding}=__commonJS("),
+        format!("let{binding}=__commonJS("),
+        format!("const{binding}=__commonJS("),
+        format!("var{binding}=lazyValue("),
+        format!("let{binding}=lazyValue("),
+        format!("const{binding}=lazyValue("),
+        format!("var{binding}=lazyModule("),
+        format!("let{binding}=lazyModule("),
+        format!("const{binding}=lazyModule("),
+        format!("var{binding}=_$l("),
+        format!("let{binding}=_$l("),
+        format!("const{binding}=_$l("),
+        format!("var{binding}={{"),
+        format!("let{binding}={{"),
+        format!("const{binding}={{"),
+        format!("var{binding}=Object.freeze({{"),
+        format!("let{binding}=Object.freeze({{"),
+        format!("const{binding}=Object.freeze({{"),
+    ]
+    .iter()
+    .any(|needle| compact_source.contains(needle))
+}
+
+fn binding_has_non_empty_call_in_program(program: &EnrichedProgram, binding: &BindingName) -> bool {
+    program
+        .model()
+        .input()
+        .source_files
+        .iter()
+        .filter_map(|source_file| source_file.source.as_deref())
+        .any(|source| source_has_non_empty_call_to_binding(source, binding.as_str()))
+}
+
+fn source_has_non_empty_call_to_binding(source: &str, binding: &str) -> bool {
+    if binding.is_empty() {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let needle = binding.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(relative) = source[cursor..].find(binding) else {
+            return false;
+        };
+        let start = cursor + relative;
+        let end = start + needle.len();
+        let before_ok = start == 0 || !is_identifier_continue(bytes[start - 1]);
+        let after_ok = bytes
+            .get(end)
+            .is_none_or(|byte| !is_identifier_continue(*byte));
+        if before_ok && after_ok {
+            let after = skip_ws(bytes, end);
+            if bytes.get(after) == Some(&b'(') {
+                let inner = skip_ws(bytes, after + 1);
+                if bytes.get(inner) != Some(&b')') {
+                    return true;
+                }
+            }
+        }
+        cursor = end;
+    }
+    false
 }
 
 fn external_package_adapter_kind(
@@ -9081,6 +9257,15 @@ fn external_package_adapter_binding_kind(
     module_id: ModuleId,
     binding: &BindingName,
 ) -> ExternalPackageAdapterBindingKind {
+    if program
+        .model()
+        .modules()
+        .iter()
+        .find(|module| module.id == module_id)
+        .is_some_and(|module| module.original_name == binding.as_str())
+    {
+        return ExternalPackageAdapterBindingKind::Callable;
+    }
     match program.binding_shape(module_id, binding.as_str()) {
         BindingShape::Callable | BindingShape::Constructor | BindingShape::ClassLike => {
             return ExternalPackageAdapterBindingKind::Callable;
@@ -9139,6 +9324,12 @@ fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) 
         format!("var{binding}=lazyModule("),
         format!("let{binding}=lazyModule("),
         format!("const{binding}=lazyModule("),
+        format!("var{binding}=E("),
+        format!("let{binding}=E("),
+        format!("const{binding}=E("),
+        format!("var{binding}=__commonJS("),
+        format!("let{binding}=__commonJS("),
+        format!("const{binding}=__commonJS("),
         format!("var{binding}=p("),
         format!("let{binding}=p("),
         format!("const{binding}=p("),
@@ -16867,6 +17058,285 @@ mod tests {
     }
 
     #[test]
+    fn adapter_required_package_original_binding_stays_callable() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nexport const value = 1;\n";
+        let package_source = "var packageInit = E(() => {});\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("adapter package file should be emitted");
+        let source = package_file.body.join("\n");
+
+        assert!(source.contains("function packageInit() { return external_fixture_package; }"));
+        assert!(!source.contains("const packageInit = external_fixture_package;"));
+    }
+
+    #[test]
+    fn adapter_required_external_package_suppresses_original_runtime_source() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nexport const value = 1;\n";
+        let package_source = "var packageInit = lazyValue(() => 1);\nexport { packageInit };\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2))
+        );
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(2)));
+        assert!(
+            !analysis.lowered_runtime_sources.contains_key(&ModuleId(2)),
+            "adapter packages replace the original source and must not own migrated runtime helpers"
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("adapter package file should be emitted");
+        let source = package_file.body.join("\n");
+        assert!(source.contains("function packageInit() { return external_fixture_package; }"));
+        assert!(!source.contains("lazyValue"));
+    }
+
+    #[test]
+    fn adapter_required_package_with_argument_callable_binding_preserves_source() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nconst value = memoize(() => 1);\nexport { value };\n";
+        let package_source =
+            "var packageInit = E(() => {});\nfunction memoize(fn) { return fn; }\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            !analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2))
+        );
+        assert!(!analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("source-preserved package file should be emitted");
+        let source = package_file.body.join("\n");
+        assert!(source.contains("function memoize(fn)"));
+        assert!(source.contains("export { memoize, packageInit };"));
+        assert!(!source.contains("external_fixture_package"));
+    }
+
+    #[test]
+    fn adapter_required_package_with_global_side_effect_preserves_source() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nexport const value = runtimeValue;\n";
+        let package_source = "var packageInit = E(() => { runtimeValue = 1; });\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            !analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2))
+        );
+        assert!(!analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("source-preserved package file should be emitted");
+        let source = package_file.body.join("\n");
+        assert!(source.contains("runtimeValue = 1"));
+        assert!(!source.contains("external_fixture_package"));
+    }
+
+    #[test]
     fn entrypoint_runtime_drops_noop_runtime_side_effects() {
         let planner = ImportExportPlanner;
         let prelude = "var noop = () => {};\nfunction main() { return 1; }\n";
@@ -17649,13 +18119,13 @@ mod tests {
         let accepted_externalized_packages =
             accepted_external_module_ids(&enriched.model().input().package_attributions);
         let source_facts = super::SourceModuleFacts::from_program(&enriched);
-        let adapter_plans = super::external_package_adapter_plans(
+        let adapter_analysis = super::external_package_adapter_analysis(
             &enriched,
             &accepted_externalized_packages,
             &source_facts,
         );
         assert!(
-            adapter_plans.contains_key(&ModuleId(1)),
+            adapter_analysis.adapters.contains_key(&ModuleId(1)),
             "package bindings read by source without an import edge must get an adapter"
         );
         let scan = super::scan_runtime_externalized_bindings(

@@ -4488,6 +4488,9 @@ fn filter_package_sources_to_best_build_variants(
     }
 
     package_sources.retain(|source| {
+        if source.external_importable && source.export_specifier == source.package_name {
+            return true;
+        }
         let key = (source.package_name.clone(), source.package_version.clone());
         let Some(selected_families) = selected_families_by_version.get(&key) else {
             return true;
@@ -4657,9 +4660,6 @@ fn build_variant_family_rank(family: &str) -> u8 {
 fn is_local_package_source_candidate(rel_path: &str) -> bool {
     let lower = rel_path.to_ascii_lowercase();
     if lower.ends_with(".d.ts")
-        || lower == "package.json"
-        || lower.ends_with("/package.json")
-        || lower.starts_with("package.json")
         || lower.ends_with("tsconfig.json")
         || lower.ends_with("/tsconfig.json")
         || lower.ends_with(".min.js")
@@ -5658,6 +5658,12 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
         "export_specifier_source"
     } else if source_path.starts_with("root-export-source:") {
         "root_export_source"
+    } else if source_path.starts_with("normalized-source-export:") {
+        "normalized_source_export"
+    } else if source_path.starts_with("normalized-source-adapter:") {
+        "normalized_source_adapter"
+    } else if source_path.starts_with("ownership-source-match:") {
+        "ownership_source_match"
     } else if source_path.starts_with("forced-external:semantic-export:") {
         "semantic_export"
     } else if source_path.starts_with("forced-external:semantic-source:") {
@@ -6165,8 +6171,8 @@ mod tests {
         best_project_exact_version_candidate, collect_local_package_sources, dedup_audit_report,
         exact_project_version_counts_by_package, extract_bun_embedded_asset_from_bytes,
         filter_package_sources_to_best_build_variants,
-        filter_package_sources_to_relevant_path_hints, help_text, load_package_sources,
-        local_package_metadata, match_packages_from_connection,
+        filter_package_sources_to_relevant_path_hints, help_text, json_package_source_module,
+        load_package_sources, local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
         package_export_specifier, package_version_hints_for_materialization,
         package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
@@ -7354,6 +7360,31 @@ mod tests {
     }
 
     #[test]
+    fn local_package_source_collection_keeps_exported_package_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("node_modules/pkg");
+        fs::create_dir_all(package_dir.as_path()).expect("create package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./package.json":"./package.json"}}"#,
+        )
+        .expect("write package json");
+        let metadata = local_package_metadata(package_dir.as_path())
+            .expect("read metadata")
+            .expect("metadata");
+        let mut sources = Vec::new();
+
+        collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)
+            .expect("collect sources");
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].export_specifier, "pkg/package.json");
+        assert!(sources[0].source_path.ends_with("package.json"));
+        assert!(sources[0].external_importable);
+        assert!(sources[0].source.starts_with("export default "));
+    }
+
+    #[test]
     fn package_source_build_variant_selection_uses_semantic_path_hints() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
@@ -7485,6 +7516,57 @@ mod tests {
         assert_eq!(sources[0].export_specifier, "pkg/public/client");
         assert!(sources[0].source_path.contains("/dist/index.js"));
         assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn package_source_build_variant_selection_keeps_root_export_surface() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "pkg/public/client.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut sources = vec![
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/index.js",
+                "export const root = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/public/client",
+                "pkg@1.0.0/dist/index.js",
+                "export const client = 1;",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/public/client",
+                "pkg@1.0.0/src/public/client.ts",
+                "export const client = 1;",
+            ),
+        ];
+
+        filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+        assert!(
+            sources.iter().any(|source| source.export_specifier == "pkg"
+                && source.source_path.ends_with("index.js")
+                && source.external_importable),
+            "{sources:?}"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.export_specifier == "pkg/public/client"
+                    && source.source_path.contains("/dist/index.js")),
+            "{sources:?}"
+        );
     }
 
     #[test]
@@ -7667,6 +7749,77 @@ mod tests {
             fs::read_to_string(tempdir.path().join(".npmrc")).expect("npmrc"),
             "legacy-peer-deps=true\n"
         );
+    }
+
+    #[test]
+    fn project_writer_materializes_react_esm_compat_shims() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let files = vec![EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nconsole.log('ok');".to_string(),
+        }];
+
+        write_emitted_project(
+            &files,
+            &[],
+            tempdir.path(),
+            &[
+                RuntimeDependency {
+                    package_name: "react".to_string(),
+                    package_version: "19.1.5".to_string(),
+                },
+                RuntimeDependency {
+                    package_name: "react-dom".to_string(),
+                    package_version: "18.3.1".to_string(),
+                },
+            ],
+        )
+        .expect("project should be written");
+
+        let package_json = fs::read_to_string(tempdir.path().join("package.json"))
+            .expect("package json should be written");
+        let react_shim = fs::read_to_string(tempdir.path().join("vendor-shims/react/index.js"))
+            .expect("react shim should be written");
+        let react_dom_shim =
+            fs::read_to_string(tempdir.path().join("vendor-shims/react-dom/index.js"))
+                .expect("react-dom shim should be written");
+
+        assert!(package_json.contains("\"react\": \"file:./vendor-shims/react\""));
+        assert!(package_json.contains("\"react-cjs\": \"npm:react@19.1.5\""));
+        assert!(package_json.contains("\"react-dom\": \"file:./vendor-shims/react-dom\""));
+        assert!(package_json.contains("\"react-dom-cjs\": \"npm:react-dom@18.3.1\""));
+        assert!(react_shim.contains("export const useEffectEvent"));
+        assert!(react_dom_shim.contains("const load = () =>"));
+        assert!(
+            fs::read_to_string(tempdir.path().join("vendor-shims/react/package.json"))
+                .expect("react package")
+                .contains("\"version\": \"19.2.0\"")
+        );
+    }
+
+    #[test]
+    fn project_writer_adds_sentry_opentelemetry_peer_dependencies() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let files = vec![EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nconsole.log('ok');".to_string(),
+        }];
+
+        write_emitted_project(
+            &files,
+            &[],
+            tempdir.path(),
+            &[RuntimeDependency {
+                package_name: "@sentry/node".to_string(),
+                package_version: "8.55.0".to_string(),
+            }],
+        )
+        .expect("project should be written");
+
+        let package_json = fs::read_to_string(tempdir.path().join("package.json"))
+            .expect("package json should be written");
+        assert!(package_json.contains("\"@opentelemetry/context-async-hooks\": \"^1.30.1\""));
+        assert!(package_json.contains("\"@opentelemetry/instrumentation\": \"^0.57.1\""));
     }
 
     #[test]
@@ -7924,14 +8077,11 @@ mod tests {
                 },
             )
             .expect("stale accepted attribution should be rewritten");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
-        assert_eq!(export_specifier.as_deref(), Some("pkg/add.js"));
-        assert_eq!(
-            external_import_policy_version,
-            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
-        );
-        assert_eq!(rejection_reason, None);
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(export_specifier, None);
+        assert_eq!(external_import_policy_version, 0);
+        assert!(rejection_reason.is_some());
     }
 
     #[test]
@@ -7996,13 +8146,10 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("accepted attribution should be rewritten");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
-        assert_eq!(export_specifier.as_deref(), Some("pkg/add.js"));
-        assert_eq!(
-            external_import_policy_version,
-            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
-        );
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(export_specifier, None);
+        assert_eq!(external_import_policy_version, 0);
     }
 
     #[test]
@@ -8038,8 +8185,8 @@ mod tests {
         assert_eq!(outcome.package_source_quality_trusted, 0);
         assert_eq!(outcome.package_source_quality_invalid, 1);
         assert_eq!(
-            outcome.matched_modules, 1,
-            "invalid source still gets a forced external package match in no-fallback mode"
+            outcome.matched_modules, 0,
+            "invalid source must not be forced to an external package import"
         );
         assert_eq!(outcome.function_ownership_matches, 0);
     }
@@ -8220,6 +8367,65 @@ mod tests {
         assert_eq!(emission_mode, "external_import");
         assert_eq!(package_version, "1.2.3");
         assert_eq!(export_specifier, "pkg/add");
+    }
+
+    #[test]
+    fn match_packages_externalizes_exported_package_json_from_package_source_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.as_path()).expect("create package dir");
+        let package_json =
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./package.json":"./package.json"}}"#;
+        fs::write(package_dir.join("package.json"), package_json).expect("write package json");
+        let bundled_source =
+            json_package_source_module(package_json).expect("json package source module");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            bundled_source.as_str(),
+            &[],
+        );
+        connection
+            .execute(
+                "UPDATE modules SET semantic_name = 'pkg/package-json.ts', package_version = '1.2.3' WHERE id = 10",
+                [],
+            )
+            .expect("set package json semantic path");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 1);
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.written_attributions, 1);
+        let (status, emission_mode, export_specifier, resolved_file): (
+            String,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, export_specifier, resolved_file
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("package.json export should be externalized");
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(export_specifier, "pkg/package.json");
+        assert!(resolved_file.ends_with("package.json"));
     }
 
     #[test]
@@ -8404,16 +8610,12 @@ mod tests {
                     ))
                 },
             )
-            .expect("require-only export should write a forced external attribution");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+            .expect("require-only export should write a rejected ownership attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert!(
-            export_specifier
-                .as_deref()
-                .is_some_and(|specifier| specifier.starts_with("pkg"))
-        );
-        assert_eq!(rejection_reason, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.is_some());
     }
 
     #[test]
@@ -8470,15 +8672,11 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("ambiguous wildcard export should write a forced external attribution");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+            .expect("ambiguous wildcard export should write a rejected ownership attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert!(
-            export_specifier
-                .as_deref()
-                .is_some_and(|specifier| specifier.starts_with("pkg"))
-        );
+        assert_eq!(export_specifier, None);
     }
 
     #[test]
@@ -8625,7 +8823,7 @@ mod tests {
         assert_eq!(outcome.written_function_attributions, 0);
         assert_eq!(
             outcome.written_attributions, 1,
-            "the module should receive a forced external no-fallback decision"
+            "the module should receive a rejected ownership decision when the import target is unsafe"
         );
 
         let (
@@ -8663,16 +8861,12 @@ mod tests {
                 },
             )
             .expect("source-only function ownership should write a rejected attribution");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert!(
-            export_specifier
-                .as_deref()
-                .is_some_and(|specifier| specifier.starts_with("pkg"))
-        );
-        assert_eq!(rejection_reason, None);
-        assert!(evidence.contains("forced-external"));
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.is_some());
+        assert!(evidence.contains("cascade_function_coverage"));
     }
 
     #[test]
@@ -8833,9 +9027,9 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("wrapper should have forced external ownership attribution");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+            .expect("wrapper should have rejected ownership attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert!(evidence.contains("dependency_closure_ownership"));
         assert!(evidence.contains("exact-hint:pkg@1.2.3"));
@@ -8925,11 +9119,11 @@ mod tests {
                     ))
                 },
             )
-            .expect("weak resolved hint should write forced external ownership");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+            .expect("weak resolved hint should write rejected ownership evidence");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("7.8.2"));
-        assert_eq!(rejection_reason, None);
+        assert!(rejection_reason.is_some());
         assert!(evidence_json.contains("rxjs"));
     }
 
@@ -8996,7 +9190,7 @@ mod tests {
         );
         assert_eq!(
             outcome.written_attributions, 1,
-            "partial ownership must be persisted as a forced external decision"
+            "partial ownership should be persisted as rejected source-retention evidence"
         );
         assert!(
             outcome.written_function_attributions >= 2,
@@ -9027,16 +9221,12 @@ mod tests {
                     ))
                 },
             )
-            .expect("partial function ownership should write a forced external attribution");
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
+            .expect("partial function ownership should write a rejected ownership attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert!(
-            export_specifier
-                .as_deref()
-                .is_some_and(|specifier| specifier.starts_with("pkg"))
-        );
-        assert_eq!(rejection_reason, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.is_some());
     }
 
     #[test]
@@ -9468,18 +9658,14 @@ mod tests {
             )
             .expect("proposed row should be replaced");
 
-        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(outcome.matched_modules, 0);
         assert_eq!(outcome.written_attributions, 1);
         assert_eq!(package_attribution_count(&connection), 1);
-        assert_eq!(status, "accepted");
-        assert_eq!(emission_mode, "external_import");
-        assert_eq!(package_version.as_deref(), Some("*"));
-        assert!(
-            export_specifier
-                .as_deref()
-                .is_some_and(|specifier| specifier.starts_with("pkg"))
-        );
-        assert_eq!(rejection_reason, None);
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version, None);
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.is_some());
         reverts_input::sqlite::load_project_bundle_from_connection(&connection, 1)
             .expect("forced external attribution should satisfy generation input contract");
     }

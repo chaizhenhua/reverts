@@ -289,25 +289,49 @@ pub fn package_source_external_import_rank(source: &PackageSource) -> u8 {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    if extension == "mjs" || path_has_any_segment(path.as_str(), &["esm", "es", "module"]) {
+    if extension == "mjs"
+        || path_has_any_segment(
+            path.as_str(),
+            &["dist-es", "esm", "es", "module", "modules"],
+        )
+    {
         return 0;
     }
-    if extension == "cjs" || path_has_any_segment(path.as_str(), &["cjs", "commonjs"]) {
+    if extension == "cjs" || path_has_any_segment(path.as_str(), &["dist-cjs", "cjs", "commonjs"]) {
         return 1;
     }
     if path_has_any_segment(path.as_str(), &["node"]) {
         return 2;
     }
-    if path_has_any_segment(path.as_str(), &["umd", "bundles", "bundle"]) {
+    if path_has_any_segment(path.as_str(), &["browser"]) {
         return 3;
     }
-    if path_has_any_segment(path.as_str(), &["dist", "lib", "build"]) {
+    if path_has_any_segment(path.as_str(), &["umd", "bundles", "bundle"]) {
         return 4;
     }
-    if path_has_any_segment(path.as_str(), &["src", "source", "sources"]) {
+    if path_has_any_segment(path.as_str(), &["dist", "lib", "build"]) {
+        return 5;
+    }
+    let path_segments = path
+        .split('/')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    if path_segments.len() == 1
+        && matches!(
+            path_segments.first().copied(),
+            Some("index.js" | "index.mjs")
+        )
+    {
         return 6;
     }
-    5
+    if path_segments.len() == 1 {
+        return 7;
+    }
+    if path_has_any_segment(path.as_str(), &["src", "source", "sources"]) {
+        return 8;
+    }
+    9
 }
 
 fn path_has_any_segment(path: &str, candidates: &[&str]) -> bool {
@@ -620,6 +644,46 @@ mod tests {
         assert_eq!(
             package_source_semantic_surface_hint_score(&source, "public/api"),
             5
+        );
+    }
+
+    #[test]
+    fn package_source_external_import_rank_prefers_esm_and_root_index() {
+        let esm = PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg",
+            "pkg@1.2.3/dist-es/index.js",
+            "export {};",
+        );
+        let cjs = PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg",
+            "pkg@1.2.3/dist-cjs/index.js",
+            "module.exports = {};",
+        );
+        let index = PackageSource::external(
+            "lodash",
+            "4.2.0",
+            "lodash",
+            "lodash@4.2.0/index.js",
+            "module.exports = {};",
+        );
+        let named_root = PackageSource::external(
+            "lodash",
+            "4.2.0",
+            "lodash",
+            "lodash@4.2.0/lodash.js",
+            "module.exports = {};",
+        );
+
+        assert!(
+            package_source_external_import_rank(&esm) < package_source_external_import_rank(&cjs)
+        );
+        assert!(
+            package_source_external_import_rank(&index)
+                < package_source_external_import_rank(&named_root)
         );
     }
 }

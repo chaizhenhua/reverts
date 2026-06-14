@@ -134,6 +134,7 @@ fn write_typescript_project_scaffold(
     let package_json =
         typescript_package_json(runtime_dependencies, has_cli_entrypoint, !assets.is_empty());
     write_project_file(output, "package.json", package_json.as_str())?;
+    write_package_compat_shims(output, runtime_dependencies)?;
     if should_write_legacy_peer_deps_npmrc(runtime_dependencies) {
         write_project_file(output, ".npmrc", TYPESCRIPT_NPMRC)?;
     }
@@ -208,6 +209,20 @@ fn typescript_package_json(
             serde_json::Value::String(dependency.package_version.clone()),
         );
     }
+    for shim in package_compat_shims(runtime_dependencies) {
+        dependencies.insert(
+            shim.package_name.to_string(),
+            serde_json::Value::String(format!("file:./vendor-shims/{}", shim.package_name)),
+        );
+        dependencies.insert(
+            shim.alias_name.to_string(),
+            serde_json::Value::String(format!(
+                "npm:{}@{}",
+                shim.package_name, shim.package_version
+            )),
+        );
+    }
+    add_known_runtime_peer_dependencies(&mut dependencies);
 
     let mut scripts = serde_json::Map::new();
     scripts.insert(
@@ -250,6 +265,280 @@ fn typescript_package_json(
     }
     serde_json::to_string_pretty(&package).expect("package.json scaffold is serializable") + "\n"
 }
+
+fn add_known_runtime_peer_dependencies(
+    dependencies: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if dependencies.contains_key("@sentry/node")
+        || dependencies.contains_key("@sentry/opentelemetry")
+    {
+        insert_dependency_if_absent(
+            dependencies,
+            "@opentelemetry/context-async-hooks",
+            "^1.30.1",
+        );
+        insert_dependency_if_absent(dependencies, "@opentelemetry/instrumentation", "^0.57.1");
+    }
+}
+
+fn insert_dependency_if_absent(
+    dependencies: &mut serde_json::Map<String, serde_json::Value>,
+    package_name: &str,
+    package_version: &str,
+) {
+    dependencies
+        .entry(package_name.to_string())
+        .or_insert_with(|| serde_json::Value::String(package_version.to_string()));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PackageCompatShim<'a> {
+    package_name: &'a str,
+    package_version: &'a str,
+    alias_name: &'a str,
+}
+
+fn package_compat_shims(runtime_dependencies: &[RuntimeDependency]) -> Vec<PackageCompatShim<'_>> {
+    runtime_dependencies
+        .iter()
+        .filter_map(|dependency| match dependency.package_name.as_str() {
+            "react" => Some(PackageCompatShim {
+                package_name: "react",
+                package_version: dependency.package_version.as_str(),
+                alias_name: "react-cjs",
+            }),
+            "react-dom" => Some(PackageCompatShim {
+                package_name: "react-dom",
+                package_version: dependency.package_version.as_str(),
+                alias_name: "react-dom-cjs",
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn write_package_compat_shims(
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+) -> Result<(), CliRunError> {
+    for shim in package_compat_shims(runtime_dependencies) {
+        match shim.package_name {
+            "react" => write_react_compat_shim(output)?,
+            "react-dom" => write_react_dom_compat_shim(output)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn write_react_compat_shim(output: &Path) -> Result<(), CliRunError> {
+    write_project_file(
+        output,
+        "vendor-shims/react/package.json",
+        REACT_COMPAT_PACKAGE_JSON,
+    )?;
+    write_project_file(output, "vendor-shims/react/index.js", REACT_COMPAT_INDEX_JS)?;
+    write_project_file(
+        output,
+        "vendor-shims/react/jsx-runtime.js",
+        REACT_COMPAT_JSX_RUNTIME_JS,
+    )?;
+    write_project_file(
+        output,
+        "vendor-shims/react/jsx-dev-runtime.js",
+        REACT_COMPAT_JSX_DEV_RUNTIME_JS,
+    )?;
+    Ok(())
+}
+
+fn write_react_dom_compat_shim(output: &Path) -> Result<(), CliRunError> {
+    write_project_file(
+        output,
+        "vendor-shims/react-dom/package.json",
+        REACT_DOM_COMPAT_PACKAGE_JSON,
+    )?;
+    write_project_file(
+        output,
+        "vendor-shims/react-dom/index.js",
+        REACT_DOM_COMPAT_INDEX_JS,
+    )?;
+    write_project_file(
+        output,
+        "vendor-shims/react-dom/client.js",
+        REACT_DOM_COMPAT_CLIENT_JS,
+    )?;
+    write_project_file(
+        output,
+        "vendor-shims/react-dom/server.js",
+        REACT_DOM_COMPAT_SERVER_JS,
+    )?;
+    Ok(())
+}
+
+const REACT_COMPAT_PACKAGE_JSON: &str = r#"{
+  "name": "react",
+  "version": "19.2.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./jsx-runtime": "./jsx-runtime.js",
+    "./jsx-dev-runtime": "./jsx-dev-runtime.js"
+  }
+}
+"#;
+
+const REACT_COMPAT_INDEX_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const React = require('react-cjs');
+
+export default React;
+export const Children = React.Children;
+export const Component = React.Component;
+export const Fragment = React.Fragment;
+export const Profiler = React.Profiler;
+export const PureComponent = React.PureComponent;
+export const StrictMode = React.StrictMode;
+export const Suspense = React.Suspense;
+export const __CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE = React.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE;
+export const __COMPILER_RUNTIME = React.__COMPILER_RUNTIME;
+export const act = React.act;
+export const cache = React.cache;
+export const captureOwnerStack = React.captureOwnerStack;
+export const cloneElement = React.cloneElement;
+export const createContext = React.createContext;
+export const createElement = React.createElement;
+export const createRef = React.createRef;
+export const forwardRef = React.forwardRef;
+export const isValidElement = React.isValidElement;
+export const lazy = React.lazy;
+export const memo = React.memo;
+export const startTransition = React.startTransition;
+export const unstable_useCacheRefresh = React.unstable_useCacheRefresh;
+export const use = React.use;
+export const useActionState = React.useActionState;
+export const useCallback = React.useCallback;
+export const useContext = React.useContext;
+export const useDebugValue = React.useDebugValue;
+export const useDeferredValue = React.useDeferredValue;
+export const useEffect = React.useEffect;
+export const useEffectEvent = React.useEffectEvent ?? ((handler) => handler);
+export const useId = React.useId;
+export const useImperativeHandle = React.useImperativeHandle;
+export const useInsertionEffect = React.useInsertionEffect;
+export const useLayoutEffect = React.useLayoutEffect;
+export const useMemo = React.useMemo;
+export const useOptimistic = React.useOptimistic;
+export const useReducer = React.useReducer;
+export const useRef = React.useRef;
+export const useState = React.useState;
+export const useSyncExternalStore = React.useSyncExternalStore;
+export const useTransition = React.useTransition;
+export const version = React.version;
+"#;
+
+const REACT_COMPAT_JSX_RUNTIME_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const runtime = require('react-cjs/jsx-runtime');
+
+export default runtime;
+export const Fragment = runtime.Fragment;
+export const jsx = runtime.jsx;
+export const jsxs = runtime.jsxs;
+"#;
+
+const REACT_COMPAT_JSX_DEV_RUNTIME_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const runtime = require('react-cjs/jsx-dev-runtime');
+
+export default runtime;
+export const Fragment = runtime.Fragment;
+export const jsxDEV = runtime.jsxDEV;
+"#;
+
+const REACT_DOM_COMPAT_PACKAGE_JSON: &str = r#"{
+  "name": "react-dom",
+  "version": "19.2.0",
+  "private": true,
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./server": "./server.js"
+  }
+}
+"#;
+
+const REACT_DOM_COMPAT_INDEX_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+let cached;
+const load = () => (cached ??= require('react-dom-cjs'));
+const proxy = new Proxy({}, {
+  get(_target, property) {
+    return load()[property];
+  },
+  has(_target, property) {
+    return property in load();
+  },
+  ownKeys() {
+    return Reflect.ownKeys(load());
+  },
+  getOwnPropertyDescriptor(_target, property) {
+    const descriptor = Object.getOwnPropertyDescriptor(load(), property);
+    return descriptor ? { ...descriptor, configurable: true } : undefined;
+  }
+});
+
+export default proxy;
+export const createPortal = (...args) => load().createPortal(...args);
+export const flushSync = (...args) => load().flushSync(...args);
+export const preconnect = (...args) => load().preconnect?.(...args);
+export const prefetchDNS = (...args) => load().prefetchDNS?.(...args);
+export const preinit = (...args) => load().preinit?.(...args);
+export const preinitModule = (...args) => load().preinitModule?.(...args);
+export const preload = (...args) => load().preload?.(...args);
+export const preloadModule = (...args) => load().preloadModule?.(...args);
+export const requestFormReset = (...args) => load().requestFormReset?.(...args);
+export const unstable_batchedUpdates = (...args) => load().unstable_batchedUpdates?.(...args);
+export const useFormState = (...args) => load().useFormState?.(...args);
+export const useFormStatus = (...args) => load().useFormStatus?.(...args);
+"#;
+
+const REACT_DOM_COMPAT_CLIENT_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+let cached;
+const load = () => (cached ??= require('react-dom-cjs/client'));
+const proxy = new Proxy({}, {
+  get(_target, property) {
+    return load()[property];
+  }
+});
+
+export default proxy;
+export const createRoot = (...args) => load().createRoot(...args);
+export const hydrateRoot = (...args) => load().hydrateRoot(...args);
+"#;
+
+const REACT_DOM_COMPAT_SERVER_JS: &str = r#"import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+let cached;
+const load = () => (cached ??= require('react-dom-cjs/server'));
+const proxy = new Proxy({}, {
+  get(_target, property) {
+    return load()[property];
+  }
+});
+
+export default proxy;
+export const renderToNodeStream = (...args) => load().renderToNodeStream?.(...args);
+export const renderToPipeableStream = (...args) => load().renderToPipeableStream?.(...args);
+export const renderToReadableStream = (...args) => load().renderToReadableStream?.(...args);
+export const renderToStaticMarkup = (...args) => load().renderToStaticMarkup?.(...args);
+export const renderToStaticNodeStream = (...args) => load().renderToStaticNodeStream?.(...args);
+export const renderToString = (...args) => load().renderToString?.(...args);
+"#;
 
 fn typescript_copy_assets_script(assets: &[EmittedAsset]) -> String {
     let manifest = assets

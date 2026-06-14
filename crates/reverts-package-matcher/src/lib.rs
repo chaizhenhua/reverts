@@ -589,6 +589,7 @@ pub fn match_packages_with_pipeline(
     };
     mark_timing!("versioned_matcher");
 
+    let skip_cascade = package_sources.len() > CASCADE_PIPELINE_SOURCE_LIMIT;
     let package_matched_modules = if package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT {
         package_report
             .matches
@@ -598,15 +599,26 @@ pub fn match_packages_with_pipeline(
     } else {
         BTreeSet::new()
     };
-    let fingerprints_by_module = fingerprints_from_rows(
-        rows,
-        package_filter,
-        &package_matched_modules,
-        package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT,
-    );
+    let fingerprints_by_module = if skip_cascade {
+        BTreeMap::new()
+    } else {
+        fingerprints_from_rows(
+            rows,
+            package_filter,
+            &package_matched_modules,
+            package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT,
+        )
+    };
     mark_timing!("module_function_fingerprints");
-    let cascade_report =
-        match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources);
+    let cascade_report = if skip_cascade {
+        CascadeMatchReport {
+            attributions: Vec::new(),
+            ownership_matches: Vec::new(),
+            audit: AuditReport::default(),
+        }
+    } else {
+        match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources)
+    };
     mark_timing!("cascade_match");
     promote_cascade_function_coverage_to_module_attributions(
         rows,
@@ -619,17 +631,24 @@ pub fn match_packages_with_pipeline(
     let function_ownership_matches = cascade_report.ownership_matches.len();
     package_report.audit.extend(cascade_report.audit);
 
-    let structural_bag_excluded_modules = package_report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let structural_bag_report = match_structural_bags_with_excluded_modules(
-        rows,
-        package_sources,
-        package_filter,
-        &structural_bag_excluded_modules,
-    );
+    let structural_bag_report = if skip_cascade {
+        StructuralBagMatchReport {
+            matches: Vec::new(),
+            audit: AuditReport::default(),
+        }
+    } else {
+        let structural_bag_excluded_modules = package_report
+            .matches
+            .iter()
+            .map(|package_match| package_match.module_id)
+            .collect::<BTreeSet<_>>();
+        match_structural_bags_with_excluded_modules(
+            rows,
+            package_sources,
+            package_filter,
+            &structural_bag_excluded_modules,
+        )
+    };
     mark_timing!("structural_bag");
     promote_structural_bag_ownership_matches(
         rows,
@@ -753,7 +772,7 @@ fn match_with_cascade_scoped_by_module_hints(
         audit: AuditReport::default(),
     };
     for ((package_name, package_version), scoped_fingerprints) in grouped_fingerprints {
-        let scoped_sources = package_sources
+        let mut scoped_sources = package_sources
             .iter()
             .filter(|source| {
                 package_name
@@ -765,6 +784,14 @@ fn match_with_cascade_scoped_by_module_hints(
             })
             .cloned()
             .collect::<Vec<_>>();
+        if package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT
+            && scoped_sources.len() > CASCADE_SOURCE_GROUP_LIMIT
+        {
+            scoped_sources.retain(|source| source.external_importable);
+        }
+        if scoped_sources.len() > CASCADE_SOURCE_GROUP_LIMIT {
+            continue;
+        }
         if scoped_sources.is_empty() {
             continue;
         }
@@ -1042,7 +1069,12 @@ fn promote_exact_hint_ownership_matches(
         }
         let external_specifier = (quality == PackageModuleSourceQuality::Trusted)
             .then(|| {
-                exact_hint_root_external_specifier(package_sources, package_name, package_version)
+                exact_hint_root_external_specifier(
+                    package_sources,
+                    package_name,
+                    package_version,
+                    module.semantic_path.as_str(),
+                )
             })
             .flatten();
         let external_importable = external_specifier.is_some();
@@ -1081,7 +1113,11 @@ fn exact_hint_root_external_specifier(
     package_sources: &[PackageSource],
     package_name: &str,
     package_version: &str,
+    semantic_path: &str,
 ) -> Option<String> {
+    if !semantic_path_is_package_root(package_name, semantic_path) {
+        return None;
+    }
     let specifiers = package_sources
         .iter()
         .filter(|source| {
@@ -1099,6 +1135,33 @@ fn exact_hint_root_external_specifier(
             .next()
             .expect("one root external specifier")
     })
+}
+
+fn semantic_path_is_package_root(package_name: &str, semantic_path: &str) -> bool {
+    let clean = semantic_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
+    for prefix in package_semantic_path_prefixes(package_name) {
+        let prefix = prefix.trim_matches('/');
+        if clean == prefix {
+            return true;
+        }
+        if let Some(rest) = clean.strip_prefix(format!("{prefix}/").as_str()) {
+            let rest = strip_source_extension(rest).trim_matches('/');
+            if rest.is_empty()
+                || rest == "index"
+                || rest
+                    .split('/')
+                    .all(|segment| is_build_path_segment(segment) || segment == "index")
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn promote_dependency_closure_ownership_matches(
@@ -1346,6 +1409,7 @@ fn promote_importable_ownership_matches(
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
+    let external_source_index = ExternalImportSourceIndex::build(package_sources);
     let mut promotions = Vec::<(usize, PackageAttributionInput, String, String)>::new();
 
     for (idx, package_match) in report.matches.iter().enumerate() {
@@ -1376,12 +1440,14 @@ fn promote_importable_ownership_matches(
         {
             continue;
         }
-        let import_target = importable_package_source_for_module(
+        let Some(import_target) = importable_package_source_for_module(
             module,
             package_match,
-            package_sources,
+            &external_source_index,
             slice.source,
-        );
+        ) else {
+            continue;
+        };
         let mut attribution = PackageAttributionInput::accepted_external(
             module.id,
             package_match.package_name.as_str(),
@@ -1416,8 +1482,6 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
         strategy,
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-            | ModuleMatchStrategy::DependencyClosureOwnership
     )
 }
 
@@ -1427,22 +1491,108 @@ struct ExternalImportTarget {
     source_path: String,
 }
 
+#[derive(Debug, Default)]
+struct ExternalImportSourceIndex<'a> {
+    by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
+    normalized_by_version_hash:
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
+}
+
+impl<'a> ExternalImportSourceIndex<'a> {
+    fn build(package_sources: &'a [PackageSource]) -> Self {
+        let mut index = Self::default();
+        for source in package_sources
+            .iter()
+            .filter(|source| source.external_importable)
+        {
+            index
+                .by_version
+                .entry(source.package_name.clone())
+                .or_default()
+                .entry(source.package_version.clone())
+                .or_default()
+                .push(source);
+            if let Ok(normalized) =
+                normalize_source(source.source_path.as_str(), source.source.as_str())
+            {
+                let normalized_hash = stable_hash(normalized.as_bytes());
+                index
+                    .normalized_by_version_hash
+                    .entry(source.package_name.clone())
+                    .or_default()
+                    .entry(source.package_version.clone())
+                    .or_default()
+                    .entry(normalized_hash)
+                    .or_default()
+                    .push(source);
+            }
+        }
+        for versions in index.by_version.values_mut() {
+            for sources in versions.values_mut() {
+                sort_external_sources(sources);
+            }
+        }
+        for versions in index.normalized_by_version_hash.values_mut() {
+            for hashes in versions.values_mut() {
+                for sources in hashes.values_mut() {
+                    sort_external_sources(sources);
+                }
+            }
+        }
+        index
+    }
+
+    fn sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
+        self.by_version
+            .get(package_name)
+            .and_then(|versions| versions.get(package_version))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn normalized_sources(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        normalized_hash: &str,
+    ) -> &[&'a PackageSource] {
+        self.normalized_by_version_hash
+            .get(package_name)
+            .and_then(|versions| versions.get(package_version))
+            .and_then(|hashes| hashes.get(normalized_hash))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+fn sort_external_sources(sources: &mut [&PackageSource]) {
+    sources.sort_by(|left, right| compare_external_sources(left, right));
+}
+
+fn compare_external_sources(left: &PackageSource, right: &PackageSource) -> Ordering {
+    package_source_external_import_rank(left)
+        .cmp(&package_source_external_import_rank(right))
+        .then_with(|| left.export_specifier.cmp(&right.export_specifier))
+        .then_with(|| left.source_path.cmp(&right.source_path))
+}
+
 fn importable_package_source_for_module(
     module: &ModuleInput,
     package_match: &PackageMatch,
-    package_sources: &[PackageSource],
+    external_source_index: &ExternalImportSourceIndex<'_>,
     module_source: &str,
-) -> ExternalImportTarget {
-    resolve_external_import_target(
+) -> Option<ExternalImportTarget> {
+    resolve_external_import_target_with_index(
         module,
         package_match.package_name.as_str(),
         package_match.package_version.as_str(),
         Some(package_match),
-        package_sources,
+        external_source_index,
         module_source,
     )
 }
 
+#[cfg(test)]
 fn resolve_external_import_target(
     module: &ModuleInput,
     package_name: &str,
@@ -1450,68 +1600,93 @@ fn resolve_external_import_target(
     package_match: Option<&PackageMatch>,
     package_sources: &[PackageSource],
     module_source: &str,
-) -> ExternalImportTarget {
+) -> Option<ExternalImportTarget> {
+    let external_source_index = ExternalImportSourceIndex::build(package_sources);
+    resolve_external_import_target_with_index(
+        module,
+        package_name,
+        package_version,
+        package_match,
+        &external_source_index,
+        module_source,
+    )
+}
+
+fn resolve_external_import_target_with_index(
+    module: &ModuleInput,
+    package_name: &str,
+    package_version: &str,
+    package_match: Option<&PackageMatch>,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+) -> Option<ExternalImportTarget> {
     if let Some(package_match) = package_match
-        && let Some(target) = exact_importable_package_match_source(package_match, package_sources)
+        && let Some(target) =
+            exact_importable_package_match_source(package_match, external_source_index)
     {
-        return target;
+        return Some(target);
+    }
+
+    if let Some(target) = normalized_source_external_package_source(
+        module,
+        package_name,
+        package_version,
+        external_source_index,
+        module_source,
+    ) {
+        return Some(target);
+    }
+
+    if !package_match.is_some_and(package_match_can_use_semantic_external_target) {
+        return None;
     }
 
     let hints = module_package_semantic_path_hints(
         package_name,
         module.semantic_path.as_str(),
         module_source,
-        SemanticPathHintMode::ForcedExternal,
+        SemanticPathHintMode::ImportProof,
     );
     if let Some(target) = semantic_external_package_source(
         package_name,
         package_version,
-        package_sources,
+        external_source_index,
         hints.as_slice(),
     ) {
-        return target;
+        return Some(target);
     }
 
-    if let Some(package_match) = package_match
-        && usable_forced_export_specifier(package_name, package_match.export_specifier.as_str())
-    {
-        return ExternalImportTarget {
-            export_specifier: package_match.export_specifier.clone(),
-            source_path: format!("forced-external:source-match:{}", package_match.source_path),
-        };
-    }
-    if let Some(export_specifier) =
-        forced_semantic_external_specifier_from_hints(package_name, hints.as_slice())
-    {
-        return ExternalImportTarget {
-            source_path: format!(
-                "forced-external:semantic-path:{package_name}@{package_version}:{export_specifier}"
-            ),
-            export_specifier,
-        };
-    }
-    ExternalImportTarget {
-        export_specifier: package_name.to_string(),
-        source_path: format!("forced-external:package-root:{package_name}@{package_version}"),
+    None
+}
+
+fn package_match_can_use_semantic_external_target(package_match: &PackageMatch) -> bool {
+    match package_match.strategy {
+        ModuleMatchStrategy::NormalizedSourceHash => true,
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors => {
+            package_match.function_signature_matches > 0 && package_match.string_anchor_matches > 0
+        }
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadeFunctionOwnership
+        | ModuleMatchStrategy::CascadePartialFunctionCoverage
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership => false,
     }
 }
 
 fn semantic_external_package_source(
     package_name: &str,
     package_version: &str,
-    package_sources: &[PackageSource],
+    external_source_index: &ExternalImportSourceIndex<'_>,
     hints: &[String],
 ) -> Option<ExternalImportTarget> {
     if hints.is_empty() {
-        return unique_root_external_source(package_sources, package_name, package_version);
+        return None;
     }
-    let mut scored = package_sources
+    let mut scored = external_source_index
+        .sources(package_name, package_version)
         .iter()
-        .filter(|source| {
-            source.external_importable
-                && source.package_name == package_name
-                && source.package_version == package_version
-        })
+        .copied()
         .filter_map(|source| {
             let (score, proof) = hints
                 .iter()
@@ -1538,20 +1713,28 @@ fn semantic_external_package_source(
     let best = scored
         .into_iter()
         .filter(|(_source, score, proof)| *score == best_score && *proof == best_proof)
-        .map(|(source, _score, _proof)| {
-            (
-                source.export_specifier.as_str(),
-                source.source_path.as_str(),
-            )
-        })
+        .map(|(source, _score, _proof)| source)
+        .collect::<Vec<_>>();
+    let export_specifiers = best
+        .iter()
+        .map(|source| source.export_specifier.as_str())
         .collect::<BTreeSet<_>>();
-    if best.len() != 1 {
+    if export_specifiers.len() != 1 {
         return None;
     }
-    let (export_specifier, source_path) = best.into_iter().next()?;
+    let export_specifier = export_specifiers.into_iter().next()?;
+    let source = best.into_iter().min_by(|left, right| {
+        package_source_external_import_rank(left)
+            .cmp(&package_source_external_import_rank(right))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    })?;
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: format!("forced-external:{}:{source_path}", best_proof.label()),
+        source_path: format!(
+            "forced-external:{}:{}",
+            best_proof.label(),
+            source.source_path
+        ),
     })
 }
 
@@ -1594,16 +1777,22 @@ fn semantic_external_source_score(
 
 fn exact_importable_package_match_source(
     package_match: &PackageMatch,
-    package_sources: &[PackageSource],
+    external_source_index: &ExternalImportSourceIndex<'_>,
 ) -> Option<ExternalImportTarget> {
-    let exact_source_paths = package_sources
+    if package_match.strategy != ModuleMatchStrategy::NormalizedSourceHash
+        || package_match.normalized_source_hash.trim().is_empty()
+    {
+        return None;
+    }
+    let sources = external_source_index.normalized_sources(
+        package_match.package_name.as_str(),
+        package_match.package_version.as_str(),
+        package_match.normalized_source_hash.as_str(),
+    );
+    let exact_source_paths = sources
         .iter()
-        .filter(|source| {
-            source.external_importable
-                && source.package_name == package_match.package_name
-                && source.package_version == package_match.package_version
-                && source.source_path == package_match.source_path
-        })
+        .copied()
+        .filter(|source| source.source_path == package_match.source_path)
         .map(|source| {
             (
                 source.export_specifier.as_str(),
@@ -1618,18 +1807,37 @@ fn exact_importable_package_match_source(
             source_path: source_path.to_string(),
         });
     }
-    if package_match.export_specifier.trim().is_empty() {
+    None
+}
+
+fn normalized_source_external_package_source(
+    module: &ModuleInput,
+    package_name: &str,
+    package_version: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+) -> Option<ExternalImportTarget> {
+    if module_source.trim().is_empty() {
         return None;
     }
-    let source = unique_best_external_import_source(package_sources.iter().filter(|source| {
-        source.external_importable
-            && source.package_name == package_match.package_name
-            && source.package_version == package_match.package_version
-            && source.export_specifier == package_match.export_specifier
-    }))?;
+    let normalized = normalize_source(module.semantic_path.as_str(), module_source).ok()?;
+    let normalized_hash = stable_hash(normalized.as_bytes());
+    let candidates = external_source_index.normalized_sources(
+        package_name,
+        package_version,
+        normalized_hash.as_str(),
+    );
+    let best = *candidates.first()?;
+    let best_key = package_source_external_import_rank(best);
+    if candidates.get(1).is_some_and(|candidate| {
+        package_source_external_import_rank(candidate) == best_key
+            && candidate.export_specifier != best.export_specifier
+    }) {
+        return None;
+    }
     Some(ExternalImportTarget {
-        export_specifier: source.export_specifier.clone(),
-        source_path: format!("export-specifier-source:{}", source.source_path),
+        export_specifier: best.export_specifier.clone(),
+        source_path: format!("normalized-source-export:{}", best.source_path),
     })
 }
 
@@ -1813,6 +2021,7 @@ fn force_externalize_remaining_package_modules(
         .filter(|(_index, package_match)| !package_match.external_importable)
         .map(|(index, package_match)| (package_match.module_id, index))
         .collect::<BTreeMap<_, _>>();
+    let external_source_index = ExternalImportSourceIndex::build(package_sources);
     let mut forced = 0usize;
 
     for module in &rows.modules {
@@ -1834,14 +2043,16 @@ fn force_externalize_remaining_package_modules(
         let package_version =
             forced_external_package_version(module, source_only_match, package_sources)
                 .unwrap_or_else(|| "*".to_string());
-        let target = forced_external_import_target(
+        let Some(target) = forced_external_import_target(
             rows,
             module,
             package_name,
             package_version.as_str(),
             source_only_match,
-            package_sources,
-        );
+            &external_source_index,
+        ) else {
+            continue;
+        };
         let mut attribution = PackageAttributionInput::accepted_external(
             module.id,
             package_name,
@@ -1925,80 +2136,20 @@ fn forced_external_import_target(
     package_name: &str,
     package_version: &str,
     source_only_match: Option<&PackageMatch>,
-    package_sources: &[PackageSource],
-) -> ExternalImportTarget {
+    external_source_index: &ExternalImportSourceIndex<'_>,
+) -> Option<ExternalImportTarget> {
     let module_source = rows
         .module_source_slice(module.id)
         .map(|slice| slice.source)
         .unwrap_or_default();
-    resolve_external_import_target(
+    resolve_external_import_target_with_index(
         module,
         package_name,
         package_version,
         source_only_match,
-        package_sources,
+        external_source_index,
         module_source,
     )
-}
-
-fn unique_root_external_source(
-    package_sources: &[PackageSource],
-    package_name: &str,
-    package_version: &str,
-) -> Option<ExternalImportTarget> {
-    let source = unique_best_external_import_source(package_sources.iter().filter(|source| {
-        source.external_importable
-            && source.package_name == package_name
-            && source.package_version == package_version
-            && source.export_specifier == package_name
-    }))?;
-    Some(ExternalImportTarget {
-        export_specifier: package_name.to_string(),
-        source_path: format!("root-export-source:{}", source.source_path),
-    })
-}
-
-fn unique_best_external_import_source<'a>(
-    sources: impl IntoIterator<Item = &'a PackageSource>,
-) -> Option<&'a PackageSource> {
-    let mut scored = sources
-        .into_iter()
-        .map(|source| (package_source_external_import_rank(source), source))
-        .collect::<Vec<_>>();
-    scored.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then_with(|| left.1.source_path.cmp(&right.1.source_path))
-    });
-    let (best_rank, best_source) = scored.first().copied()?;
-    if scored
-        .get(1)
-        .is_some_and(|(rank, _source)| *rank == best_rank)
-    {
-        return None;
-    }
-    Some(best_source)
-}
-
-fn usable_forced_export_specifier(package_name: &str, export_specifier: &str) -> bool {
-    let Some((specifier_package, _subpath)) = split_bare_specifier(export_specifier) else {
-        return false;
-    };
-    specifier_package == package_name && !export_specifier.trim().is_empty()
-}
-
-fn forced_semantic_external_specifier_from_hints(
-    package_name: &str,
-    hints: &[String],
-) -> Option<String> {
-    let hint = hints.first()?.trim_matches('/');
-    if hint.is_empty() {
-        return None;
-    }
-    if package_name == "highlight.js" {
-        return Some(format!("{package_name}/lib/languages/{hint}"));
-    }
-    Some(format!("{package_name}/{hint}"))
 }
 
 fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
@@ -3318,6 +3469,8 @@ const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
 const STRING_ANCHOR_WEIGHT: u32 = 1;
 const MODULE_SOURCE_HASH_ALTERNATE_MAX_BYTES: usize = 64 * 1024;
 const CASCADE_MATCHED_MODULE_SOURCE_LIMIT: usize = 8;
+const CASCADE_PIPELINE_SOURCE_LIMIT: usize = 4096;
+const CASCADE_SOURCE_GROUP_LIMIT: usize = 128;
 
 fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool {
     matches!(
@@ -3340,8 +3493,8 @@ mod tests {
 
     use super::{
         BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy,
-        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageModuleSourceQuality, PackageSource,
-        VersionedPackageMatchReport, VersionedPackageMatcher, exact_hint_root_external_specifier,
+        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality,
+        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher,
         match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
@@ -3386,15 +3539,14 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_externalizes_empty_source_scope_without_cli_sidecar_report() {
+    fn pipeline_does_not_externalize_empty_source_scope_without_proof() {
         let rows = rows_with_package_source("export function add(a,b){return a+b}");
 
         let report = match_packages_with_pipeline(&rows, &[], None);
 
         assert!(report.package_report.audit.is_clean());
-        assert_eq!(report.package_report.matches.len(), 1);
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(report.package_report.matches.len(), 0);
+        assert_eq!(report.package_report.attributions.len(), 0);
         assert!(report.function_attributions.is_empty());
         assert_eq!(report.function_ownership_matches, 0);
     }
@@ -3607,18 +3759,26 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
-    fn exact_hint_promotion_does_not_externalize_json_without_source_match() {
+    fn exact_hint_promotion_does_not_externalize_without_source_match() {
+        let rows = rows_with_package_source_at_version("export const unrelated = 42;", "1.0.0");
         let package_sources = [PackageSource::external(
             "pkg",
             "1.0.0",
-            "pkg",
-            "pkg@1.0.0/data.json",
-            "export default {\"aliceblue\":\"#f0f8ff\"};\n",
+            "pkg/other",
+            "pkg@1.0.0/index.js",
+            "export const packageRoot = 1;",
         )];
 
-        let specifier = exact_hint_root_external_specifier(&package_sources, "pkg", "1.0.0");
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
 
-        assert_eq!(specifier, None);
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -3893,10 +4053,10 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .source_path
                 .contains("structural-bag:pkg@1.2.3")
         );
-        assert!(package_match.external_importable);
+        assert!(!package_match.external_importable);
         assert!(
-            !report.package_report.attributions.is_empty(),
-            "no-fallback pipeline must emit an external import"
+            report.package_report.attributions.is_empty(),
+            "ownership-only structural evidence must not emit an unproven external import"
         );
     }
 
@@ -3984,15 +4144,12 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
             })
             .expect("structural ownership should be present");
-        assert!(package_match.external_importable);
-        assert_eq!(package_match.export_specifier.as_str(), "pkg/first");
-        assert_eq!(report.package_report.attributions.len(), 1);
-        assert_eq!(
-            report.package_report.attributions[0]
-                .export_specifier
-                .as_deref(),
-            Some("pkg/first")
+        assert!(
+            !package_match.external_importable,
+            "structural ownership plus a semantic surface is not enough to replace module source"
         );
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4039,8 +4196,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
             })
             .expect("structural ownership should be present");
-        assert!(package_match.external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(
+            !package_match.external_importable,
+            "structural ownership must not fall back to the package root import"
+        );
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4069,8 +4229,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .source_path
                 .contains("exact-hint:pkg@1.2.3:quality=trusted")
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4094,18 +4254,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(
-            report.package_report.matches[0].export_specifier.as_str(),
-            "pkg/sample"
+        assert!(
+            !report.package_report.matches[0].external_importable,
+            "dependency-only hints do not prove the module body is the public subpath export"
         );
-        assert_eq!(report.package_report.attributions.len(), 1);
-        assert_eq!(
-            report.package_report.attributions[0]
-                .export_specifier
-                .as_deref(),
-            Some("pkg/sample")
-        );
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4129,11 +4282,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(
-            report.package_report.matches[0].export_specifier.as_str(),
-            "pkg/_arrayMap.js"
-        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4159,8 +4309,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4184,8 +4334,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4209,11 +4359,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(
-            report.package_report.matches[0].export_specifier.as_str(),
-            "pkg/_baseKeys.js"
-        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4237,8 +4384,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4261,8 +4408,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4282,27 +4429,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
 
         assert!(report.package_report.audit.is_clean());
         assert_eq!(report.package_report.matches.len(), 1);
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(
-            report.package_report.matches[0].export_specifier.as_str(),
-            "pkg/basekeys.js"
-        );
         assert!(
-            report.package_report.matches[0]
-                .source_path
-                .starts_with("forced-external:semantic-source:")
+            !report.package_report.matches[0].external_importable,
+            "plain filename similarity is only ownership evidence, not import replacement proof"
         );
-        assert_eq!(report.package_report.attributions.len(), 1);
-        assert_eq!(
-            report.package_report.attributions[0]
-                .export_specifier
-                .as_deref(),
-            Some("pkg/basekeys.js")
-        );
-        assert_eq!(
-            report.package_report.attributions[0].subpath.as_deref(),
-            Some("basekeys.js")
-        );
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4322,28 +4453,15 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
 
         assert!(report.package_report.audit.is_clean());
         assert_eq!(report.package_report.matches.len(), 1);
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(
-            report.package_report.matches[0].export_specifier.as_str(),
-            "pkg/public/api"
-        );
         assert!(
-            report.package_report.matches[0]
-                .source_path
-                .starts_with("forced-external:semantic-export:"),
-            "{}",
-            report.package_report.matches[0].source_path
+            !report.package_report.matches[0].external_importable,
+            "semantic export-surface names are not enough without source equivalence"
         );
-        assert_eq!(
-            report.package_report.attributions[0]
-                .export_specifier
-                .as_deref(),
-            Some("pkg/public/api")
-        );
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
-    fn pipeline_force_no_fallback_externalizes_source_only_ownership_in_matcher() {
+    fn pipeline_keeps_source_only_ownership_without_verified_import_target() {
         let mut rows =
             rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
         rows.modules[0].semantic_path = "pkg/sample.js".to_string();
@@ -4359,7 +4477,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
 
         assert!(report.package_report.audit.is_clean());
         assert_eq!(report.package_report.matches.len(), 1);
-        assert!(report.package_report.matches[0].external_importable);
+        assert!(!report.package_report.matches[0].external_importable);
         assert_eq!(
             report.package_report.matches[0].export_specifier.as_str(),
             "pkg"
@@ -4367,21 +4485,15 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(
             report.package_report.matches[0]
                 .source_path
-                .starts_with("forced-external:source-match:exact-hint:")
+                .starts_with("exact-hint:")
         );
-        assert_eq!(report.package_report.attributions.len(), 1);
-        assert_eq!(
-            report.package_report.attributions[0]
-                .resolved_file
-                .as_deref(),
-            Some(report.package_report.matches[0].source_path.as_str())
-        );
+        assert_eq!(report.package_report.attributions.len(), 0);
     }
 
     #[test]
     fn pipeline_resolves_source_match_export_specifier_to_best_esm_package_source() {
-        let mut rows =
-            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        let matched_source = "export const sharedSurface = 1;";
+        let mut rows = rows_with_package_source_at_version(matched_source, "1.2.3");
         rows.modules[0].semantic_path = "pkg/runtime.js".to_string();
         let package_sources = [
             PackageSource::external(
@@ -4389,14 +4501,14 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 "1.2.3",
                 "pkg",
                 "pkg@1.2.3/build/src/index.js",
-                "export const cjsFallback = 1;",
+                matched_source,
             ),
             PackageSource::external(
                 "pkg",
                 "1.2.3",
                 "pkg",
                 "pkg@1.2.3/build/esm/index.mjs",
-                "export const esmSurface = 1;",
+                matched_source,
             ),
         ];
 
@@ -4407,18 +4519,65 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(report.package_report.matches[0].external_importable);
         assert_eq!(
             report.package_report.matches[0].source_path.as_str(),
-            "export-specifier-source:pkg@1.2.3/build/esm/index.mjs"
+            "normalized-source-export:pkg@1.2.3/build/esm/index.mjs"
         );
         assert_eq!(
             report.package_report.attributions[0]
                 .resolved_file
                 .as_deref(),
-            Some("export-specifier-source:pkg@1.2.3/build/esm/index.mjs")
+            Some("normalized-source-export:pkg@1.2.3/build/esm/index.mjs")
         );
     }
 
     #[test]
-    fn pipeline_uses_root_export_source_proof_when_no_semantic_hints_exist() {
+    fn resolver_maps_exact_hint_root_to_normalized_export_source() {
+        let source = "export function fromPackage(){return 42;}";
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "pkgModule",
+            "pkg/unknown.js",
+            "pkg",
+            Some("1.2.3".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path: "exact-hint:pkg@1.2.3:quality=trusted".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/submodule.js",
+            "pkg@1.2.3/dist/esm/submodule.js",
+            source,
+        )];
+
+        let target = resolve_external_import_target(
+            &module,
+            "pkg",
+            "1.2.3",
+            Some(&package_match),
+            &package_sources,
+            source,
+        )
+        .expect("normalized external source should resolve");
+
+        assert_eq!(target.export_specifier.as_str(), "pkg/submodule.js");
+        assert_eq!(
+            target.source_path.as_str(),
+            "normalized-source-export:pkg@1.2.3/dist/esm/submodule.js"
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_root_export_without_source_equivalence() {
         let module = ModuleInput::package(
             ModuleId(10),
             "pkgRoot",
@@ -4443,38 +4602,18 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "function unrelated(){return 42;}",
         );
 
-        assert_eq!(
-            target.source_path.as_str(),
-            "root-export-source:pkg@1.2.3/index.js"
-        );
-        assert_eq!(target.export_specifier.as_str(), "pkg");
+        assert_eq!(target, None);
     }
 
     #[test]
-    fn pipeline_force_no_fallback_externalizes_without_package_sources() {
+    fn pipeline_does_not_externalize_without_package_sources() {
         let rows = rows_with_package_source("export function add(a,b){return a+b}");
 
         let report = match_packages_with_pipeline(&rows, &[], None);
 
         assert!(report.package_report.audit.is_clean());
-        assert_eq!(report.package_report.matches.len(), 1);
-        assert_eq!(
-            report.package_report.matches[0].source_path.as_str(),
-            "forced-external:semantic-path:pkg@*:pkg/module"
-        );
-        assert_eq!(report.package_report.attributions.len(), 1);
-        assert_eq!(
-            report.package_report.attributions[0]
-                .package_version
-                .as_deref(),
-            Some("*")
-        );
-        assert_eq!(
-            report.package_report.attributions[0]
-                .export_specifier
-                .as_deref(),
-            Some("pkg/module")
-        );
+        assert_eq!(report.package_report.matches.len(), 0);
+        assert_eq!(report.package_report.attributions.len(), 0);
     }
 
     #[test]
@@ -4507,8 +4646,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4577,8 +4716,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .source_path
                 .contains("exact-hint:pkg@1.2.3:quality=weak")
         );
-        assert!(report.package_report.matches[0].external_importable);
-        assert!(!report.package_report.attributions.is_empty());
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
@@ -4636,9 +4775,9 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "{}",
             package_match.source_path
         );
-        assert!(package_match.external_importable);
+        assert!(!package_match.external_importable);
         assert!(
-            report
+            !report
                 .package_report
                 .attributions
                 .iter()
@@ -4647,7 +4786,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                         && attribution.emission_mode
                             == reverts_input::PackageEmissionMode::ExternalImport
                 }),
-            "no-fallback pipeline must emit an external import"
+            "ownership-only evidence must not emit an unproven external import"
         );
     }
 
@@ -4699,9 +4838,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         let report = match_packages_with_pipeline(&rows, &package_sources, None);
 
         assert!(report.package_report.audit.is_clean());
-        assert_eq!(report.package_report.matches.len(), 1);
-        assert!(report.package_report.matches[0].external_importable);
-        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(report.package_report.matches.len(), 0);
+        assert_eq!(report.package_report.attributions.len(), 0);
     }
 
     #[test]
@@ -4884,7 +5022,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(wrapper_match.source_path.contains("owned_neighbors=2/2"));
         assert!(wrapper_match.source_path.contains("out=0/0"));
         assert!(wrapper_match.source_path.contains("in=2/2"));
-        assert!(wrapper_match.external_importable);
+        assert!(!wrapper_match.external_importable);
     }
 
     #[test]
@@ -5070,7 +5208,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .contains("dependency-cluster:pkg@1.2.3")
         );
         assert!(cluster_match.source_path.contains("owned_seeds=3/3"));
-        assert!(cluster_match.external_importable);
+        assert!(!cluster_match.external_importable);
     }
 
     #[test]
@@ -5155,7 +5293,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(gap_match.source_path.contains("owned_seeds=2/2"));
         assert!(gap_match.source_path.contains("run_size=4"));
-        assert!(gap_match.external_importable);
+        assert!(!gap_match.external_importable);
     }
 
     #[test]
