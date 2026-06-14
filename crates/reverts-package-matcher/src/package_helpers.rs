@@ -211,13 +211,40 @@ pub fn module_package_semantic_path_hints(
         let hint = strip_source_extension(rest)
             .trim_matches('/')
             .to_ascii_lowercase();
-        if !hint.is_empty() {
+        if !hint.is_empty()
+            && (mode == SemanticPathHintMode::ForcedExternal
+                || module_source.trim().is_empty()
+                || source_contains_semantic_hint(module_source, hint.as_str())
+                || hint
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|segment| source_contains_semantic_hint(module_source, segment))
+                || semantic_filename_hint_is_package_root(package_name, hint.as_str()))
+        {
             hints.push(hint);
         }
     }
+    let clean_hint = strip_source_extension(clean.as_str())
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    if mode == SemanticPathHintMode::ImportProof
+        && !clean_hint.is_empty()
+        && !clean_hint.starts_with("modules/")
+        && !package_semantic_path_prefixes(package_name)
+            .iter()
+            .any(|prefix| {
+                clean_hint == *prefix || clean_hint.starts_with(format!("{prefix}/").as_str())
+            })
+        && (semantic_filename_hint_is_structured_export_path(clean_hint.as_str())
+            || semantic_filename_hint_is_package_root(package_name, clean_hint.as_str()))
+    {
+        hints.push(clean_hint);
+    }
     if let Some(hint) = module_semantic_filename_hint(clean.as_str(), module_source)
         && (mode == SemanticPathHintMode::ForcedExternal
-            || semantic_filename_hint_is_package_export_like(hint.as_str()))
+            || semantic_filename_hint_is_package_export_like(hint.as_str())
+            || semantic_filename_hint_is_structured_export_path(hint.as_str())
+            || semantic_filename_hint_is_package_root(package_name, hint.as_str()))
     {
         hints.push(hint);
     }
@@ -240,13 +267,21 @@ pub fn clean_package_semantic_path_hint(package_name: &str, semantic_path: &str)
 
 fn module_semantic_filename_hint(semantic_path: &str, module_source: &str) -> Option<String> {
     let filename = semantic_path.rsplit('/').next().unwrap_or(semantic_path);
-    let stem = strip_source_extension(filename).trim();
+    let generated_stem = semantic_path
+        .strip_prefix("modules/")
+        .map(strip_source_extension)
+        .map(str::trim);
+    let stem = generated_stem.unwrap_or_else(|| strip_source_extension(filename).trim());
     let (prefix, rest) = stem.split_once('-')?;
     if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let hint = rest.trim_matches('/').to_ascii_lowercase();
-    if hint.is_empty() || !source_contains_semantic_hint(module_source, hint.as_str()) {
+    if hint.is_empty()
+        || (!source_contains_semantic_hint(module_source, hint.as_str())
+            && !(semantic_filename_hint_is_structured_export_path(hint.as_str())
+                && !hint.split('/').any(|segment| segment == "_internal")))
+    {
         return None;
     }
     Some(hint)
@@ -258,6 +293,25 @@ fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
         && trimmed
             .chars()
             .any(|character| character.is_ascii_alphabetic() && character.is_ascii_lowercase())
+}
+
+fn semantic_filename_hint_is_structured_export_path(hint: &str) -> bool {
+    let trimmed = hint.trim().trim_matches('/');
+    let segments = canonical_public_path_segments(trimmed);
+    segments.len() >= 2
+        && !segments
+            .iter()
+            .all(|segment| is_build_path_segment(segment.as_str()))
+        && segments
+            .last()
+            .is_some_and(|segment| normalize_hint_text(segment).len() >= 4)
+}
+
+fn semantic_filename_hint_is_package_root(package_name: &str, hint: &str) -> bool {
+    let hint = normalize_hint_text(hint);
+    package_semantic_path_prefixes(package_name)
+        .into_iter()
+        .any(|prefix| normalize_hint_text(prefix.as_str()) == hint)
 }
 
 fn source_contains_semantic_hint(source: &str, hint: &str) -> bool {

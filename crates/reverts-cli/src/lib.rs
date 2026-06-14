@@ -8077,11 +8077,14 @@ mod tests {
                 },
             )
             .expect("stale accepted attribution should be rewritten");
-        assert_eq!(status, "rejected");
-        assert_eq!(emission_mode, "application_source");
-        assert_eq!(export_specifier, None);
-        assert_eq!(external_import_policy_version, 0);
-        assert!(rejection_reason.is_some());
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(export_specifier.as_deref(), Some("pkg/add.js"));
+        assert_eq!(
+            external_import_policy_version,
+            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
+        );
+        assert_eq!(rejection_reason, None);
     }
 
     #[test]
@@ -8146,10 +8149,13 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .expect("accepted attribution should be rewritten");
-        assert_eq!(status, "rejected");
-        assert_eq!(emission_mode, "application_source");
-        assert_eq!(export_specifier, None);
-        assert_eq!(external_import_policy_version, 0);
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(export_specifier.as_deref(), Some("pkg/add.js"));
+        assert_eq!(
+            external_import_policy_version,
+            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
+        );
     }
 
     #[test]

@@ -1665,12 +1665,15 @@ fn package_match_can_use_semantic_external_target(package_match: &PackageMatch) 
         ModuleMatchStrategy::FunctionSignatureAndStringAnchors => {
             package_match.function_signature_matches > 0 && package_match.string_anchor_matches > 0
         }
+        ModuleMatchStrategy::DependencyClosureOwnership => {
+            package_match.source_path.starts_with("exact-hint:")
+                && package_match.source_path.contains(":quality=trusted:")
+        }
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-        | ModuleMatchStrategy::DependencyClosureOwnership => false,
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => false,
     }
 }
 
@@ -4254,11 +4257,12 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(
-            !report.package_report.matches[0].external_importable,
-            "dependency-only hints do not prove the module body is the public subpath export"
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/sample"
         );
-        assert!(report.package_report.attributions.is_empty());
+        assert_eq!(report.package_report.attributions.len(), 1);
     }
 
     #[test]
@@ -4282,8 +4286,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(!report.package_report.matches[0].external_importable);
-        assert!(report.package_report.attributions.is_empty());
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/_arrayMap.js"
+        );
     }
 
     #[test]
@@ -4359,8 +4366,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(!report.package_report.matches[0].external_importable);
-        assert!(report.package_report.attributions.is_empty());
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/_baseKeys.js"
+        );
     }
 
     #[test]
@@ -4453,11 +4463,12 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
 
         assert!(report.package_report.audit.is_clean());
         assert_eq!(report.package_report.matches.len(), 1);
-        assert!(
-            !report.package_report.matches[0].external_importable,
-            "semantic export-surface names are not enough without source equivalence"
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/public/api"
         );
-        assert!(report.package_report.attributions.is_empty());
+        assert_eq!(report.package_report.attributions.len(), 1);
     }
 
     #[test]
@@ -4646,8 +4657,8 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0].strategy,
             ModuleMatchStrategy::DependencyClosureOwnership
         );
-        assert!(!report.package_report.matches[0].external_importable);
-        assert!(report.package_report.attributions.is_empty());
+        assert!(report.package_report.matches[0].external_importable);
+        assert!(!report.package_report.attributions.is_empty());
     }
 
     #[test]
