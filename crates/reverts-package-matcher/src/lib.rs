@@ -946,12 +946,29 @@ fn promote_exact_hint_ownership_matches(
         if quality == PackageModuleSourceQuality::Invalid {
             continue;
         }
+        let external_specifier = (quality == PackageModuleSourceQuality::Trusted)
+            .then(|| {
+                exact_hint_root_external_specifier(package_sources, package_name, package_version)
+            })
+            .flatten();
+        let external_importable = external_specifier.is_some();
+        let export_specifier = external_specifier.unwrap_or_else(|| package_name.to_string());
         matched_modules.insert(module.id);
+        if external_importable {
+            report
+                .attributions
+                .push(PackageAttributionInput::accepted_external(
+                    module.id,
+                    package_name,
+                    package_version,
+                    export_specifier.as_str(),
+                ));
+        }
         report.matches.push(PackageMatch {
             module_id: module.id,
             package_name: package_name.to_string(),
             package_version: package_version.to_string(),
-            export_specifier: package_name.to_string(),
+            export_specifier,
             source_path: format!(
                 "exact-hint:{package_name}@{package_version}:quality={}:semantic_path={}",
                 package_module_source_quality_label(quality),
@@ -961,9 +978,32 @@ fn promote_exact_hint_ownership_matches(
             strategy: ModuleMatchStrategy::DependencyClosureOwnership,
             function_signature_matches: 0,
             string_anchor_matches: 0,
-            external_importable: false,
+            external_importable,
         });
     }
+}
+
+fn exact_hint_root_external_specifier(
+    package_sources: &[PackageSource],
+    package_name: &str,
+    package_version: &str,
+) -> Option<String> {
+    let specifiers = package_sources
+        .iter()
+        .filter(|source| {
+            source.package_name == package_name
+                && source.package_version == package_version
+                && source.external_importable
+                && source.export_specifier == package_name
+        })
+        .map(|source| source.export_specifier.clone())
+        .collect::<BTreeSet<_>>();
+    (specifiers.len() == 1).then(|| {
+        specifiers
+            .into_iter()
+            .next()
+            .expect("one root external specifier")
+    })
 }
 
 fn promote_dependency_closure_ownership_matches(
@@ -3340,6 +3380,46 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(!report.package_report.matches[0].external_importable);
         assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_promotes_trusted_exact_hint_with_unique_root_surface_to_external_import() {
+        let mut rows =
+            rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/index.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg",
+            "pkg@1.2.3/dist/index.js",
+            "export const unrelated = 'public-root-surface';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .contains("exact-hint:pkg@1.2.3:quality=trusted")
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg")
+        );
     }
 
     #[test]

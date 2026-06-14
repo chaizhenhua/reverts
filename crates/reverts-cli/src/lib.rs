@@ -2210,8 +2210,11 @@ fn load_package_sources(
             "external_import_policy_version",
         )
         .map_err(MatchPackagesError::QueryPackageSources)?;
+        let has_export_specifier_column =
+            sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
+                .map_err(MatchPackagesError::QueryPackageSources)?;
         let external_importable_expr = if has_external_importable_column {
-            if has_external_import_policy_version_column {
+            if has_external_import_policy_version_column && has_export_specifier_column {
                 format!(
                     "CASE WHEN external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} THEN external_importable ELSE 0 END"
                 )
@@ -2221,11 +2224,21 @@ fn load_package_sources(
         } else {
             "0".to_string()
         };
+        let export_specifier_expr = if has_external_import_policy_version_column
+            && has_export_specifier_column
+        {
+            format!(
+                "CASE WHEN external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} AND TRIM(COALESCE(export_specifier, '')) != '' THEN export_specifier ELSE '' END"
+            )
+        } else {
+            "''".to_string()
+        };
         let mut sql = String::from(
             format!(
                 r"
             SELECT package_name, package_version, entry_path, source_content,
-                   {external_importable_expr}
+                   {external_importable_expr},
+                   {export_specifier_expr}
               FROM package_source_cache
              WHERE TRIM(COALESCE(package_name, '')) != ''
                AND TRIM(COALESCE(package_version, '')) != ''
@@ -2347,7 +2360,12 @@ fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageS
     let entry_path = row.get::<_, String>(2)?;
     let source = row.get::<_, String>(3)?;
     let external_importable = row.get::<_, i64>(4)? != 0;
-    let export_specifier = package_export_specifier(package_name.as_str(), entry_path.as_str());
+    let cached_export_specifier = row.get::<_, String>(5)?;
+    let export_specifier = if cached_export_specifier.trim().is_empty() {
+        package_export_specifier(package_name.as_str(), entry_path.as_str())
+    } else {
+        cached_export_specifier.trim().to_string()
+    };
     let source_path = format!("{package_name}@{package_version}/{entry_path}");
     if external_importable {
         Ok(PackageSource::external(
@@ -2386,13 +2404,14 @@ fn persist_package_source_cache(
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
                      content_hash, external_importable, external_import_policy_version,
-                     fetched_at, expires_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now', '+30 days'))
+                     export_specifier, fetched_at, expires_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now', '+30 days'))
                 ON CONFLICT(package_name, package_version, entry_path) DO UPDATE SET
                     source_content = excluded.source_content,
                     content_hash = excluded.content_hash,
                     external_importable = excluded.external_importable,
                     external_import_policy_version = excluded.external_import_policy_version,
+                    export_specifier = excluded.export_specifier,
                     fetched_at = excluded.fetched_at,
                     expires_at = excluded.expires_at
                 ",
@@ -2408,6 +2427,7 @@ fn persist_package_source_cache(
                         0_i64
                     },
                     PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+                    source.export_specifier.as_str(),
                 ],
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -2457,13 +2477,25 @@ fn ensure_package_source_cache_table(
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
     }
+    if !sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
+        .map_err(MatchPackagesError::WritePackageSourceCache)?
+    {
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_source_cache
+                    ADD COLUMN export_specifier TEXT NOT NULL DEFAULT '';
+                ",
+            )
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    }
     connection
         .execute_batch(PACKAGE_SOURCE_CACHE_INDEX_SQL)
         .map_err(MatchPackagesError::WritePackageSourceCache)?;
     Ok(())
 }
 
-const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 2;
+const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 3;
 
 const PACKAGE_SOURCE_CACHE_CREATE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS package_source_cache (
@@ -2474,6 +2506,7 @@ CREATE TABLE IF NOT EXISTS package_source_cache (
     content_hash TEXT NOT NULL,
     external_importable INTEGER NOT NULL DEFAULT 1,
     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+    export_specifier TEXT NOT NULL DEFAULT '',
     fetched_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     PRIMARY KEY (package_name, package_version, entry_path)
@@ -2530,6 +2563,14 @@ fn migrate_package_source_cache_entry_path_primary_key(
     } else {
         "0"
     };
+    let has_export_specifier =
+        sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    let export_specifier_expr = if has_export_specifier {
+        "export_specifier"
+    } else {
+        "''"
+    };
     let transaction = connection
         .transaction()
         .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -2555,6 +2596,7 @@ fn migrate_package_source_cache_entry_path_primary_key(
                 content_hash,
                 external_importable,
                 external_import_policy_version,
+                export_specifier,
                 fetched_at,
                 expires_at
             )
@@ -2566,6 +2608,7 @@ fn migrate_package_source_cache_entry_path_primary_key(
                 content_hash,
                 {external_importable_expr},
                 {external_import_policy_version_expr},
+                {export_specifier_expr},
                 fetched_at,
                 expires_at
               FROM package_source_cache__reverts_old
@@ -5642,8 +5685,9 @@ mod tests {
         collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
         help_text, load_package_sources, local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
-        package_version_hints_for_materialization, parse_npm_versions_json,
-        persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
+        package_export_specifier, package_version_hints_for_materialization,
+        parse_npm_versions_json, persist_package_source_cache,
+        resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections,
         stale_package_source_cache_versions, version_text,
     };
@@ -6313,6 +6357,7 @@ mod tests {
             loaded
                 .iter()
                 .any(|source| source.source_path.ends_with("public.js")
+                    && source.export_specifier == "pkg/public"
                     && source.external_importable)
         );
         assert!(loaded.iter().any(
@@ -6411,6 +6456,7 @@ mod tests {
                     content_hash TEXT NOT NULL,
                     external_importable INTEGER NOT NULL DEFAULT 1,
                     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -6423,7 +6469,7 @@ mod tests {
                     ('pkg', '1.2.3', 'index.js', 'export const oldValue = 1;',
                      'hash-a', 1, 0, 'now', 'later'),
                     ('pkg', '1.2.4', 'index.js', 'export const newValue = 1;',
-                     'hash-b', 1, 2, 'now', 'later'),
+                     'hash-b', 1, 3, 'now', 'later'),
                     ('other', '9.9.9', 'index.js', 'export const other = 1;',
                      'hash-c', 1, 0, 'now', 'later');
                 ",
@@ -8754,6 +8800,7 @@ mod tests {
                     content_hash TEXT NOT NULL,
                     external_importable INTEGER NOT NULL DEFAULT 1,
                     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -8811,15 +8858,16 @@ mod tests {
                     INSERT INTO package_source_cache
                         (package_name, package_version, entry_path, source_content,
                          content_hash, external_importable, external_import_policy_version,
-                         fetched_at, expires_at)
-                    VALUES (?1, ?2, ?3, ?4, 'hash', 1, ?5, 'now', 'later')
+                         export_specifier, fetched_at, expires_at)
+                    VALUES (?1, ?2, ?3, ?4, 'hash', 1, ?5, ?6, 'now', 'later')
                     ",
                     params![
                         package_name,
                         package_version,
                         entry_path,
                         source,
-                        PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION
+                        PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+                        package_export_specifier(package_name, entry_path),
                     ],
                 )
                 .expect("insert package source");
@@ -8889,6 +8937,7 @@ mod tests {
                     content_hash TEXT NOT NULL,
                     external_importable INTEGER NOT NULL DEFAULT 1,
                     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -8949,10 +8998,10 @@ mod tests {
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
                      content_hash, external_importable, external_import_policy_version,
-                     fetched_at, expires_at)
+                     export_specifier, fetched_at, expires_at)
                 VALUES
                     ('undici', '2.2.1', 'wrapper.mjs', 'export default {};',
-                     'hash', 1, ?1, 'now', 'later')
+                     'hash', 1, ?1, 'undici/wrapper.mjs', 'now', 'later')
                 ",
                 [PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION],
             )
@@ -9005,6 +9054,7 @@ mod tests {
                     content_hash TEXT NOT NULL,
                     external_importable INTEGER NOT NULL DEFAULT 1,
                     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -9072,10 +9122,10 @@ mod tests {
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
                      content_hash, external_importable, external_import_policy_version,
-                     fetched_at, expires_at)
+                     export_specifier, fetched_at, expires_at)
                 VALUES
                     ('pkg', '1.2.3', 'add', 'export function add(a, b) { return a + b; }',
-                     'hash', 1, ?1, 'now', 'later')
+                     'hash', 1, ?1, 'pkg/add', 'now', 'later')
                 ",
                 [PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION],
             )
