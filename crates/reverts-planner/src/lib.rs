@@ -724,19 +724,18 @@ impl ImportExportPlanner {
             {
                 let adapter_bindings =
                     package_adapter_export_bindings(program, module.id, source_facts);
-                if !adapter_bindings.is_empty()
-                    && let Some(adapter_kind) =
-                        external_package_adapter_kind(program, module.id, &adapter_bindings)
-                {
-                    populate_external_package_adapter_file(
-                        &mut file,
-                        attribution,
-                        &adapter_bindings,
-                        adapter_kind,
-                    );
-                    plan.push_file(file);
-                    continue;
-                }
+                let adapter_kind =
+                    external_package_adapter_kind(program, module.id, &adapter_bindings);
+                populate_external_package_adapter_file(
+                    &mut file,
+                    program,
+                    module.id,
+                    attribution,
+                    &adapter_bindings,
+                    adapter_kind,
+                );
+                plan.push_file(file);
+                continue;
             }
 
             if pure_reexport_bypasses.omitted_modules.contains(&module.id) {
@@ -5701,9 +5700,13 @@ fn runtime_source_module_imports(
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let definition_modules = unique_source_definition_modules(program, externalized_packages);
     let mut imports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    let local_bindings = local_bindings_in_source(source);
     let mut runtime_import_identifiers = runtime_import_identifiers_in_source(source);
     runtime_import_identifiers.extend(call_identifiers_in_source(source));
     for identifier in runtime_import_identifiers {
+        if local_bindings.contains(identifier.as_str()) {
+            continue;
+        }
         let binding = BindingName::new(identifier);
         if satisfied_runtime_bindings.contains(&binding) {
             continue;
@@ -6395,46 +6398,30 @@ fn external_package_adapter_kind(
     program: &EnrichedProgram,
     module_id: ModuleId,
     adapter_bindings: &BTreeSet<BindingName>,
-) -> Option<ExternalPackageAdapterKind> {
+) -> ExternalPackageAdapterKind {
     let Some(source) = program.model().input().module_source_slice(module_id) else {
-        return None;
+        return ExternalPackageAdapterKind::NamespaceReturn;
     };
     let compact = compact_js_source(source.source);
     if compact.contains("let_$cached;")
         && compact.contains("return_$module.exports;")
         && compact.contains("export{")
     {
-        return Some(ExternalPackageAdapterKind::CommonJsWrapper);
+        return ExternalPackageAdapterKind::CommonJsWrapper;
     }
     if adapter_bindings
         .iter()
         .any(|binding| compact.contains(format!("var{}=p(", binding.as_str()).as_str()))
     {
-        return Some(ExternalPackageAdapterKind::CommonJsWrapper);
+        return ExternalPackageAdapterKind::CommonJsWrapper;
     }
-    if adapter_bindings
-        .iter()
-        .all(|binding| !compact_source_defines_binding(compact.as_str(), binding.as_str()))
-    {
-        return Some(ExternalPackageAdapterKind::NamespaceReturn);
-    }
-    None
-}
-
-fn compact_source_defines_binding(compact_source: &str, binding: &str) -> bool {
-    [
-        format!("function{binding}("),
-        format!("var{binding}="),
-        format!("let{binding}="),
-        format!("const{binding}="),
-        format!("class{binding}"),
-    ]
-    .iter()
-    .any(|needle| compact_source.contains(needle))
+    ExternalPackageAdapterKind::NamespaceReturn
 }
 
 fn populate_external_package_adapter_file(
     file: &mut PlannedFile,
+    program: &EnrichedProgram,
+    module_id: ModuleId,
     attribution: &PackageAttributionInput,
     exportable_bindings: &BTreeSet<BindingName>,
     adapter_kind: ExternalPackageAdapterKind,
@@ -6454,16 +6441,30 @@ fn populate_external_package_adapter_file(
     });
     let return_expression =
         external_package_adapter_return_expression(namespace.as_str(), adapter_kind);
+    let namespace_expression = namespace.as_str().to_string();
     for binding in exportable_bindings {
-        file.push_source(format!(
-            "function {}() {{ return {}; }}",
-            binding.as_str(),
-            return_expression
-        ));
+        let adapter_binding_kind =
+            external_package_adapter_binding_kind(program, module_id, binding);
+        match adapter_binding_kind {
+            ExternalPackageAdapterBindingKind::Callable => {
+                file.push_source(format!(
+                    "function {}() {{ return {}; }}",
+                    binding.as_str(),
+                    return_expression
+                ));
+            }
+            ExternalPackageAdapterBindingKind::Value => {
+                file.push_source(format!(
+                    "const {} = {};",
+                    binding.as_str(),
+                    namespace_expression
+                ));
+            }
+        }
         file.add_binding(PlannedBinding::new(
             binding.clone(),
             binding.clone(),
-            BindingShape::Callable,
+            adapter_binding_kind.binding_shape(),
             true,
         ));
     }
@@ -6471,6 +6472,92 @@ fn populate_external_package_adapter_file(
     for binding in exportable_bindings {
         file.add_export_with_source_backed(binding.clone(), true);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalPackageAdapterBindingKind {
+    Callable,
+    Value,
+}
+
+impl ExternalPackageAdapterBindingKind {
+    const fn binding_shape(self) -> BindingShape {
+        match self {
+            Self::Callable => BindingShape::Callable,
+            Self::Value => BindingShape::NamespaceObject,
+        }
+    }
+}
+
+fn external_package_adapter_binding_kind(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    binding: &BindingName,
+) -> ExternalPackageAdapterBindingKind {
+    match program.binding_shape(module_id, binding.as_str()) {
+        BindingShape::Callable | BindingShape::Constructor | BindingShape::ClassLike => {
+            return ExternalPackageAdapterBindingKind::Callable;
+        }
+        BindingShape::Unknown
+        | BindingShape::Value
+        | BindingShape::PlainObject
+        | BindingShape::NamespaceObject
+        | BindingShape::EnumObject => {}
+    }
+    if external_package_source_defines_callable_binding(program, module_id, binding) {
+        return ExternalPackageAdapterBindingKind::Callable;
+    }
+    ExternalPackageAdapterBindingKind::Value
+}
+
+fn external_package_source_defines_callable_binding(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return false;
+    };
+    compact_source_defines_callable_binding(
+        compact_js_source(source.source).as_str(),
+        binding.as_str(),
+    )
+}
+
+fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) -> bool {
+    [
+        format!("function{binding}("),
+        format!("asyncfunction{binding}("),
+        format!("var{binding}=function"),
+        format!("let{binding}=function"),
+        format!("const{binding}=function"),
+        format!("var{binding}=asyncfunction"),
+        format!("let{binding}=asyncfunction"),
+        format!("const{binding}=asyncfunction"),
+        format!("var{binding}=()=>"),
+        format!("let{binding}=()=>"),
+        format!("const{binding}=()=>"),
+        format!("var{binding}=(()=>"),
+        format!("let{binding}=(()=>"),
+        format!("const{binding}=(()=>"),
+        format!("var{binding}=async()=>"),
+        format!("let{binding}=async()=>"),
+        format!("const{binding}=async()=>"),
+        format!("var{binding}=(async()=>"),
+        format!("let{binding}=(async()=>"),
+        format!("const{binding}=(async()=>"),
+        format!("var{binding}=lazyValue("),
+        format!("let{binding}=lazyValue("),
+        format!("const{binding}=lazyValue("),
+        format!("var{binding}=lazyModule("),
+        format!("let{binding}=lazyModule("),
+        format!("const{binding}=lazyModule("),
+        format!("var{binding}=p("),
+        format!("let{binding}=p("),
+        format!("const{binding}=p("),
+    ]
+    .iter()
+    .any(|needle| compact_source.contains(needle))
 }
 
 fn external_package_adapter_return_expression(
@@ -6516,6 +6603,19 @@ fn package_adapter_export_bindings(
             continue;
         };
         bindings.extend(candidate_reads.intersection(&target_bindings).cloned());
+    }
+    for (from_module_id, candidate_reads) in &source_facts.candidate_reads_by_module {
+        if *from_module_id == module_id {
+            continue;
+        }
+        bindings.extend(candidate_reads.iter().filter_map(|binding| {
+            source_facts
+                .definition_modules_all
+                .get(binding)
+                .and_then(|owner| *owner)
+                .filter(|owner| *owner == module_id)
+                .map(|_owner| binding.clone())
+        }));
     }
     bindings
 }
@@ -11017,6 +11117,31 @@ mod tests {
             .expect("fixture should normalize")
     }
 
+    #[test]
+    fn runtime_source_module_import_scan_skips_helper_local_bindings() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "module.js",
+            Some("function ub6() { return 1; }".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "ub6", "modules/ub6.ts").with_source_file(1),
+        );
+        let enriched = enriched_from_rows(rows);
+        let imports = super::runtime_source_module_imports(
+            &enriched,
+            "var ub6 = lazyValue(() => 1);\nub6();",
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+        );
+
+        assert!(
+            imports.is_empty(),
+            "helper-local folded bindings must not be imported from their omitted source module"
+        );
+    }
+
     fn planned_source(plan: &EmitPlan, path: &str) -> String {
         plan.files
             .iter()
@@ -13826,7 +13951,7 @@ mod tests {
     }
 
     #[test]
-    fn entrypoint_runtime_imports_source_required_package_bindings() {
+    fn entrypoint_runtime_imports_source_required_package_adapter_bindings() {
         let planner = ImportExportPlanner;
         let prelude = "function main() { return packageInit(); }\n";
         let body = "var value = packageInit();\nexport { value };\n";
@@ -13904,12 +14029,17 @@ mod tests {
         );
         assert!(helper_source.contains("import { packageInit } from '../package.js';"));
         assert!(helper_source.contains("packageInit();"));
-        assert!(
-            package_file
-                .body
-                .join("\n")
-                .contains("export { packageInit };")
+        let package_source = package_file.body.join("\n");
+        assert_eq!(package_file.imports.len(), 1);
+        assert_eq!(
+            package_file.imports[0].resolution.specifier(),
+            Some("fixture-package")
         );
+        assert!(
+            package_source.contains("function packageInit() { return external_fixture_package; }")
+        );
+        assert!(package_source.contains("export { packageInit };"));
+        assert!(!package_source.contains("return 1"));
     }
 
     #[test]
@@ -14439,7 +14569,7 @@ mod tests {
     }
 
     #[test]
-    fn accepted_external_package_read_from_runtime_helper_is_emitted_locally() {
+    fn accepted_external_package_read_from_runtime_helper_uses_external_adapter() {
         let planner = ImportExportPlanner;
         let package_source = "var dNq = { default: () => 1 };\nvar cNq = lazyValue(() => dNq);\n";
         let app_source = "var app = lazyValue(() => (cNq(), dNq).default());\n";
@@ -14493,7 +14623,7 @@ mod tests {
         );
         assert!(
             source_required_packages.contains(&ModuleId(1)),
-            "package bindings read by source without an import edge must stay local"
+            "package bindings read by source without an import edge must get an adapter"
         );
         let init_shims = super::externalized_package_init_shims(
             &enriched,
@@ -14511,8 +14641,17 @@ mod tests {
             .files
             .iter()
             .find(|file| file.path == "modules/open.ts")
-            .expect("runtime-read package file should be emitted locally");
-        assert!(package_file.body.join("\n").contains("var cNq = lazyValue"));
+            .expect("runtime-read package adapter file should be emitted");
+        let package_source = package_file.body.join("\n");
+        assert_eq!(package_file.imports.len(), 1);
+        assert_eq!(
+            package_file.imports[0].resolution.specifier(),
+            Some("open/index.js")
+        );
+        assert!(package_source.contains("function cNq() { return external_open; }"));
+        assert!(package_source.contains("const dNq = external_open;"));
+        assert!(package_source.contains("export { cNq, dNq };"));
+        assert!(!package_source.contains("lazyValue"));
     }
 
     #[test]
