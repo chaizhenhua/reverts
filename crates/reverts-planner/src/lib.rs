@@ -1644,12 +1644,12 @@ impl ImportExportPlanner {
                 program,
                 helper_closure.source.as_str(),
                 &helper_closure.emitted_bindings,
-                &externalized_packages,
+                externalized_packages,
             );
             let package_init_shims = externalized_package_init_shims(
                 program,
                 helper_closure.source.as_str(),
-                &externalized_packages,
+                externalized_packages,
             );
             let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
             emitted_runtime_bindings.extend(package_init_shims.iter().cloned());

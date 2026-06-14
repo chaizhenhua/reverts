@@ -3788,16 +3788,16 @@ fn collect_exports_importable_paths(
                     ("node", LocalPackageImportKind::Universal),
                     ("browser", LocalPackageImportKind::Esm),
                 ] {
-                    if let Some(nested_value) = object.get(condition) {
-                        if let Some(kind) = kind.and_condition(nested_kind) {
-                            collect_exports_importable_paths(
-                                nested_value,
-                                package_name,
-                                export_key,
-                                kind,
-                                import_surface,
-                            );
-                        }
+                    if let Some(nested_value) = object.get(condition)
+                        && let Some(kind) = kind.and_condition(nested_kind)
+                    {
+                        collect_exports_importable_paths(
+                            nested_value,
+                            package_name,
+                            export_key,
+                            kind,
+                            import_surface,
+                        );
                     }
                 }
             }
@@ -6232,11 +6232,11 @@ mod tests {
     #[test]
     fn best_matching_package_version_uses_binary_search_for_wildcards() {
         let versions = BTreeSet::from([
-            semver::Version::parse("0.9.9").unwrap(),
-            semver::Version::parse("1.0.0").unwrap(),
-            semver::Version::parse("1.2.3").unwrap(),
-            semver::Version::parse("1.9.9").unwrap(),
-            semver::Version::parse("2.0.0").unwrap(),
+            semver::Version::parse("0.9.9").expect("fixture version should parse"),
+            semver::Version::parse("1.0.0").expect("fixture version should parse"),
+            semver::Version::parse("1.2.3").expect("fixture version should parse"),
+            semver::Version::parse("1.9.9").expect("fixture version should parse"),
+            semver::Version::parse("2.0.0").expect("fixture version should parse"),
         ]);
 
         let selected = best_matching_package_version_by_binary_search("1.x", &versions);
@@ -6250,9 +6250,9 @@ mod tests {
     #[test]
     fn nearest_package_version_uses_binary_search_floor_for_missing_exact() {
         let versions = BTreeSet::from([
-            semver::Version::parse("3.700.0").unwrap(),
-            semver::Version::parse("3.711.0").unwrap(),
-            semver::Version::parse("3.720.0").unwrap(),
+            semver::Version::parse("3.700.0").expect("fixture version should parse"),
+            semver::Version::parse("3.711.0").expect("fixture version should parse"),
+            semver::Version::parse("3.720.0").expect("fixture version should parse"),
         ]);
 
         let selected = nearest_package_version_by_binary_search("3.712.0", &versions);
@@ -6289,7 +6289,10 @@ mod tests {
         let single_version = parse_npm_versions_json("pkg", "latest", br#""2.0.0""#)
             .expect("single version should parse");
 
-        assert!(array_versions.contains(&semver::Version::parse("1.2.3").unwrap()));
+        assert!(
+            array_versions
+                .contains(&semver::Version::parse("1.2.3").expect("fixture version should parse"))
+        );
         assert_eq!(
             single_version
                 .iter()
