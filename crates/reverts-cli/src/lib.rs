@@ -23,7 +23,7 @@ use reverts_input::{
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
-use reverts_js::{ParseGoal, parse_source};
+use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
@@ -950,7 +950,7 @@ pub fn match_packages_from_connection(
         args.materialize_package_sources,
         args.apply,
     )?;
-    resolve_non_exact_package_version_hints(&mut rows, &package_sources, &package_names);
+    resolve_package_version_hints_to_available_sources(&mut rows, &package_sources, &package_names);
     let source_quality_counts = package_module_source_quality_counts(
         &rows,
         (!args.package_names.is_empty()).then_some(&package_names),
@@ -2529,9 +2529,9 @@ fn materialize_package_sources_from_hints(
     let mut hints =
         package_version_hints_for_materialization(rows, package_names, existing_sources);
     for (package_name, requested_version) in
-        unresolved_non_exact_package_version_hints(rows, package_names, existing_sources)
+        network_package_version_resolution_hints(rows, package_names, existing_sources)
     {
-        match resolve_non_exact_package_version_hint_from_network(
+        match resolve_package_version_hint_from_network(
             package_name.as_str(),
             requested_version.as_str(),
         ) {
@@ -2555,6 +2555,7 @@ fn materialize_package_sources_from_hints(
     }
 
     let mut sources = Vec::new();
+    let mut attempted = BTreeSet::<(String, String)>::new();
     for (idx, (package_name, package_version)) in hints.into_iter().enumerate() {
         let temp_root = std::env::temp_dir().join(format!(
             "reverts-package-source-{}-{idx}",
@@ -2575,11 +2576,12 @@ fn materialize_package_sources_from_hints(
             }
         })?;
 
-        let result = materialize_one_package_source(
+        let result = materialize_package_source_with_nearest_fallback(
             temp_root.as_path(),
             package_name.as_str(),
             package_version.as_str(),
             &mut sources,
+            &mut attempted,
         );
         let cleanup = fs::remove_dir_all(temp_root.as_path());
         if let Err(error) = result {
@@ -2652,6 +2654,47 @@ fn materialize_one_package_source(
     Ok(())
 }
 
+fn materialize_package_source_with_nearest_fallback(
+    temp_root: &Path,
+    package_name: &str,
+    package_version: &str,
+    sources: &mut Vec<PackageSource>,
+    attempted: &mut BTreeSet<(String, String)>,
+) -> Result<(), MatchPackagesError> {
+    if !attempted.insert((package_name.to_string(), package_version.to_string())) {
+        return Ok(());
+    }
+    match materialize_one_package_source(temp_root, package_name, package_version, sources) {
+        Ok(()) => Ok(()),
+        Err(original_error) => {
+            let Some(nearest_version) =
+                resolve_unavailable_exact_package_version_hint_from_network(
+                    package_name,
+                    package_version,
+                )?
+            else {
+                return Err(original_error);
+            };
+            if nearest_version == package_version
+                || !attempted.insert((package_name.to_string(), nearest_version.clone()))
+            {
+                return Err(original_error);
+            }
+            eprintln!(
+                "package source materialization for {package_name}@{package_version} failed; trying nearest available version {nearest_version}"
+            );
+            materialize_one_package_source(temp_root, package_name, nearest_version.as_str(), sources)
+                .map_err(|fallback_error| MatchPackagesError::MaterializePackageSource {
+                    package_name: package_name.to_string(),
+                    package_version: package_version.to_string(),
+                    message: format!(
+                        "{original_error}; nearest fallback {nearest_version} also failed: {fallback_error}"
+                    ),
+                })
+        }
+    }
+}
+
 fn package_version_hints_for_materialization(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
@@ -2670,11 +2713,25 @@ fn package_version_hints_for_materialization(
             {
                 return None;
             }
-            let package_version = module
-                .package_version
-                .as_deref()
-                .map(str::trim)
-                .filter(|version| !version.is_empty())?;
+            let package_version = module.package_version.as_deref().map(str::trim);
+            let Some(package_version) = package_version.filter(|version| !version.is_empty())
+            else {
+                let resolved = best_project_version_candidate(
+                    package_name,
+                    "latest",
+                    &project_exact_versions,
+                    None,
+                )
+                .or_else(|| {
+                    available_versions.get(package_name).and_then(|versions| {
+                        best_matching_package_version_by_binary_search("latest", versions)
+                    })
+                })?;
+                return (!available_versions
+                    .get(package_name)
+                    .is_some_and(|versions| versions.contains(&resolved)))
+                .then(|| (package_name.to_string(), resolved.to_string()));
+            };
             if is_exact_package_version_hint(package_version) {
                 return (!package_source_versions_contain(
                     &available_versions,
@@ -2706,7 +2763,7 @@ fn is_exact_package_version_hint(version: &str) -> bool {
     Version::parse(version).is_ok()
 }
 
-fn unresolved_non_exact_package_version_hints(
+fn network_package_version_resolution_hints(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
@@ -2724,12 +2781,32 @@ fn unresolved_non_exact_package_version_hints(
             {
                 return None;
             }
-            let package_version = module
+            let requested_version = module
                 .package_version
                 .as_deref()
                 .map(str::trim)
-                .filter(|version| !version.is_empty())
-                .filter(|version| !is_exact_package_version_hint(version))?;
+                .filter(|version| !version.is_empty());
+            let Some(package_version) = requested_version else {
+                let has_project_candidate = best_project_version_candidate(
+                    package_name,
+                    "latest",
+                    &project_exact_versions,
+                    None,
+                )
+                .is_some();
+                let has_available_candidate =
+                    available_versions
+                        .get(package_name)
+                        .is_some_and(|versions| {
+                            best_matching_package_version_by_binary_search("latest", versions)
+                                .is_some()
+                        });
+                return (!has_project_candidate && !has_available_candidate)
+                    .then(|| (package_name.to_string(), "latest".to_string()));
+            };
+            if is_exact_package_version_hint(package_version) {
+                return None;
+            }
             let has_project_candidate = best_project_version_candidate(
                 package_name,
                 package_version,
@@ -2750,13 +2827,25 @@ fn unresolved_non_exact_package_version_hints(
         .collect()
 }
 
-fn resolve_non_exact_package_version_hints(
+fn resolve_package_version_hints_to_available_sources(
     rows: &mut InputRows,
     package_sources: &[PackageSource],
     package_names: &BTreeSet<String>,
 ) -> usize {
     let available_versions = exact_package_source_versions_by_package(package_sources);
     let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+    let module_source_slices = rows
+        .modules
+        .iter()
+        .filter_map(|module| {
+            rows.module_source_slice(module.id).map(|slice| {
+                (
+                    module.id,
+                    (slice.source_file_path.to_string(), slice.source.to_string()),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut resolved = 0usize;
     for module in &mut rows.modules {
         if module.kind != ModuleKind::Package {
@@ -2771,31 +2860,91 @@ fn resolve_non_exact_package_version_hints(
         {
             continue;
         }
-        let Some(package_version) = module
+        let requested_version = module
             .package_version
             .as_deref()
             .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .filter(|version| !is_exact_package_version_hint(version))
-        else {
-            continue;
-        };
+            .filter(|version| !version.is_empty());
         let Some(versions) = available_versions.get(package_name) else {
             continue;
         };
-        let selected = best_project_version_candidate(
-            package_name,
-            package_version,
-            &project_exact_versions,
-            Some(versions),
-        )
-        .or_else(|| best_matching_package_version_by_binary_search(package_version, versions));
+        let source_identity_version = best_source_identity_version_for_module(
+            module,
+            module_source_slices.get(&module.id),
+            package_sources,
+        );
+        let selected = match requested_version {
+            Some(package_version) if is_exact_package_version_hint(package_version) => {
+                if package_source_versions_contain(
+                    &available_versions,
+                    package_name,
+                    package_version,
+                ) {
+                    None
+                } else {
+                    source_identity_version.or_else(|| {
+                        nearest_package_version_by_binary_search(package_version, versions)
+                    })
+                }
+            }
+            Some(package_version) => best_project_version_candidate(
+                package_name,
+                package_version,
+                &project_exact_versions,
+                Some(versions),
+            )
+            .or(source_identity_version)
+            .or_else(|| best_matching_package_version_by_binary_search(package_version, versions)),
+            None => source_identity_version
+                .or_else(|| {
+                    best_project_version_candidate(
+                        package_name,
+                        "latest",
+                        &project_exact_versions,
+                        Some(versions),
+                    )
+                })
+                .or_else(|| best_matching_package_version_by_binary_search("latest", versions)),
+        };
         if let Some(selected) = selected {
             module.package_version = Some(selected.to_string());
             resolved += 1;
         }
     }
     resolved
+}
+
+fn best_source_identity_version_for_module(
+    module: &ModuleInput,
+    source_slice: Option<&(String, String)>,
+    package_sources: &[PackageSource],
+) -> Option<Version> {
+    let package_name = module.package_name.as_deref()?.trim();
+    let (source_file_path, source) = source_slice?;
+    let module_normalized =
+        normalize_source_for_pipeline(source, Some(Path::new(source_file_path))).ok()?;
+    let mut matches_by_version = BTreeMap::<Version, usize>::new();
+    for package_source in package_sources
+        .iter()
+        .filter(|source| source.package_name == package_name)
+    {
+        let Ok(package_version) = Version::parse(package_source.package_version.as_str()) else {
+            continue;
+        };
+        let Ok(package_normalized) = normalize_source_for_pipeline(
+            package_source.source.as_str(),
+            Some(Path::new(package_source.source_path.as_str())),
+        ) else {
+            continue;
+        };
+        if package_normalized == module_normalized {
+            *matches_by_version.entry(package_version).or_default() += 1;
+        }
+    }
+    matches_by_version
+        .into_iter()
+        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
+        .map(|(version, _count)| version)
 }
 
 fn exact_package_source_versions_by_package(
@@ -2922,6 +3071,23 @@ fn best_matching_package_version_by_binary_search(
         .cloned()
 }
 
+fn nearest_package_version_by_binary_search(
+    requested_version: &str,
+    versions: &BTreeSet<Version>,
+) -> Option<Version> {
+    if versions.is_empty() {
+        return None;
+    }
+    let requested = Version::parse(requested_version.trim()).ok()?;
+    let sorted_versions = versions.iter().cloned().collect::<Vec<_>>();
+    let insertion_point = sorted_versions.partition_point(|version| version <= &requested);
+    if insertion_point > 0 {
+        sorted_versions.get(insertion_point - 1).cloned()
+    } else {
+        sorted_versions.first().cloned()
+    }
+}
+
 fn version_req_upper_bound(requirement: &VersionReq) -> Option<(Version, bool)> {
     requirement
         .comparators
@@ -2994,13 +3160,27 @@ fn partial_version_floor(comparator: &Comparator) -> Version {
     }
 }
 
-fn resolve_non_exact_package_version_hint_from_network(
+fn resolve_package_version_hint_from_network(
     package_name: &str,
     requested_version: &str,
 ) -> Result<Option<String>, MatchPackagesError> {
     let versions = npm_package_versions(package_name, requested_version)?;
     Ok(
         best_matching_package_version_by_binary_search(requested_version, &versions)
+            .map(|version| version.to_string()),
+    )
+}
+
+fn resolve_unavailable_exact_package_version_hint_from_network(
+    package_name: &str,
+    requested_version: &str,
+) -> Result<Option<String>, MatchPackagesError> {
+    if !is_exact_package_version_hint(requested_version) {
+        return Ok(None);
+    }
+    let versions = npm_package_versions(package_name, requested_version)?;
+    Ok(
+        nearest_package_version_by_binary_search(requested_version, &versions)
             .map(|version| version.to_string()),
     )
 }
@@ -5164,7 +5344,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use reverts_input::{InputRows, ModuleInput, ProjectInput};
+    use reverts_input::{InputRows, ModuleInput, ProjectInput, SourceFileInput};
     use reverts_ir::ModuleId;
     use reverts_observe::{AuditFinding, AuditReport, FindingCode};
     use reverts_package_matcher::PackageSource;
@@ -5177,8 +5357,9 @@ mod tests {
         MatchPackagesArgs, RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
         collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
         help_text, load_package_sources, local_package_metadata, match_packages_from_connection,
+        nearest_package_version_by_binary_search, network_package_version_resolution_hints,
         package_version_hints_for_materialization, parse_npm_versions_json,
-        persist_package_source_cache, resolve_non_exact_package_version_hints, run,
+        persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections, version_text,
     };
 
@@ -5596,11 +5777,129 @@ mod tests {
             ),
         ];
 
-        let resolved =
-            resolve_non_exact_package_version_hints(&mut rows, &package_sources, &BTreeSet::new());
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.3.1"));
+    }
+
+    #[test]
+    fn unavailable_exact_package_versions_resolve_to_nearest_cached_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "awsMissingExact",
+            "node_modules/@aws-sdk/middleware-host-header/index.js",
+            "@aws-sdk/middleware-host-header",
+            Some("3.712.0".to_string()),
+        ));
+        let package_sources = [
+            PackageSource::source_only(
+                "@aws-sdk/middleware-host-header",
+                "3.700.0",
+                "@aws-sdk/middleware-host-header",
+                "@aws-sdk/middleware-host-header@3.700.0/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "@aws-sdk/middleware-host-header",
+                "3.711.0",
+                "@aws-sdk/middleware-host-header",
+                "@aws-sdk/middleware-host-header@3.711.0/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "@aws-sdk/middleware-host-header",
+                "3.720.0",
+                "@aws-sdk/middleware-host-header",
+                "@aws-sdk/middleware-host-header@3.720.0/index.js",
+                "export {};",
+            ),
+        ];
+
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.711.0"));
+    }
+
+    #[test]
+    fn unavailable_exact_package_versions_prefer_source_identity_over_nearest_cached_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let bundled_source = "export function add(a,b){return a+b}";
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(bundled_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(10),
+                "pkgMissingExact",
+                "node_modules/pkg/add.js",
+                "pkg",
+                Some("3.712.0".to_string()),
+            )
+            .with_source_file(1),
+        );
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "3.711.0",
+                "pkg/add.js",
+                "pkg@3.711.0/add.js",
+                "export function sub(a,b){return a-b}",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "3.720.0",
+                "pkg/add.js",
+                "pkg@3.720.0/add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            ),
+        ];
+
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.720.0"));
+    }
+
+    #[test]
+    fn missing_package_versions_resolve_to_latest_cached_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "inkNoVersion",
+            "node_modules/ink/index.js",
+            "ink",
+            None,
+        ));
+        let package_sources = [
+            PackageSource::source_only("ink", "4.4.1", "ink", "ink@4.4.1/index.js", "export {};"),
+            PackageSource::source_only("ink", "5.2.1", "ink", "ink@5.2.1/index.js", "export {};"),
+        ];
+
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("5.2.1"));
     }
 
     #[test]
@@ -5618,6 +5917,41 @@ mod tests {
         assert_eq!(
             selected.as_ref().map(ToString::to_string).as_deref(),
             Some("1.9.9")
+        );
+    }
+
+    #[test]
+    fn nearest_package_version_uses_binary_search_floor_for_missing_exact() {
+        let versions = BTreeSet::from([
+            semver::Version::parse("3.700.0").unwrap(),
+            semver::Version::parse("3.711.0").unwrap(),
+            semver::Version::parse("3.720.0").unwrap(),
+        ]);
+
+        let selected = nearest_package_version_by_binary_search("3.712.0", &versions);
+
+        assert_eq!(
+            selected.as_ref().map(ToString::to_string).as_deref(),
+            Some("3.711.0")
+        );
+    }
+
+    #[test]
+    fn network_resolution_hints_include_missing_versions() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "inkNoVersion",
+            "node_modules/ink/index.js",
+            "ink",
+            None,
+        ));
+
+        let hints = network_package_version_resolution_hints(&rows, &BTreeSet::new(), &[]);
+
+        assert_eq!(
+            hints,
+            BTreeSet::from([("ink".to_string(), "latest".to_string())])
         );
     }
 
@@ -6888,11 +7222,11 @@ mod tests {
         assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
         assert!(evidence.contains("dependency_closure_ownership"));
-        assert!(evidence.contains("dependency-closure:pkg@1.2.3"));
+        assert!(evidence.contains("exact-hint:pkg@1.2.3"));
     }
 
     #[test]
-    fn match_packages_explains_weak_hint_contradicted_by_dependencies() {
+    fn match_packages_resolves_weak_unversioned_hint_to_source_ownership() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let dependency_path = tempdir.path().join("axios.js");
         let mut connection = package_match_connection(
@@ -6949,7 +7283,7 @@ mod tests {
             match_packages_from_connection(&mut connection, &args).expect("match should run");
 
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.matched_modules, 1);
         assert_eq!(outcome.written_attributions, 1);
         let (rejection_reason, evidence_json): (String, String) = connection
             .query_row(
@@ -6961,14 +7295,11 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .expect("weak inconsistent hint should write rejected reason");
-        assert!(rejection_reason.contains("package hint is weak"));
-        assert!(rejection_reason.contains("dependency graph points at other packages"));
-        assert!(evidence_json.contains("unmatched_diagnostics"));
-        assert!(evidence_json.contains("dependency_neighborhood"));
-        assert!(evidence_json.contains("outgoing_package_counts"));
-        assert!(evidence_json.contains("axios"));
-        assert!(evidence_json.contains("version_decision"));
+            .expect("weak resolved hint should write source ownership reason");
+        assert!(rejection_reason.contains("matched package ownership"));
+        assert!(evidence_json.contains("ownership_match"));
+        assert!(evidence_json.contains("exact-hint:rxjs@7.8.2"));
+        assert!(evidence_json.contains("quality=weak"));
     }
 
     #[test]
@@ -7355,7 +7686,7 @@ mod tests {
     }
 
     #[test]
-    fn unversioned_package_versions_write_rejected_attribution_without_inference() {
+    fn unversioned_package_versions_resolve_to_latest_cached_version() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -7388,7 +7719,7 @@ mod tests {
             match_packages_from_connection(&mut connection, &args).expect("match should run");
         let (status, rejection_reason, package_version, emission_mode): (
             String,
-            String,
+            Option<String>,
             Option<String>,
             String,
         ) = connection
@@ -7401,7 +7732,7 @@ mod tests {
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("rejected attribution should be written");
+            .expect("resolved attribution should be written");
         let package_version_not_null: i64 = connection
             .query_row(
                 r"
@@ -7415,15 +7746,15 @@ mod tests {
             .expect("package_version column should exist");
 
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-        assert_eq!(outcome.matched_modules, 0);
+        assert_eq!(outcome.matched_modules, 1);
         assert_eq!(outcome.matched_package_surfaces, 0);
         assert_eq!(outcome.written_attributions, 1);
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 1);
-        assert_eq!(status, "rejected");
-        assert!(rejection_reason.contains("did not produce an accepted attribution"));
-        assert_eq!(package_version, None);
-        assert_eq!(emission_mode, "application_source");
+        assert_eq!(status, "accepted");
+        assert_eq!(rejection_reason, None);
+        assert_eq!(package_version.as_deref(), Some("2.0.0"));
+        assert_eq!(emission_mode, "external_import");
         assert_eq!(package_version_not_null, 0);
     }
 
