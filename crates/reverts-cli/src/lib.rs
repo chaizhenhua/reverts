@@ -38,6 +38,7 @@ use reverts_pipeline::{
     generate_project_from_input, runtime_setter_migration_blocker_report_from_input,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use semver::{BuildMetadata, Comparator, Op, Version, VersionReq};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchPackagesArgs {
@@ -941,10 +942,6 @@ pub fn match_packages_from_connection(
         &mut rows,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
-    let source_quality_counts = package_module_source_quality_counts(
-        &rows,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
     let package_sources = load_package_sources(
         connection,
         &rows,
@@ -953,6 +950,11 @@ pub fn match_packages_from_connection(
         args.materialize_package_sources,
         args.apply,
     )?;
+    resolve_non_exact_package_version_hints(&mut rows, &package_sources, &package_names);
+    let source_quality_counts = package_module_source_quality_counts(
+        &rows,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
     let pipeline_report = if package_sources.is_empty() && package_names.is_empty() {
         empty_package_matching_pipeline_report()
     } else {
@@ -2250,7 +2252,8 @@ fn load_package_sources(
         package_source_roots,
     )?);
     if materialize_package_sources {
-        let materialized_sources = materialize_package_sources_from_hints(rows, package_names)?;
+        let materialized_sources =
+            materialize_package_sources_from_hints(rows, package_names, &package_sources)?;
         if persist_materialized_package_sources && !materialized_sources.is_empty() {
             persist_package_source_cache(connection, &materialized_sources)?;
         }
@@ -2521,8 +2524,32 @@ fn load_package_sources_from_roots(
 fn materialize_package_sources_from_hints(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
+    existing_sources: &[PackageSource],
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
-    let hints = package_version_hints_for_materialization(rows, package_names);
+    let mut hints =
+        package_version_hints_for_materialization(rows, package_names, existing_sources);
+    for (package_name, requested_version) in
+        unresolved_non_exact_package_version_hints(rows, package_names, existing_sources)
+    {
+        match resolve_non_exact_package_version_hint_from_network(
+            package_name.as_str(),
+            requested_version.as_str(),
+        ) {
+            Ok(Some(resolved_version)) => {
+                hints.insert((package_name, resolved_version));
+            }
+            Ok(None) => {
+                eprintln!(
+                    "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
+                );
+            }
+            Err(error) => {
+                eprintln!(
+                    "skipping package source materialization for {package_name}@{requested_version}: {error}"
+                );
+            }
+        }
+    }
     if hints.is_empty() {
         return Ok(Vec::new());
     }
@@ -2555,7 +2582,11 @@ fn materialize_package_sources_from_hints(
             &mut sources,
         );
         let cleanup = fs::remove_dir_all(temp_root.as_path());
-        result?;
+        if let Err(error) = result {
+            eprintln!(
+                "skipping package source materialization for {package_name}@{package_version}: {error}"
+            );
+        }
         if let Err(source) = cleanup {
             return Err(MatchPackagesError::ReadPackageSourceRoot {
                 path: temp_root,
@@ -2624,7 +2655,10 @@ fn materialize_one_package_source(
 fn package_version_hints_for_materialization(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
+    existing_sources: &[PackageSource],
 ) -> BTreeSet<(String, String)> {
+    let available_versions = exact_package_source_versions_by_package(existing_sources);
+    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
     rows.modules
         .iter()
         .filter(|module| module.kind == ModuleKind::Package)
@@ -2640,14 +2674,394 @@ fn package_version_hints_for_materialization(
                 .package_version
                 .as_deref()
                 .map(str::trim)
-                .filter(|version| is_exact_package_version_hint(version))?;
-            Some((package_name.to_string(), package_version.to_string()))
+                .filter(|version| !version.is_empty())?;
+            if is_exact_package_version_hint(package_version) {
+                return (!package_source_versions_contain(
+                    &available_versions,
+                    package_name,
+                    package_version,
+                ))
+                .then(|| (package_name.to_string(), package_version.to_string()));
+            }
+            let resolved = best_project_version_candidate(
+                package_name,
+                package_version,
+                &project_exact_versions,
+                None,
+            )
+            .or_else(|| {
+                available_versions.get(package_name).and_then(|versions| {
+                    best_matching_package_version_by_binary_search(package_version, versions)
+                })
+            })?;
+            (!available_versions
+                .get(package_name)
+                .is_some_and(|versions| versions.contains(&resolved)))
+            .then(|| (package_name.to_string(), resolved.to_string()))
         })
         .collect()
 }
 
 fn is_exact_package_version_hint(version: &str) -> bool {
-    semver::Version::parse(version).is_ok()
+    Version::parse(version).is_ok()
+}
+
+fn unresolved_non_exact_package_version_hints(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+    existing_sources: &[PackageSource],
+) -> BTreeSet<(String, String)> {
+    let available_versions = exact_package_source_versions_by_package(existing_sources);
+    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            let package_name = module.package_name.as_deref()?.trim();
+            if package_name.is_empty()
+                || !is_valid_package_name(package_name)
+                || (!package_names.is_empty() && !package_names.contains(package_name))
+            {
+                return None;
+            }
+            let package_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty())
+                .filter(|version| !is_exact_package_version_hint(version))?;
+            let has_project_candidate = best_project_version_candidate(
+                package_name,
+                package_version,
+                &project_exact_versions,
+                None,
+            )
+            .is_some();
+            let has_available_candidate =
+                available_versions
+                    .get(package_name)
+                    .is_some_and(|versions| {
+                        best_matching_package_version_by_binary_search(package_version, versions)
+                            .is_some()
+                    });
+            (!has_project_candidate && !has_available_candidate)
+                .then(|| (package_name.to_string(), package_version.to_string()))
+        })
+        .collect()
+}
+
+fn resolve_non_exact_package_version_hints(
+    rows: &mut InputRows,
+    package_sources: &[PackageSource],
+    package_names: &BTreeSet<String>,
+) -> usize {
+    let available_versions = exact_package_source_versions_by_package(package_sources);
+    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+    let mut resolved = 0usize;
+    for module in &mut rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        if package_name.is_empty()
+            || !is_valid_package_name(package_name)
+            || (!package_names.is_empty() && !package_names.contains(package_name))
+        {
+            continue;
+        }
+        let Some(package_version) = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .filter(|version| !is_exact_package_version_hint(version))
+        else {
+            continue;
+        };
+        let Some(versions) = available_versions.get(package_name) else {
+            continue;
+        };
+        let selected = best_project_version_candidate(
+            package_name,
+            package_version,
+            &project_exact_versions,
+            Some(versions),
+        )
+        .or_else(|| best_matching_package_version_by_binary_search(package_version, versions));
+        if let Some(selected) = selected {
+            module.package_version = Some(selected.to_string());
+            resolved += 1;
+        }
+    }
+    resolved
+}
+
+fn exact_package_source_versions_by_package(
+    package_sources: &[PackageSource],
+) -> BTreeMap<String, BTreeSet<Version>> {
+    let mut versions = BTreeMap::<String, BTreeSet<Version>>::new();
+    for source in package_sources {
+        let Ok(version) = Version::parse(source.package_version.as_str()) else {
+            continue;
+        };
+        versions
+            .entry(source.package_name.clone())
+            .or_default()
+            .insert(version);
+    }
+    versions
+}
+
+fn exact_project_version_counts_by_package(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeMap<Version, usize>> {
+    let mut versions = BTreeMap::<String, BTreeMap<Version, usize>>::new();
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        if package_name.is_empty()
+            || !is_valid_package_name(package_name)
+            || (!package_names.is_empty() && !package_names.contains(package_name))
+        {
+            continue;
+        }
+        let Some(package_version) = module.package_version.as_deref().map(str::trim) else {
+            continue;
+        };
+        let Ok(version) = Version::parse(package_version) else {
+            continue;
+        };
+        *versions
+            .entry(package_name.to_string())
+            .or_default()
+            .entry(version)
+            .or_default() += 1;
+    }
+    versions
+}
+
+fn package_source_versions_contain(
+    versions_by_package: &BTreeMap<String, BTreeSet<Version>>,
+    package_name: &str,
+    package_version: &str,
+) -> bool {
+    let Ok(version) = Version::parse(package_version) else {
+        return false;
+    };
+    versions_by_package
+        .get(package_name)
+        .is_some_and(|versions| versions.contains(&version))
+}
+
+fn best_project_version_candidate(
+    package_name: &str,
+    requested_version: &str,
+    project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
+    available_versions: Option<&BTreeSet<Version>>,
+) -> Option<Version> {
+    let versions = project_exact_versions.get(package_name)?;
+    let mut candidates = versions
+        .iter()
+        .filter(|(version, _count)| {
+            available_versions.is_none_or(|available| available.contains(version))
+                && version_hint_matches(requested_version, version)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.1
+            .cmp(right.1)
+            .then_with(|| left.0.cmp(right.0))
+            .reverse()
+    });
+    candidates
+        .into_iter()
+        .map(|(version, _count)| version.clone())
+        .next()
+}
+
+fn version_hint_matches(requested_version: &str, version: &Version) -> bool {
+    let requested_version = requested_version.trim();
+    if requested_version.eq_ignore_ascii_case("latest") {
+        return true;
+    }
+    VersionReq::parse(requested_version).is_ok_and(|requirement| requirement.matches(version))
+}
+
+fn best_matching_package_version_by_binary_search(
+    requested_version: &str,
+    versions: &BTreeSet<Version>,
+) -> Option<Version> {
+    if versions.is_empty() {
+        return None;
+    }
+    if requested_version.trim().eq_ignore_ascii_case("latest") {
+        return versions.iter().next_back().cloned();
+    }
+    let requirement = VersionReq::parse(requested_version.trim()).ok()?;
+    let sorted_versions = versions.iter().cloned().collect::<Vec<_>>();
+    let search_end = version_req_upper_bound(&requirement)
+        .map(|(upper_bound, inclusive)| {
+            if inclusive {
+                sorted_versions.partition_point(|version| version <= &upper_bound)
+            } else {
+                sorted_versions.partition_point(|version| version < &upper_bound)
+            }
+        })
+        .unwrap_or(sorted_versions.len());
+    sorted_versions[..search_end]
+        .iter()
+        .rev()
+        .find(|version| requirement.matches(version))
+        .cloned()
+}
+
+fn version_req_upper_bound(requirement: &VersionReq) -> Option<(Version, bool)> {
+    requirement
+        .comparators
+        .iter()
+        .filter_map(comparator_upper_bound)
+        .min_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
+}
+
+fn comparator_upper_bound(comparator: &Comparator) -> Option<(Version, bool)> {
+    match comparator.op {
+        Op::Exact | Op::Wildcard => partial_exact_upper_bound(comparator),
+        Op::Tilde => {
+            let minor = comparator.minor?;
+            Some((Version::new(comparator.major, minor + 1, 0), false))
+        }
+        Op::Caret => Some(caret_upper_bound(comparator)),
+        Op::Less => Some((partial_version_floor(comparator), false)),
+        Op::LessEq => {
+            if comparator.patch.is_some() {
+                Some((partial_version_floor(comparator), true))
+            } else {
+                partial_exact_upper_bound(comparator)
+            }
+        }
+        Op::Greater | Op::GreaterEq => None,
+        _ => None,
+    }
+}
+
+fn partial_exact_upper_bound(comparator: &Comparator) -> Option<(Version, bool)> {
+    match (comparator.minor, comparator.patch) {
+        (Some(minor), Some(patch)) if comparator.op == Op::Exact => Some((
+            Version {
+                major: comparator.major,
+                minor,
+                patch,
+                pre: comparator.pre.clone(),
+                build: BuildMetadata::EMPTY,
+            },
+            true,
+        )),
+        (Some(minor), _) => Some((Version::new(comparator.major, minor + 1, 0), false)),
+        (None, _) => Some((Version::new(comparator.major + 1, 0, 0), false)),
+    }
+}
+
+fn caret_upper_bound(comparator: &Comparator) -> (Version, bool) {
+    let minor = comparator.minor.unwrap_or(0);
+    let patch = comparator.patch.unwrap_or(0);
+    if comparator.major > 0 {
+        (Version::new(comparator.major + 1, 0, 0), false)
+    } else if minor > 0 {
+        (Version::new(0, minor + 1, 0), false)
+    } else if comparator.patch.is_some() {
+        (Version::new(0, 0, patch + 1), false)
+    } else if comparator.minor.is_some() {
+        (Version::new(0, 1, 0), false)
+    } else {
+        (Version::new(1, 0, 0), false)
+    }
+}
+
+fn partial_version_floor(comparator: &Comparator) -> Version {
+    Version {
+        major: comparator.major,
+        minor: comparator.minor.unwrap_or(0),
+        patch: comparator.patch.unwrap_or(0),
+        pre: comparator.pre.clone(),
+        build: BuildMetadata::EMPTY,
+    }
+}
+
+fn resolve_non_exact_package_version_hint_from_network(
+    package_name: &str,
+    requested_version: &str,
+) -> Result<Option<String>, MatchPackagesError> {
+    let versions = npm_package_versions(package_name, requested_version)?;
+    Ok(
+        best_matching_package_version_by_binary_search(requested_version, &versions)
+            .map(|version| version.to_string()),
+    )
+}
+
+fn npm_package_versions(
+    package_name: &str,
+    requested_version: &str,
+) -> Result<BTreeSet<Version>, MatchPackagesError> {
+    let output = Command::new("npm")
+        .arg("view")
+        .arg(package_name)
+        .arg("versions")
+        .arg("--json")
+        .output()
+        .map_err(|source| MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: requested_version.to_string(),
+            message: format!("failed to run npm view: {source}"),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = if stderr.is_empty() { stdout } else { stderr };
+        return Err(MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: requested_version.to_string(),
+            message,
+        });
+    }
+    parse_npm_versions_json(package_name, requested_version, output.stdout.as_slice())
+}
+
+fn parse_npm_versions_json(
+    package_name: &str,
+    requested_version: &str,
+    stdout: &[u8],
+) -> Result<BTreeSet<Version>, MatchPackagesError> {
+    let value = serde_json::from_slice::<serde_json::Value>(stdout).map_err(|source| {
+        MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: requested_version.to_string(),
+            message: format!("failed to parse npm versions JSON: {source}"),
+        }
+    })?;
+    let mut versions = BTreeSet::new();
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(version) = item.as_str().and_then(|value| Version::parse(value).ok()) {
+                    versions.insert(version);
+                }
+            }
+        }
+        serde_json::Value::String(version) => {
+            if let Ok(version) = Version::parse(version.as_str()) {
+                versions.insert(version);
+            }
+        }
+        _ => {}
+    }
+    Ok(versions)
 }
 
 fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
@@ -4760,10 +5174,11 @@ mod tests {
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, RuntimeInventoryArgs, collect_local_package_sources, dedup_audit_report,
-        extract_bun_embedded_asset_from_bytes, help_text, load_package_sources,
-        local_package_metadata, match_packages_from_connection,
-        package_version_hints_for_materialization, persist_package_source_cache, run,
+        MatchPackagesArgs, RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
+        collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
+        help_text, load_package_sources, local_package_metadata, match_packages_from_connection,
+        package_version_hints_for_materialization, parse_npm_versions_json,
+        persist_package_source_cache, resolve_non_exact_package_version_hints, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections, version_text,
     };
 
@@ -5059,7 +5474,7 @@ mod tests {
     }
 
     #[test]
-    fn materialization_hints_use_exact_filtered_package_versions() {
+    fn materialization_hints_resolve_non_exact_versions_from_project_and_cache() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
@@ -5089,6 +5504,36 @@ mod tests {
             "react",
             Some("latest".to_string()),
         ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(14),
+            "protobufjs",
+            "node_modules/protobufjs/index.js",
+            "protobufjs",
+            Some("7.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(15),
+            "protobufjsExact",
+            "node_modules/protobufjs/light.js",
+            "protobufjs",
+            Some("7.5.4".to_string()),
+        ));
+        let available_sources = [
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs",
+                "rxjs@7.8.2/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "protobufjs",
+                "7.4.0",
+                "protobufjs",
+                "protobufjs@7.4.0/index.js",
+                "export {};",
+            ),
+        ];
 
         let hints = package_version_hints_for_materialization(
             &rows,
@@ -5096,12 +5541,101 @@ mod tests {
                 "lodash".to_string(),
                 "rxjs".to_string(),
                 "react".to_string(),
+                "protobufjs".to_string(),
             ]),
+            &available_sources,
         );
 
         assert_eq!(
             hints,
-            BTreeSet::from([("lodash".to_string(), "4.17.21".to_string())])
+            BTreeSet::from([
+                ("lodash".to_string(), "4.17.21".to_string()),
+                ("protobufjs".to_string(), "7.5.4".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn non_exact_package_versions_resolve_to_best_cached_version_before_matching() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "forgeRange",
+            "node_modules/node-forge/index.js",
+            "node-forge",
+            Some("1.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "forgeExact",
+            "node_modules/node-forge/lib/aes.js",
+            "node-forge",
+            Some("1.3.1".to_string()),
+        ));
+        let package_sources = [
+            PackageSource::source_only(
+                "node-forge",
+                "1.0.0",
+                "node-forge",
+                "node-forge@1.0.0/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "node-forge",
+                "1.3.1",
+                "node-forge",
+                "node-forge@1.3.1/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "node-forge",
+                "1.3.3",
+                "node-forge",
+                "node-forge@1.3.3/index.js",
+                "export {};",
+            ),
+        ];
+
+        let resolved =
+            resolve_non_exact_package_version_hints(&mut rows, &package_sources, &BTreeSet::new());
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.3.1"));
+    }
+
+    #[test]
+    fn best_matching_package_version_uses_binary_search_for_wildcards() {
+        let versions = BTreeSet::from([
+            semver::Version::parse("0.9.9").unwrap(),
+            semver::Version::parse("1.0.0").unwrap(),
+            semver::Version::parse("1.2.3").unwrap(),
+            semver::Version::parse("1.9.9").unwrap(),
+            semver::Version::parse("2.0.0").unwrap(),
+        ]);
+
+        let selected = best_matching_package_version_by_binary_search("1.x", &versions);
+
+        assert_eq!(
+            selected.as_ref().map(ToString::to_string).as_deref(),
+            Some("1.9.9")
+        );
+    }
+
+    #[test]
+    fn npm_versions_json_parser_accepts_arrays_and_single_versions() {
+        let array_versions = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","1.2.3","bad"]"#)
+            .expect("array versions should parse");
+        let single_version = parse_npm_versions_json("pkg", "latest", br#""2.0.0""#)
+            .expect("single version should parse");
+
+        assert!(array_versions.contains(&semver::Version::parse("1.2.3").unwrap()));
+        assert_eq!(
+            single_version
+                .iter()
+                .next()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("2.0.0")
         );
     }
 
