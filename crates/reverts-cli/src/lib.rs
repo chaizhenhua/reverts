@@ -6192,7 +6192,7 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_does_not_promote_structural_bag_ownership() {
+    fn match_packages_promotes_structural_bag_source_ownership() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -6224,8 +6224,8 @@ mod tests {
 
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(
-            outcome.matched_modules, 0,
-            "structural bag evidence is not promoted by the package matching pipeline"
+            outcome.matched_modules, 1,
+            "structural bag evidence should be promoted as source-only ownership"
         );
         assert_eq!(
             outcome.cascade_ownership_matches, 0,
@@ -6247,7 +6247,8 @@ mod tests {
             )
             .expect("count attribution rows");
         assert_eq!(attribution_count, 1);
-        assert!(!evidence.contains("aggregate_structural_bag_similarity"));
+        assert!(evidence.contains("aggregate_structural_bag_similarity"));
+        assert!(evidence.contains("structural-bag:pkg@1.2.3"));
     }
 
     #[test]

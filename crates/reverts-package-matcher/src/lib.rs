@@ -554,6 +554,22 @@ pub fn match_packages_with_pipeline(
         &mut package_report,
     );
 
+    let structural_bag_excluded_modules = package_report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let structural_bag_report = match_structural_bags_with_excluded_modules(
+        rows,
+        package_sources,
+        package_filter,
+        &structural_bag_excluded_modules,
+    );
+    promote_structural_bag_ownership_matches(
+        rows,
+        structural_bag_report.matches.as_slice(),
+        &mut package_report,
+    );
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
     promote_package_file_graph_ownership_matches(rows, &mut package_report);
@@ -821,6 +837,37 @@ fn promote_cascade_function_coverage_to_module_attributions(
             string_anchor_matches: 0,
             external_importable: can_externalize,
         });
+    }
+}
+
+fn promote_structural_bag_ownership_matches(
+    rows: &InputRows,
+    structural_matches: &[PackageMatch],
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = accepted_external_modules(rows, report);
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let ownership_by_module = ownership_by_module(rows, report);
+
+    for package_match in structural_matches {
+        if package_match.external_importable
+            || already_accepted.contains(&package_match.module_id)
+            || matched_modules.contains(&package_match.module_id)
+            || has_direct_neighborhood_package_contradiction(
+                rows,
+                package_match.module_id,
+                package_match.package_name.as_str(),
+                &ownership_by_module,
+            )
+        {
+            continue;
+        }
+        matched_modules.insert(package_match.module_id);
+        report.matches.push(package_match.clone());
     }
 }
 
@@ -3112,6 +3159,58 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(report.audit.is_clean());
         assert_eq!(report.matches.len(), 1);
         assert_eq!(report.matches[0].module_id, ModuleId(11));
+    }
+
+    #[test]
+    fn pipeline_promotes_structural_bag_as_source_only_ownership() {
+        let mut rows = rows_with_package_source(
+            r#"
+            function a(x){if(x){return true;}return false;}
+            function b(y){if(y){return true;}return false;}
+            "#,
+        );
+        rows.modules[0].semantic_path = "pkg/not-present-in-source.js".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/first",
+                "first.js",
+                "function first(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/second",
+                "second.js",
+                "function second(input){if(input){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.structural_bag_report.matches.len(), 1);
+        let package_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == ModuleId(10))
+            .expect("structural ownership should be promoted into package report");
+        assert_eq!(
+            package_match.strategy,
+            ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        );
+        assert!(
+            package_match
+                .source_path
+                .contains("structural-bag:pkg@1.2.3")
+        );
+        assert!(!package_match.external_importable);
+        assert!(
+            report.package_report.attributions.is_empty(),
+            "structural ownership alone must not emit an external import"
+        );
     }
 
     #[test]
