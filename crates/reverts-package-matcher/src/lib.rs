@@ -1692,8 +1692,11 @@ fn resolve_external_import_target_with_index(
     }
 
     if let Some(package_match) = package_match
-        && let Some(target) =
-            export_member_external_package_source(package_match, external_source_index)
+        && let Some(target) = export_member_external_package_source(
+            package_match,
+            external_source_index,
+            module_source,
+        )
     {
         return Some(target);
     }
@@ -1977,6 +1980,7 @@ impl ExportMemberSourceProof {
 fn export_member_external_package_source(
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
 ) -> Option<ExternalImportTarget> {
     if !source_only_match_can_be_promoted_to_import(package_match.strategy) {
         return None;
@@ -2056,9 +2060,17 @@ fn export_member_external_package_source(
             .cmp(&package_source_external_import_rank(right))
             .then_with(|| left.source_path.cmp(&right.source_path))
     })?;
+    let external_members = external_source_index.export_members(source);
+    let aliases =
+        export_member_alias_proof_map(module_source, source.source.as_str(), &external_members);
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: export_member_proof_source_path(source, best_proof, &matched_members),
+        source_path: export_member_proof_source_path(
+            source,
+            best_proof,
+            &matched_members,
+            &aliases,
+        ),
     })
 }
 
@@ -2190,6 +2202,7 @@ fn export_member_proof_source_path(
     source: &PackageSource,
     proof: ExportMemberSourceProof,
     members: &BTreeSet<String>,
+    aliases: &BTreeMap<String, String>,
 ) -> String {
     let members = members
         .iter()
@@ -2197,12 +2210,385 @@ fn export_member_proof_source_path(
         .map(String::as_str)
         .collect::<Vec<_>>()
         .join(",");
+    let alias_proof = export_member_alias_proof_fragment(aliases);
+    if !alias_proof.is_empty() {
+        return format!(
+            "forced-external:export-members:{}:{}:aliases={}:{}",
+            proof.label(),
+            members,
+            alias_proof,
+            source.source_path
+        );
+    }
     format!(
         "forced-external:export-members:{}:{}:{}",
         proof.label(),
         members,
         source.source_path
     )
+}
+
+fn export_member_alias_proof_fragment(aliases: &BTreeMap<String, String>) -> String {
+    aliases
+        .iter()
+        .take(64)
+        .filter(|(local, exported)| {
+            local.as_str() != exported.as_str()
+                && is_identifier_name(local.as_str())
+                && is_identifier_name(exported.as_str())
+        })
+        .map(|(local, exported)| format!("{local}={exported}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn export_member_alias_proof_map(
+    module_source: &str,
+    external_source: &str,
+    exported_members: &BTreeSet<String>,
+) -> BTreeMap<String, String> {
+    if module_source.trim().is_empty() || exported_members.is_empty() {
+        return BTreeMap::new();
+    }
+    let local_signatures = binding_string_signatures_from_source(module_source);
+    let external_signatures = binding_string_signatures_from_source(external_source)
+        .into_iter()
+        .filter(|(binding, signature)| {
+            exported_members.contains(binding.as_str()) && !signature.is_empty()
+        })
+        .collect::<BTreeMap<_, _>>();
+    if local_signatures.is_empty() || external_signatures.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut aliases = BTreeMap::new();
+    for (local, local_signature) in local_signatures {
+        if exported_members.contains(local.as_str()) || local_signature.is_empty() {
+            continue;
+        }
+        let mut scored = external_signatures
+            .iter()
+            .filter_map(|(exported, external_signature)| {
+                export_member_alias_score(&local_signature, exported.as_str(), external_signature)
+                    .map(|score| (exported.as_str(), score))
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(right.0)));
+        let Some((best_exported, best_score)) = scored.first().copied() else {
+            continue;
+        };
+        if scored
+            .get(1)
+            .is_some_and(|(_exported, score)| *score == best_score)
+        {
+            continue;
+        }
+        aliases.insert(local, best_exported.to_string());
+    }
+    aliases
+}
+
+fn export_member_alias_score(
+    local_signature: &BTreeSet<String>,
+    exported_member: &str,
+    external_signature: &BTreeSet<String>,
+) -> Option<usize> {
+    if local_signature.contains(exported_member) && external_signature.contains(exported_member) {
+        return Some(10_000 + local_signature.intersection(external_signature).count());
+    }
+    let overlap = local_signature.intersection(external_signature).count();
+    if overlap < 3 {
+        return None;
+    }
+    let smaller = local_signature.len().min(external_signature.len());
+    (overlap * 100 >= smaller * 80).then_some(1_000 + overlap)
+}
+
+fn binding_string_signatures_from_source(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    let mut signatures = BTreeMap::<String, BTreeSet<String>>::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_for_signature(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        let Some((identifier, after_identifier)) = read_identifier_with_end_at(source, cursor)
+        else {
+            cursor += 1;
+            continue;
+        };
+
+        if matches!(identifier, "var" | "let" | "const") {
+            if let Some((binding, expression_start)) =
+                variable_initializer_start_for_signature(source, after_identifier)
+            {
+                let end = signature_expression_end(source, expression_start);
+                let initializer = &source[expression_start..end];
+                if !initializer_is_lazy_wrapper_for_signature(initializer) {
+                    insert_binding_string_signature(&mut signatures, binding, initializer);
+                    cursor = end;
+                } else {
+                    cursor = expression_start;
+                }
+                continue;
+            }
+        } else if identifier == "class" {
+            if let Some((binding, class_start)) =
+                class_declaration_start_for_signature(source, cursor, after_identifier)
+            {
+                let end = signature_expression_end(source, class_start);
+                insert_binding_string_signature(
+                    &mut signatures,
+                    binding,
+                    &source[class_start..end],
+                );
+                cursor = end;
+                continue;
+            }
+        } else if let Some((binding, expression_start)) =
+            commonjs_export_initializer_start_for_signature(source, cursor)
+        {
+            let end = signature_expression_end(source, expression_start);
+            insert_binding_string_signature(
+                &mut signatures,
+                binding,
+                &source[expression_start..end],
+            );
+            cursor = end;
+            continue;
+        } else if assignment_lhs_is_standalone_identifier(source, cursor) {
+            let after_ws = skip_ascii_ws(bytes, after_identifier);
+            if bytes.get(after_ws) == Some(&b'=')
+                && bytes.get(after_ws + 1) != Some(&b'=')
+                && bytes.get(after_ws + 1) != Some(&b'>')
+            {
+                let expression_start = skip_ascii_ws(bytes, after_ws + 1);
+                let end = signature_expression_end(source, expression_start);
+                insert_binding_string_signature(
+                    &mut signatures,
+                    identifier,
+                    &source[expression_start..end],
+                );
+                cursor = end;
+                continue;
+            }
+        }
+        cursor = after_identifier;
+    }
+    signatures
+}
+
+fn initializer_is_lazy_wrapper_for_signature(initializer: &str) -> bool {
+    let trimmed = initializer.trim_start();
+    trimmed.starts_with("E(")
+        || trimmed.starts_with("lazyValue(")
+        || trimmed.starts_with("lazyModule(")
+        || trimmed.starts_with("__commonJS(")
+}
+
+fn insert_binding_string_signature(
+    signatures: &mut BTreeMap<String, BTreeSet<String>>,
+    binding: &str,
+    source: &str,
+) {
+    if !is_identifier_name(binding) {
+        return;
+    }
+    let strings = quoted_string_literals_from_source(source);
+    if strings.is_empty() {
+        return;
+    }
+    signatures
+        .entry(binding.to_string())
+        .or_default()
+        .extend(strings);
+}
+
+fn variable_initializer_start_for_signature(source: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = source.as_bytes();
+    let binding_start = skip_ascii_ws(bytes, start);
+    let (binding, after_binding) = read_identifier_with_end_at(source, binding_start)?;
+    let equals = skip_ascii_ws(bytes, after_binding);
+    if bytes.get(equals) != Some(&b'=') {
+        return None;
+    }
+    Some((binding, skip_ascii_ws(bytes, equals + 1)))
+}
+
+fn class_declaration_start_for_signature(
+    source: &str,
+    class_start: usize,
+    after_keyword: usize,
+) -> Option<(&str, usize)> {
+    let binding_start = skip_ascii_ws(source.as_bytes(), after_keyword);
+    let (binding, _after_binding) = read_identifier_with_end_at(source, binding_start)?;
+    Some((binding, class_start))
+}
+
+fn commonjs_export_initializer_start_for_signature(
+    source: &str,
+    start: usize,
+) -> Option<(&str, usize)> {
+    let bytes = source.as_bytes();
+    let (object, after_object) = read_identifier_with_end_at(source, start)?;
+    let member_start = if object == "exports" {
+        if bytes.get(after_object) != Some(&b'.') {
+            return None;
+        }
+        after_object + 1
+    } else if object == "module" {
+        let dot = after_object;
+        if bytes.get(dot) != Some(&b'.') {
+            return None;
+        }
+        let (exports, after_exports) = read_identifier_with_end_at(source, dot + 1)?;
+        if exports != "exports" || bytes.get(after_exports) != Some(&b'.') {
+            return None;
+        }
+        after_exports + 1
+    } else {
+        return None;
+    };
+    let (member, after_member) = read_identifier_with_end_at(source, member_start)?;
+    let equals = skip_ascii_ws(bytes, after_member);
+    if bytes.get(equals) != Some(&b'=')
+        || bytes.get(equals + 1) == Some(&b'=')
+        || bytes.get(equals + 1) == Some(&b'>')
+    {
+        return None;
+    }
+    Some((member, skip_ascii_ws(bytes, equals + 1)))
+}
+
+fn assignment_lhs_is_standalone_identifier(source: &str, start: usize) -> bool {
+    previous_non_ascii_ws(source.as_bytes(), start).is_none_or(|byte| !matches!(byte, b'.' | b'#'))
+}
+
+fn previous_non_ascii_ws(bytes: &[u8], before: usize) -> Option<u8> {
+    let mut cursor = before.checked_sub(1)?;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor = cursor.checked_sub(1)?;
+    }
+    bytes.get(cursor).copied()
+}
+
+fn signature_expression_end(source: &str, start: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = start;
+    let mut paren_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_for_signature(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        match bytes[cursor] {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 {
+                    return cursor + 1;
+                }
+            }
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b';' if paren_depth == 0 && brace_depth == 0 && bracket_depth == 0 => {
+                return cursor + 1;
+            }
+            _ => {}
+        }
+        cursor += 1;
+    }
+    source.len()
+}
+
+fn quoted_string_literals_from_source(source: &str) -> BTreeSet<String> {
+    let bytes = source.as_bytes();
+    let mut strings = BTreeSet::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[cursor];
+                let (value, next) = read_quoted_string_literal_for_signature(source, cursor, quote);
+                let trimmed = value.trim();
+                if (3..=128).contains(&trimmed.len()) {
+                    strings.insert(trimmed.to_string());
+                }
+                cursor = next;
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment_for_signature(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment_for_signature(bytes, cursor + 2);
+            }
+            _ => cursor += 1,
+        }
+    }
+    strings
+}
+
+fn read_quoted_string_literal_for_signature(
+    source: &str,
+    start: usize,
+    quote: u8,
+) -> (String, usize) {
+    let mut escaped = false;
+    let mut out = String::new();
+    for (offset, ch) in source[start + 1..].char_indices() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch as u8 == quote {
+            return (out, start + 1 + offset + ch.len_utf8());
+        }
+        out.push(ch);
+    }
+    (out, source.len())
+}
+
+fn skip_non_code_for_signature(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    match bytes.get(cursor).copied()? {
+        b'\'' | b'"' | b'`' => {
+            Some(read_quoted_string_literal_for_signature(source, cursor, bytes[cursor]).1)
+        }
+        b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+            Some(skip_line_comment_for_signature(bytes, cursor + 2))
+        }
+        b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+            Some(skip_block_comment_for_signature(bytes, cursor + 2))
+        }
+        _ => None,
+    }
+}
+
+fn skip_line_comment_for_signature(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn skip_block_comment_for_signature(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+    bytes.len()
 }
 
 fn export_member_set_is_strong<'a>(members: impl Iterator<Item = &'a String>) -> bool {
@@ -2580,6 +2966,11 @@ fn skip_ascii_ws(bytes: &[u8], mut cursor: usize) -> usize {
         cursor += 1;
     }
     cursor
+}
+
+fn read_identifier_with_end_at(source: &str, start: usize) -> Option<(&str, usize)> {
+    let identifier = read_identifier_at(source, start)?;
+    Some((identifier, start + identifier.len()))
 }
 
 fn read_identifier_at(source: &str, start: usize) -> Option<&str> {
@@ -5822,6 +6213,87 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .resolved_file
                 .as_deref(),
             Some(package_match.source_path.as_str())
+        );
+    }
+
+    #[test]
+    fn export_member_adapter_proof_records_minified_member_aliases() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "init",
+            "pkg/internal.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        );
+        let module_source = r#"
+            var q, C;
+            var init = E(() => {
+                depInit();
+                q = arrayToEnum(["alpha", "beta", "gamma"]);
+                C = class C extends Error {
+                    constructor() {
+                        super();
+                        this.name = "PublicError";
+                    }
+                };
+            });
+        "#;
+        let public_source = r#"
+            export const ErrorCode = arrayToEnum(["alpha", "beta", "gamma"]);
+            export class PublicError extends Error {
+                constructor() {
+                    super();
+                    this.name = "PublicError";
+                }
+            }
+        "#;
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.0.0".to_string(),
+            export_specifier: "pkg/internal".to_string(),
+            source_path: "pkg@1.0.0/internal.js".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::FunctionSignatureAndStringAnchors,
+            function_signature_matches: 2,
+            string_anchor_matches: 4,
+            external_importable: false,
+        };
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal",
+                "pkg@1.0.0/internal.js",
+                public_source,
+            ),
+            PackageSource::external("pkg", "1.0.0", "pkg", "pkg@1.0.0/index.js", public_source),
+        ];
+
+        let target = resolve_external_import_target(
+            &module,
+            "pkg",
+            "1.0.0",
+            Some(&package_match),
+            &package_sources,
+            module_source,
+        )
+        .expect("export-member alias proof should resolve to root import");
+
+        assert_eq!(target.export_specifier.as_str(), "pkg");
+        assert!(
+            target
+                .source_path
+                .starts_with("forced-external:export-members:source-equivalent:"),
+            "{}",
+            target.source_path
+        );
+        assert!(
+            target
+                .source_path
+                .contains(":aliases=C=PublicError,q=ErrorCode:"),
+            "{}",
+            target.source_path
         );
     }
 

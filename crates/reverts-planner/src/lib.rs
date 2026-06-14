@@ -1956,6 +1956,21 @@ impl ImportExportPlanner {
                     helper_closure.emitted_bindings.remove(binding);
                 }
             }
+            let adapter_owned_runtime_bindings = adapter_owned_runtime_bindings(
+                program,
+                external_package_adapters,
+                externalized_packages,
+                &helper_closure.emitted_bindings,
+            );
+            if !adapter_owned_runtime_bindings.is_empty() {
+                helper_closure.source = strip_runtime_var_declarations(
+                    helper_closure.source.as_str(),
+                    &adapter_owned_runtime_bindings,
+                );
+                for binding in &adapter_owned_runtime_bindings {
+                    helper_closure.emitted_bindings.remove(binding);
+                }
+            }
             // Phase 11a: some runtime lazyValue thunks are not real lazy
             // module boundaries; they only fill private helper vars with
             // pure values and return `undefined`. Make those assignments
@@ -8963,6 +8978,28 @@ fn runtime_namespace_exports_for_helpers(
         .collect()
 }
 
+fn adapter_owned_runtime_bindings(
+    program: &EnrichedProgram,
+    external_package_adapters: &BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
+    externalized_packages: &BTreeSet<ModuleId>,
+    emitted_bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    if external_package_adapters.is_empty() || emitted_bindings.is_empty() {
+        return BTreeSet::new();
+    }
+    let definition_modules = unique_source_definition_modules(program, externalized_packages);
+    emitted_bindings
+        .iter()
+        .filter(|binding| {
+            definition_modules
+                .get(*binding)
+                .and_then(|module_id| *module_id)
+                .is_some_and(|module_id| external_package_adapters.contains_key(&module_id))
+        })
+        .cloned()
+        .collect()
+}
+
 fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
     let mut cursor = before.checked_sub(1)?;
     while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
@@ -8984,9 +9021,34 @@ struct ExternalPackageAdapterPlan {
     member_proof: Option<ExportMemberAdapterProof>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExportMemberAdapterProofKind {
+    BarrelReference,
+    BuildVariantPeer,
+    SourceEquivalent,
+    Unknown,
+}
+
+impl ExportMemberAdapterProofKind {
+    fn parse(value: &str) -> Self {
+        match value {
+            "barrel-reference" => Self::BarrelReference,
+            "build-variant-peer" => Self::BuildVariantPeer,
+            "source-equivalent" => Self::SourceEquivalent,
+            _ => Self::Unknown,
+        }
+    }
+
+    const fn allows_runtime_alias_side_effect_elision(self) -> bool {
+        matches!(self, Self::BuildVariantPeer | Self::SourceEquivalent)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExportMemberAdapterProof {
+    kind: ExportMemberAdapterProofKind,
     exported_members: BTreeSet<String>,
+    aliases: BTreeMap<BindingName, String>,
 }
 
 fn export_member_adapter_proof(
@@ -8995,15 +9057,44 @@ fn export_member_adapter_proof(
     let resolved_file = attribution.resolved_file.as_deref()?;
     let rest = resolved_file.strip_prefix("forced-external:export-members:")?;
     let mut parts = rest.splitn(3, ':');
-    let _proof_kind = parts.next()?;
+    let proof_kind = ExportMemberAdapterProofKind::parse(parts.next()?);
     let members = parts.next()?;
+    let tail = parts.next().unwrap_or_default();
     let exported_members = members
         .split(',')
         .map(str::trim)
         .filter(|member| is_identifier_like(member))
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
-    (!exported_members.is_empty()).then_some(ExportMemberAdapterProof { exported_members })
+    let aliases = export_member_adapter_aliases(tail.as_bytes());
+    (!exported_members.is_empty()).then_some(ExportMemberAdapterProof {
+        kind: proof_kind,
+        exported_members,
+        aliases,
+    })
+}
+
+fn export_member_adapter_aliases(tail: &[u8]) -> BTreeMap<BindingName, String> {
+    let Some(rest) = std::str::from_utf8(tail).ok() else {
+        return BTreeMap::new();
+    };
+    let Some(alias_tail) = rest.strip_prefix("aliases=") else {
+        return BTreeMap::new();
+    };
+    let aliases = alias_tail
+        .split_once(':')
+        .map(|(aliases, _source_path)| aliases)
+        .unwrap_or(alias_tail);
+    aliases
+        .split(',')
+        .filter_map(|alias| {
+            let (local, exported) = alias.split_once('=')?;
+            let local = local.trim();
+            let exported = exported.trim();
+            (is_identifier_like(local) && is_identifier_like(exported))
+                .then(|| (BindingName::new(local), exported.to_string()))
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9057,15 +9148,21 @@ fn adapter_plan_is_safe(
         .iter()
         .find(|module| module.id == module_id)
         .map(|module| module.original_name.as_str());
-    if adapter_source_has_implicit_side_effect_exports(program, module_id, original_name) {
+    let member_bindings = export_member_adapter_binding_map(program, module_id, member_proof);
+    if adapter_source_has_implicit_side_effect_exports(
+        program,
+        module_id,
+        original_name,
+        member_proof,
+        &member_bindings,
+    ) {
         return false;
     }
     bindings.iter().all(|binding| {
         if Some(binding.as_str()) == original_name {
             return true;
         }
-        if export_member_adapter_binding_map(program, module_id, member_proof).contains_key(binding)
-        {
+        if member_bindings.contains_key(binding) {
             return true;
         }
         external_adapter_non_original_binding_is_safe(program, module_id, binding)
@@ -9077,6 +9174,8 @@ fn adapter_source_has_implicit_side_effect_exports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     original_name: Option<&str>,
+    member_proof: Option<&ExportMemberAdapterProof>,
+    member_backed_bindings: &BTreeMap<BindingName, String>,
 ) -> bool {
     let Some(source) = program.model().input().module_source_slice(module_id) else {
         return false;
@@ -9085,6 +9184,7 @@ fn adapter_source_has_implicit_side_effect_exports(
     if compact.contains("return_$module.exports;") || compact.contains("module.exports") {
         return false;
     }
+    let writes = adapter_relevant_implicit_writes(source.source, member_backed_bindings);
     if call_identifiers_in_source(source.source)
         .into_iter()
         .any(|callee| {
@@ -9095,11 +9195,80 @@ fn adapter_source_has_implicit_side_effect_exports(
                 )
         })
     {
+        if adapter_member_proof_allows_call_side_effect_elision(
+            compact.as_str(),
+            original_name,
+            member_proof,
+            member_backed_bindings,
+            &writes,
+        ) {
+            return false;
+        }
         return true;
     }
-    implicit_global_writes_in_source(source.source)
+    writes.into_iter().any(|binding| {
+        Some(binding.as_str()) != original_name && !member_backed_bindings.contains_key(&binding)
+    })
+}
+
+fn adapter_relevant_implicit_writes(
+    source: &str,
+    member_backed_bindings: &BTreeMap<BindingName, String>,
+) -> BTreeSet<BindingName> {
+    let local_bindings = local_bindings_in_source(source);
+    implicit_global_writes_in_source(source)
         .into_iter()
-        .any(|binding| Some(binding.as_str()) != original_name)
+        .filter(|binding| {
+            member_backed_bindings.contains_key(binding)
+                || !local_bindings.contains(binding.as_str())
+        })
+        .collect()
+}
+
+fn adapter_member_proof_allows_call_side_effect_elision(
+    compact_source: &str,
+    original_name: Option<&str>,
+    member_proof: Option<&ExportMemberAdapterProof>,
+    member_backed_bindings: &BTreeMap<BindingName, String>,
+    writes: &BTreeSet<BindingName>,
+) -> bool {
+    let Some(member_proof) = member_proof else {
+        return false;
+    };
+    if !member_proof.kind.allows_runtime_alias_side_effect_elision()
+        || member_backed_bindings.is_empty()
+        || writes.is_empty()
+    {
+        return false;
+    }
+    if writes.iter().any(|binding| {
+        Some(binding.as_str()) != original_name && !member_backed_bindings.contains_key(binding)
+    }) {
+        return false;
+    }
+    let Some(original_name) = original_name else {
+        return false;
+    };
+    source_has_adapter_lazy_initializer(compact_source, original_name)
+}
+
+fn source_has_adapter_lazy_initializer(compact_source: &str, original_name: &str) -> bool {
+    [
+        format!("var{original_name}=E("),
+        format!("let{original_name}=E("),
+        format!("const{original_name}=E("),
+        format!("var{original_name}=lazyValue("),
+        format!("let{original_name}=lazyValue("),
+        format!("const{original_name}=lazyValue("),
+        format!("var{original_name}=lazyModule("),
+        format!("let{original_name}=lazyModule("),
+        format!("const{original_name}=lazyModule("),
+        format!("var{original_name}=__commonJS("),
+        format!("let{original_name}=__commonJS("),
+        format!("const{original_name}=__commonJS("),
+    ]
+    .iter()
+    .any(|needle| compact_source.contains(needle))
 }
 
 fn external_adapter_non_original_binding_is_safe(
@@ -9128,6 +9297,11 @@ fn export_member_adapter_binding_map(
         .filter(|member| is_identifier_like(member.as_str()))
         .map(|member| (BindingName::new(member.clone()), member.clone()))
         .collect::<BTreeMap<_, _>>();
+    for (local, exported) in &member_proof.aliases {
+        if member_proof.exported_members.contains(exported.as_str()) {
+            bindings.insert(local.clone(), exported.clone());
+        }
+    }
     let Some(source) = program.model().input().module_source_slice(module_id) else {
         return bindings;
     };
@@ -9135,6 +9309,11 @@ fn export_member_adapter_binding_map(
         if member_proof.exported_members.contains(exported.as_str()) {
             bindings.insert(local, exported);
         }
+    }
+    for (local, exported) in
+        class_runtime_name_member_bindings(source.source, &member_proof.exported_members)
+    {
+        bindings.entry(local).or_insert(exported);
     }
     bindings
 }
@@ -9145,6 +9324,88 @@ fn commonjs_exported_member_bindings(source: &str) -> BTreeMap<BindingName, Stri
     collect_direct_member_export_assignments(compact.as_str(), &mut bindings);
     collect_define_property_member_getters(compact.as_str(), &mut bindings);
     bindings
+}
+
+fn class_runtime_name_member_bindings(
+    source: &str,
+    exported_members: &BTreeSet<String>,
+) -> BTreeMap<BindingName, String> {
+    let mut bindings = BTreeMap::new();
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("class") {
+        let class_start = cursor + relative;
+        if !keyword_boundary(source, class_start, "class") {
+            cursor = class_start + "class".len();
+            continue;
+        }
+        let Some((local, class_body_end)) = class_local_binding_and_body_end(source, class_start)
+        else {
+            cursor = class_start + "class".len();
+            continue;
+        };
+        let class_source = &source[class_start..=class_body_end.min(source.len() - 1)];
+        let compact_class = compact_js_source(class_source);
+        for member in exported_members {
+            if class_declares_runtime_name(compact_class.as_str(), member.as_str()) {
+                bindings.insert(local.clone(), member.clone());
+                break;
+            }
+        }
+        cursor = class_body_end.saturating_add(1);
+    }
+    bindings
+}
+
+fn keyword_boundary(source: &str, start: usize, keyword: &str) -> bool {
+    let end = start + keyword.len();
+    let bytes = source.as_bytes();
+    let before_ok = start == 0 || !is_identifier_continue(bytes[start - 1]);
+    let after_ok = bytes
+        .get(end)
+        .is_none_or(|byte| !is_identifier_continue(*byte));
+    before_ok && after_ok
+}
+
+fn class_local_binding_and_body_end(
+    source: &str,
+    class_start: usize,
+) -> Option<(BindingName, usize)> {
+    let bytes = source.as_bytes();
+    let after_keyword = skip_ws(bytes, class_start + "class".len());
+    let (class_name, after_class_name) = parse_identifier(source, after_keyword)?;
+    let local = assigned_identifier_before_expression(source, class_start)
+        .unwrap_or_else(|| BindingName::new(class_name));
+    let body_start = source[after_class_name..]
+        .find('{')
+        .map(|relative| after_class_name + relative)?;
+    let body_end = find_matching_brace(source, body_start)?;
+    Some((local, body_end))
+}
+
+fn assigned_identifier_before_expression(
+    source: &str,
+    expression_start: usize,
+) -> Option<BindingName> {
+    let bytes = source.as_bytes();
+    let equals = previous_non_ws(bytes, expression_start)?;
+    if bytes.get(equals) != Some(&b'=') {
+        return None;
+    }
+    let end = previous_non_ws(bytes, equals)?;
+    let mut start = end;
+    while start > 0 && is_identifier_continue(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start > end || !is_identifier_start(bytes[start]) {
+        return None;
+    }
+    let name = &source[start..=end];
+    is_identifier_like(name).then(|| BindingName::new(name))
+}
+
+fn class_declares_runtime_name(compact_class_source: &str, member: &str) -> bool {
+    compact_class_source.contains(format!("name=\"{member}\"").as_str())
+        || compact_class_source.contains(format!("name='{member}'").as_str())
 }
 
 fn collect_direct_member_export_assignments(
@@ -17604,6 +17865,162 @@ mod tests {
             "{package_source}"
         );
         assert!(!package_source.contains("class LocalClient"));
+    }
+
+    #[test]
+    fn export_member_adapter_alias_proof_elides_lazy_runtime_member_writes() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nconst value = new C();\nconst code = q.alpha;\nexport { value, code };\n";
+        let package_source = concat!(
+            "var q, C;\n",
+            "var packageInit = E(() => {\n",
+            "  depInit();\n",
+            "  q = arrayToEnum([\"alpha\", \"beta\", \"gamma\"]);\n",
+            "  C = class C extends Error { constructor() { super(); this.name = \"PublicError\"; } };\n",
+            "});\n",
+        );
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            )
+            .with_resolved_file(
+                "forced-external:export-members:source-equivalent:ErrorCode,PublicError:aliases=q=ErrorCode:fixture-package@1.0.0/dist/index.js",
+            ),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2)),
+            "source-equivalent alias proof should allow adapter despite lazy init calls/writes"
+        );
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_source = planned_source(&plan, "modules/package.ts");
+        assert!(
+            package_source.contains("function packageInit() { return external_fixture_package; }")
+        );
+        assert!(package_source.contains("const C = external_fixture_package.PublicError;"));
+        assert!(package_source.contains("const q = external_fixture_package.ErrorCode;"));
+        assert!(!package_source.contains("depInit"));
+        assert!(!package_source.contains("arrayToEnum"));
+    }
+
+    #[test]
+    fn runtime_helper_imports_adapter_owned_member_aliases() {
+        let planner = ImportExportPlanner;
+        let prelude =
+            "var q;\nvar C;\nfunction useRuntime() { packageInit(); return [C, q.alpha]; }\n";
+        let body = "packageInit();\nconst value = useRuntime();\nexport { value };\n";
+        let source = format!("{prelude}{body}");
+        let package_source = concat!(
+            "var q, C;\n",
+            "var packageInit = E(() => {\n",
+            "  q = arrayToEnum([\"alpha\", \"beta\", \"gamma\"]);\n",
+            "  C = class C extends Error { constructor() { super(); this.name = \"PublicError\"; } };\n",
+            "});\n",
+        );
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            )
+            .with_resolved_file(
+                "forced-external:export-members:source-equivalent:ErrorCode,PublicError:aliases=q=ErrorCode:fixture-package@1.0.0/dist/index.js",
+            ),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+        assert!(
+            helper_source.contains("import { C, packageInit, q } from '../package.js';"),
+            "{helper_source}"
+        );
+        assert!(!helper_source.contains("var q;"));
+        assert!(!helper_source.contains("var C;"));
+        assert!(helper_source.contains("return [C, q.alpha];"));
     }
 
     #[test]
