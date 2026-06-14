@@ -548,6 +548,20 @@ pub struct PackageMatchingPipelineReport {
     pub function_ownership_matches: usize,
 }
 
+/// Controls how the package pipeline turns ownership evidence into final
+/// external-import attributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalizationPolicy {
+    /// Only emit an external import when the matcher has a direct import
+    /// surface proof. Ownership-only matches remain source-only evidence for
+    /// callers that still want conservative fallback behavior.
+    ProofOnly,
+    /// Never leave a matched package module on application source. Any package
+    /// module in the matched scope that is not already accepted external is
+    /// connected to the best available external import target.
+    ForceNoFallback,
+}
+
 impl PackageMatchingPipelineReport {
     #[must_use]
     fn empty() -> Self {
@@ -577,6 +591,23 @@ pub fn match_packages_with_pipeline(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> PackageMatchingPipelineReport {
+    match_packages_with_pipeline_with_policy(
+        rows,
+        package_sources,
+        package_filter,
+        ExternalizationPolicy::ProofOnly,
+    )
+}
+
+/// Runs the complete package matching pipeline using the requested
+/// externalization policy.
+#[must_use]
+pub fn match_packages_with_pipeline_with_policy(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
+    externalization_policy: ExternalizationPolicy,
+) -> PackageMatchingPipelineReport {
     let timing_enabled = std::env::var_os("REVERTS_MATCH_TIMING").is_some();
     let timing_started = Instant::now();
     let mut timing_last = timing_started;
@@ -594,7 +625,10 @@ pub fn match_packages_with_pipeline(
             }
         };
     }
-    if package_sources.is_empty() && package_filter.is_none_or(BTreeSet::is_empty) {
+    if externalization_policy == ExternalizationPolicy::ProofOnly
+        && package_sources.is_empty()
+        && package_filter.is_none_or(BTreeSet::is_empty)
+    {
         return PackageMatchingPipelineReport::empty();
     }
 
@@ -668,6 +702,18 @@ pub fn match_packages_with_pipeline(
     mark_timing!("package_file_graph");
     promote_importable_ownership_matches(rows, package_sources, &mut package_report);
     mark_timing!("importable_promote");
+    if externalization_policy == ExternalizationPolicy::ForceNoFallback {
+        let matched_package_names = package_filter
+            .cloned()
+            .unwrap_or_else(|| package_source_filter(rows));
+        force_externalize_remaining_package_modules(
+            rows,
+            package_sources,
+            &matched_package_names,
+            &mut package_report,
+        );
+        mark_timing!("force_externalize");
+    }
     if timing_enabled {
         let _ = timing_last;
     }
@@ -1659,6 +1705,26 @@ fn module_package_semantic_path_hints(
     semantic_path: &str,
     module_source: &str,
 ) -> Vec<String> {
+    module_package_semantic_path_hints_with_mode(
+        package_name,
+        semantic_path,
+        module_source,
+        SemanticPathHintMode::ImportProof,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticPathHintMode {
+    ImportProof,
+    ForcedExternal,
+}
+
+fn module_package_semantic_path_hints_with_mode(
+    package_name: &str,
+    semantic_path: &str,
+    module_source: &str,
+    mode: SemanticPathHintMode,
+) -> Vec<String> {
     let clean = semantic_path
         .trim()
         .trim_start_matches("./")
@@ -1667,8 +1733,17 @@ fn module_package_semantic_path_hints(
     if clean.is_empty() {
         return Vec::new();
     }
+    let mut prefixes = package_semantic_path_prefixes(package_name);
+    if mode == SemanticPathHintMode::ForcedExternal {
+        let normalized_package = normalize_hint_text(package_name);
+        if !normalized_package.is_empty() {
+            prefixes.push(normalized_package);
+        }
+        prefixes.sort();
+        prefixes.dedup();
+    }
     let mut hints = Vec::new();
-    for prefix in package_semantic_path_prefixes(package_name) {
+    for prefix in prefixes {
         let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
         else {
             continue;
@@ -1681,7 +1756,8 @@ fn module_package_semantic_path_hints(
         }
     }
     if let Some(hint) = module_semantic_filename_hint(clean.as_str(), module_source)
-        && semantic_filename_hint_is_package_export_like(hint.as_str())
+        && (mode == SemanticPathHintMode::ForcedExternal
+            || semantic_filename_hint_is_package_export_like(hint.as_str()))
     {
         hints.push(hint);
     }
@@ -2008,6 +2084,323 @@ fn accepted_external_modules(
         })
         .map(|attribution| attribution.module_id)
         .collect()
+}
+
+fn package_source_filter(rows: &InputRows) -> BTreeSet<String> {
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter(|module| !has_accepted_external_attribution(rows, module.id))
+        .filter_map(|module| {
+            module
+                .package_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|package_name| {
+                    !package_name.is_empty() && is_valid_package_name(package_name)
+                })
+                .map(ToOwned::to_owned)
+        })
+        .collect()
+}
+
+fn force_externalize_remaining_package_modules(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    matched_package_names: &BTreeSet<String>,
+    report: &mut VersionedPackageMatchReport,
+) -> usize {
+    let mut accepted_modules = accepted_external_modules(rows, report);
+    let source_only_matches = report
+        .matches
+        .iter()
+        .filter(|package_match| !package_match.external_importable)
+        .map(|package_match| (package_match.module_id, package_match.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let source_only_match_indices = report
+        .matches
+        .iter()
+        .enumerate()
+        .filter(|(_index, package_match)| !package_match.external_importable)
+        .map(|(index, package_match)| (package_match.module_id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut forced = 0usize;
+
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
+            continue;
+        }
+        let Some(package_name) = module
+            .package_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|package_name| !package_name.is_empty() && is_valid_package_name(package_name))
+        else {
+            continue;
+        };
+        if !matched_package_names.contains(package_name) {
+            continue;
+        }
+        let source_only_match = source_only_matches.get(&module.id);
+        let package_version =
+            forced_external_package_version(module, source_only_match, package_sources)
+                .unwrap_or_else(|| "*".to_string());
+        let target = forced_external_import_target(
+            rows,
+            module,
+            package_name,
+            package_version.as_str(),
+            source_only_match,
+            package_sources,
+        );
+        let mut attribution = PackageAttributionInput::accepted_external(
+            module.id,
+            package_name,
+            package_version.as_str(),
+            target.export_specifier.as_str(),
+        )
+        .with_resolved_file(target.source_path.as_str());
+        if let Some((_package_name, Some(subpath))) =
+            split_bare_specifier(target.export_specifier.as_str())
+        {
+            attribution = attribution.with_subpath(subpath);
+        }
+        report.attributions.push(attribution);
+        if let Some(index) = source_only_match_indices.get(&module.id).copied() {
+            let package_match = &mut report.matches[index];
+            package_match.package_name = package_name.to_string();
+            package_match.package_version = package_version;
+            package_match.export_specifier = target.export_specifier;
+            package_match.source_path = target.source_path;
+            package_match.external_importable = true;
+        } else {
+            report.matches.push(PackageMatch {
+                module_id: module.id,
+                package_name: package_name.to_string(),
+                package_version,
+                export_specifier: target.export_specifier,
+                source_path: target.source_path,
+                normalized_source_hash: String::new(),
+                strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+                function_signature_matches: source_only_match
+                    .map(|package_match| package_match.function_signature_matches)
+                    .unwrap_or_default(),
+                string_anchor_matches: source_only_match
+                    .map(|package_match| package_match.string_anchor_matches)
+                    .unwrap_or_default(),
+                external_importable: true,
+            });
+        }
+        accepted_modules.insert(module.id);
+        forced += 1;
+    }
+    forced
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ForcedExternalImportTarget {
+    export_specifier: String,
+    source_path: String,
+}
+
+fn forced_external_package_version(
+    module: &ModuleInput,
+    source_only_match: Option<&PackageMatch>,
+    package_sources: &[PackageSource],
+) -> Option<String> {
+    module
+        .package_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| source_only_match.map(|package_match| package_match.package_version.clone()))
+        .or_else(|| {
+            latest_package_source_version(package_sources, module.package_name.as_deref()?.trim())
+        })
+}
+
+fn latest_package_source_version(
+    package_sources: &[PackageSource],
+    package_name: &str,
+) -> Option<String> {
+    package_sources
+        .iter()
+        .filter(|source| source.package_name == package_name)
+        .filter_map(|source| {
+            Version::parse(source.package_version.as_str())
+                .ok()
+                .map(|version| (version, source.package_version.as_str()))
+        })
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_version, text)| text.to_string())
+}
+
+fn forced_external_import_target(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_name: &str,
+    package_version: &str,
+    source_only_match: Option<&PackageMatch>,
+    package_sources: &[PackageSource],
+) -> ForcedExternalImportTarget {
+    if let Some(target) = best_semantic_external_package_source(
+        rows,
+        module,
+        package_name,
+        package_version,
+        package_sources,
+    ) {
+        return target;
+    }
+    if let Some(package_match) = source_only_match
+        && usable_forced_export_specifier(package_name, package_match.export_specifier.as_str())
+    {
+        return ForcedExternalImportTarget {
+            export_specifier: package_match.export_specifier.clone(),
+            source_path: format!("forced-external:source-match:{}", package_match.source_path),
+        };
+    }
+    if let Some(export_specifier) = forced_semantic_external_specifier(rows, module, package_name) {
+        return ForcedExternalImportTarget {
+            source_path: format!(
+                "forced-external:semantic-path:{package_name}@{package_version}:{export_specifier}"
+            ),
+            export_specifier,
+        };
+    }
+    ForcedExternalImportTarget {
+        export_specifier: package_name.to_string(),
+        source_path: format!("forced-external:package-root:{package_name}@{package_version}"),
+    }
+}
+
+fn best_semantic_external_package_source(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_name: &str,
+    package_version: &str,
+    package_sources: &[PackageSource],
+) -> Option<ForcedExternalImportTarget> {
+    let module_source = rows
+        .module_source_slice(module.id)
+        .map(|slice| slice.source)
+        .unwrap_or_default();
+    let hints = module_package_semantic_path_hints_with_mode(
+        package_name,
+        module.semantic_path.as_str(),
+        module_source,
+        SemanticPathHintMode::ForcedExternal,
+    );
+    if hints.is_empty() {
+        return unique_root_external_source(package_sources, package_name, package_version);
+    }
+    let mut scored = package_sources
+        .iter()
+        .filter(|source| {
+            source.external_importable
+                && source.package_name == package_name
+                && source.package_version == package_version
+        })
+        .filter_map(|source| {
+            let score = hints
+                .iter()
+                .map(|hint| {
+                    package_source_semantic_hint_score(
+                        package_source_relative_path(source).as_str(),
+                        hint.as_str(),
+                    )
+                })
+                .max()
+                .unwrap_or_default();
+            (score > 0).then_some((source, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+    let best_score = scored.first()?.1;
+    let best = scored
+        .into_iter()
+        .filter(|(_source, score)| *score == best_score)
+        .map(|(source, _score)| {
+            (
+                source.export_specifier.as_str(),
+                source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if best.len() != 1 {
+        return None;
+    }
+    let (export_specifier, source_path) = best.into_iter().next()?;
+    Some(ForcedExternalImportTarget {
+        export_specifier: export_specifier.to_string(),
+        source_path: format!("forced-external:semantic-source:{source_path}"),
+    })
+}
+
+fn unique_root_external_source(
+    package_sources: &[PackageSource],
+    package_name: &str,
+    package_version: &str,
+) -> Option<ForcedExternalImportTarget> {
+    let roots = package_sources
+        .iter()
+        .filter(|source| {
+            source.external_importable
+                && source.package_name == package_name
+                && source.package_version == package_version
+                && source.export_specifier == package_name
+        })
+        .map(|source| source.source_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if roots.len() != 1 {
+        return None;
+    }
+    Some(ForcedExternalImportTarget {
+        export_specifier: package_name.to_string(),
+        source_path: format!(
+            "forced-external:root-source:{}",
+            roots.into_iter().next().expect("root source")
+        ),
+    })
+}
+
+fn usable_forced_export_specifier(package_name: &str, export_specifier: &str) -> bool {
+    let Some((specifier_package, _subpath)) = split_bare_specifier(export_specifier) else {
+        return false;
+    };
+    specifier_package == package_name && !export_specifier.trim().is_empty()
+}
+
+fn forced_semantic_external_specifier(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_name: &str,
+) -> Option<String> {
+    let module_source = rows
+        .module_source_slice(module.id)
+        .map(|slice| slice.source)
+        .unwrap_or_default();
+    let hints = module_package_semantic_path_hints_with_mode(
+        package_name,
+        module.semantic_path.as_str(),
+        module_source,
+        SemanticPathHintMode::ForcedExternal,
+    );
+    let hint = hints.first()?.trim_matches('/');
+    if hint.is_empty() {
+        return None;
+    }
+    if package_name == "highlight.js" {
+        return Some(format!("{package_name}/lib/languages/{hint}"));
+    }
+    Some(format!("{package_name}/{hint}"))
 }
 
 fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
@@ -3371,10 +3764,11 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy,
-        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageModuleSourceQuality, PackageSource,
-        VersionedPackageMatchReport, VersionedPackageMatcher, exact_hint_root_external_specifier,
-        match_packages_with_pipeline, match_structural_bags,
+        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ExternalizationPolicy,
+        ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageModuleSourceQuality,
+        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher,
+        exact_hint_root_external_specifier, match_packages_with_pipeline,
+        match_packages_with_pipeline_with_policy, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
     };
@@ -4293,6 +4687,124 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(!report.package_report.matches[0].external_importable);
         assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_force_no_fallback_uses_plain_filename_semantic_surface() {
+        let mut rows =
+            rows_with_package_source_at_version("function basekeys(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-basekeys.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/basekeys.js",
+            "basekeys.js",
+            "export const unrelatedBasekeysSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline_with_policy(
+            &rows,
+            &package_sources,
+            None,
+            ExternalizationPolicy::ForceNoFallback,
+        );
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/basekeys.js"
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .starts_with("forced-external:semantic-source:")
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg/basekeys.js")
+        );
+        assert_eq!(
+            report.package_report.attributions[0].subpath.as_deref(),
+            Some("basekeys.js")
+        );
+    }
+
+    #[test]
+    fn pipeline_force_no_fallback_externalizes_source_only_ownership_in_matcher() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/other",
+            "other.js",
+            "export const other = 'unrelated-package-source';",
+        )];
+
+        let report = match_packages_with_pipeline_with_policy(
+            &rows,
+            &package_sources,
+            None,
+            ExternalizationPolicy::ForceNoFallback,
+        );
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg"
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .starts_with("forced-external:source-match:exact-hint:")
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .resolved_file
+                .as_deref(),
+            Some(report.package_report.matches[0].source_path.as_str())
+        );
+    }
+
+    #[test]
+    fn pipeline_force_no_fallback_externalizes_without_package_sources() {
+        let rows = rows_with_package_source("export function add(a,b){return a+b}");
+
+        let report = match_packages_with_pipeline_with_policy(
+            &rows,
+            &[],
+            None,
+            ExternalizationPolicy::ForceNoFallback,
+        );
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].source_path.as_str(),
+            "forced-external:semantic-path:pkg@*:pkg/module"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .package_version
+                .as_deref(),
+            Some("*")
+        );
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg/module")
+        );
     }
 
     #[test]

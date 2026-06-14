@@ -43,7 +43,7 @@ impl PackageSurfaceIndex {
                     &mut import_attribute_candidates,
                     &mut import_attribute_conflicts,
                     specifier,
-                    import_attributes_for_attribution(attribution),
+                    optional_import_attributes_for_attribution(attribution),
                 );
             }
 
@@ -197,17 +197,25 @@ fn record_import_attribute_candidate(
     }
 }
 
-fn import_attributes_for_attribution(
+#[must_use]
+pub fn import_attributes_for_attribution(
     attribution: &PackageAttributionInput,
-) -> Option<BTreeMap<String, String>> {
+) -> BTreeMap<String, String> {
     if attribution
         .resolved_file
         .as_deref()
         .is_some_and(is_json_resolved_file)
     {
-        return Some(BTreeMap::from([("type".to_string(), "json".to_string())]));
+        return BTreeMap::from([("type".to_string(), "json".to_string())]);
     }
-    None
+    BTreeMap::new()
+}
+
+fn optional_import_attributes_for_attribution(
+    attribution: &PackageAttributionInput,
+) -> Option<BTreeMap<String, String>> {
+    let attributes = import_attributes_for_attribution(attribution);
+    (!attributes.is_empty()).then_some(attributes)
 }
 
 fn is_json_resolved_file(resolved_file: &str) -> bool {
