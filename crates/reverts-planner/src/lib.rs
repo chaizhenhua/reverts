@@ -4574,6 +4574,10 @@ fn compute_runtime_var_migration_plan(
                 migration,
             });
         }
+        let mut migration_proposals = merge_same_owner_overlapping_reader_migrations(
+            &reader_cluster_context,
+            migration_proposals,
+        );
         migration_proposals.sort_by(|left, right| {
             // Primary vars are the actual setter-removal unit. Closure
             // snippets can be large, so sort by primary coverage first to
@@ -5109,6 +5113,147 @@ type RuntimeReaderClusterResult =
     Result<RuntimeReaderClusterMigration, RuntimeReaderClusterBlocker>;
 
 const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
+
+fn merge_same_owner_overlapping_reader_migrations(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    proposals: Vec<RuntimeReaderClusterMigrationProposal>,
+) -> Vec<RuntimeReaderClusterMigrationProposal> {
+    if proposals.len() < 2 {
+        return proposals;
+    }
+    let proposal_local_bindings = proposals
+        .iter()
+        .map(|proposal| reader_migration_local_bindings(&proposal.migration))
+        .collect::<Vec<_>>();
+    let mut merged = Vec::<RuntimeReaderClusterMigrationProposal>::new();
+    let mut assigned = vec![false; proposals.len()];
+
+    for start in 0..proposals.len() {
+        if assigned[start] {
+            continue;
+        }
+        assigned[start] = true;
+        let owner_module = proposals[start].owner_module;
+        let mut component = vec![start];
+        let mut component_local = proposal_local_bindings[start].clone();
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in 0..proposals.len() {
+                if assigned[index] || proposals[index].owner_module != owner_module {
+                    continue;
+                }
+                if component_local
+                    .intersection(&proposal_local_bindings[index])
+                    .next()
+                    .is_none()
+                {
+                    continue;
+                }
+                assigned[index] = true;
+                component.push(index);
+                component_local.extend(proposal_local_bindings[index].iter().cloned());
+                changed = true;
+            }
+        }
+
+        if component.len() == 1 {
+            merged.push(proposals[start].clone());
+            continue;
+        }
+
+        let Some(proposal) =
+            merge_reader_migration_component(ctx, &proposals, &component, owner_module)
+        else {
+            for index in component {
+                merged.push(proposals[index].clone());
+            }
+            continue;
+        };
+        merged.push(proposal);
+    }
+
+    merged
+}
+
+fn reader_migration_local_bindings(
+    migration: &RuntimeReaderClusterMigration,
+) -> BTreeSet<BindingName> {
+    migration
+        .primary_bindings
+        .iter()
+        .chain(migration.extra_snippets.iter())
+        .chain(migration.extra_namespace_exports.iter())
+        .cloned()
+        .collect()
+}
+
+fn merge_reader_migration_component(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    proposals: &[RuntimeReaderClusterMigrationProposal],
+    component: &[usize],
+    owner_module: ModuleId,
+) -> Option<RuntimeReaderClusterMigrationProposal> {
+    let seed_binding = component
+        .iter()
+        .filter_map(|index| proposals.get(*index))
+        .map(|proposal| proposal.seed_binding.clone())
+        .min()?;
+    let mut migration = RuntimeReaderClusterMigration {
+        primary_bindings: BTreeSet::new(),
+        extra_snippets: BTreeSet::new(),
+        extra_namespace_exports: BTreeSet::new(),
+        extra_runtime_deps: BTreeSet::new(),
+        pinned_runtime_deps: BTreeSet::new(),
+        extra_source_deps: BTreeMap::new(),
+    };
+
+    for index in component {
+        let proposal = proposals.get(*index)?;
+        migration
+            .primary_bindings
+            .extend(proposal.migration.primary_bindings.iter().cloned());
+        migration
+            .extra_snippets
+            .extend(proposal.migration.extra_snippets.iter().cloned());
+        migration
+            .extra_namespace_exports
+            .extend(proposal.migration.extra_namespace_exports.iter().cloned());
+        migration
+            .extra_runtime_deps
+            .extend(proposal.migration.extra_runtime_deps.iter().cloned());
+        migration
+            .pinned_runtime_deps
+            .extend(proposal.migration.pinned_runtime_deps.iter().cloned());
+        for (module_id, bindings) in &proposal.migration.extra_source_deps {
+            migration
+                .extra_source_deps
+                .entry(*module_id)
+                .or_default()
+                .extend(bindings.iter().cloned());
+        }
+    }
+
+    let local_bindings = reader_migration_local_bindings(&migration);
+    if migration
+        .pinned_runtime_deps
+        .intersection(&local_bindings)
+        .next()
+        .is_some()
+    {
+        return None;
+    }
+    migration
+        .extra_runtime_deps
+        .retain(|dep| !local_bindings.contains(dep));
+
+    Some(RuntimeReaderClusterMigrationProposal {
+        seed_binding,
+        owner_module,
+        source_lines: runtime_reader_migration_source_lines(ctx, &migration),
+        migration,
+    })
+}
 
 impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
     fn from(reason: RuntimeReaderClusterBlocker) -> Self {
@@ -8334,6 +8479,8 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "Array"
             | "ArrayBuffer"
             | "BigInt"
+            | "BigInt64Array"
+            | "BigUint64Array"
             | "Blob"
             | "Boolean"
             | "Buffer"
@@ -8351,6 +8498,7 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "EventTarget"
             | "EvalError"
             | "File"
+            | "FinalizationRegistry"
             | "Float32Array"
             | "Float64Array"
             | "FormData"
@@ -8395,6 +8543,7 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "Uint8Array"
             | "Uint8ClampedArray"
             | "WeakMap"
+            | "WeakRef"
             | "WeakSet"
             | "WritableStream"
             | "__dirname"
@@ -13252,7 +13401,7 @@ impl Error for PlanError {}
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use reverts_graph::{RuntimePrelude, RuntimePreludeBindingKind};
+    use reverts_graph::{RuntimePrelude, RuntimePreludeBindingKind, RuntimePreludeSnippet};
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, PackageAttributionStatus, PackageSurfaceInput, ProjectInput,
@@ -13267,9 +13416,12 @@ mod tests {
 
     use super::{
         CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile,
-        RuntimeSetterMigrationBlockerReason, SourceCompilerStrategy, inline_internal_setter_calls,
+        RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
+        RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
+        RuntimeSourceReadIndex, SourceCompilerStrategy, inline_internal_setter_calls,
         inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
-        parse_generated_named_export_statement, purify_private_runtime_lazy_initializers,
+        merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
+        purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -16550,6 +16702,10 @@ mod tests {
              Bun.file('ready');\n\
              unescape('%20');\n\
              new AggregateError([]);\n\
+             new WeakRef({});\n\
+             new FinalizationRegistry(() => {});\n\
+             BigInt64Array.from([]);\n\
+             BigUint64Array.from([]);\n\
              shared;",
         );
 
@@ -16566,6 +16722,10 @@ mod tests {
         assert!(!identifiers.contains("Bun"));
         assert!(!identifiers.contains("unescape"));
         assert!(!identifiers.contains("AggregateError"));
+        assert!(!identifiers.contains("WeakRef"));
+        assert!(!identifiers.contains("FinalizationRegistry"));
+        assert!(!identifiers.contains("BigInt64Array"));
+        assert!(!identifiers.contains("BigUint64Array"));
     }
 
     #[test]
@@ -19386,6 +19546,142 @@ mod tests {
         assert!(
             helper_source.contains("function __reverts_set_multi(value) { return multi = value; }"),
             "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn reader_migration_merge_combines_same_owner_overlapping_components() {
+        let owner = ModuleId(1);
+        let other_owner = ModuleId(2);
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: String::new(),
+            bindings: BTreeMap::new(),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("readA"),
+                    RuntimePreludeSnippet {
+                        source: "function readA() { return a + b; }".to_string(),
+                        byte_start: 10,
+                    },
+                ),
+                (
+                    BindingName::new("readC"),
+                    RuntimePreludeSnippet {
+                        source: "function readC() { return b + c; }".to_string(),
+                        byte_start: 20,
+                    },
+                ),
+                (
+                    BindingName::new("readD"),
+                    RuntimePreludeSnippet {
+                        source: "function readD() { return b + d; }".to_string(),
+                        byte_start: 30,
+                    },
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let source_consumers = BTreeMap::new();
+        let source_definition_modules = BTreeMap::new();
+        let module_dependencies = BTreeMap::new();
+        let folded_modules = BTreeSet::new();
+        let folded_definitions = BTreeSet::new();
+        let owner_state = BTreeMap::new();
+        let read_index = RuntimeSourceReadIndex::default();
+        let movable = BTreeSet::new();
+        let candidate_owners = BTreeMap::new();
+        let ctx = RuntimeReaderClusterContext {
+            source_file_id: 1,
+            owner_available_bindings: BTreeMap::new(),
+            source_consumers_by_runtime_binding: &source_consumers,
+            source_definition_modules: &source_definition_modules,
+            module_dependencies_by_owner: &module_dependencies,
+            folded_modules: &folded_modules,
+            folded_runtime_definitions: &folded_definitions,
+            owner_runtime_state: &owner_state,
+            prelude: &prelude,
+            read_index: &read_index,
+            movable_bindings: &movable,
+            candidate_owners: &candidate_owners,
+        };
+        let proposals = vec![
+            RuntimeReaderClusterMigrationProposal {
+                seed_binding: BindingName::new("a"),
+                owner_module: owner,
+                source_lines: 1,
+                migration: RuntimeReaderClusterMigration {
+                    primary_bindings: BTreeSet::from([
+                        BindingName::new("a"),
+                        BindingName::new("b"),
+                    ]),
+                    extra_snippets: BTreeSet::from([BindingName::new("readA")]),
+                    extra_namespace_exports: BTreeSet::new(),
+                    extra_runtime_deps: BTreeSet::from([BindingName::new("b")]),
+                    pinned_runtime_deps: BTreeSet::new(),
+                    extra_source_deps: BTreeMap::new(),
+                },
+            },
+            RuntimeReaderClusterMigrationProposal {
+                seed_binding: BindingName::new("c"),
+                owner_module: owner,
+                source_lines: 1,
+                migration: RuntimeReaderClusterMigration {
+                    primary_bindings: BTreeSet::from([
+                        BindingName::new("b"),
+                        BindingName::new("c"),
+                    ]),
+                    extra_snippets: BTreeSet::from([BindingName::new("readC")]),
+                    extra_namespace_exports: BTreeSet::new(),
+                    extra_runtime_deps: BTreeSet::new(),
+                    pinned_runtime_deps: BTreeSet::new(),
+                    extra_source_deps: BTreeMap::new(),
+                },
+            },
+            RuntimeReaderClusterMigrationProposal {
+                seed_binding: BindingName::new("d"),
+                owner_module: other_owner,
+                source_lines: 1,
+                migration: RuntimeReaderClusterMigration {
+                    primary_bindings: BTreeSet::from([
+                        BindingName::new("b"),
+                        BindingName::new("d"),
+                    ]),
+                    extra_snippets: BTreeSet::from([BindingName::new("readD")]),
+                    extra_namespace_exports: BTreeSet::new(),
+                    extra_runtime_deps: BTreeSet::new(),
+                    pinned_runtime_deps: BTreeSet::new(),
+                    extra_source_deps: BTreeMap::new(),
+                },
+            },
+        ];
+
+        let merged = merge_same_owner_overlapping_reader_migrations(&ctx, proposals);
+        let owner_merge = merged
+            .iter()
+            .find(|proposal| proposal.owner_module == owner)
+            .expect("same-owner overlap should merge");
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            owner_merge.migration.primary_bindings,
+            BTreeSet::from([
+                BindingName::new("a"),
+                BindingName::new("b"),
+                BindingName::new("c"),
+            ])
+        );
+        assert_eq!(
+            owner_merge.migration.extra_snippets,
+            BTreeSet::from([BindingName::new("readA"), BindingName::new("readC")])
+        );
+        assert!(owner_merge.migration.extra_runtime_deps.is_empty());
+        assert!(
+            merged
+                .iter()
+                .any(|proposal| proposal.owner_module == other_owner)
         );
     }
 
