@@ -689,6 +689,13 @@ impl ImportExportPlanner {
             &runtime_var_migrations,
             externalized_packages,
         );
+        let runtime_singleton_inlines = runtime_singleton_inline_plan(
+            program,
+            lowered_runtime_sources,
+            runtime_lazy_folds,
+            &runtime_var_migrations,
+            externalized_packages,
+        );
         let mut used_package_runtime_helper_files =
             BTreeMap::<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>::new();
         let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
@@ -731,6 +738,7 @@ impl ImportExportPlanner {
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
             file.set_compiler_recovery(compiler_recovery);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
+            let mut emitted_inline_runtime_helpers = BTreeSet::<(u32, BindingName)>::new();
 
             if module.kind == ModuleKind::Package
                 && let Some(adapter_plan) = external_package_adapters.get(&module.id)
@@ -1214,12 +1222,27 @@ impl ImportExportPlanner {
                     &mut planned_bindings,
                     &lowered_import_partition.direct_prelude_imports,
                 );
+                let (inline_remaining_helpers, remaining_runtime_helpers) =
+                    partition_runtime_singleton_inline_bindings(
+                        &runtime_singleton_inlines,
+                        module.id,
+                        lowered_source.source_file_id,
+                        &lowered_import_partition.runtime_bindings,
+                    );
+                emit_runtime_singleton_inline_helpers(
+                    &runtime_singleton_inlines,
+                    &mut file,
+                    &mut planned_bindings,
+                    &mut emitted_inline_runtime_helpers,
+                    lowered_source.source_file_id,
+                    &inline_remaining_helpers,
+                );
                 let (package_remaining_helpers, remaining_runtime_helpers) =
                     partition_package_runtime_bindings(
                         &package_runtime_islands,
                         package_runtime_owner.as_ref(),
                         lowered_source.source_file_id,
-                        &lowered_import_partition.runtime_bindings,
+                        &remaining_runtime_helpers,
                     );
                 let (package_written_helpers, written_runtime_helpers) =
                     partition_package_runtime_bindings(
@@ -1332,11 +1355,26 @@ impl ImportExportPlanner {
                     &mut planned_bindings,
                     &import_partition.direct_prelude_imports,
                 );
+                let (inline_bindings, runtime_bindings) =
+                    partition_runtime_singleton_inline_bindings(
+                        &runtime_singleton_inlines,
+                        module.id,
+                        source_file_id,
+                        &import_partition.runtime_bindings,
+                    );
+                emit_runtime_singleton_inline_helpers(
+                    &runtime_singleton_inlines,
+                    &mut file,
+                    &mut planned_bindings,
+                    &mut emitted_inline_runtime_helpers,
+                    source_file_id,
+                    &inline_bindings,
+                );
                 let (package_bindings, bindings) = partition_package_runtime_bindings(
                     &package_runtime_islands,
                     package_runtime_owner.as_ref(),
                     source_file_id,
-                    &import_partition.runtime_bindings,
+                    &runtime_bindings,
                 );
                 if !package_bindings.is_empty() {
                     let mut package_import = PackageRuntimeImportEmitter {
@@ -2365,6 +2403,230 @@ impl RuntimeVarMigrationPlan {
             }
         }
         None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeSingletonInlineSnippet {
+    consumer_module: ModuleId,
+    byte_start: u32,
+    source: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RuntimeSingletonInlinePlan {
+    snippets_by_binding: BTreeMap<(u32, BindingName), RuntimeSingletonInlineSnippet>,
+}
+
+fn runtime_singleton_inline_plan(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> RuntimeSingletonInlinePlan {
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut consumers_by_binding = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
+    let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
+
+    for module in program.model().modules() {
+        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+            continue;
+        }
+        let mut used_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        for import in program.model().graph().runtime_imports_for(module.id) {
+            used_by_source
+                .entry(import.source_file_id)
+                .or_default()
+                .insert(import.binding);
+        }
+        if let Some(source) = lowered_runtime_sources.get(&module.id) {
+            used_by_source
+                .entry(source.source_file_id)
+                .or_default()
+                .extend(source.remaining_helpers.iter().cloned());
+            for written in &source.written_helpers {
+                blocked_bindings.insert((source.source_file_id, written.clone()));
+            }
+        }
+        for (source_file_id, bindings) in used_by_source {
+            for binding in bindings {
+                let key = (source_file_id, binding.clone());
+                if is_runtime_singleton_inline_excluded_binding(&binding)
+                    || runtime_var_migrations
+                        .reexport_owner(source_file_id, &binding)
+                        .is_some()
+                {
+                    blocked_bindings.insert(key);
+                    continue;
+                }
+                consumers_by_binding
+                    .entry(key)
+                    .or_default()
+                    .insert(module.id);
+            }
+        }
+    }
+
+    let mut plan = RuntimeSingletonInlinePlan::default();
+    let mut read_indices_by_source = BTreeMap::<u32, RuntimeSourceReadIndex>::new();
+    for ((source_file_id, binding), consumers) in consumers_by_binding {
+        if consumers.len() != 1 || blocked_bindings.contains(&(source_file_id, binding.clone())) {
+            continue;
+        }
+        let consumer_module = *consumers
+            .iter()
+            .next()
+            .expect("singleton consumer set must contain one module");
+        let Some(consumer) = modules_by_id.get(&consumer_module).copied() else {
+            continue;
+        };
+        if consumer.kind == ModuleKind::Package && externalized_packages.contains(&consumer_module)
+        {
+            continue;
+        }
+        if runtime_singleton_inline_consumer_has_name_conflict(
+            program,
+            lowered_runtime_sources,
+            consumer_module,
+            &binding,
+        ) {
+            continue;
+        }
+        let Some(prelude) = program.model().graph().runtime_prelude(source_file_id) else {
+            continue;
+        };
+        let Some(snippet) = prelude.snippets.get(&binding) else {
+            continue;
+        };
+        if !is_migratable_reader_function_snippet(&binding, snippet.source.as_str()) {
+            continue;
+        }
+        read_indices_by_source
+            .entry(source_file_id)
+            .or_insert_with(|| {
+                let folded_chunks = runtime_lazy_folds
+                    .chunks_by_source_file
+                    .get(&source_file_id)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                runtime_source_read_index(prelude, folded_chunks)
+            });
+        let read_index = read_indices_by_source
+            .get(&source_file_id)
+            .expect("runtime read index should be cached");
+        if runtime_binding_has_blocking_non_snippet_use(read_index, &binding)
+            || !runtime_readers_for_binding(read_index, &binding).is_empty()
+            || read_index
+                .free_bindings_by_snippet
+                .get(&binding)
+                .is_none_or(|free_bindings| !free_bindings.is_empty())
+            || implicit_global_writes_in_source(snippet.source.as_str())
+                .into_iter()
+                .any(|write| prelude.defines(&write))
+        {
+            continue;
+        }
+        plan.snippets_by_binding.insert(
+            (source_file_id, binding),
+            RuntimeSingletonInlineSnippet {
+                consumer_module,
+                byte_start: snippet.byte_start,
+                source: snippet.source.clone(),
+            },
+        );
+    }
+
+    plan
+}
+
+fn is_runtime_singleton_inline_excluded_binding(binding: &BindingName) -> bool {
+    let name = binding.as_str();
+    name == "lazyModule"
+        || name == "lazyValue"
+        || name.starts_with("__reverts_set_")
+        || is_planner_synthetic_binding(name)
+}
+
+fn runtime_singleton_inline_consumer_has_name_conflict(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    consumer_module: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    program
+        .model()
+        .graph()
+        .ast_imports_for(consumer_module)
+        .contains(binding)
+        || program
+            .model()
+            .graph()
+            .ast_definitions_for(consumer_module)
+            .contains(binding)
+        || lowered_runtime_sources
+            .get(&consumer_module)
+            .is_some_and(|source| source.local_definitions.contains(binding))
+}
+
+fn partition_runtime_singleton_inline_bindings(
+    plan: &RuntimeSingletonInlinePlan,
+    current_module: ModuleId,
+    source_file_id: u32,
+    bindings: &BTreeSet<BindingName>,
+) -> (BTreeSet<BindingName>, BTreeSet<BindingName>) {
+    let mut inline_bindings = BTreeSet::<BindingName>::new();
+    let mut runtime_bindings = BTreeSet::<BindingName>::new();
+    for binding in bindings {
+        if plan
+            .snippets_by_binding
+            .get(&(source_file_id, binding.clone()))
+            .is_some_and(|snippet| snippet.consumer_module == current_module)
+        {
+            inline_bindings.insert(binding.clone());
+        } else {
+            runtime_bindings.insert(binding.clone());
+        }
+    }
+    (inline_bindings, runtime_bindings)
+}
+
+fn emit_runtime_singleton_inline_helpers(
+    plan: &RuntimeSingletonInlinePlan,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    emitted_inline_runtime_helpers: &mut BTreeSet<(u32, BindingName)>,
+    source_file_id: u32,
+    bindings: &BTreeSet<BindingName>,
+) {
+    let mut snippets = bindings
+        .iter()
+        .filter_map(|binding| {
+            let key = (source_file_id, binding.clone());
+            let snippet = plan.snippets_by_binding.get(&key)?;
+            Some((key, snippet))
+        })
+        .collect::<Vec<_>>();
+    snippets.sort_by_key(|((_, binding), snippet)| (snippet.byte_start, binding.clone()));
+    for ((source_file_id, binding), snippet) in snippets {
+        if planned_bindings.contains(&binding)
+            || !emitted_inline_runtime_helpers.insert((source_file_id, binding.clone()))
+        {
+            continue;
+        }
+        file.push_source(snippet.source.clone());
+        planned_bindings.insert(binding.clone());
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding,
+            BindingShape::Unknown,
+            true,
+        ));
     }
 }
 
@@ -13596,7 +13858,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_direct_imports_profitable_prelude_import_when_runtime_edge_remains() {
+    fn planner_inlines_singleton_helper_after_direct_prelude_import() {
         let prelude = "import { join as pathJoin } from 'path';\nfunction helper() { return 1; }\n";
         let body = "var value = pathJoin('a', String(helper()));\nexport { value };\n";
         let source = format!("{prelude}{body}");
@@ -13611,20 +13873,18 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let entry_source = planned_source(&plan, "modules/entry.ts");
-        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
         assert!(entry_source.contains("import { join as pathJoin } from 'path';"));
         assert!(
-            entry_source.contains("import { helper } from './runtime/source-1-helpers.js';"),
+            entry_source.contains("function helper() { return 1; }"),
             "entry:\n{entry_source}"
         );
-        assert!(!helper_source.contains("from 'path'"));
-        assert!(helper_source.contains("function helper()"));
-        assert!(helper_source.contains("export { helper };"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
-    fn planner_keeps_namespace_prelude_import_on_runtime_path_when_runtime_edge_remains() {
+    fn planner_keeps_namespace_prelude_import_on_runtime_path_after_singleton_inline() {
         let prelude = "import * as pathNS from 'path';\nfunction helper() { return 1; }\n";
         let body = "var value = pathNS.join('a', String(helper()));\nexport { value };\n";
         let source = format!("{prelude}{body}");
@@ -13642,12 +13902,14 @@ mod tests {
         let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
         assert!(
-            entry_source
-                .contains("import { helper, pathNS } from './runtime/source-1-helpers.js';")
+            entry_source.contains("import { pathNS } from './runtime/source-1-helpers.js';"),
+            "{entry_source}"
         );
+        assert!(entry_source.contains("function helper() { return 1; }"));
         assert!(!entry_source.contains("from 'path'"));
         assert!(helper_source.contains("import * as pathNS from 'path';"));
-        assert!(helper_source.contains("export { helper, pathNS };"));
+        assert!(helper_source.contains("export { pathNS };"));
+        assert!(!helper_source.contains("function helper()"));
     }
 
     #[test]
@@ -15611,6 +15873,97 @@ mod tests {
             .is_none(),
             "application use must keep shared helper in central runtime"
         );
+    }
+
+    #[test]
+    fn singleton_runtime_function_inlines_into_application_consumer() {
+        let prelude = "function runtimeHelper() { return 1; }\n";
+        let app_body = "var value = runtimeHelper();\nexport { value };\n";
+        let source = format!("{prelude}{app_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(
+            entry_source.contains("function runtimeHelper() { return 1; }"),
+            "{entry_source}"
+        );
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn singleton_runtime_function_with_runtime_dep_stays_in_runtime() {
+        let prelude = concat!(
+            "function runtimeDep() { return 1; }\n",
+            "function runtimeHelper() { return runtimeDep(); }\n",
+        );
+        let app_body = "var value = runtimeHelper();\nexport { value };\n";
+        let source = format!("{prelude}{app_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            entry_source.contains("import { runtimeHelper } from './runtime/source-1-helpers.js';"),
+            "{entry_source}"
+        );
+        assert!(helper_source.contains("function runtimeDep() { return 1; }"));
+        assert!(helper_source.contains("function runtimeHelper() { return runtimeDep(); }"));
+    }
+
+    #[test]
+    fn singleton_runtime_function_with_two_consumers_stays_in_runtime() {
+        let prelude = "function runtimeHelper() { return 1; }\n";
+        let left_body = "var left = runtimeHelper();\nexport { left };\n";
+        let right_body = "var right = runtimeHelper();\nexport { right };\n";
+        let source = format!("{prelude}{left_body}{right_body}");
+        let left_start = prelude.len() as u32;
+        let left_end = left_start + left_body.len() as u32;
+        let right_end = source.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "left", "modules/left.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(left_start, left_end)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "right", "modules/right.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(left_end, right_end)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let left_source = planned_source(&plan, "modules/left.ts");
+        let right_source = planned_source(&plan, "modules/right.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            left_source.contains("import { runtimeHelper } from './runtime/source-1-helpers.js';")
+        );
+        assert!(
+            right_source.contains("import { runtimeHelper } from './runtime/source-1-helpers.js';")
+        );
+        assert!(helper_source.contains("function runtimeHelper() { return 1; }"));
     }
 
     #[test]
