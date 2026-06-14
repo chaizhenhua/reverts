@@ -689,16 +689,17 @@ impl ImportExportPlanner {
             &runtime_var_migrations,
             externalized_packages,
         );
+        let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
         let runtime_singleton_inlines = runtime_singleton_inline_plan(
             program,
             lowered_runtime_sources,
             runtime_lazy_folds,
             &runtime_var_migrations,
+            &runtime_prelude_direct_imports,
             externalized_packages,
         );
         let mut used_package_runtime_helper_files =
             BTreeMap::<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>::new();
-        let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
         let runtime_edge_direct_prelude_imports = runtime_edge_direct_prelude_imports(
             program,
             lowered_runtime_sources,
@@ -1169,14 +1170,29 @@ impl ImportExportPlanner {
             }
             let mut runtime_sources_for_module = BTreeSet::<u32>::new();
             if let Some(lowered_source) = lowered_source
-                && (!lowered_import_partition.runtime_bindings.is_empty()
+                && (!partition_runtime_singleton_inline_bindings(
+                    &runtime_singleton_inlines,
+                    module.id,
+                    lowered_source.source_file_id,
+                    &lowered_import_partition.runtime_bindings,
+                )
+                .1
+                .is_empty()
                     || !written_runtime_helpers.is_empty()
                     || !lazy_helper_names.is_empty())
             {
                 runtime_sources_for_module.insert(lowered_source.source_file_id);
             }
             for (source_file_id, partition) in &runtime_import_partitions {
-                if !partition.runtime_bindings.is_empty() {
+                if !partition_runtime_singleton_inline_bindings(
+                    &runtime_singleton_inlines,
+                    module.id,
+                    *source_file_id,
+                    &partition.runtime_bindings,
+                )
+                .1
+                .is_empty()
+                {
                     runtime_sources_for_module.insert(*source_file_id);
                 }
             }
@@ -2410,6 +2426,14 @@ impl RuntimeVarMigrationPlan {
 struct RuntimeSingletonInlineSnippet {
     consumer_module: ModuleId,
     byte_start: u32,
+    snippets: Vec<RuntimeSingletonInlineSnippetSource>,
+    direct_prelude_imports: BTreeMap<BindingName, RuntimePreludeDirectImport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeSingletonInlineSnippetSource {
+    binding: BindingName,
+    byte_start: u32,
     source: String,
 }
 
@@ -2423,6 +2447,7 @@ fn runtime_singleton_inline_plan(
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     runtime_var_migrations: &RuntimeVarMigrationPlan,
+    direct_prelude_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> RuntimeSingletonInlinePlan {
     let modules_by_id = program
@@ -2475,8 +2500,8 @@ fn runtime_singleton_inline_plan(
 
     let mut plan = RuntimeSingletonInlinePlan::default();
     let mut read_indices_by_source = BTreeMap::<u32, RuntimeSourceReadIndex>::new();
-    for ((source_file_id, binding), consumers) in consumers_by_binding {
-        if consumers.len() != 1 || blocked_bindings.contains(&(source_file_id, binding.clone())) {
+    for ((source_file_id, binding), consumers) in &consumers_by_binding {
+        if consumers.len() != 1 || blocked_bindings.contains(&(*source_file_id, binding.clone())) {
             continue;
         }
         let consumer_module = *consumers
@@ -2494,55 +2519,182 @@ fn runtime_singleton_inline_plan(
             program,
             lowered_runtime_sources,
             consumer_module,
-            &binding,
+            binding,
         ) {
             continue;
         }
-        let Some(prelude) = program.model().graph().runtime_prelude(source_file_id) else {
+        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
             continue;
         };
-        let Some(snippet) = prelude.snippets.get(&binding) else {
-            continue;
-        };
-        if !is_migratable_reader_function_snippet(&binding, snippet.source.as_str()) {
-            continue;
-        }
         read_indices_by_source
-            .entry(source_file_id)
+            .entry(*source_file_id)
             .or_insert_with(|| {
                 let folded_chunks = runtime_lazy_folds
                     .chunks_by_source_file
-                    .get(&source_file_id)
+                    .get(source_file_id)
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 runtime_source_read_index(prelude, folded_chunks)
             });
         let read_index = read_indices_by_source
-            .get(&source_file_id)
+            .get(source_file_id)
             .expect("runtime read index should be cached");
-        if runtime_binding_has_blocking_non_snippet_use(read_index, &binding)
-            || !runtime_readers_for_binding(read_index, &binding).is_empty()
-            || read_index
-                .free_bindings_by_snippet
-                .get(&binding)
-                .is_none_or(|free_bindings| !free_bindings.is_empty())
-            || implicit_global_writes_in_source(snippet.source.as_str())
-                .into_iter()
-                .any(|write| prelude.defines(&write))
-        {
+        let singleton_ctx = RuntimeSingletonInlineContext {
+            program,
+            lowered_runtime_sources,
+            prelude,
+            read_index,
+            source_file_id: *source_file_id,
+            consumers_by_binding: &consumers_by_binding,
+            blocked_bindings: &blocked_bindings,
+            direct_prelude_imports: direct_prelude_imports.get(source_file_id),
+        };
+        let Some(inline_snippet) =
+            resolve_runtime_singleton_inline_snippet(&singleton_ctx, binding, consumer_module)
+        else {
             continue;
-        }
-        plan.snippets_by_binding.insert(
-            (source_file_id, binding),
-            RuntimeSingletonInlineSnippet {
-                consumer_module,
-                byte_start: snippet.byte_start,
-                source: snippet.source.clone(),
-            },
-        );
+        };
+        plan.snippets_by_binding
+            .insert((*source_file_id, binding.clone()), inline_snippet);
     }
 
     plan
+}
+
+struct RuntimeSingletonInlineContext<'a> {
+    program: &'a EnrichedProgram,
+    lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    prelude: &'a RuntimePrelude,
+    read_index: &'a RuntimeSourceReadIndex,
+    source_file_id: u32,
+    consumers_by_binding: &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
+    blocked_bindings: &'a BTreeSet<(u32, BindingName)>,
+    direct_prelude_imports: Option<&'a BTreeMap<BindingName, RuntimePreludeDirectImport>>,
+}
+
+fn resolve_runtime_singleton_inline_snippet(
+    ctx: &RuntimeSingletonInlineContext<'_>,
+    root_binding: &BindingName,
+    consumer_module: ModuleId,
+) -> Option<RuntimeSingletonInlineSnippet> {
+    let mut cluster_bindings = BTreeSet::<BindingName>::new();
+    let mut direct_imports = BTreeMap::<BindingName, RuntimePreludeDirectImport>::new();
+    let mut queue = vec![root_binding.clone()];
+
+    while let Some(binding) = queue.pop() {
+        if !cluster_bindings.insert(binding.clone()) {
+            continue;
+        }
+        let key = (ctx.source_file_id, binding.clone());
+        if ctx.blocked_bindings.contains(&key)
+            || is_runtime_singleton_inline_excluded_binding(&binding)
+        {
+            return None;
+        }
+        if ctx.consumers_by_binding.get(&key).is_some_and(|consumers| {
+            consumers
+                .iter()
+                .any(|consumer| *consumer != consumer_module)
+        }) {
+            return None;
+        }
+        if runtime_singleton_inline_consumer_has_name_conflict(
+            ctx.program,
+            ctx.lowered_runtime_sources,
+            consumer_module,
+            &binding,
+        ) {
+            return None;
+        }
+        if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &binding)
+            || ctx
+                .read_index
+                .namespace_exports_by_namespace
+                .contains_key(&binding)
+        {
+            return None;
+        }
+        let snippet = ctx.prelude.snippets.get(&binding)?;
+        if !is_runtime_singleton_inline_snippet(&binding, snippet.source.as_str()) {
+            return None;
+        }
+        if implicit_global_writes_in_source(snippet.source.as_str())
+            .into_iter()
+            .any(|write| ctx.prelude.defines(&write))
+        {
+            return None;
+        }
+        let free_bindings = ctx.read_index.free_bindings_by_snippet.get(&binding)?;
+        for free_binding in free_bindings {
+            if cluster_bindings.contains(free_binding) {
+                continue;
+            }
+            if let Some(import) = ctx
+                .direct_prelude_imports
+                .and_then(|imports| imports.get(free_binding))
+            {
+                if runtime_singleton_inline_consumer_has_name_conflict(
+                    ctx.program,
+                    ctx.lowered_runtime_sources,
+                    consumer_module,
+                    free_binding,
+                ) {
+                    return None;
+                }
+                direct_imports.insert(free_binding.clone(), import.clone());
+                continue;
+            }
+            if ctx.prelude.defines(free_binding) {
+                queue.push(free_binding.clone());
+                continue;
+            }
+            return None;
+        }
+    }
+
+    if !cluster_bindings.iter().all(|binding| {
+        runtime_readers_for_binding(ctx.read_index, binding)
+            .into_iter()
+            .all(|reader| reader == *binding || cluster_bindings.contains(&reader))
+    }) {
+        return None;
+    }
+    if cluster_bindings.iter().any(|binding| {
+        ctx.consumers_by_binding
+            .get(&(ctx.source_file_id, binding.clone()))
+            .is_some_and(|consumers| {
+                consumers
+                    .iter()
+                    .any(|consumer| *consumer != consumer_module)
+            })
+    }) {
+        return None;
+    }
+
+    let mut snippets = cluster_bindings
+        .iter()
+        .filter_map(|binding| {
+            let snippet = ctx.prelude.snippets.get(binding)?;
+            Some(RuntimeSingletonInlineSnippetSource {
+                binding: binding.clone(),
+                byte_start: snippet.byte_start,
+                source: snippet.source.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    snippets.sort_by_key(|snippet| (snippet.byte_start, snippet.binding.clone()));
+    let byte_start = snippets
+        .iter()
+        .map(|snippet| snippet.byte_start)
+        .min()
+        .unwrap_or_default();
+
+    Some(RuntimeSingletonInlineSnippet {
+        consumer_module,
+        byte_start,
+        snippets,
+        direct_prelude_imports: direct_imports,
+    })
 }
 
 fn is_runtime_singleton_inline_excluded_binding(binding: &BindingName) -> bool {
@@ -2551,6 +2703,11 @@ fn is_runtime_singleton_inline_excluded_binding(binding: &BindingName) -> bool {
         || name == "lazyValue"
         || name.starts_with("__reverts_set_")
         || is_planner_synthetic_binding(name)
+}
+
+fn is_runtime_singleton_inline_snippet(binding: &BindingName, source: &str) -> bool {
+    is_migratable_reader_function_snippet(binding, source)
+        || classify_migratable_var_declaration(source, binding.as_str()).is_some()
 }
 
 fn runtime_singleton_inline_consumer_has_name_conflict(
@@ -2613,20 +2770,29 @@ fn emit_runtime_singleton_inline_helpers(
         })
         .collect::<Vec<_>>();
     snippets.sort_by_key(|((_, binding), snippet)| (snippet.byte_start, binding.clone()));
-    for ((source_file_id, binding), snippet) in snippets {
-        if planned_bindings.contains(&binding)
-            || !emitted_inline_runtime_helpers.insert((source_file_id, binding.clone()))
-        {
+    for ((source_file_id, _binding), snippet) in snippets {
+        if !snippet.snippets.iter().any(|part| {
+            !planned_bindings.contains(&part.binding)
+                && !emitted_inline_runtime_helpers.contains(&(source_file_id, part.binding.clone()))
+        }) {
             continue;
         }
-        file.push_source(snippet.source.clone());
-        planned_bindings.insert(binding.clone());
-        file.add_binding(PlannedBinding::new(
-            binding.clone(),
-            binding,
-            BindingShape::Unknown,
-            true,
-        ));
+        emit_direct_prelude_imports(file, planned_bindings, &snippet.direct_prelude_imports);
+        for part in &snippet.snippets {
+            if planned_bindings.contains(&part.binding)
+                || !emitted_inline_runtime_helpers.insert((source_file_id, part.binding.clone()))
+            {
+                continue;
+            }
+            file.push_source(part.source.clone());
+            planned_bindings.insert(part.binding.clone());
+            file.add_binding(PlannedBinding::new(
+                part.binding.clone(),
+                part.binding.clone(),
+                BindingShape::Unknown,
+                true,
+            ));
+        }
     }
 }
 
@@ -4747,14 +4913,43 @@ fn migratable_runtime_reader_cluster_result(
         } else if !is_migratable_reader_function_snippet(&reader, snippet.source.as_str()) {
             return Err(RuntimeReaderClusterBlocker::InvalidReaderFunctionSnippet);
         }
-        // Moving a function that mutates runtime globals would either try to
-        // assign to an imported binding in the writer module or silently split
-        // mutable state. Keep the first cluster pass read-only.
-        if implicit_global_writes_in_source(snippet.source.as_str())
+        // A moved reader may initialize/update the primary runtime binding (or
+        // another same-owner movable binding) as long as that binding moves
+        // with the same cluster. Writes to runtime state left behind in the
+        // helper file would require assigning to an ESM import, so those still
+        // block the migration.
+        let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
             .into_iter()
-            .any(|write| ctx.prelude.defines(&write) || write == *binding)
-        {
-            return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
+            .filter(|write| ctx.prelude.defines(write))
+            .collect::<BTreeSet<_>>();
+        for write in runtime_writes {
+            if primary_bindings.contains(&write) {
+                continue;
+            }
+            if !ctx.movable_bindings.contains(&write) {
+                return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
+            }
+            let Some(write_owner) = ctx.candidate_owners.get(&write) else {
+                return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
+            };
+            if *write_owner != owner_module {
+                return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
+            }
+            let write_readers =
+                match runtime_binding_read_profile_diagnostic(ctx.read_index, &write) {
+                    Ok(RuntimeBindingReadProfile::NoReads) => BTreeSet::new(),
+                    Ok(RuntimeBindingReadProfile::SnippetReaders(readers)) => readers,
+                    Ok(RuntimeBindingReadProfile::Rejected) | Err(_) => {
+                        return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
+                    }
+                };
+            if primary_bindings.insert(write.clone()) {
+                for write_reader in write_readers {
+                    if !moved_snippets.contains(&write_reader) {
+                        queue.push(write_reader);
+                    }
+                }
+            }
         }
 
         // Any runtime snippet that still reads this newly moved function would
@@ -4940,10 +5135,15 @@ fn runtime_reader_source_dependency(
     if dep_module == owner_module || ctx.folded_modules.contains(&dep_module) {
         return None;
     }
-    if !ctx
+    let owner_already_depends_on_source = ctx
         .module_dependencies_by_owner
         .get(&owner_module)
-        .is_some_and(|deps| deps.contains(&dep_module))
+        .is_some_and(|deps| deps.contains(&dep_module));
+    // If the writer already imports the source module, re-use that edge.
+    // Otherwise we may synthesize a new direct import for the moved reader
+    // dependency, but only when it does not introduce a source-module cycle.
+    if !owner_already_depends_on_source
+        && module_dependency_path_exists(ctx.module_dependencies_by_owner, dep_module, owner_module)
     {
         return None;
     }
@@ -4955,6 +5155,31 @@ fn runtime_reader_source_dependency(
         return None;
     }
     Some(dep_module)
+}
+
+fn module_dependency_path_exists(
+    dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    from: ModuleId,
+    target: ModuleId,
+) -> bool {
+    if from == target {
+        return true;
+    }
+    let mut seen = BTreeSet::<ModuleId>::new();
+    let mut stack = vec![from];
+    while let Some(module_id) = stack.pop() {
+        if !seen.insert(module_id) {
+            continue;
+        }
+        let Some(next_modules) = dependencies.get(&module_id) else {
+            continue;
+        };
+        if next_modules.contains(&target) {
+            return true;
+        }
+        stack.extend(next_modules.iter().copied());
+    }
+    false
 }
 
 fn module_dependency_modules_by_owner(
@@ -13884,7 +14109,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_keeps_namespace_prelude_import_on_runtime_path_after_singleton_inline() {
+    fn planner_direct_imports_namespace_prelude_after_singleton_inline() {
         let prelude = "import * as pathNS from 'path';\nfunction helper() { return 1; }\n";
         let body = "var value = pathNS.join('a', String(helper()));\nexport { value };\n";
         let source = format!("{prelude}{body}");
@@ -13899,17 +14124,14 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let entry_source = planned_source(&plan, "modules/entry.ts");
-        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
         assert!(
-            entry_source.contains("import { pathNS } from './runtime/source-1-helpers.js';"),
+            entry_source.contains("import * as pathNS from 'path';"),
             "{entry_source}"
         );
         assert!(entry_source.contains("function helper() { return 1; }"));
-        assert!(!entry_source.contains("from 'path'"));
-        assert!(helper_source.contains("import * as pathNS from 'path';"));
-        assert!(helper_source.contains("export { pathNS };"));
-        assert!(!helper_source.contains("function helper()"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
@@ -13956,7 +14178,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_keeps_prelude_import_on_runtime_path_when_helper_reads_it() {
+    fn planner_inlines_singleton_helper_that_reads_direct_prelude_import() {
         let prelude = "import * as pathNS from 'path';\nfunction helper() { return pathNS.sep; }\n";
         let body = "var value = pathNS.join('a', helper());\nexport { value };\n";
         let source = format!("{prelude}{body}");
@@ -13971,16 +14193,11 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let entry_source = planned_source(&plan, "modules/entry.ts");
-        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
-        assert!(
-            entry_source
-                .contains("import { helper, pathNS } from './runtime/source-1-helpers.js';")
-        );
-        assert!(!entry_source.contains("from 'path'"));
-        assert!(helper_source.contains("import * as pathNS from 'path';"));
-        assert!(helper_source.contains("function helper()"));
-        assert!(helper_source.contains("export { helper, pathNS };"));
+        assert!(entry_source.contains("import * as pathNS from 'path';"));
+        assert!(entry_source.contains("function helper() { return pathNS.sep; }"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
@@ -15302,7 +15519,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_helper_closure_keeps_recursive_prelude_dependencies() {
+    fn singleton_inline_closure_keeps_recursive_prelude_dependencies() {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "function first() { return second(); }\n",
@@ -15331,17 +15548,18 @@ mod tests {
         let plan = planner
             .plan_enriched_program(&enriched)
             .expect("fixture should normalize");
-        let helper_file = plan
+        let entry_file = plan
             .files
             .iter()
-            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-            .expect("runtime helper file should be planned");
-        let helper_source = helper_file.body.join("\n");
+            .find(|file| file.path == "modules/entry.ts")
+            .expect("entry file should be planned");
+        let entry_source = entry_file.body.join("\n");
 
-        assert!(helper_source.contains("function first()"));
-        assert!(helper_source.contains("function second()"));
-        assert!(helper_source.contains("function third()"));
-        assert!(helper_source.contains("export { first };"));
+        assert!(entry_source.contains("function first()"));
+        assert!(entry_source.contains("function second()"));
+        assert!(entry_source.contains("function third()"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
@@ -15901,7 +16119,7 @@ mod tests {
     }
 
     #[test]
-    fn singleton_runtime_function_with_runtime_dep_stays_in_runtime() {
+    fn singleton_runtime_function_with_runtime_dep_cluster_inlines() {
         let prelude = concat!(
             "function runtimeDep() { return 1; }\n",
             "function runtimeHelper() { return runtimeDep(); }\n",
@@ -15919,14 +16137,78 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(entry_source.contains("function runtimeDep() { return 1; }"));
+        assert!(entry_source.contains("function runtimeHelper() { return runtimeDep(); }"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn singleton_runtime_function_with_shared_runtime_dep_stays_in_runtime() {
+        let prelude = concat!(
+            "function runtimeDep() { return 1; }\n",
+            "function runtimeHelper() { return runtimeDep(); }\n",
+        );
+        let helper_body = "var value = runtimeHelper();\nexport { value };\n";
+        let dep_body = "var depValue = runtimeDep();\nexport { depValue };\n";
+        let source = format!("{prelude}{helper_body}{dep_body}");
+        let helper_start = prelude.len() as u32;
+        let helper_end = helper_start + helper_body.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "helper-consumer", "modules/helper-consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(helper_start, helper_end)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "dep-consumer", "modules/dep-consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(helper_end, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let helper_consumer_source = planned_source(&plan, "modules/helper-consumer.ts");
+        let dep_consumer_source = planned_source(&plan, "modules/dep-consumer.ts");
         let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
         assert!(
-            entry_source.contains("import { runtimeHelper } from './runtime/source-1-helpers.js';"),
-            "{entry_source}"
+            helper_consumer_source
+                .contains("import { runtimeHelper } from './runtime/source-1-helpers.js';"),
+            "{helper_consumer_source}"
+        );
+        assert!(
+            dep_consumer_source
+                .contains("import { runtimeDep } from './runtime/source-1-helpers.js';"),
+            "{dep_consumer_source}"
         );
         assert!(helper_source.contains("function runtimeDep() { return 1; }"));
         assert!(helper_source.contains("function runtimeHelper() { return runtimeDep(); }"));
+    }
+
+    #[test]
+    fn singleton_runtime_literal_var_inlines_into_application_consumer() {
+        let prelude = "var answer = 42;\n";
+        let app_body = "var value = answer + 1;\nexport { value };\n";
+        let source = format!("{prelude}{app_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(entry_source.contains("var answer = 42;"), "{entry_source}");
+        assert!(entry_source.contains("var value = answer + 1;"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
@@ -16463,6 +16745,47 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_moves_reader_that_writes_primary() {
+        let prelude = concat!(
+            "var shared;\n",
+            "function resetShared() { shared = 0; return shared; }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = resetShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("function resetShared() { shared = 0; return shared; }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { resetShared };"));
+        assert!(consumer_source.contains("import { resetShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn reader_cluster_runtime_var_migration_allows_owner_local_source_dependency() {
         let prelude = concat!(
             "var shared;\n",
@@ -16577,6 +16900,63 @@ mod tests {
             writer_source.contains("function decoratedShared() { return decorate(shared); }"),
             "{writer_source}"
         );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(
+            helper_source.contains("export { decorate };"),
+            "{helper_source}"
+        );
+        assert!(consumer_source.contains("import { decoratedShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_imports_auto_source_dependency() {
+        let prelude = concat!(
+            "var shared;\n",
+            "function decoratedShared() { return decorate(shared); }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let helper_body = "function decorate(value) { return `${value}!`; }\n";
+        let consumer_body = "var value = decoratedShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{helper_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "helper", "modules/helper.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/helper.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            writer_source.contains("import { decorate } from './helper.js';"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("function decoratedShared()"));
         assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
         assert!(
             helper_source.contains("export { decorate };"),
@@ -17163,7 +17543,7 @@ mod tests {
     }
 
     #[test]
-    fn single_reader_runtime_var_migration_rejects_non_runtime_reader_dependency() {
+    fn single_reader_runtime_var_migration_rejects_cyclic_auto_source_dependency() {
         let prelude = "var shared;\nfunction formatShared() { return decorate(shared); }\n";
         let writer_body = "shared = 'ok';\nexport { shared };\n";
         let helper_body = "function decorate(value) { return value; }\nexport { decorate };\n";
@@ -17196,6 +17576,10 @@ mod tests {
                     source.len() as u32,
                 )),
         );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
 
         let plan = plan_from_rows(rows);
         let writer_source = planned_source(&plan, "modules/writer.ts");
@@ -18247,7 +18631,7 @@ mod tests {
     }
 
     #[test]
-    fn template_interpolation_runtime_helper_is_imported_from_prelude() {
+    fn template_interpolation_singleton_literal_is_inlined_from_prelude() {
         let planner = ImportExportPlanner;
         let prelude = "var EDL = 'date';\n";
         let body = "var value = new RegExp(`^${EDL}$`);\nexport { value };\n";
@@ -18277,17 +18661,12 @@ mod tests {
             .iter()
             .find(|file| file.path == "modules/entry.ts")
             .expect("entry file should be planned");
-        let helper_file = plan
-            .files
-            .iter()
-            .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-            .expect("runtime helper file should be planned");
         let entry_source = entry_file.body.join("\n");
-        let helper_source = helper_file.body.join("\n");
 
-        assert!(entry_source.contains("import { EDL } from './runtime/source-1-helpers.js';"));
-        assert!(helper_source.contains("var EDL = 'date';"));
-        assert!(helper_source.contains("export { EDL };"));
+        assert!(entry_source.contains("var EDL = 'date';"));
+        assert!(entry_source.contains("var value = new RegExp(`^${EDL}$`);"));
+        assert!(!entry_source.contains("source-1-helpers"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
