@@ -1327,11 +1327,22 @@ fn promote_importable_ownership_matches(
         {
             continue;
         }
-        let Some(import_target) =
-            importable_package_source_for_module(module, package_match, package_sources)
-        else {
+        let Some(import_target) = importable_package_source_for_module(
+            module,
+            package_match,
+            package_sources,
+            slice.source,
+        ) else {
             continue;
         };
+        if semantic_import_proof_requires_source_anchor(package_match.strategy)
+            && !module_source_contains_import_surface_anchor(
+                slice.source,
+                import_target.export_specifier.as_str(),
+            )
+        {
+            continue;
+        }
         let mut attribution = PackageAttributionInput::accepted_external(
             module.id,
             package_match.package_name.as_str(),
@@ -1372,6 +1383,14 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
     )
 }
 
+fn semantic_import_proof_requires_source_anchor(strategy: ModuleMatchStrategy) -> bool {
+    matches!(
+        strategy,
+        ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            | ModuleMatchStrategy::DependencyClosureOwnership
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportablePackageSourceTarget {
     export_specifier: String,
@@ -1382,6 +1401,7 @@ fn importable_package_source_for_module(
     module: &ModuleInput,
     package_match: &PackageMatch,
     package_sources: &[PackageSource],
+    module_source: &str,
 ) -> Option<ImportablePackageSourceTarget> {
     if source_match_strategy_has_exact_import_proof(package_match.strategy)
         && let Some(target) = exact_importable_package_match_source(package_match, package_sources)
@@ -1389,10 +1409,14 @@ fn importable_package_source_for_module(
         return Some(target);
     }
 
-    let hint = module_package_semantic_path_hint(
+    let hints = module_package_semantic_path_hints(
         package_match.package_name.as_str(),
         module.semantic_path.as_str(),
-    )?;
+        module_source,
+    );
+    if hints.is_empty() {
+        return None;
+    }
     let min_score = semantic_export_surface_min_score(package_match.strategy);
     let mut scored = package_sources
         .iter()
@@ -1402,19 +1426,25 @@ fn importable_package_source_for_module(
                 && source.package_version == package_match.package_version
         })
         .filter_map(|source| {
-            let score = if min_score >= STRONG_SEMANTIC_EXPORT_SURFACE_SCORE {
-                package_export_surface_semantic_score(
-                    package_match.package_name.as_str(),
-                    source.export_specifier.as_str(),
-                    hint.as_str(),
-                )
-            } else {
-                package_source_semantic_export_surface_score(
-                    package_match.package_name.as_str(),
-                    source,
-                    hint.as_str(),
-                )
-            };
+            let score = hints
+                .iter()
+                .map(|hint| {
+                    if min_score >= STRONG_SEMANTIC_EXPORT_SURFACE_SCORE {
+                        package_export_surface_semantic_score(
+                            package_match.package_name.as_str(),
+                            source.export_specifier.as_str(),
+                            hint.as_str(),
+                        )
+                    } else {
+                        package_source_semantic_export_surface_score(
+                            package_match.package_name.as_str(),
+                            source,
+                            hint.as_str(),
+                        )
+                    }
+                })
+                .max()
+                .unwrap_or(0);
             (score >= min_score).then(|| (source, score))
         })
         .collect::<Vec<_>>();
@@ -1514,7 +1544,25 @@ fn package_export_surface_semantic_score(
     if path_segments_end_with(&export_segments, &hint_segments) && hint_segments.len() >= 2 {
         return 5;
     }
+    if single_export_segment_matches_internal_hint(&export_segments, &hint_segments) {
+        return 5;
+    }
     0
+}
+
+fn single_export_segment_matches_internal_hint(
+    export_segments: &[String],
+    hint_segments: &[String],
+) -> bool {
+    export_segments.len() == 1
+        && hint_segments.len() >= 2
+        && hint_segments
+            .last()
+            .is_some_and(|hint_last| hint_last == &export_segments[0])
+        && hint_segments
+            .iter()
+            .take(hint_segments.len().saturating_sub(1))
+            .any(|segment| matches!(segment.as_str(), "internal" | "private"))
 }
 
 fn exact_importable_package_match_source(
@@ -1548,15 +1596,20 @@ fn exact_importable_package_match_source(
     })
 }
 
-fn module_package_semantic_path_hint(package_name: &str, semantic_path: &str) -> Option<String> {
+fn module_package_semantic_path_hints(
+    package_name: &str,
+    semantic_path: &str,
+    module_source: &str,
+) -> Vec<String> {
     let clean = semantic_path
         .trim()
         .trim_start_matches("./")
         .trim_start_matches('/')
         .replace('\\', "/");
     if clean.is_empty() {
-        return None;
+        return Vec::new();
     }
+    let mut hints = Vec::new();
     for prefix in package_semantic_path_prefixes(package_name) {
         let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
         else {
@@ -1566,10 +1619,60 @@ fn module_package_semantic_path_hint(package_name: &str, semantic_path: &str) ->
             .trim_matches('/')
             .to_ascii_lowercase();
         if !hint.is_empty() {
-            return Some(hint);
+            hints.push(hint);
         }
     }
-    None
+    if let Some(hint) = module_semantic_filename_hint(clean.as_str(), module_source)
+        && semantic_filename_hint_is_package_export_like(hint.as_str())
+    {
+        hints.push(hint);
+    }
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+fn module_semantic_filename_hint(semantic_path: &str, module_source: &str) -> Option<String> {
+    let filename = semantic_path.rsplit('/').next().unwrap_or(semantic_path);
+    let stem = strip_source_extension(filename).trim();
+    let (prefix, rest) = stem.split_once('-')?;
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let hint = rest.trim_matches('/').to_ascii_lowercase();
+    if hint.is_empty() || !source_contains_semantic_hint(module_source, hint.as_str()) {
+        return None;
+    }
+    Some(hint)
+}
+
+fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
+    let trimmed = hint.trim();
+    trimmed.starts_with('_')
+        && trimmed
+            .chars()
+            .any(|character| character.is_ascii_alphabetic() && character.is_ascii_lowercase())
+}
+
+fn source_contains_semantic_hint(source: &str, hint: &str) -> bool {
+    let source_normalized = normalize_hint_text(source);
+    let hint_normalized = normalize_hint_text(hint);
+    hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str())
+}
+
+fn module_source_contains_import_surface_anchor(source: &str, export_specifier: &str) -> bool {
+    let Some((_package_name, export_subpath)) = split_bare_specifier(export_specifier) else {
+        return false;
+    };
+    let Some(export_subpath) = export_subpath else {
+        return true;
+    };
+    let segments = canonical_public_path_segments(export_subpath.as_str());
+    let Some(last_segment) = segments.last() else {
+        return true;
+    };
+    let source_normalized = normalize_hint_text(source);
+    last_segment.len() >= 4 && source_normalized.contains(last_segment.as_str())
 }
 
 fn package_source_relative_path(source: &PackageSource) -> String {
@@ -3915,6 +4018,163 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .as_deref(),
             Some("pkg/sample")
         );
+    }
+
+    #[test]
+    fn pipeline_promotes_dependency_internal_kebab_hint_to_camel_internal_export() {
+        let mut rows =
+            rows_with_package_source_at_version("function arrayMap(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-pkg/_internal/array-map.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/_arrayMap.js",
+            "_arrayMap.js",
+            "export const unrelatedArrayMapSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/_arrayMap.js"
+        );
+    }
+
+    #[test]
+    fn pipeline_keeps_token_only_internal_hint_source_only_without_full_export_anchor() {
+        let mut rows = rows_with_package_source_at_version(
+            "function unrelated(){return Array.isArray([]);}",
+            "1.2.3",
+        );
+        rows.modules[0].semantic_path = "modules/10-pkg/_internal/is-typed-array.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/isTypedArray.js",
+            "isTypedArray.js",
+            "export const unrelatedIsTypedArraySurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_keeps_weak_internal_hint_source_only_even_with_unique_export_surface() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-pkg/_internal/array-map.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/_arrayMap.js",
+            "_arrayMap.js",
+            "export const unrelatedArrayMapSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_promotes_dependency_internal_filename_hint_to_export_subpath() {
+        let mut rows =
+            rows_with_package_source_at_version("function baseKeys(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-_baseKeys.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/_baseKeys.js",
+            "_baseKeys.js",
+            "export const unrelatedBaseKeysSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/_baseKeys.js"
+        );
+    }
+
+    #[test]
+    fn pipeline_keeps_internal_filename_hint_source_only_when_source_lacks_anchor() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-_baseKeys.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/_baseKeys.js",
+            "_baseKeys.js",
+            "export const unrelatedBaseKeysSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_keeps_plain_filename_hint_source_only_without_package_prefix() {
+        let mut rows = rows_with_package_source_at_version("function map(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-map.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/map.js",
+            "map.js",
+            "export const unrelatedMapSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
