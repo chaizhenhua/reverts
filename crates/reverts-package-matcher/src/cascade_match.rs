@@ -154,6 +154,9 @@ fn build_index(
 ) -> InMemoryFingerprintIndex {
     let mut index = InMemoryFingerprintIndex::new();
     for (idx, source) in package_sources.iter().enumerate() {
+        if !source.is_within_fingerprint_budget() {
+            continue;
+        }
         let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);

@@ -82,6 +82,8 @@ pub struct PackageSource {
     pub external_importable: bool,
 }
 
+const PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES: usize = 512 * 1024;
+
 impl PackageSource {
     /// Creates an external package source candidate.
     #[must_use]
@@ -121,6 +123,10 @@ impl PackageSource {
             source: source.into(),
             external_importable: false,
         }
+    }
+
+    pub(crate) fn is_within_fingerprint_budget(&self) -> bool {
+        self.source.len() <= PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES
     }
 }
 
@@ -1976,6 +1982,9 @@ impl<'a> PackageVersionIndex<'a> {
     fn build(package_sources: &'a [PackageSource], audit: &mut AuditReport) -> Self {
         let mut by_version = BTreeMap::<(String, String), Vec<PackageSourceFingerprint<'a>>>::new();
         for source in package_sources {
+            if !source.is_within_fingerprint_budget() {
+                continue;
+            }
             match package_source_fingerprint(source) {
                 Ok(fingerprint) => {
                     by_version
@@ -2821,8 +2830,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{
-        BestVersionMatch, ModuleMatchStrategy, PackageModuleSourceQuality, PackageSource,
-        VersionedPackageMatcher, match_packages_with_pipeline, match_structural_bags,
+        BestVersionMatch, ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
+        PackageModuleSourceQuality, PackageSource, VersionedPackageMatcher,
+        match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality,
     };
@@ -3430,6 +3440,40 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 }),
             "exact hints prove ownership only; they must not emit an external import"
         );
+    }
+
+    #[test]
+    fn pipeline_promotes_exact_hint_without_fingerprinting_huge_package_source() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let huge_source = format!(
+            "export const oversized = \"{}\";",
+            "x".repeat(PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES + 1)
+        );
+        let package_sources = [PackageSource::source_only(
+            "pkg",
+            "1.2.3",
+            "pkg/oversized",
+            "oversized.js",
+            huge_source,
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .contains("exact-hint:pkg@1.2.3")
+        );
+        assert!(report.cascade_report.audit.is_clean());
+        assert!(report.structural_bag_report.audit.is_clean());
     }
 
     #[test]

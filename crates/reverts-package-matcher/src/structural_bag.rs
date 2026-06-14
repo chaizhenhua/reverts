@@ -266,6 +266,9 @@ fn build_package_bags(
         if !needed_packages.contains(source.package_name.as_str()) {
             continue;
         }
+        if !source.is_within_fingerprint_budget() {
+            continue;
+        }
         let synthetic_module_id = ModuleId(u32::MAX.saturating_sub(idx as u32));
         let fingerprints =
             FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str());

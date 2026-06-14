@@ -3375,8 +3375,16 @@ fn collect_local_package_sources(
                 source,
             }
         })?;
+        let importable_specifier = metadata.importable_specifier_for(rel_path.as_str());
+        if is_json_source_path(rel_path.as_str()) && importable_specifier.is_none() {
+            continue;
+        }
+        let source = package_source_body_for_local_file(rel_path.as_str(), source.as_str())
+            .unwrap_or(source);
         let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
-        if let Some(export_specifier) = metadata.importable_specifier_for(rel_path.as_str()) {
+        if let Some(export_specifier) =
+            importable_specifier.filter(|_| !is_json_source_path(rel_path.as_str()))
+        {
             sources.push(PackageSource::external(
                 metadata.name.as_str(),
                 metadata.version.as_str(),
@@ -3719,6 +3727,27 @@ fn is_javascript_source_path(rel_path: &str) -> bool {
         Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
         Some("js" | "mjs" | "cjs")
     )
+}
+
+fn is_json_source_path(rel_path: &str) -> bool {
+    matches!(
+        Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
+        Some("json")
+    )
+}
+
+fn package_source_body_for_local_file(rel_path: &str, source: &str) -> Option<String> {
+    if is_json_source_path(rel_path) {
+        json_package_source_module(source)
+    } else {
+        None
+    }
+}
+
+fn json_package_source_module(source: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(source).ok()?;
+    let json = serde_json::to_string(&value).ok()?;
+    Some(format!("export default {json};\n"))
 }
 
 fn filter_package_sources_to_best_build_variants(
@@ -4066,6 +4095,11 @@ fn path_hint_tokens(value: &str) -> BTreeSet<String> {
 fn is_local_package_source_candidate(rel_path: &str) -> bool {
     let lower = rel_path.to_ascii_lowercase();
     if lower.ends_with(".d.ts")
+        || lower == "package.json"
+        || lower.ends_with("/package.json")
+        || lower.starts_with("package.json")
+        || lower.ends_with("tsconfig.json")
+        || lower.ends_with("/tsconfig.json")
         || lower.ends_with(".min.js")
         || lower.contains("/test/")
         || lower.contains("/tests/")
@@ -4078,7 +4112,7 @@ fn is_local_package_source_candidate(rel_path: &str) -> bool {
     }
     matches!(
         Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
-        Some("js" | "mjs" | "cjs" | "ts" | "tsx")
+        Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "json")
     )
 }
 
@@ -6099,6 +6133,40 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert!(sources[0].source_path.ends_with("dist/index.js"));
         assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn local_package_source_collection_wraps_importable_json_data() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("node_modules/css-color-names");
+        fs::create_dir_all(package_dir.as_path()).expect("create package dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"css-color-names","version":"1.0.1","main":"./css-color-names.json"}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("css-color-names.json"),
+            r##"{"aliceblue":"#f0f8ff","rebeccapurple":"#663399"}"##,
+        )
+        .expect("write json data");
+        fs::write(package_dir.join("ignored.json"), r#"{"private":true}"#)
+            .expect("write private json");
+        let metadata = local_package_metadata(package_dir.as_path())
+            .expect("read metadata")
+            .expect("metadata");
+        let mut sources = Vec::new();
+
+        collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)
+            .expect("collect sources");
+
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].source_path.ends_with("css-color-names.json"));
+        assert_eq!(sources[0].package_name, "css-color-names");
+        assert_eq!(sources[0].package_version, "1.0.1");
+        assert!(!sources[0].external_importable);
+        assert!(sources[0].source.starts_with("export default "));
+        assert!(sources[0].source.contains("aliceblue"));
     }
 
     #[test]
