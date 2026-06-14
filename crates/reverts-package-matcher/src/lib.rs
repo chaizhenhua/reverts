@@ -341,6 +341,15 @@ pub enum PackageModuleSourceQuality {
     Invalid,
 }
 
+#[must_use]
+fn package_module_source_quality_label(quality: PackageModuleSourceQuality) -> &'static str {
+    match quality {
+        PackageModuleSourceQuality::Trusted => "trusted",
+        PackageModuleSourceQuality::Weak => "weak",
+        PackageModuleSourceQuality::Invalid => "invalid",
+    }
+}
+
 impl Default for VersionedPackageMatcherConfig {
     fn default() -> Self {
         Self {
@@ -570,7 +579,7 @@ pub fn match_packages_with_pipeline(
         structural_bag_report.matches.as_slice(),
         &mut package_report,
     );
-    promote_trusted_hint_ownership_matches(rows, package_sources, &mut package_report);
+    promote_exact_hint_ownership_matches(rows, package_sources, &mut package_report);
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
     promote_package_file_graph_ownership_matches(rows, &mut package_report);
@@ -872,7 +881,7 @@ fn promote_structural_bag_ownership_matches(
     }
 }
 
-fn promote_trusted_hint_ownership_matches(
+fn promote_exact_hint_ownership_matches(
     rows: &InputRows,
     package_sources: &[PackageSource],
     report: &mut VersionedPackageMatchReport,
@@ -896,7 +905,6 @@ fn promote_trusted_hint_ownership_matches(
         .iter()
         .map(|package_match| package_match.module_id)
         .collect::<BTreeSet<_>>();
-    let ownership_by_module = ownership_by_module(rows, report);
 
     for module in &rows.modules {
         if module.kind != ModuleKind::Package
@@ -928,17 +936,8 @@ fn promote_trusted_hint_ownership_matches(
         let Some(slice) = rows.module_source_slice(module.id) else {
             continue;
         };
-        if package_module_source_quality(module, slice.source_file_path, slice.source)
-            != PackageModuleSourceQuality::Trusted
-        {
-            continue;
-        }
-        if has_direct_neighborhood_package_contradiction(
-            rows,
-            module.id,
-            package_name,
-            &ownership_by_module,
-        ) {
+        let quality = package_module_source_quality(module, slice.source_file_path, slice.source);
+        if quality == PackageModuleSourceQuality::Invalid {
             continue;
         }
         matched_modules.insert(module.id);
@@ -948,7 +947,8 @@ fn promote_trusted_hint_ownership_matches(
             package_version: package_version.to_string(),
             export_specifier: package_name.to_string(),
             source_path: format!(
-                "trusted-hint:{package_name}@{package_version}:semantic_path={}",
+                "exact-hint:{package_name}@{package_version}:quality={}:semantic_path={}",
+                package_module_source_quality_label(quality),
                 module.semantic_path,
             ),
             normalized_source_hash: String::new(),
@@ -3326,16 +3326,115 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(
             report.package_report.matches[0]
                 .source_path
-                .contains("trusted-hint:pkg@1.2.3")
+                .contains("exact-hint:pkg@1.2.3:quality=trusted")
         );
         assert!(!report.package_report.matches[0].external_importable);
         assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
-    fn pipeline_does_not_promote_weak_hint_without_other_evidence() {
+    fn pipeline_promotes_weak_exact_hint_as_source_only_ownership() {
         let mut rows =
             rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/other",
+            "other.js",
+            "export const other = 'unrelated-package-source';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .contains("exact-hint:pkg@1.2.3:quality=weak")
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_promotes_weak_exact_hint_despite_other_package_neighbor() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "other.js",
+            Some("export const otherDep = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "otherDep",
+                "other/index.js",
+                "other",
+                Some("9.9.9".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(11),
+                "other",
+                "9.9.9",
+                "other",
+            ));
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/other",
+            "other.js",
+            "export const other = 'unrelated-package-source';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let package_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == ModuleId(10))
+            .expect("exact package hint should own the module even when imports point outside");
+        assert!(
+            package_match
+                .source_path
+                .contains("exact-hint:pkg@1.2.3:quality=weak"),
+            "{}",
+            package_match.source_path
+        );
+        assert!(!package_match.external_importable);
+        assert!(
+            report
+                .package_report
+                .attributions
+                .iter()
+                .all(|attribution| {
+                    attribution.module_id != ModuleId(10)
+                        || attribution.emission_mode
+                            != reverts_input::PackageEmissionMode::ExternalImport
+                }),
+            "exact hints prove ownership only; they must not emit an external import"
+        );
+    }
+
+    #[test]
+    fn pipeline_does_not_promote_exact_hint_without_exact_version() {
+        let mut rows = rows_with_package_source("function unrelated(){return 42;}");
         rows.modules[0].semantic_path = "pkg/sample.js".to_string();
         let package_sources = [PackageSource::external(
             "pkg",
@@ -3751,15 +3850,9 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             .with_source_span(SourceSpan::new(one_start as u32, one_end as u32)),
         );
         rows.modules.push(
-            ModuleInput::package(
-                ModuleId(11),
-                "gap",
-                "pkg/absent-item.js",
-                "pkg",
-                Some("1.2.3".to_string()),
-            )
-            .with_source_file(1)
-            .with_source_span(SourceSpan::new(gap_start as u32, gap_end as u32)),
+            ModuleInput::package(ModuleId(11), "gap", "pkg/absent-item.js", "pkg", None)
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(gap_start as u32, gap_end as u32)),
         );
         rows.modules.push(
             ModuleInput::package(
@@ -3773,15 +3866,9 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             .with_source_span(SourceSpan::new(two_start as u32, two_end as u32)),
         );
         rows.modules.push(
-            ModuleInput::package(
-                ModuleId(13),
-                "tail",
-                "pkg/unused-tail.js",
-                "pkg",
-                Some("1.2.3".to_string()),
-            )
-            .with_source_file(1)
-            .with_source_span(SourceSpan::new(tail_start as u32, tail_end as u32)),
+            ModuleInput::package(ModuleId(13), "tail", "pkg/unused-tail.js", "pkg", None)
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(tail_start as u32, tail_end as u32)),
         );
         let package_sources = [
             PackageSource::external("pkg", "1.2.3", "pkg/one", "one.js", one),

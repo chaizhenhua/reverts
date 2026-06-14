@@ -6373,7 +6373,7 @@ mod tests {
         );
         connection
             .execute(
-                "UPDATE modules SET semantic_name = 'rxjs/operators/sample', package_name = 'rxjs', package_version = '7.8.2' WHERE id = 10",
+                "UPDATE modules SET semantic_name = 'rxjs/operators/sample', package_name = 'rxjs', package_version = NULL WHERE id = 10",
                 [],
             )
             .expect("make weak rxjs hint");
