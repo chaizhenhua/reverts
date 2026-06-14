@@ -27,12 +27,12 @@ use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
 use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    BestVersionMatch, ExternalizationPolicy, ModuleMatchStrategy, PackageMatch,
-    PackageModuleSourceQuality, PackageSource, VersionMatchScore, VersionedPackageMatchReport,
-    clean_package_semantic_path_hint, has_accepted_external_attribution,
-    is_exact_package_version_hint, is_json_source_path, match_packages_with_pipeline_with_policy,
-    ownership_by_module, package_import_names_from_sources, package_module_source_quality,
-    package_source_entry_path, package_source_semantic_hint_score, strip_source_extension,
+    BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
+    VersionMatchScore, VersionedPackageMatchReport, clean_package_semantic_path_hint,
+    has_accepted_external_attribution, is_exact_package_version_hint, is_json_source_path,
+    match_packages_with_pipeline, ownership_by_module, package_import_names_from_sources,
+    package_module_source_quality, package_source_entry_path, package_source_semantic_hint_score,
+    strip_source_extension,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -1011,11 +1011,10 @@ pub fn match_packages_from_connection(
         (!args.package_names.is_empty()).then_some(&package_names),
     );
     mark_timing!("source_quality_counts");
-    let pipeline_report = match_packages_with_pipeline_with_policy(
+    let pipeline_report = match_packages_with_pipeline(
         &rows,
         &package_sources,
         (!args.package_names.is_empty()).then_some(&package_names),
-        ExternalizationPolicy::ForceNoFallback,
     );
     mark_timing!("match_pipeline");
     let report = pipeline_report.package_report;
@@ -3046,7 +3045,6 @@ fn materialize_package_sources_from_hints(
     }
 
     let mut sources = Vec::new();
-    let mut attempted = BTreeSet::<(String, String)>::new();
     for (idx, (package_name, package_version)) in hints.into_iter().enumerate() {
         let temp_root = std::env::temp_dir().join(format!(
             "reverts-package-source-{}-{idx}",
@@ -3067,12 +3065,11 @@ fn materialize_package_sources_from_hints(
             }
         })?;
 
-        let result = materialize_package_source_with_nearest_fallback(
+        let result = materialize_one_package_source(
             temp_root.as_path(),
             package_name.as_str(),
             package_version.as_str(),
             &mut sources,
-            &mut attempted,
         );
         let cleanup = fs::remove_dir_all(temp_root.as_path());
         if let Err(error) = result {
@@ -3154,47 +3151,6 @@ fn materialize_one_package_source(
         });
     }
     Ok(())
-}
-
-fn materialize_package_source_with_nearest_fallback(
-    temp_root: &Path,
-    package_name: &str,
-    package_version: &str,
-    sources: &mut Vec<PackageSource>,
-    attempted: &mut BTreeSet<(String, String)>,
-) -> Result<(), MatchPackagesError> {
-    if !attempted.insert((package_name.to_string(), package_version.to_string())) {
-        return Ok(());
-    }
-    match materialize_one_package_source(temp_root, package_name, package_version, sources) {
-        Ok(()) => Ok(()),
-        Err(original_error) => {
-            let Some(nearest_version) =
-                resolve_unavailable_exact_package_version_hint_from_network(
-                    package_name,
-                    package_version,
-                )?
-            else {
-                return Err(original_error);
-            };
-            if nearest_version == package_version
-                || !attempted.insert((package_name.to_string(), nearest_version.clone()))
-            {
-                return Err(original_error);
-            }
-            eprintln!(
-                "package source materialization for {package_name}@{package_version} failed; trying nearest available version {nearest_version}"
-            );
-            materialize_one_package_source(temp_root, package_name, nearest_version.as_str(), sources)
-                .map_err(|fallback_error| MatchPackagesError::MaterializePackageSource {
-                    package_name: package_name.to_string(),
-                    package_version: package_version.to_string(),
-                    message: format!(
-                        "{original_error}; nearest fallback {nearest_version} also failed: {fallback_error}"
-                    ),
-                })
-        }
-    }
 }
 
 #[cfg(test)]
@@ -3574,20 +3530,6 @@ fn resolve_package_version_hint_from_network(
     let versions = npm_package_versions(package_name, requested_version)?;
     Ok(
         best_matching_package_version_by_binary_search(requested_version, &versions)
-            .map(|version| version.to_string()),
-    )
-}
-
-fn resolve_unavailable_exact_package_version_hint_from_network(
-    package_name: &str,
-    requested_version: &str,
-) -> Result<Option<String>, MatchPackagesError> {
-    if !is_exact_package_version_hint(requested_version) {
-        return Ok(None);
-    }
-    let versions = npm_package_versions(package_name, requested_version)?;
-    Ok(
-        nearest_package_version_by_binary_search(requested_version, &versions)
             .map(|version| version.to_string()),
     )
 }

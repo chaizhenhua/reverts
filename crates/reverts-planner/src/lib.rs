@@ -763,10 +763,38 @@ impl ImportExportPlanner {
             }
 
             if let Some(folded) = runtime_lazy_folds.modules.get(&module.id) {
-                required_runtime_helper_bindings
-                    .entry(folded.source_file_id)
-                    .or_default()
-                    .extend(folded.required_bindings.iter().cloned());
+                let mut runtime_stub_exports = BTreeSet::<BindingName>::new();
+                let mut direct_stub_exports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+                for binding in &folded.stub_exports {
+                    if let Some(owner_module) =
+                        runtime_var_migrations.migrated_owner(folded.source_file_id, binding)
+                    {
+                        if owner_module != module.id {
+                            direct_stub_exports
+                                .entry(owner_module)
+                                .or_default()
+                                .insert(binding.clone());
+                        }
+                    } else {
+                        runtime_stub_exports.insert(binding.clone());
+                    }
+                }
+                let runtime_required_bindings = folded
+                    .required_bindings
+                    .iter()
+                    .filter(|binding| {
+                        runtime_var_migrations
+                            .migrated_owner(folded.source_file_id, binding)
+                            .is_none_or(|owner| owner == module.id)
+                    })
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !runtime_required_bindings.is_empty() {
+                    required_runtime_helper_bindings
+                        .entry(folded.source_file_id)
+                        .or_default()
+                        .extend(runtime_required_bindings);
+                }
                 // Phase 13: a folded module whose only in-project purpose is
                 // `export { X } from runtime` is a pure forwarding shim. When
                 // we can rewrite every internal consumer to import the folded
@@ -776,22 +804,34 @@ impl ImportExportPlanner {
                 if omitted_folded_stub_modules.contains(&module.id) {
                     continue;
                 }
-                used_runtime_helper_files
-                    .entry(folded.source_file_id)
-                    .or_default()
-                    .extend(folded.stub_exports.iter().cloned());
-                exported_runtime_helper_bindings
-                    .entry(folded.source_file_id)
-                    .or_default()
-                    .extend(folded.stub_exports.iter().cloned());
-                let specifier = relative_import_specifier(
-                    path,
-                    runtime_helpers_path(folded.source_file_id).as_str(),
-                );
-                file.push_source(named_reexport_statement(
-                    folded.stub_exports.iter(),
-                    specifier.as_str(),
-                ));
+                if !runtime_stub_exports.is_empty() {
+                    used_runtime_helper_files
+                        .entry(folded.source_file_id)
+                        .or_default()
+                        .extend(runtime_stub_exports.iter().cloned());
+                    exported_runtime_helper_bindings
+                        .entry(folded.source_file_id)
+                        .or_default()
+                        .extend(runtime_stub_exports.iter().cloned());
+                    let specifier = relative_import_specifier(
+                        path,
+                        runtime_helpers_path(folded.source_file_id).as_str(),
+                    );
+                    file.push_source(named_reexport_statement(
+                        runtime_stub_exports.iter(),
+                        specifier.as_str(),
+                    ));
+                }
+                for (owner_module, bindings) in &direct_stub_exports {
+                    let Some(owner_path) = module_output_path(program, *owner_module) else {
+                        continue;
+                    };
+                    let specifier = relative_import_specifier(path, owner_path.as_str());
+                    file.push_source(named_reexport_statement(
+                        bindings.iter(),
+                        specifier.as_str(),
+                    ));
+                }
                 for export in &folded.stub_exports {
                     file.add_binding(PlannedBinding::new(
                         export.clone(),
@@ -838,24 +878,51 @@ impl ImportExportPlanner {
                             runtime_lazy_folds.modules.get(&effective_target_module_id)
                             && omitted_folded_stub_modules.contains(&effective_target_module_id)
                         {
+                            let mut runtime_bindings = BTreeSet::<BindingName>::new();
+                            let mut direct_bindings =
+                                BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+                            for binding in effective_bindings {
+                                if let Some(owner_module) = runtime_var_migrations
+                                    .migrated_owner(folded.source_file_id, &binding)
+                                    && owner_module != module.id
+                                {
+                                    direct_bindings
+                                        .entry(owner_module)
+                                        .or_default()
+                                        .insert(binding.clone());
+                                } else {
+                                    runtime_bindings.insert(binding.clone());
+                                }
+                            }
+                            emit_direct_owner_imports(
+                                program,
+                                module.id,
+                                path,
+                                &mut file,
+                                &mut planned_bindings,
+                                &direct_bindings,
+                            );
+                            if runtime_bindings.is_empty() {
+                                continue;
+                            }
                             has_runtime_edge_before_lazy_helpers = true;
                             used_runtime_helper_files
                                 .entry(folded.source_file_id)
                                 .or_default()
-                                .extend(effective_bindings.iter().cloned());
+                                .extend(runtime_bindings.iter().cloned());
                             exported_runtime_helper_bindings
                                 .entry(folded.source_file_id)
                                 .or_default()
-                                .extend(effective_bindings.iter().cloned());
+                                .extend(runtime_bindings.iter().cloned());
                             let specifier = relative_import_specifier(
                                 path,
                                 runtime_helpers_path(folded.source_file_id).as_str(),
                             );
                             file.push_source(named_import_statement(
-                                effective_bindings.iter(),
+                                runtime_bindings.iter(),
                                 specifier.as_str(),
                             ));
-                            for binding in effective_bindings {
+                            for binding in runtime_bindings {
                                 planned_bindings.insert(binding.clone());
                                 file.add_binding(plan_binding_from_program(
                                     program,
@@ -1063,7 +1130,7 @@ impl ImportExportPlanner {
                 .into_iter()
                 .filter(|binding| !dropped_runtime_namespaces_for_source.contains(binding))
                 .collect();
-            let mut runtime_import_partitions = Vec::<(u32, RuntimeReexportImportPartition)>::new();
+            let mut runtime_import_partitions = Vec::<(u32, RuntimeOwnerImportPartition)>::new();
             for (source_file_id, bindings) in runtime_import_groups {
                 let dropped_runtime_namespaces = namespace_member_rewrite
                     .as_ref()
@@ -1118,7 +1185,7 @@ impl ImportExportPlanner {
                 if bindings.is_empty() {
                     continue;
                 }
-                let import_partition = partition_runtime_reexport_bindings(
+                let import_partition = partition_runtime_owner_bindings(
                     &runtime_var_migrations,
                     &runtime_prelude_direct_imports,
                     source_file_id,
@@ -1136,7 +1203,7 @@ impl ImportExportPlanner {
                 .any(|(_, partition)| !partition.runtime_bindings.is_empty());
             let mut lowered_import_partition = lowered_source
                 .map(|lowered_source| {
-                    partition_runtime_reexport_bindings(
+                    partition_runtime_owner_bindings(
                         &runtime_var_migrations,
                         &runtime_prelude_direct_imports,
                         lowered_source.source_file_id,
@@ -1571,10 +1638,9 @@ impl ImportExportPlanner {
                 // longer hosts. Their `X = value` writes (left
                 // unrewritten above because we excluded them from
                 // `written_runtime_helpers`) now bind to the same-module
-                // `var X;` slot. The runtime helpers file re-exports
-                // these from this module, so cross-module readers keep
-                // resolving them transparently. Bindings that came with
-                // a literal initializer in the prelude emit
+                // `var X;` slot. Cross-module readers are routed directly to
+                // this owner module instead of through the runtime helpers
+                // barrel. Bindings that came with a literal initializer emit
                 // `var X = INIT;` so the writer keeps the original
                 // initial value the runtime used to set at load.
                 if !migrated_locally.is_empty() {
@@ -1666,11 +1732,10 @@ impl ImportExportPlanner {
                 file.add_export_with_source_backed(export, true);
             }
             // Phase 10b: bindings this module now owns must be exported so
-            // the runtime helpers file (which re-exports from here) and
-            // every consumer importing from runtime continue to resolve
-            // through the live binding. Skip any binding that is already
-            // exported through the module's regular AST or wiring path
-            // to avoid duplicate-export audit failures.
+            // direct-routed consumers resolve through the live binding. Skip
+            // any binding that is already exported through the module's
+            // regular AST or wiring path to avoid duplicate-export audit
+            // failures.
             if !migrated_local_bindings.is_empty() {
                 let already_exported: BTreeSet<BindingName> = program
                     .model()
@@ -1779,13 +1844,8 @@ impl ImportExportPlanner {
                 runtime_var_migrations.extra_snippet_bindings_for_source(*source_file_id);
             let migrations_for_source =
                 runtime_var_migrations.primary_bindings_for_source(*source_file_id);
-            let reexported_bindings_for_source =
-                runtime_var_migrations.reexported_bindings_for_source(*source_file_id);
-            let runtime_reexports_for_source = reexported_bindings_for_source
-                .iter()
-                .filter(|(binding, _owner)| public_helper_bindings.contains(*binding))
-                .map(|(binding, owner)| (binding.clone(), *owner))
-                .collect::<BTreeMap<_, _>>();
+            let migrated_bindings_for_source =
+                runtime_var_migrations.migrated_bindings_for_source(*source_file_id);
             let entrypoint = prelude
                 .entrypoint
                 .as_ref()
@@ -1819,7 +1879,7 @@ impl ImportExportPlanner {
             if let Some(setter_targets) = used_runtime_helper_setters.get(source_file_id) {
                 root_bindings.extend(setter_targets.iter().cloned());
             }
-            for binding in reexported_bindings_for_source.keys() {
+            for binding in migrated_bindings_for_source.keys() {
                 root_bindings.remove(binding);
             }
             if let Some(entrypoint) = entrypoint {
@@ -1837,7 +1897,7 @@ impl ImportExportPlanner {
                     }
                 }
             }
-            for binding in reexported_bindings_for_source.keys() {
+            for binding in migrated_bindings_for_source.keys() {
                 root_bindings.remove(binding);
             }
             let folded_chunks = runtime_lazy_folds
@@ -1858,10 +1918,8 @@ impl ImportExportPlanner {
             helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
             // Phase 10b: bindings the migration plan reassigned out of
             // this runtime helpers file no longer have their `var X;`
-            // declaration here. The writer module re-declares them
-            // locally and exports them; below we emit `export { X } from
-            // '<owner>';` re-exports so existing consumer imports keep
-            // working unchanged.
+            // declaration here. Consumers are routed directly to the owner
+            // module instead of through a runtime re-export barrel.
             if !migrations_for_source.is_empty() {
                 helper_closure.source = strip_runtime_var_declarations(
                     helper_closure.source.as_str(),
@@ -1901,10 +1959,10 @@ impl ImportExportPlanner {
                 &helper_closure.emitted_bindings,
                 externalized_packages,
             );
-            let helper_imports = runtime_reexport_owner_imports_for_source(
+            let helper_imports = runtime_migrated_owner_imports_for_source(
                 helper_closure.source.as_str(),
                 &helper_closure.emitted_bindings,
-                &reexported_bindings_for_source,
+                &migrated_bindings_for_source,
                 runtime_externalized_binding_scan.source_module_imports,
             );
             let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
@@ -1973,10 +2031,9 @@ impl ImportExportPlanner {
                     .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
             );
             // Phase 10b: drop migrated bindings from the runtime helper's
-            // own named export — they're re-exported below from their
-            // new owner module so the consumer's `import { X } from
-            // runtime` still resolves to a live binding.
-            for binding in runtime_reexports_for_source.keys() {
+            // own named export. All consumers should import the owner module
+            // directly; the runtime file is no longer a compatibility barrel.
+            for binding in migrated_bindings_for_source.keys() {
                 exported_bindings.remove(binding);
             }
             if exports_lazy_module {
@@ -1988,38 +2045,9 @@ impl ImportExportPlanner {
             if !exported_bindings.is_empty() {
                 file.push_source(named_export_statement(exported_bindings.iter()));
             }
-            // Phase 12: only keep migrated-binding re-exports when an
-            // internal consumer still imports the compatibility path. Most
-            // consumers are rewritten to import the owner module directly, so
-            // these statements usually disappear entirely.
-            let mut migrations_by_owner_path: BTreeMap<String, BTreeSet<BindingName>> =
-                BTreeMap::new();
-            for (binding, owner_module) in &runtime_reexports_for_source {
-                let Some(owner_path) = module_output_path(program, *owner_module) else {
-                    continue;
-                };
-                let specifier =
-                    relative_import_specifier(helper_path.as_str(), owner_path.as_str());
-                migrations_by_owner_path
-                    .entry(specifier)
-                    .or_default()
-                    .insert(binding.clone());
-            }
-            for (specifier, bindings) in &migrations_by_owner_path {
-                file.push_source(named_reexport_statement(bindings.iter(), specifier));
-                for binding in bindings {
-                    file.add_binding(PlannedBinding::new(
-                        binding.clone(),
-                        binding.clone(),
-                        BindingShape::Unknown,
-                        true,
-                    ));
-                    file.add_export_with_source_backed(binding.clone(), true);
-                }
-            }
             for binding in public_helper_bindings
                 .iter()
-                .filter(|binding| !reexported_bindings_for_source.contains_key(*binding))
+                .filter(|binding| !migrated_bindings_for_source.contains_key(*binding))
                 .cloned()
             {
                 file.add_binding(PlannedBinding::new(
@@ -2282,9 +2310,9 @@ fn pure_reexport_bypass_plan(
 /// export the binding directly.
 ///
 /// `migrations_by_binding` maps each migrated binding to its new owner
-/// module. The runtime helper file replaces the binding's declaration
-/// and setter with a `export { X } from '<owner>';` re-export so that
-/// other consumers' existing `import { X } from runtime` keep working.
+/// module. Consumers are routed directly to that owner; the runtime helper
+/// file strips the migrated declaration and setter instead of emitting a
+/// compatibility re-export barrel.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RuntimeVarMigrationPlan {
     /// Binding name → (owner module id, runtime source file id the
@@ -2449,10 +2477,7 @@ impl RuntimeVarMigrationPlan {
             .collect()
     }
 
-    fn reexported_bindings_for_source(
-        &self,
-        source_file_id: u32,
-    ) -> BTreeMap<BindingName, ModuleId> {
+    fn migrated_bindings_for_source(&self, source_file_id: u32) -> BTreeMap<BindingName, ModuleId> {
         let mut bindings = BTreeMap::new();
         for (binding, migration) in &self.migrations_by_binding {
             if migration.source_file_id != source_file_id {
@@ -2466,7 +2491,7 @@ impl RuntimeVarMigrationPlan {
         bindings
     }
 
-    fn reexport_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
+    fn migrated_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
         for (primary, migration) in &self.migrations_by_binding {
             if migration.source_file_id != source_file_id {
                 continue;
@@ -2548,7 +2573,7 @@ fn runtime_singleton_inline_plan(
                 let key = (source_file_id, binding.clone());
                 if is_runtime_singleton_inline_excluded_binding(&binding)
                     || runtime_var_migrations
-                        .reexport_owner(source_file_id, &binding)
+                        .migrated_owner(source_file_id, &binding)
                         .is_some()
                 {
                     blocked_bindings.insert(key);
@@ -3094,7 +3119,7 @@ fn package_runtime_island_plan(
                 let key = (source_file_id, binding.clone());
                 if is_package_runtime_excluded_binding(&binding)
                     || runtime_var_migrations
-                        .reexport_owner(source_file_id, &binding)
+                        .migrated_owner(source_file_id, &binding)
                         .is_some()
                 {
                     blocked_bindings.insert(key);
@@ -3151,7 +3176,7 @@ fn package_runtime_island_plan(
         root_bindings.retain(|binding| {
             !is_package_runtime_excluded_binding(binding)
                 && runtime_var_migrations
-                    .reexport_owner(key.source_file_id, binding)
+                    .migrated_owner(key.source_file_id, binding)
                     .is_none()
                 && prelude.defines(binding)
         });
@@ -3256,7 +3281,7 @@ fn package_runtime_closure_is_safe(
             || is_package_runtime_excluded_binding(binding)
             || gate
                 .runtime_var_migrations
-                .reexport_owner(gate.source_file_id, binding)
+                .migrated_owner(gate.source_file_id, binding)
                 .is_some()
             || runtime_binding_has_blocking_non_snippet_use(gate.read_index, binding)
             || gate
@@ -3626,13 +3651,13 @@ fn emit_package_runtime_helper_files(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeReexportImportPartition {
+struct RuntimeOwnerImportPartition {
     runtime_bindings: BTreeSet<BindingName>,
     direct_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     direct_prelude_imports: BTreeMap<BindingName, RuntimePreludeDirectImport>,
 }
 
-impl RuntimeReexportImportPartition {
+impl RuntimeOwnerImportPartition {
     fn route_prelude_imports_through_runtime_except(
         &mut self,
         keep_direct: Option<&BTreeSet<BindingName>>,
@@ -3663,17 +3688,17 @@ enum RuntimePreludeDirectImportKind {
     Named { imported: String },
 }
 
-fn partition_runtime_reexport_bindings(
+fn partition_runtime_owner_bindings(
     migrations: &RuntimeVarMigrationPlan,
     direct_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
     source_file_id: u32,
     current_module: ModuleId,
     bindings: BTreeSet<BindingName>,
-) -> RuntimeReexportImportPartition {
-    let mut partition = RuntimeReexportImportPartition::default();
+) -> RuntimeOwnerImportPartition {
+    let mut partition = RuntimeOwnerImportPartition::default();
     let direct_imports_for_source = direct_imports.get(&source_file_id);
     for binding in bindings {
-        match migrations.reexport_owner(source_file_id, &binding) {
+        match migrations.migrated_owner(source_file_id, &binding) {
             Some(owner) if owner != current_module => {
                 partition
                     .direct_imports
@@ -8042,10 +8067,10 @@ fn scan_runtime_externalized_bindings(
     }
 }
 
-fn runtime_reexport_owner_imports_for_source(
+fn runtime_migrated_owner_imports_for_source(
     source: &str,
     satisfied_runtime_bindings: &BTreeSet<BindingName>,
-    reexported_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
+    migrated_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
     mut imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut identifiers = runtime_import_identifiers_in_source(source);
@@ -8055,7 +8080,7 @@ fn runtime_reexport_owner_imports_for_source(
         if satisfied_runtime_bindings.contains(&binding) {
             continue;
         }
-        let Some(owner_module) = reexported_bindings_for_source.get(&binding) else {
+        let Some(owner_module) = migrated_bindings_for_source.get(&binding) else {
             continue;
         };
         imports
