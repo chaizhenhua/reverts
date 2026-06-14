@@ -570,6 +570,7 @@ pub fn match_packages_with_pipeline(
         structural_bag_report.matches.as_slice(),
         &mut package_report,
     );
+    promote_trusted_hint_ownership_matches(rows, package_sources, &mut package_report);
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
     promote_package_file_graph_ownership_matches(rows, &mut package_report);
@@ -868,6 +869,94 @@ fn promote_structural_bag_ownership_matches(
         }
         matched_modules.insert(package_match.module_id);
         report.matches.push(package_match.clone());
+    }
+}
+
+fn promote_trusted_hint_ownership_matches(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    report: &mut VersionedPackageMatchReport,
+) {
+    let available_versions = package_sources
+        .iter()
+        .map(|source| {
+            (
+                source.package_name.as_str().to_string(),
+                source.package_version.as_str().to_string(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if available_versions.is_empty() {
+        return;
+    }
+
+    let already_accepted = accepted_external_modules(rows, report);
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let ownership_by_module = ownership_by_module(rows, report);
+
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package
+            || already_accepted.contains(&module.id)
+            || matched_modules.contains(&module.id)
+        {
+            continue;
+        }
+        let Some(package_name) = module
+            .package_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|package_name| !package_name.is_empty())
+        else {
+            continue;
+        };
+        let Some(package_version) = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|package_version| !package_version.is_empty())
+            .filter(|package_version| Version::parse(package_version).is_ok())
+        else {
+            continue;
+        };
+        if !available_versions.contains(&(package_name.to_string(), package_version.to_string())) {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            continue;
+        };
+        if package_module_source_quality(module, slice.source_file_path, slice.source)
+            != PackageModuleSourceQuality::Trusted
+        {
+            continue;
+        }
+        if has_direct_neighborhood_package_contradiction(
+            rows,
+            module.id,
+            package_name,
+            &ownership_by_module,
+        ) {
+            continue;
+        }
+        matched_modules.insert(module.id);
+        report.matches.push(PackageMatch {
+            module_id: module.id,
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            export_specifier: package_name.to_string(),
+            source_path: format!(
+                "trusted-hint:{package_name}@{package_version}:semantic_path={}",
+                module.semantic_path,
+            ),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        });
     }
 }
 
@@ -3214,6 +3303,56 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn pipeline_promotes_trusted_exact_hint_as_source_only_ownership() {
+        let mut rows =
+            rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/other",
+            "other.js",
+            "export const other = 'unrelated-package-source';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .contains("trusted-hint:pkg@1.2.3")
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_does_not_promote_weak_hint_without_other_evidence() {
+        let mut rows =
+            rows_with_package_source_at_version("function unrelated(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/other",
+            "other.js",
+            "export const other = 'unrelated-package-source';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(report.package_report.matches.is_empty());
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
     fn source_only_package_source_matches_without_external_attribution() {
         let rows =
             rows_with_package_source_at_version("export function add(a,b){return a+b}", "1.2.3");
@@ -3585,9 +3724,9 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     #[test]
     fn pipeline_promotes_same_file_package_graph_ownership() {
         let one = "export function one(){return 'one-anchor';}";
-        let gap = "const localGap = Math.random();";
+        let gap = "const localValue = Math.random();";
         let two = "export function two(){return 'two-anchor';}";
-        let tail = "const localTail = Date.now();";
+        let tail = "const trailingValue = Date.now();";
         let bundled = [one, gap, two, tail].join("\n");
         let one_start = 0usize;
         let one_end = one.len();
@@ -3615,7 +3754,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ModuleInput::package(
                 ModuleId(11),
                 "gap",
-                "pkg/gap.js",
+                "pkg/absent-item.js",
                 "pkg",
                 Some("1.2.3".to_string()),
             )
@@ -3637,7 +3776,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ModuleInput::package(
                 ModuleId(13),
                 "tail",
-                "pkg/tail.js",
+                "pkg/unused-tail.js",
                 "pkg",
                 Some("1.2.3".to_string()),
             )
@@ -3670,7 +3809,9 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert!(
             gap_match
                 .source_path
-                .contains("package-file-graph:pkg@1.2.3")
+                .contains("package-file-graph:pkg@1.2.3"),
+            "{}",
+            gap_match.source_path
         );
         assert!(gap_match.source_path.contains("owned_seeds=2/2"));
         assert!(gap_match.source_path.contains("run_size=4"));
