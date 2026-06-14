@@ -4456,6 +4456,7 @@ fn compute_runtime_var_migration_plan(
             .get(&source_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let folded_runtime_definitions = folded_runtime_chunk_definitions(folded_chunks);
         let read_index = runtime_source_read_index(prelude, folded_chunks);
         let reader_cluster_context = RuntimeReaderClusterContext {
             owner_available_bindings: runtime_reader_owner_available_bindings(
@@ -4468,6 +4469,7 @@ fn compute_runtime_var_migration_plan(
             module_dependencies_by_owner: &module_dependencies_by_owner,
             source_local_definitions_by_module: &source_local_definitions_by_module,
             folded_modules: &folded_modules,
+            folded_runtime_definitions: &folded_runtime_definitions,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -4718,6 +4720,7 @@ fn runtime_setter_migration_blocker_report(
             .get(&source_id)
             .map(Vec::as_slice)
             .unwrap_or(&[]);
+        let folded_runtime_definitions = folded_runtime_chunk_definitions(folded_chunks);
         let read_index = runtime_source_read_index(prelude, folded_chunks);
         let reader_cluster_context = RuntimeReaderClusterContext {
             owner_available_bindings: runtime_reader_owner_available_bindings(
@@ -4730,6 +4733,7 @@ fn runtime_setter_migration_blocker_report(
             module_dependencies_by_owner: &module_dependencies_by_owner,
             source_local_definitions_by_module: &source_local_definitions_by_module,
             folded_modules: &folded_modules,
+            folded_runtime_definitions: &folded_runtime_definitions,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -4939,6 +4943,7 @@ struct RuntimeReaderClusterContext<'a> {
     module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
     source_local_definitions_by_module: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
     folded_modules: &'a BTreeSet<ModuleId>,
+    folded_runtime_definitions: &'a BTreeSet<BindingName>,
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     movable_bindings: &'a BTreeSet<BindingName>,
@@ -4976,6 +4981,8 @@ struct RuntimeReaderClusterMigration {
 
 type RuntimeReaderClusterResult =
     Result<RuntimeReaderClusterMigration, RuntimeReaderClusterBlocker>;
+
+const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
 
 impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
     fn from(reason: RuntimeReaderClusterBlocker) -> Self {
@@ -5027,11 +5034,15 @@ fn migratable_runtime_reader_cluster_result(
     let mut moved_snippets = BTreeSet::<BindingName>::new();
     let mut moved_namespace_exports = BTreeSet::<BindingName>::new();
     let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
+    let mut folded_runtime_deps = BTreeSet::<BindingName>::new();
     let mut extra_source_deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     let mut queue = initial_readers.into_iter().collect::<Vec<_>>();
     while let Some(reader) = queue.pop() {
         if !moved_snippets.insert(reader.clone()) {
             continue;
+        }
+        if ctx.folded_runtime_definitions.contains(&reader) {
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
             return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
@@ -5152,6 +5163,11 @@ fn migratable_runtime_reader_cluster_result(
                 if owner_available_bindings.contains(dep) {
                     continue;
                 }
+                if runtime_reader_folded_runtime_dependency(ctx, owner_module, dep) {
+                    extra_runtime_deps.insert(dep.clone());
+                    folded_runtime_deps.insert(dep.clone());
+                    continue;
+                }
                 if let Some(dep_module) = runtime_reader_source_dependency(ctx, owner_module, dep) {
                     extra_source_deps
                         .entry(dep_module)
@@ -5202,6 +5218,11 @@ fn migratable_runtime_reader_cluster_result(
                 if owner_available_bindings.contains(dep) {
                     continue;
                 }
+                if runtime_reader_folded_runtime_dependency(ctx, owner_module, dep) {
+                    extra_runtime_deps.insert(dep.clone());
+                    folded_runtime_deps.insert(dep.clone());
+                    continue;
+                }
                 if let Some(dep_module) = runtime_reader_source_dependency(ctx, owner_module, dep) {
                     extra_source_deps
                         .entry(dep_module)
@@ -5226,6 +5247,13 @@ fn migratable_runtime_reader_cluster_result(
 
     for primary in &primary_bindings {
         extra_runtime_deps.remove(primary);
+    }
+
+    if !folded_runtime_deps.is_empty()
+        && runtime_reader_cluster_source_lines(ctx, &moved_snippets)
+            > MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES
+    {
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
     }
 
     Ok(RuntimeReaderClusterMigration {
@@ -5305,6 +5333,47 @@ fn runtime_reader_source_dependency(
         return None;
     }
     Some(dep_module)
+}
+
+fn runtime_reader_folded_runtime_dependency(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    if !ctx.folded_runtime_definitions.contains(binding) {
+        return false;
+    }
+    let Some(dep_module) = ctx
+        .source_definition_modules
+        .get(binding)
+        .and_then(|module_id| *module_id)
+    else {
+        return false;
+    };
+    if dep_module == owner_module || !ctx.folded_modules.contains(&dep_module) {
+        return false;
+    }
+    !module_dependency_path_exists(ctx.module_dependencies_by_owner, dep_module, owner_module)
+}
+
+fn runtime_reader_cluster_source_lines(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    readers: &BTreeSet<BindingName>,
+) -> usize {
+    readers
+        .iter()
+        .filter_map(|reader| ctx.prelude.snippets.get(reader))
+        .map(|snippet| snippet.source.lines().count().max(1))
+        .sum()
+}
+
+fn folded_runtime_chunk_definitions(
+    folded_chunks: &[RuntimeFoldedSourceChunk],
+) -> BTreeSet<BindingName> {
+    folded_chunks
+        .iter()
+        .flat_map(|chunk| top_level_definitions_in_source(chunk.source.as_str()))
+        .collect()
 }
 
 fn module_dependency_path_exists(
@@ -17821,6 +17890,151 @@ mod tests {
         assert!(!helper_source.contains("var left;"));
         assert!(
             helper_source.contains("function __reverts_set_right(value) { return right = value; }")
+        );
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_imports_folded_runtime_local_dep() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var decorate;\n",
+            "function decoratedShared() { initDecorate(); return decorate(shared); }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let folded_body = concat!(
+            "var initDecorate = lazy(() => { decorate = (value) => `${value}!`; });\n",
+            "export { initDecorate, decorate };\n",
+        );
+        let consumer_body = "var value = decoratedShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "decorator", "modules/decorator.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            writer_source.contains(
+                "import { decorate, initDecorate } from './runtime/source-1-helpers.js';"
+            ),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(
+            writer_source.contains(
+                "function decoratedShared() { initDecorate(); return decorate(shared); }"
+            ),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(writer_source.contains("export { decoratedShared };"));
+        assert!(consumer_source.contains("import { decoratedShared } from './writer.js';"));
+        assert!(!helper_source.contains("function decoratedShared()"));
+        assert!(!helper_source.contains("var shared;"));
+        assert!(
+            !helper_source.contains("__reverts_set_shared"),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source.contains("decorate = (value) => `${value}!`;"),
+            "{helper_source}"
+        );
+        assert!(helper_source.contains("var initDecorate = () => {};"));
+        assert!(helper_source.contains("export { decorate, initDecorate };"));
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_rejects_cyclic_folded_runtime_local_dep() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var decorate;\n",
+            "function decoratedShared() { initDecorate(); return decorate(shared); }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let folded_body = concat!(
+            "var initDecorate = lazy(() => { decorate = (value) => `${value}!`; });\n",
+            "export { initDecorate, decorate };\n",
+        );
+        let consumer_body = "var value = decoratedShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "decorator", "modules/decorator.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(writer_source.contains(
+            "import { shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(writer_source.contains("__reverts_set_shared('ok');"));
+        assert!(!writer_source.contains("function decoratedShared()"));
+        assert!(
+            helper_source.contains(
+                "function decoratedShared() { initDecorate(); return decorate(shared); }"
+            )
+        );
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { return shared = value; }")
         );
     }
 
