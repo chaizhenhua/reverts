@@ -6,10 +6,7 @@ use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
     RuntimePreludeBindingKind, RuntimePreludeImport,
 };
-use reverts_input::{
-    ModuleDependencyTarget, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode,
-};
+use reverts_input::{ModuleDependencyTarget, ModuleInput, PackageAttributionInput};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,

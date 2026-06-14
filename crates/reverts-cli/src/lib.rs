@@ -4991,13 +4991,8 @@ fn package_source_quality_rejection_reason(
     }
     let mut same_package_dependencies = 0usize;
     let mut other_package_dependencies = 0usize;
-    for dependency_id in outgoing_dependencies
-        .get(&module.id)
-        .into_iter()
-        .flatten()
-        .copied()
-    {
-        let Some(dependency) = modules_by_id.get(&dependency_id) else {
+    for dependency_id in outgoing_dependencies.get(&module.id).into_iter().flatten() {
+        let Some(dependency) = modules_by_id.get(dependency_id) else {
             continue;
         };
         let Some(dependency_package_name) = dependency.package_name.as_deref() else {
