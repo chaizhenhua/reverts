@@ -4474,6 +4474,7 @@ fn compute_runtime_var_migration_plan(
             candidate_owners: &candidate_owners,
         };
         let mut migrated_primary_bindings = BTreeSet::<BindingName>::new();
+        let mut migrated_reader_owners = BTreeMap::<BindingName, ModuleId>::new();
         for (binding, owner_module, initializer) in candidates {
             if migrated_primary_bindings.contains(&binding) {
                 continue;
@@ -4518,6 +4519,15 @@ fn compute_runtime_var_migration_plan(
                 .primary_bindings
                 .iter()
                 .any(|primary| migrated_primary_bindings.contains(primary))
+                || migration
+                    .extra_snippets
+                    .iter()
+                    .chain(migration.extra_namespace_exports.iter())
+                    .any(|reader| {
+                        migrated_reader_owners
+                            .get(reader)
+                            .is_some_and(|existing_owner| *existing_owner != owner_module)
+                    })
             {
                 continue;
             }
@@ -4542,6 +4552,13 @@ fn compute_runtime_var_migration_plan(
                     },
                 );
                 migrated_primary_bindings.insert(primary.clone());
+            }
+            for reader in migration
+                .extra_snippets
+                .iter()
+                .chain(migration.extra_namespace_exports.iter())
+            {
+                migrated_reader_owners.insert(reader.clone(), owner_module);
             }
         }
     }
@@ -5101,7 +5118,15 @@ fn migratable_runtime_reader_cluster_result(
                     return Err(RuntimeReaderClusterBlocker::ReadsOtherMovableBinding);
                 };
                 if *dep_owner != owner_module {
-                    return Err(RuntimeReaderClusterBlocker::ReadsOtherMovableBinding);
+                    if module_dependency_path_exists(
+                        ctx.module_dependencies_by_owner,
+                        *dep_owner,
+                        owner_module,
+                    ) {
+                        return Err(RuntimeReaderClusterBlocker::ReadsOtherMovableBinding);
+                    }
+                    extra_runtime_deps.insert(dep.clone());
+                    continue;
                 }
                 let dep_readers = match runtime_binding_read_profile_diagnostic(ctx.read_index, dep)
                 {
@@ -7654,12 +7679,14 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
         identifier,
         "AbortController"
             | "AbortSignal"
+            | "AggregateError"
             | "Array"
             | "ArrayBuffer"
             | "BigInt"
             | "Blob"
             | "Boolean"
             | "Buffer"
+            | "Bun"
             | "ByteLengthQueuingStrategy"
             | "CompressionStream"
             | "CountQueuingStrategy"
@@ -7758,6 +7785,7 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "setTimeout"
             | "structuredClone"
             | "undefined"
+            | "unescape"
             | "window"
             | "XMLHttpRequest"
     )
@@ -15822,6 +15850,9 @@ mod tests {
              document.dispatchEvent(new CustomEvent('ready'));\n\
              window.localStorage.getItem('ready');\n\
              new XMLHttpRequest();\n\
+             Bun.file('ready');\n\
+             unescape('%20');\n\
+             new AggregateError([]);\n\
              shared;",
         );
 
@@ -15835,6 +15866,9 @@ mod tests {
         assert!(!identifiers.contains("window"));
         assert!(!identifiers.contains("localStorage"));
         assert!(!identifiers.contains("XMLHttpRequest"));
+        assert!(!identifiers.contains("Bun"));
+        assert!(!identifiers.contains("unescape"));
+        assert!(!identifiers.contains("AggregateError"));
     }
 
     #[test]
@@ -17714,7 +17748,7 @@ mod tests {
     }
 
     #[test]
-    fn reader_cluster_runtime_var_migration_rejects_cross_writer_component() {
+    fn reader_cluster_runtime_var_migration_imports_cross_writer_movable_dep() {
         let prelude = "var left;\nvar right;\nfunction pair() { return [left, right]; }\n";
         let left_writer_body = "left = 1;\nexport { left };\n";
         let right_writer_body = "right = 2;\nexport { right };\n";
@@ -17751,16 +17785,25 @@ mod tests {
         let plan = plan_from_rows(rows);
         let left_writer_source = planned_source(&plan, "modules/left-writer.ts");
         let right_writer_source = planned_source(&plan, "modules/right-writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
         let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
-        assert!(left_writer_source.contains("__reverts_set_left(1);"));
-        assert!(right_writer_source.contains("__reverts_set_right(2);"));
-        assert!(!left_writer_source.contains("function pair()"));
-        assert!(!right_writer_source.contains("function pair()"));
-        assert!(helper_source.contains("function pair() { return [left, right]; }"));
         assert!(
-            helper_source.contains("function __reverts_set_left(value) { return left = value; }")
+            left_writer_source.contains("import { right } from './runtime/source-1-helpers.js';"),
+            "{left_writer_source}"
         );
+        assert!(
+            left_writer_source.contains("var left;"),
+            "{left_writer_source}"
+        );
+        assert!(left_writer_source.contains("function pair() { return [left, right]; }"));
+        assert!(left_writer_source.contains("left = 1;"));
+        assert!(left_writer_source.contains("export { pair };"));
+        assert!(right_writer_source.contains("__reverts_set_right(2);"));
+        assert!(!right_writer_source.contains("function pair()"));
+        assert!(consumer_source.contains("import { pair } from './left-writer.js';"));
+        assert!(!helper_source.contains("function pair()"));
+        assert!(!helper_source.contains("var left;"));
         assert!(
             helper_source.contains("function __reverts_set_right(value) { return right = value; }")
         );
