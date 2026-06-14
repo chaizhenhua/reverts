@@ -590,6 +590,7 @@ impl ImportExportPlanner {
         let analysis = PlannerAnalysis::from_program(program);
         runtime_setter_migration_blocker_report(
             program,
+            &analysis.source_module_wiring,
             &analysis.lowered_runtime_sources,
             &analysis.runtime_lazy_folds,
             &analysis.externalized_packages,
@@ -618,6 +619,7 @@ impl ImportExportPlanner {
             pure_reexport_bypass_plan(program, source_module_wiring, externalized_packages);
         let runtime_var_migrations = compute_runtime_var_migration_plan(
             program,
+            source_module_wiring,
             lowered_runtime_sources,
             runtime_lazy_folds,
             externalized_packages,
@@ -855,6 +857,8 @@ impl ImportExportPlanner {
                 .collect::<BTreeSet<_>>();
             let migrated_extra_runtime_deps =
                 runtime_var_migrations.extra_runtime_deps_for_owner(module.id);
+            let migrated_extra_source_deps =
+                runtime_var_migrations.extra_source_deps_for_owner(module.id);
             let migrated_local_bindings =
                 runtime_var_migrations.local_bindings_for_owner(module.id);
             let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
@@ -1111,6 +1115,16 @@ impl ImportExportPlanner {
                         runtime_edge_direct_prelude_imports.get(source_file_id),
                     );
                 }
+            }
+            if !migrated_extra_source_deps.is_empty() {
+                emit_direct_owner_imports(
+                    program,
+                    module.id,
+                    path,
+                    &mut file,
+                    &mut planned_bindings,
+                    &migrated_extra_source_deps,
+                );
             }
             if let Some(lowered_source) = lowered_source
                 && (!remaining_runtime_helpers.is_empty()
@@ -1483,6 +1497,25 @@ impl ImportExportPlanner {
                     .difference(&already_exported)
                     .cloned()
                     .collect();
+                if !new_exports.is_empty() {
+                    file.push_source(named_export_statement(new_exports.iter()));
+                    for binding in &new_exports {
+                        file.add_export_with_source_backed(binding.clone(), true);
+                    }
+                }
+            }
+            let migration_source_exports =
+                runtime_var_migrations.source_dep_exports_for_module(module.id);
+            if !migration_source_exports.is_empty() {
+                let already_exported = file
+                    .exports
+                    .iter()
+                    .map(|export| export.binding.clone())
+                    .collect::<BTreeSet<_>>();
+                let new_exports = migration_source_exports
+                    .difference(&already_exported)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
                 if !new_exports.is_empty() {
                     file.push_source(named_export_statement(new_exports.iter()));
                     for binding in &new_exports {
@@ -2058,6 +2091,11 @@ struct RuntimeVarMigration {
     /// the migrated primary var. The writer module imports these back
     /// from the helper file.
     extra_runtime_deps: BTreeSet<BindingName>,
+    /// Source-module bindings read by `extra_snippets` that are already
+    /// represented by a source dependency edge from the writer. The writer
+    /// imports these from their source module instead of forcing the reader
+    /// cluster to stay in runtime.
+    extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     /// Optional initializer expression preserved from the runtime
     /// declaration. `None` means the original `var X;` had no
     /// initializer; `Some(text)` carries a side-effect-free literal
@@ -2094,6 +2132,39 @@ impl RuntimeVarMigrationPlan {
             .values()
             .filter(|migration| migration.owner_module == owner_module)
             .flat_map(|migration| migration.extra_runtime_deps.iter().cloned())
+            .collect()
+    }
+
+    fn extra_source_deps_for_owner(
+        &self,
+        owner_module: ModuleId,
+    ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+        let mut deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+        for migration in self
+            .migrations_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            for (module_id, bindings) in &migration.extra_source_deps {
+                deps.entry(*module_id)
+                    .or_default()
+                    .extend(bindings.iter().cloned());
+            }
+        }
+        deps
+    }
+
+    fn source_dep_exports_for_module(&self, module_id: ModuleId) -> BTreeSet<BindingName> {
+        self.migrations_by_binding
+            .values()
+            .flat_map(|migration| {
+                migration
+                    .extra_source_deps
+                    .get(&module_id)
+                    .into_iter()
+                    .flatten()
+                    .cloned()
+            })
             .collect()
     }
 
@@ -2951,6 +3022,7 @@ fn is_identifier_like(value: &str) -> bool {
 ///      migration.
 fn compute_runtime_var_migration_plan(
     program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     externalized_packages: &BTreeSet<ModuleId>,
@@ -2960,6 +3032,13 @@ fn compute_runtime_var_migration_plan(
     // re-export stub; there is no source body to host a migrated
     // declaration or to absorb same-module assignments. Skip them.
     let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
+    let source_definition_modules =
+        unique_source_definition_modules(program, externalized_packages);
+    let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
+    let source_local_definitions_by_module = lowered_runtime_sources
+        .iter()
+        .map(|(module_id, source)| (*module_id, source.local_definitions.clone()))
+        .collect::<BTreeMap<_, _>>();
     // Invert `written_helpers` to find single-writer bindings — but
     // exclude writes that came from a module that was later folded.
     let mut writers: BTreeMap<BindingName, BTreeSet<(ModuleId, u32)>> = BTreeMap::new();
@@ -3035,8 +3114,16 @@ fn compute_runtime_var_migration_plan(
             .unwrap_or(&[]);
         let read_index = runtime_source_read_index(prelude, folded_chunks);
         let reader_cluster_context = RuntimeReaderClusterContext {
-            program,
-            lowered_runtime_sources,
+            owner_available_bindings: runtime_reader_owner_available_bindings(
+                program,
+                source_module_wiring,
+                lowered_runtime_sources,
+                candidate_owners.values().copied(),
+            ),
+            source_definition_modules: &source_definition_modules,
+            module_dependencies_by_owner: &module_dependencies_by_owner,
+            source_local_definitions_by_module: &source_local_definitions_by_module,
+            folded_modules: &folded_modules,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -3068,6 +3155,7 @@ fn compute_runtime_var_migration_plan(
                     extra_snippets: BTreeSet::new(),
                     extra_namespace_exports: BTreeSet::new(),
                     extra_runtime_deps: BTreeSet::new(),
+                    extra_source_deps: BTreeMap::new(),
                 },
                 RuntimeBindingReadProfile::SnippetReaders(readers) => {
                     let Ok(migration) = migratable_runtime_reader_cluster_result(
@@ -3101,6 +3189,7 @@ fn compute_runtime_var_migration_plan(
                         extra_snippets: migration.extra_snippets.clone(),
                         extra_namespace_exports: migration.extra_namespace_exports.clone(),
                         extra_runtime_deps: migration.extra_runtime_deps.clone(),
+                        extra_source_deps: migration.extra_source_deps.clone(),
                         initializer: if primary == &binding {
                             initializer.clone()
                         } else {
@@ -3117,17 +3206,26 @@ fn compute_runtime_var_migration_plan(
 
 fn runtime_setter_migration_blocker_report(
     program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> RuntimeSetterMigrationBlockerReport {
     let actual_migrations = compute_runtime_var_migration_plan(
         program,
+        source_module_wiring,
         lowered_runtime_sources,
         runtime_lazy_folds,
         externalized_packages,
     );
     let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
+    let source_definition_modules =
+        unique_source_definition_modules(program, externalized_packages);
+    let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
+    let source_local_definitions_by_module = lowered_runtime_sources
+        .iter()
+        .map(|(module_id, source)| (*module_id, source.local_definitions.clone()))
+        .collect::<BTreeMap<_, _>>();
     let modules_by_id = program
         .model()
         .modules()
@@ -3261,8 +3359,16 @@ fn runtime_setter_migration_blocker_report(
             .unwrap_or(&[]);
         let read_index = runtime_source_read_index(prelude, folded_chunks);
         let reader_cluster_context = RuntimeReaderClusterContext {
-            program,
-            lowered_runtime_sources,
+            owner_available_bindings: runtime_reader_owner_available_bindings(
+                program,
+                source_module_wiring,
+                lowered_runtime_sources,
+                candidate_owners.values().copied(),
+            ),
+            source_definition_modules: &source_definition_modules,
+            module_dependencies_by_owner: &module_dependencies_by_owner,
+            source_local_definitions_by_module: &source_local_definitions_by_module,
+            folded_modules: &folded_modules,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -3467,8 +3573,11 @@ fn runtime_readers_for_binding(
 }
 
 struct RuntimeReaderClusterContext<'a> {
-    program: &'a EnrichedProgram,
-    lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    owner_available_bindings: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
+    module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    source_local_definitions_by_module: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    folded_modules: &'a BTreeSet<ModuleId>,
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     movable_bindings: &'a BTreeSet<BindingName>,
@@ -3501,6 +3610,7 @@ struct RuntimeReaderClusterMigration {
     extra_snippets: BTreeSet<BindingName>,
     extra_namespace_exports: BTreeSet<BindingName>,
     extra_runtime_deps: BTreeSet<BindingName>,
+    extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
 }
 
 type RuntimeReaderClusterResult =
@@ -3548,12 +3658,15 @@ fn migratable_runtime_reader_cluster_result(
             extra_snippets: BTreeSet::new(),
             extra_namespace_exports: BTreeSet::new(),
             extra_runtime_deps: BTreeSet::new(),
+            extra_source_deps: BTreeMap::new(),
         });
     }
 
+    let owner_available_bindings = owner_declared_or_imported_bindings(ctx, owner_module)?;
     let mut moved_snippets = BTreeSet::<BindingName>::new();
     let mut moved_namespace_exports = BTreeSet::<BindingName>::new();
     let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
+    let mut extra_source_deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     let mut queue = initial_readers.into_iter().collect::<Vec<_>>();
     while let Some(reader) = queue.pop() {
         if !moved_snippets.insert(reader.clone()) {
@@ -3636,6 +3749,16 @@ fn migratable_runtime_reader_cluster_result(
                 continue;
             }
             if !ctx.prelude.defines(dep) {
+                if owner_available_bindings.contains(dep) {
+                    continue;
+                }
+                if let Some(dep_module) = runtime_reader_source_dependency(ctx, owner_module, dep) {
+                    extra_source_deps
+                        .entry(dep_module)
+                        .or_default()
+                        .insert(dep.clone());
+                    continue;
+                }
                 return Err(RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding);
             }
             extra_runtime_deps.insert(dep.clone());
@@ -3676,24 +3799,27 @@ fn migratable_runtime_reader_cluster_result(
                 continue;
             }
             if !ctx.prelude.defines(dep) {
+                if owner_available_bindings.contains(dep) {
+                    continue;
+                }
+                if let Some(dep_module) = runtime_reader_source_dependency(ctx, owner_module, dep) {
+                    extra_source_deps
+                        .entry(dep_module)
+                        .or_default()
+                        .insert(dep.clone());
+                    continue;
+                }
                 return Err(RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding);
             }
             extra_runtime_deps.insert(dep.clone());
         }
     }
 
-    let owner_source = ctx
-        .lowered_runtime_sources
-        .get(&owner_module)
-        .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)?;
-    let source_imports = ctx.program.model().graph().ast_imports_for(owner_module);
-    let mut owner_conflicts = owner_source.local_definitions.clone();
-    owner_conflicts.extend(source_imports);
     if moved_snippets
         .iter()
         .chain(extra_runtime_deps.iter())
         .chain(primary_bindings.iter())
-        .any(|binding| owner_conflicts.contains(binding))
+        .any(|binding| owner_available_bindings.contains(binding))
     {
         return Err(RuntimeReaderClusterBlocker::OwnerNameConflict);
     }
@@ -3707,7 +3833,89 @@ fn migratable_runtime_reader_cluster_result(
         extra_snippets: moved_snippets,
         extra_namespace_exports: moved_namespace_exports,
         extra_runtime_deps,
+        extra_source_deps,
     })
+}
+
+fn owner_declared_or_imported_bindings(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+) -> Result<BTreeSet<BindingName>, RuntimeReaderClusterBlocker> {
+    ctx.owner_available_bindings
+        .get(&owner_module)
+        .cloned()
+        .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)
+}
+
+fn runtime_reader_owner_available_bindings(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    owners: impl IntoIterator<Item = ModuleId>,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut by_owner = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for owner_module in owners {
+        if by_owner.contains_key(&owner_module) {
+            continue;
+        }
+        let Some(owner_source) = lowered_runtime_sources.get(&owner_module) else {
+            continue;
+        };
+        let mut bindings = owner_source.local_definitions.clone();
+        bindings.extend(program.model().graph().ast_imports_for(owner_module));
+        if let Some(imports_by_target) = source_module_wiring.imports_by_module.get(&owner_module) {
+            for bindings_from_target in imports_by_target.values() {
+                bindings.extend(bindings_from_target.iter().cloned());
+            }
+        }
+        by_owner.insert(owner_module, bindings);
+    }
+    by_owner
+}
+
+fn runtime_reader_source_dependency(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    binding: &BindingName,
+) -> Option<ModuleId> {
+    let dep_module = ctx
+        .source_definition_modules
+        .get(binding)
+        .and_then(|module_id| *module_id)?;
+    if dep_module == owner_module || ctx.folded_modules.contains(&dep_module) {
+        return None;
+    }
+    if !ctx
+        .module_dependencies_by_owner
+        .get(&owner_module)
+        .is_some_and(|deps| deps.contains(&dep_module))
+    {
+        return None;
+    }
+    if !ctx
+        .source_local_definitions_by_module
+        .get(&dep_module)
+        .is_some_and(|definitions| definitions.contains(binding))
+    {
+        return None;
+    }
+    Some(dep_module)
+}
+
+fn module_dependency_modules_by_owner(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
+    let mut dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+    for dependency in &program.model().input().dependencies {
+        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+            continue;
+        };
+        dependencies
+            .entry(dependency.from_module_id)
+            .or_default()
+            .insert(target_module_id);
+    }
+    dependencies
 }
 
 fn runtime_binding_has_blocking_non_snippet_use(
@@ -14677,6 +14885,130 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_allows_owner_local_source_dependency() {
+        let prelude = concat!(
+            "var shared;\n",
+            "function decoratedShared() { return decorate(shared); }\n",
+        );
+        let writer_body = concat!(
+            "function decorate(value) { return `${value}!`; }\n",
+            "shared = 'ok';\n",
+            "export { shared };\n",
+        );
+        let consumer_body = "var value = decoratedShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(
+            writer_source.contains("function decoratedShared() { return decorate(shared); }"),
+            "{writer_source}"
+        );
+        assert!(
+            writer_source.contains("function decorate(value)"),
+            "{writer_source}"
+        );
+        assert!(
+            writer_source.contains("return `${value}!`;"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(writer_source.contains("export { decoratedShared };"));
+        assert!(consumer_source.contains("import { decoratedShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_imports_declared_source_dependency() {
+        let prelude = concat!(
+            "var shared;\n",
+            "function decoratedShared() { return decorate(shared); }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let helper_body = "function decorate(value) { return `${value}!`; }\n";
+        let consumer_body = "var value = decoratedShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{helper_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "helper", "modules/helper.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/helper.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            writer_source.contains("import { decorate } from './helper.js';"),
+            "{writer_source}"
+        );
+        assert!(
+            writer_source.contains("function decoratedShared() { return decorate(shared); }"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(
+            helper_source.contains("export { decorate };"),
+            "{helper_source}"
+        );
+        assert!(consumer_source.contains("import { decoratedShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn namespace_getter_runtime_var_migration_moves_namespace_with_writer() {
         let prelude = concat!(
             "var shared;\n",
@@ -15255,13 +15587,10 @@ mod tests {
     #[test]
     fn single_reader_runtime_var_migration_rejects_non_runtime_reader_dependency() {
         let prelude = "var shared;\nfunction formatShared() { return decorate(shared); }\n";
-        let writer_body = concat!(
-            "function decorate(value) { return value; }\n",
-            "shared = 'ok';\n",
-            "export { shared };\n",
-        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let helper_body = "function decorate(value) { return value; }\nexport { decorate };\n";
         let consumer_body = "var value = formatShared();\nexport { value };\n";
-        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let source = format!("{prelude}{writer_body}{helper_body}{consumer_body}");
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files
             .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
@@ -15274,10 +15603,18 @@ mod tests {
                 )),
         );
         rows.modules.push(
-            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+            ModuleInput::application(ModuleId(2), "helper", "modules/helper.ts")
                 .with_source_file(1)
                 .with_source_span(SourceSpan::new(
                     (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + helper_body.len()) as u32,
                     source.len() as u32,
                 )),
         );
@@ -15291,6 +15628,7 @@ mod tests {
         ));
         assert!(writer_source.contains("__reverts_set_shared('ok');"));
         assert!(!writer_source.contains("function formatShared()"));
+        assert!(helper_source.contains("import { decorate } from '../helper.js';"));
         assert!(helper_source.contains("var shared;"));
         assert!(helper_source.contains("function formatShared() { return decorate(shared); }"));
         assert!(
