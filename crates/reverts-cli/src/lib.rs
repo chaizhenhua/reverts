@@ -18,10 +18,11 @@ use std::time::Duration;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
     AssetKind, InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
-    PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
+    PackageAttributionStatus, PackageEmissionMode, SourceFileInput, SourceSpan,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
+use reverts_js::{ParseGoal, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
@@ -935,6 +936,10 @@ pub fn match_packages_from_connection(
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
 
     let package_names = package_source_filter(&rows, &args.package_names);
+    repair_package_module_source_slices(
+        &mut rows,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
     let source_quality_counts = package_module_source_quality_counts(
         &rows,
         (!args.package_names.is_empty()).then_some(&package_names),
@@ -1050,6 +1055,191 @@ fn empty_package_matching_pipeline_report() -> PackageMatchingPipelineReport {
             audit: AuditReport::default(),
         },
     }
+}
+
+fn repair_package_module_source_slices(
+    rows: &mut InputRows,
+    package_filter: Option<&BTreeSet<String>>,
+) -> usize {
+    let module_count_by_source_file = rows
+        .modules
+        .iter()
+        .filter_map(|module| module.source_file_id)
+        .fold(
+            BTreeMap::<u32, usize>::new(),
+            |mut counts, source_file_id| {
+                *counts.entry(source_file_id).or_default() += 1;
+                counts
+            },
+        );
+    let source_files = &rows.source_files;
+    let mut repaired = 0usize;
+    for module in &mut rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        if let Some(package_filter) = package_filter
+            && !module
+                .package_name
+                .as_deref()
+                .is_some_and(|package_name| package_filter.contains(package_name))
+        {
+            continue;
+        }
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        let Some(source_file) = source_files
+            .iter()
+            .find(|source_file| source_file.id == source_file_id)
+        else {
+            continue;
+        };
+        let Some(source) = source_file.source.as_deref() else {
+            continue;
+        };
+        let Some((start, end)) = module_source_repair_range(
+            module,
+            source,
+            module_count_by_source_file
+                .get(&source_file_id)
+                .copied()
+                .unwrap_or_default(),
+        ) else {
+            continue;
+        };
+        let Some(slice) = source.get(start..end) else {
+            continue;
+        };
+        if package_module_source_quality(module, source_file.path.as_str(), slice)
+            != PackageModuleSourceQuality::Invalid
+        {
+            continue;
+        }
+        let Some(repaired_span) =
+            repaired_package_source_span(source_file.path.as_str(), source, start, end)
+        else {
+            continue;
+        };
+        module.source_span = Some(repaired_span);
+        repaired += 1;
+    }
+    repaired
+}
+
+fn module_source_repair_range(
+    module: &ModuleInput,
+    source: &str,
+    module_count_for_source: usize,
+) -> Option<(usize, usize)> {
+    if let Some(span) = module.source_span {
+        return Some((span.byte_start as usize, span.byte_end as usize));
+    }
+    (module_count_for_source == 1).then_some((0, source.len()))
+}
+
+fn repaired_package_source_span(
+    source_path: &str,
+    source: &str,
+    start: usize,
+    end: usize,
+) -> Option<SourceSpan> {
+    let (trimmed_start, trimmed_end) = trim_source_range(source, start, end)?;
+    let trimmed_source = source.get(trimmed_start..trimmed_end)?;
+    if package_source_candidate_parses(source_path, trimmed_source) {
+        return source_span_from_usize(trimmed_start, trimmed_end);
+    }
+
+    let mut best = None::<(usize, usize)>;
+    let local_source = source.get(trimmed_start..trimmed_end)?;
+    let starts = package_source_repair_starts(local_source);
+    let ends = package_source_repair_ends(local_source);
+    for local_start in starts {
+        for local_end in ends.iter().rev().copied() {
+            if local_end <= local_start {
+                continue;
+            }
+            let abs_start = trimmed_start + local_start;
+            let abs_end = trimmed_start + local_end;
+            let Some((candidate_start, candidate_end)) =
+                trim_source_range(source, abs_start, abs_end)
+            else {
+                continue;
+            };
+            if candidate_end <= candidate_start || candidate_end - candidate_start < 8 {
+                continue;
+            }
+            let Some(candidate) = source.get(candidate_start..candidate_end) else {
+                continue;
+            };
+            if !package_source_candidate_parses(source_path, candidate) {
+                continue;
+            }
+            let candidate_len = candidate_end - candidate_start;
+            let best_len = best
+                .map(|(best_start, best_end)| best_end - best_start)
+                .unwrap_or_default();
+            if candidate_len > best_len {
+                best = Some((candidate_start, candidate_end));
+            }
+            break;
+        }
+    }
+    best.and_then(|(candidate_start, candidate_end)| {
+        source_span_from_usize(candidate_start, candidate_end)
+    })
+}
+
+fn trim_source_range(source: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    let slice = source.get(start..end)?;
+    let trimmed_start = start + (slice.len() - slice.trim_start().len());
+    let trimmed_end = end - (slice.len() - slice.trim_end().len());
+    (trimmed_start < trimmed_end).then_some((trimmed_start, trimmed_end))
+}
+
+fn package_source_repair_starts(source: &str) -> Vec<usize> {
+    const START_TOKENS: &[&str] = &[
+        "export ",
+        "import ",
+        "function ",
+        "class ",
+        "const ",
+        "let ",
+        "var ",
+        "Object.",
+        "module.",
+        "exports",
+    ];
+    let mut starts = BTreeSet::from([0usize]);
+    for token in START_TOKENS {
+        for (idx, _) in source.match_indices(token) {
+            if idx <= 512 && source.is_char_boundary(idx) {
+                starts.insert(idx);
+            }
+        }
+    }
+    starts.into_iter().collect()
+}
+
+fn package_source_repair_ends(source: &str) -> Vec<usize> {
+    let mut ends = BTreeSet::from([source.len()]);
+    for (idx, ch) in source.char_indices() {
+        if matches!(ch, ';' | '}' | ')' | ']') {
+            ends.insert(idx + ch.len_utf8());
+        }
+    }
+    ends.into_iter().collect()
+}
+
+fn package_source_candidate_parses(source_path: &str, source: &str) -> bool {
+    parse_source(source, Some(Path::new(source_path)), ParseGoal::TypeScript).is_ok()
+}
+
+fn source_span_from_usize(start: usize, end: usize) -> Option<SourceSpan> {
+    Some(SourceSpan::new(
+        u32::try_from(start).ok()?,
+        u32::try_from(end).ok()?,
+    ))
 }
 
 fn package_module_source_quality_counts(
@@ -5204,6 +5394,40 @@ mod tests {
         assert_eq!(outcome.package_source_quality_invalid, 1);
         assert_eq!(outcome.matched_modules, 0);
         assert_eq!(outcome.cascade_ownership_matches, 0);
+    }
+
+    #[test]
+    fn match_packages_repairs_trailing_garbage_package_module_slice() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b} %%% trailing-runtime-garbage",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: false,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            outcome.package_source_quality_trusted, 1,
+            "repair should make the package slice parseable before quality counting"
+        );
+        assert_eq!(outcome.package_source_quality_invalid, 0);
+        assert_eq!(outcome.matched_modules, 1);
     }
 
     #[test]

@@ -942,6 +942,7 @@ dependencies = [
  "reverts-graph",
  "reverts-input",
  "reverts-ir",
+ "reverts-js",
  "reverts-observe",
  "reverts-package-matcher",
  "reverts-pipeline",

@@ -13,6 +13,7 @@ reverts-bundle = { path = "../reverts-bundle" }
 reverts-graph = { path = "../reverts-graph" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
+reverts-js = { path = "../reverts-js" }
 reverts-observe = { path = "../reverts-observe" }
 reverts-package-matcher = { path = "../reverts-package-matcher" }
 reverts-pipeline = { path = "../reverts-pipeline" }
