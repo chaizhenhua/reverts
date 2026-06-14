@@ -18,8 +18,8 @@ use std::time::Duration;
 use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
-    AssetKind, InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
-    PackageAttributionStatus, PackageEmissionMode, SourceFileInput, SourceSpan,
+    AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
+    PackageEmissionMode, SourceFileInput, SourceSpan,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
@@ -27,8 +27,11 @@ use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
-    VersionMatchScore, VersionedPackageMatchReport, match_packages_with_pipeline,
+    VersionMatchScore, VersionedPackageMatchReport, direct_module_dependencies,
+    direct_module_dependents, has_accepted_external_attribution, is_exact_package_version_hint,
+    is_json_source_path, match_packages_with_pipeline, ownership_by_module,
     package_import_names_from_sources, package_module_source_quality,
+    package_semantic_path_prefixes, path_hint_tokens, strip_source_extension,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -1454,67 +1457,6 @@ fn package_subpath_from_logical_path<'a>(
     None
 }
 
-fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
-    rows.dependencies
-        .iter()
-        .filter(|dependency| dependency.from_module_id == module_id)
-        .filter_map(|dependency| match dependency.target {
-            ModuleDependencyTarget::Module(target) => Some(target),
-            ModuleDependencyTarget::Package { .. } => None,
-        })
-        .collect()
-}
-
-fn direct_module_dependents(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
-    rows.dependencies
-        .iter()
-        .filter_map(|dependency| match dependency.target {
-            ModuleDependencyTarget::Module(target) if target == module_id => {
-                Some(dependency.from_module_id)
-            }
-            ModuleDependencyTarget::Module(_) | ModuleDependencyTarget::Package { .. } => None,
-        })
-        .collect()
-}
-
-fn ownership_by_module(
-    rows: &InputRows,
-    report: &VersionedPackageMatchReport,
-) -> BTreeMap<ModuleId, (String, String)> {
-    let mut ownership_by_module = report
-        .matches
-        .iter()
-        .map(|package_match| {
-            (
-                package_match.module_id,
-                (
-                    package_match.package_name.clone(),
-                    package_match.package_version.clone(),
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for attribution in rows
-        .package_attributions
-        .iter()
-        .chain(report.attributions.iter())
-    {
-        if attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
-            && let Some(package_version) = attribution.package_version.as_deref()
-        {
-            ownership_by_module.insert(
-                attribution.module_id,
-                (
-                    attribution.package_name.clone(),
-                    package_version.to_string(),
-                ),
-            );
-        }
-    }
-    ownership_by_module
-}
-
 pub fn extract_assets_from_sqlite(
     args: &ExtractAssetsArgs,
 ) -> Result<ExtractAssetsOutcome, ExtractAssetsError> {
@@ -2162,14 +2104,6 @@ fn package_source_filter(rows: &InputRows, requested_package_names: &[String]) -
         .collect::<BTreeSet<_>>();
     package_names.extend(package_import_names_from_sources(rows));
     package_names
-}
-
-fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
-    rows.package_attributions.iter().any(|attribution| {
-        attribution.module_id == module_id
-            && attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
-    })
 }
 
 fn load_package_sources(
@@ -2911,10 +2845,6 @@ fn package_version_hints_for_materialization(
             .then(|| (package_name.to_string(), resolved.to_string()))
         })
         .collect()
-}
-
-fn is_exact_package_version_hint(version: &str) -> bool {
-    Version::parse(version).is_ok()
 }
 
 fn network_package_version_resolution_hints(
@@ -4019,13 +3949,6 @@ fn is_javascript_source_path(rel_path: &str) -> bool {
     )
 }
 
-fn is_json_source_path(rel_path: &str) -> bool {
-    matches!(
-        Path::new(rel_path).extension().and_then(|ext| ext.to_str()),
-        Some("json")
-    )
-}
-
 fn package_source_body_for_local_file(rel_path: &str, source: &str) -> Option<String> {
     if is_json_source_path(rel_path) {
         json_package_source_module(source)
@@ -4193,26 +4116,6 @@ fn strip_package_prefix_from_semantic_path<'a>(
     None
 }
 
-fn package_semantic_path_prefixes(package_name: &str) -> Vec<String> {
-    let mut prefixes = vec![package_name.to_string()];
-    if let Some(unscoped) = package_name.strip_prefix('@') {
-        prefixes.push(unscoped.to_string());
-        prefixes.push(unscoped.replace('/', "-"));
-    }
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
-}
-
-fn strip_source_extension(path: &str) -> &str {
-    for extension in [".js", ".mjs", ".cjs", ".ts", ".tsx"] {
-        if let Some(stripped) = path.strip_suffix(extension) {
-            return stripped;
-        }
-    }
-    path
-}
-
 fn is_useful_package_path_hint(hint: &str) -> bool {
     if hint.is_empty() {
         return false;
@@ -4347,39 +4250,6 @@ fn normalize_path_for_hint_match(value: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn path_hint_tokens(value: &str) -> BTreeSet<String> {
-    let mut tokens = BTreeSet::new();
-    let mut current = String::new();
-    let mut previous_lowercase = false;
-    for ch in value.chars() {
-        if !ch.is_ascii_alphanumeric() {
-            if current.len() >= 2 {
-                tokens.insert(current.clone());
-            }
-            current.clear();
-            previous_lowercase = false;
-            continue;
-        }
-        if ch.is_ascii_uppercase() && previous_lowercase && !current.is_empty() {
-            if current.len() >= 2 {
-                tokens.insert(current.clone());
-            }
-            current.clear();
-        }
-        current.push(ch.to_ascii_lowercase());
-        previous_lowercase = ch.is_ascii_lowercase();
-    }
-    if current.len() >= 2 {
-        tokens.insert(current);
-    }
-    tokens.remove("js");
-    tokens.remove("ts");
-    tokens.remove("mjs");
-    tokens.remove("cjs");
-    tokens.remove("index");
-    tokens
 }
 
 fn is_local_package_source_candidate(rel_path: &str) -> bool {

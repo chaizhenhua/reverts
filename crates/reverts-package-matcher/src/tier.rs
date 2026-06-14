@@ -31,13 +31,43 @@ pub fn try_exact(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
+    exact_for_axes(
+        fp.param_count,
+        fp.statement_count,
+        fp.primary.ast,
+        index,
+        MatchTier::Exact,
+        None,
+    )
+}
+
+fn exact_for_axes(
+    param_count: u32,
+    statement_count: u32,
+    ast_hash: u64,
+    index: &dyn PackageFingerprintIndex,
+    tier: MatchTier,
+    matched_alternate: Option<NormalizationPassId>,
+) -> Option<FunctionMatch> {
     let key = ExactKey {
-        param_count: fp.param_count,
-        statement_count: fp.statement_count,
-        ast_hash: fp.primary.ast,
+        param_count,
+        statement_count,
+        ast_hash,
     };
     let candidates = index.query_exact(key);
-    pick_unique(candidates, MatchTier::Exact, None, vec![AxisKind::Ast])
+    pick_unique(candidates, tier, matched_alternate, vec![AxisKind::Ast])
+}
+
+fn first_alternate_match(
+    fp: &FunctionFingerprint,
+    mut match_alternate: impl FnMut(u32, &AxisHashes, NormalizationPassId) -> Option<FunctionMatch>,
+) -> Option<FunctionMatch> {
+    for alt in &fp.alternates {
+        if let Some(function_match) = match_alternate(alt.statement_count, &alt.axes, alt.pass) {
+            return Some(function_match);
+        }
+    }
+    None
 }
 
 #[must_use]
@@ -45,23 +75,16 @@ pub fn try_exact_alternate(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    for alt in &fp.alternates {
-        let key = ExactKey {
-            param_count: fp.param_count,
-            statement_count: alt.statement_count,
-            ast_hash: alt.axes.ast,
-        };
-        let candidates = index.query_exact(key);
-        if let Some(m) = pick_unique(
-            candidates,
+    first_alternate_match(fp, |statement_count, axes, pass| {
+        exact_for_axes(
+            fp.param_count,
+            statement_count,
+            axes.ast,
+            index,
             MatchTier::ExactAlternate,
-            Some(alt.pass),
-            vec![AxisKind::Ast],
-        ) {
-            return Some(m);
-        }
-    }
-    None
+            Some(pass),
+        )
+    })
 }
 
 #[must_use]
@@ -90,18 +113,15 @@ pub fn try_structural_anchored_alternate(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    for alt in &fp.alternates {
-        if let Some(m) = structural_anchored_for_axes(
+    first_alternate_match(fp, |_statement_count, axes, pass| {
+        structural_anchored_for_axes(
             fp.param_count,
-            &alt.axes,
+            axes,
             index,
             MatchTier::StructuralAnchoredAlternate,
-            Some(alt.pass),
-        ) {
-            return Some(m);
-        }
-    }
-    None
+            Some(pass),
+        )
+    })
 }
 
 fn structural_anchored_for_axes(
@@ -213,18 +233,15 @@ pub fn try_feature_similarity_alternate(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    for alt in &fp.alternates {
-        if let Some(m) = feature_similarity_for_axes(
+    first_alternate_match(fp, |_statement_count, axes, pass| {
+        feature_similarity_for_axes(
             fp.param_count,
-            &alt.axes,
+            axes,
             index,
             MatchTier::FeatureSimilarityAlternate,
-            Some(alt.pass),
-        ) {
-            return Some(m);
-        }
-    }
-    None
+            Some(pass),
+        )
+    })
 }
 
 fn feature_similarity_for_axes(
@@ -415,18 +432,15 @@ pub fn try_structural_only_alternate(
     fp: &FunctionFingerprint,
     index: &dyn PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
-    for alt in &fp.alternates {
-        if let Some(m) = structural_only_for_anchor(
+    first_alternate_match(fp, |_statement_count, axes, pass| {
+        structural_only_for_anchor(
             fp.param_count,
-            alt.axes.structural_anchor,
+            axes.structural_anchor,
             index,
             MatchTier::StructuralOnlyAlternate,
-            Some(alt.pass),
-        ) {
-            return Some(m);
-        }
-    }
-    None
+            Some(pass),
+        )
+    })
 }
 
 fn structural_only_for_anchor(

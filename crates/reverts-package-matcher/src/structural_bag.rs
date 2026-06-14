@@ -12,14 +12,14 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::FunctionExtractor;
-use reverts_input::{InputRows, ModuleInput, PackageAttributionStatus, PackageEmissionMode};
+use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 use semver::Version;
 
 use crate::{
     ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
-    package_module_source_quality,
+    has_accepted_external_attribution, package_module_source_quality,
 };
 
 /// Result of aggregate structural-bag ownership matching.
@@ -118,14 +118,6 @@ fn candidate_modules<'a>(
                     .as_deref()
                     .is_some_and(|package_name| filter.contains(package_name))
             })
-    })
-}
-
-fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
-    rows.package_attributions.iter().any(|attribution| {
-        attribution.module_id == module_id
-            && attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
     })
 }
 

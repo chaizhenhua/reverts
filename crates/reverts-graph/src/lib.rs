@@ -24,7 +24,7 @@ use oxc_ast::{
         walk_variable_declarator,
     },
 };
-use oxc_parser::{ParseOptions, Parser};
+use oxc_parser::Parser;
 use oxc_span::GetSpan;
 use oxc_syntax::{
     operator::{AssignmentOperator, LogicalOperator},
@@ -35,7 +35,10 @@ use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
     ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, split_bare_specifier,
 };
-use reverts_js::{JsError, ParseError, ParseGoal, parse_error_message, source_type_candidates};
+use reverts_js::{
+    JsError, ParseError, ParseGoal, collect_identifier_read_facts, parse_error_message,
+    parse_options_for, source_type_candidates,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RevertsGraph {
@@ -108,7 +111,7 @@ impl RuntimePrelude {
             let Some(snippet) = self.snippets.get(&binding) else {
                 continue;
             };
-            for identifier in identifiers_in_source(snippet.source.as_str()) {
+            for identifier in runtime_snippet_dependency_identifiers(snippet.source.as_str()) {
                 let candidate = BindingName::new(identifier);
                 if self.bindings.contains_key(&candidate) && needed.insert(candidate.clone()) {
                     pending.push_back(candidate);
@@ -1118,182 +1121,12 @@ fn compact_source(source: &str) -> String {
         .collect()
 }
 
-fn identifiers_in_source(source: &str) -> BTreeSet<String> {
-    let mut identifiers = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if matches!(byte, b'\'' | b'"') {
-            index = skip_quoted_source(bytes, index, byte);
-            continue;
-        }
-        if byte == b'`' {
-            index = collect_template_identifiers(source, index, &mut identifiers);
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
-            index = skip_line_comment(bytes, index + 2);
-            continue;
-        }
-        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
-            index = skip_block_comment(bytes, index + 2);
-            continue;
-        }
-        if is_identifier_start(byte) {
-            let start = index;
-            index += 1;
-            while index < bytes.len() && is_identifier_continue(bytes[index]) {
-                index += 1;
-            }
-            let identifier = &source[start..index];
-            if !is_js_keyword(identifier) {
-                identifiers.insert(identifier.to_string());
-            }
-            continue;
-        }
-        index += 1;
-    }
-    identifiers
-}
-
-fn collect_template_identifiers(
-    source: &str,
-    start: usize,
-    identifiers: &mut BTreeSet<String>,
-) -> usize {
-    let bytes = source.as_bytes();
-    let mut index = start + 1;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            b'`' => return index + 1,
-            b'$' if bytes.get(index + 1) == Some(&b'{') => {
-                let open = index + 1;
-                let Some(close) = find_matching_template_expression(source, open) else {
-                    return skip_quoted_source(bytes, start, b'`');
-                };
-                identifiers.extend(identifiers_in_source(&source[open + 1..close]));
-                index = close + 1;
-            }
-            _ => index += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn find_matching_template_expression(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut index = open;
-    let mut depth = 0usize;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\'' | b'"' | b'`' => index = skip_quoted_source(bytes, index, bytes[index]),
-            b'/' if bytes.get(index + 1) == Some(&b'/') => {
-                index = skip_line_comment(bytes, index + 2);
-            }
-            b'/' if bytes.get(index + 1) == Some(&b'*') => {
-                index = skip_block_comment(bytes, index + 2);
-            }
-            b'{' => {
-                depth += 1;
-                index += 1;
-            }
-            b'}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(index);
-                }
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    None
-}
-
-fn skip_quoted_source(bytes: &[u8], start: usize, quote: u8) -> usize {
-    let mut index = start + 1;
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-            continue;
-        }
-        if bytes[index] == quote {
-            return index + 1;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-fn skip_line_comment(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() && bytes[index] != b'\n' {
-        index += 1;
-    }
-    index
-}
-
-fn skip_block_comment(bytes: &[u8], mut index: usize) -> usize {
-    while index + 1 < bytes.len() {
-        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
-            return index + 2;
-        }
-        index += 1;
-    }
-    bytes.len()
-}
-
-fn is_identifier_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
-}
-
-fn is_identifier_continue(byte: u8) -> bool {
-    is_identifier_start(byte) || byte.is_ascii_digit()
-}
-
-fn is_js_keyword(value: &str) -> bool {
-    matches!(
-        value,
-        "async"
-            | "await"
-            | "break"
-            | "case"
-            | "catch"
-            | "class"
-            | "const"
-            | "continue"
-            | "default"
-            | "do"
-            | "else"
-            | "export"
-            | "extends"
-            | "false"
-            | "finally"
-            | "for"
-            | "from"
-            | "function"
-            | "if"
-            | "import"
-            | "in"
-            | "let"
-            | "new"
-            | "null"
-            | "return"
-            | "super"
-            | "switch"
-            | "this"
-            | "throw"
-            | "true"
-            | "try"
-            | "typeof"
-            | "undefined"
-            | "var"
-            | "void"
-            | "while"
-            | "with"
-            | "yield"
-    )
+fn runtime_snippet_dependency_identifiers(source: &str) -> BTreeSet<String> {
+    collect_identifier_read_facts(source, None, ParseGoal::TypeScript)
+        .expect("runtime prelude snippets require parseable TypeScript source")
+        .into_iter()
+        .map(|fact| fact.name)
+        .collect()
 }
 
 fn looks_like_commonjs_wrapper(compact: &str) -> bool {
@@ -1492,13 +1325,6 @@ fn control_flow_node_kind(statement: &Statement<'_>) -> ControlFlowNodeKind {
         Statement::ReturnStatement(_) => ControlFlowNodeKind::Return,
         Statement::ThrowStatement(_) => ControlFlowNodeKind::Throw,
         _ => ControlFlowNodeKind::Statement,
-    }
-}
-
-fn parse_options_for(_source_type: oxc_span::SourceType) -> ParseOptions {
-    ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
     }
 }
 

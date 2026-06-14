@@ -6,6 +6,7 @@ use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
 use reverts_ir::{AxisHashes, ByteRange, FunctionFingerprint, FunctionId, ModuleId};
 use reverts_js::normalize::{apply_to_source, stable_passes};
+use reverts_js::parse_options_for;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedFunction {
@@ -80,7 +81,9 @@ impl FunctionExtractor {
         let source = strip_outer_block_braces(source);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
-        let parsed = Parser::new(&alloc, source, source_type).parse();
+        let parsed = Parser::new(&alloc, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
         if parsed.panicked || !parsed.errors.is_empty() {
             return Vec::new();
         }
@@ -106,7 +109,9 @@ impl FunctionExtractor {
                 continue;
             };
             let alt_alloc = Allocator::default();
-            let alt_parsed = Parser::new(&alt_alloc, &transformed, source_type).parse();
+            let alt_parsed = Parser::new(&alt_alloc, &transformed, source_type)
+                .with_options(parse_options_for(source_type))
+                .parse();
             if alt_parsed.panicked || !alt_parsed.errors.is_empty() {
                 continue;
             }

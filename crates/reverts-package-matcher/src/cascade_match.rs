@@ -17,6 +17,7 @@ use oxc_span::SourceType;
 use reverts_graph::FunctionExtractor;
 use reverts_input::{AttributionConfidence, PackageAttributionInput};
 use reverts_ir::{AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId};
+use reverts_js::parse_options_for;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_index::{
     Candidate, CfgKey, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
@@ -160,7 +161,9 @@ fn build_index(
         let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
         let alloc = Allocator::default();
         let source_type = SourceType::default().with_typescript(true).with_jsx(true);
-        let parsed = Parser::new(&alloc, source.source.as_str(), source_type).parse();
+        let parsed = Parser::new(&alloc, source.source.as_str(), source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
         if parsed.panicked || !parsed.errors.is_empty() {
             audit.push(
                 AuditFinding::error(

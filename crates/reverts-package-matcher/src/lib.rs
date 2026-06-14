@@ -2,6 +2,7 @@ pub mod acceptance;
 pub mod cascade;
 pub mod cascade_match;
 pub mod hungarian;
+pub mod package_helpers;
 pub mod structural_bag;
 pub mod tier;
 pub mod variant;
@@ -11,6 +12,11 @@ pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
+pub use package_helpers::{
+    direct_module_dependencies, direct_module_dependents, has_accepted_external_attribution,
+    is_exact_package_version_hint, is_json_source_path, ownership_by_module,
+    package_semantic_path_prefixes, path_hint_tokens, strip_source_extension,
+};
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
 };
@@ -39,7 +45,7 @@ use oxc_ast::{
         walk_import_expression, walk_template_element,
     },
 };
-use oxc_parser::{ParseOptions, Parser};
+use oxc_parser::Parser;
 use reverts_graph::FunctionExtractor;
 use reverts_input::{
     InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
@@ -54,7 +60,7 @@ use reverts_ir::{
 use reverts_js::normalize::{apply_to_source, stable_passes};
 use reverts_js::{
     JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
-    source_type_candidates,
+    parse_options_for, source_type_candidates,
 };
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::is_node_builtin;
@@ -467,10 +473,6 @@ fn group_exact_version_fingerprints(
         }
     }
     hinted
-}
-
-fn is_exact_package_version_hint(version: &str) -> bool {
-    Version::parse(version).is_ok()
 }
 
 fn collect_decision_outputs(
@@ -1035,18 +1037,6 @@ fn exact_hint_root_external_specifier(
     })
 }
 
-fn is_json_source_path(source_path: &str) -> bool {
-    let source_path = source_path
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(source_path)
-        .trim();
-    matches!(
-        Path::new(source_path).extension().and_then(|ext| ext.to_str()),
-        Some(ext) if ext.eq_ignore_ascii_case("json")
-    )
-}
-
 fn promote_dependency_closure_ownership_matches(
     rows: &InputRows,
     report: &mut VersionedPackageMatchReport,
@@ -1439,44 +1429,6 @@ fn accepted_external_modules(
         .collect()
 }
 
-fn ownership_by_module(
-    rows: &InputRows,
-    report: &VersionedPackageMatchReport,
-) -> BTreeMap<ModuleId, (String, String)> {
-    let mut ownership_by_module = report
-        .matches
-        .iter()
-        .map(|package_match| {
-            (
-                package_match.module_id,
-                (
-                    package_match.package_name.clone(),
-                    package_match.package_version.clone(),
-                ),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    for attribution in rows
-        .package_attributions
-        .iter()
-        .chain(report.attributions.iter())
-    {
-        if attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
-            && let Some(package_version) = attribution.package_version.as_deref()
-        {
-            ownership_by_module.insert(
-                attribution.module_id,
-                (
-                    attribution.package_name.clone(),
-                    package_version.to_string(),
-                ),
-            );
-        }
-    }
-    ownership_by_module
-}
-
 fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
     let package_modules = rows
         .modules
@@ -1667,29 +1619,6 @@ fn direct_module_neighborhood(rows: &InputRows, module_id: ModuleId) -> BTreeSet
     direct_module_dependencies(rows, module_id)
         .into_iter()
         .chain(direct_module_dependents(rows, module_id))
-        .collect()
-}
-
-fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
-    rows.dependencies
-        .iter()
-        .filter(|dependency| dependency.from_module_id == module_id)
-        .filter_map(|dependency| match dependency.target {
-            ModuleDependencyTarget::Module(target) => Some(target),
-            ModuleDependencyTarget::Package { .. } => None,
-        })
-        .collect()
-}
-
-fn direct_module_dependents(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
-    rows.dependencies
-        .iter()
-        .filter_map(|dependency| match dependency.target {
-            ModuleDependencyTarget::Module(target) if target == module_id => {
-                Some(dependency.from_module_id)
-            }
-            ModuleDependencyTarget::Module(_) | ModuleDependencyTarget::Package { .. } => None,
-        })
         .collect()
 }
 
@@ -2297,17 +2226,6 @@ fn package_semantic_path_tokens(package_name: &str, semantic_path: &str) -> BTre
     tokens
 }
 
-fn package_semantic_path_prefixes(package_name: &str) -> Vec<String> {
-    let mut prefixes = vec![package_name.to_string()];
-    if let Some(unscoped) = package_name.strip_prefix('@') {
-        prefixes.push(unscoped.to_string());
-        prefixes.push(unscoped.replace('/', "-"));
-    }
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
-}
-
 fn strip_package_prefix_from_semantic_path<'a>(
     semantic_path: &'a str,
     prefix: &str,
@@ -2321,43 +2239,6 @@ fn strip_package_prefix_from_semantic_path<'a>(
         }
     }
     None
-}
-
-fn strip_source_extension(path: &str) -> &str {
-    for extension in [".js", ".mjs", ".cjs", ".ts", ".tsx"] {
-        if let Some(stripped) = path.strip_suffix(extension) {
-            return stripped;
-        }
-    }
-    path
-}
-
-fn path_hint_tokens(value: &str) -> BTreeSet<String> {
-    let mut tokens = BTreeSet::new();
-    let mut current = String::new();
-    let mut previous_lowercase = false;
-    for ch in value.chars() {
-        if !ch.is_ascii_alphanumeric() {
-            if current.len() >= 2 {
-                tokens.insert(current.clone());
-            }
-            current.clear();
-            previous_lowercase = false;
-            continue;
-        }
-        if ch.is_ascii_uppercase() && previous_lowercase && !current.is_empty() {
-            if current.len() >= 2 {
-                tokens.insert(current.clone());
-            }
-            current.clear();
-        }
-        current.push(ch.to_ascii_lowercase());
-        previous_lowercase = ch.is_ascii_lowercase();
-    }
-    if current.len() >= 2 {
-        tokens.insert(current);
-    }
-    tokens
 }
 
 fn is_strong_path_hint_token(token: &str) -> bool {
@@ -2488,13 +2369,6 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
         &JsError::ParseFailed(errors),
         "source could not be parsed",
     ))
-}
-
-fn parse_options_for(_source_type: oxc_span::SourceType) -> ParseOptions {
-    ParseOptions {
-        allow_return_outside_function: true,
-        ..Default::default()
-    }
 }
 
 struct FingerprintVisitor<'s> {

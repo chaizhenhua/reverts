@@ -5718,7 +5718,12 @@ fn module_export_name_text(name: &ModuleExportName<'_>) -> Option<String> {
     }
 }
 
-fn parse_options_for(_source_type: SourceType) -> ParseOptions {
+/// Parser options shared by every crate that parses bundle or emitted source.
+///
+/// This is intentionally owned by `reverts-js` so graph/package matching do not
+/// carry parallel parser-option defaults.
+#[must_use]
+pub fn parse_options_for(_source_type: SourceType) -> ParseOptions {
     ParseOptions {
         allow_return_outside_function: true,
         ..Default::default()
@@ -5762,12 +5767,86 @@ pub fn sanitize_identifier(value: &str) -> String {
 
 #[must_use]
 pub fn is_identifier_start(ch: char) -> bool {
-    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+    u8::try_from(ch).is_ok_and(is_ascii_identifier_start)
 }
 
 #[must_use]
 pub fn is_identifier_part(ch: char) -> bool {
-    is_identifier_start(ch) || ch.is_ascii_digit()
+    u8::try_from(ch).is_ok_and(is_ascii_identifier_continue)
+}
+
+#[must_use]
+pub fn is_ascii_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+#[must_use]
+pub fn is_ascii_identifier_continue(byte: u8) -> bool {
+    is_ascii_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+#[must_use]
+pub fn is_js_keyword(value: &str) -> bool {
+    matches!(
+        value,
+        "async"
+            | "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "class"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "else"
+            | "export"
+            | "extends"
+            | "false"
+            | "finally"
+            | "for"
+            | "from"
+            | "function"
+            | "if"
+            | "import"
+            | "in"
+            | "let"
+            | "new"
+            | "null"
+            | "return"
+            | "super"
+            | "switch"
+            | "this"
+            | "throw"
+            | "true"
+            | "try"
+            | "typeof"
+            | "undefined"
+            | "var"
+            | "void"
+            | "while"
+            | "with"
+            | "yield"
+    )
+}
+
+#[must_use]
+pub fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor < bytes.len() && bytes[cursor] != b'\n' {
+        cursor += 1;
+    }
+    cursor
+}
+
+#[must_use]
+pub fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
+    while cursor + 1 < bytes.len() {
+        if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+    bytes.len()
 }
 
 fn is_reserved_word(value: &str) -> bool {
@@ -5837,10 +5916,25 @@ mod tests {
         extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
         format_source_with_module_items_and_renames,
         format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
-        parse_error_message, parse_source, sanitize_identifier,
-        verify_only_immediate_call_references,
+        parse_error_message, parse_options_for, parse_source, sanitize_identifier,
+        skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
     };
     use std::collections::BTreeSet;
+
+    #[test]
+    fn shared_parser_options_allow_top_level_return() {
+        let source_type = super::source_type_for_parse(None, ParseGoal::JavaScript);
+        assert!(parse_options_for(source_type).allow_return_outside_function);
+    }
+
+    #[test]
+    fn shared_identifier_helpers_cover_contextual_keywords_and_comments() {
+        assert!(super::is_ascii_identifier_start(b'$'));
+        assert!(super::is_ascii_identifier_continue(b'9'));
+        assert!(super::is_js_keyword("async"));
+        assert_eq!(skip_line_comment(b"// comment\nnext", 2), 10);
+        assert_eq!(skip_block_comment(b"/* block */next", 2), 11);
+    }
 
     #[test]
     fn parses_typescript_without_external_tooling() {

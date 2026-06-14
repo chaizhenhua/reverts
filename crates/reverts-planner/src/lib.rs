@@ -12,7 +12,9 @@ use reverts_input::{
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
-    format_source_pretty, parse_error_message, sanitize_identifier,
+    format_source_pretty, is_ascii_identifier_continue as is_identifier_continue,
+    is_ascii_identifier_start as is_identifier_start, is_js_keyword, parse_error_message,
+    sanitize_identifier, skip_block_comment, skip_line_comment,
     verify_only_immediate_call_references,
 };
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
@@ -9911,58 +9913,6 @@ fn skip_ws_and_comments(bytes: &[u8], mut cursor: usize, limit: usize) -> usize 
     }
 }
 
-fn is_identifier_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
-}
-
-fn is_identifier_continue(byte: u8) -> bool {
-    is_identifier_start(byte) || byte.is_ascii_digit()
-}
-
-fn is_js_keyword(value: &str) -> bool {
-    matches!(
-        value,
-        "async"
-            | "await"
-            | "break"
-            | "case"
-            | "catch"
-            | "class"
-            | "const"
-            | "continue"
-            | "default"
-            | "do"
-            | "else"
-            | "export"
-            | "extends"
-            | "false"
-            | "finally"
-            | "for"
-            | "from"
-            | "function"
-            | "if"
-            | "import"
-            | "in"
-            | "let"
-            | "new"
-            | "null"
-            | "return"
-            | "super"
-            | "switch"
-            | "this"
-            | "throw"
-            | "true"
-            | "try"
-            | "typeof"
-            | "undefined"
-            | "var"
-            | "void"
-            | "while"
-            | "with"
-            | "yield"
-    )
-}
-
 fn skip_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
     if quote == b'`' {
         return skip_template_literal(bytes, start);
@@ -10023,23 +9973,6 @@ fn skip_template_expression(bytes: &[u8], mut cursor: usize) -> usize {
             }
             _ => cursor += 1,
         }
-    }
-    bytes.len()
-}
-
-fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && bytes[cursor] != b'\n' {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor + 1 < bytes.len() {
-        if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
-            return cursor + 2;
-        }
-        cursor += 1;
     }
     bytes.len()
 }
