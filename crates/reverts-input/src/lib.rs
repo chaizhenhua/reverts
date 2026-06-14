@@ -336,6 +336,14 @@ pub struct PackageAttributionInput {
     pub package_name: String,
     pub package_version: Option<String>,
     pub subpath: Option<String>,
+    /// Physical/package-cache source path that proved this attribution.
+    ///
+    /// Generation normally only needs the public `export_specifier`, but some
+    /// safely externalizable assets (notably JSON package entry points) also
+    /// need import attributes. Keeping the resolved source path on the
+    /// generation input lets the package resolver recover those import-shape
+    /// details without re-reading the package source cache.
+    pub resolved_file: Option<String>,
     pub export_specifier: Option<String>,
     pub emission_mode: PackageEmissionMode,
     pub status: PackageAttributionStatus,
@@ -357,6 +365,7 @@ impl PackageAttributionInput {
             package_name: package_name.into(),
             package_version,
             subpath: None,
+            resolved_file: None,
             export_specifier: None,
             emission_mode,
             status: PackageAttributionStatus::Proposed,
@@ -378,6 +387,7 @@ impl PackageAttributionInput {
             package_name: package_name.into(),
             package_version: Some(package_version.into()),
             subpath: None,
+            resolved_file: None,
             export_specifier: Some(export_specifier.into()),
             emission_mode: PackageEmissionMode::ExternalImport,
             status: PackageAttributionStatus::Accepted,
@@ -398,6 +408,7 @@ impl PackageAttributionInput {
             package_name: package_name.into(),
             package_version: None,
             subpath: None,
+            resolved_file: None,
             export_specifier: None,
             emission_mode: PackageEmissionMode::ApplicationSource,
             status: PackageAttributionStatus::Rejected,
@@ -410,6 +421,12 @@ impl PackageAttributionInput {
     #[must_use]
     pub fn with_subpath(mut self, subpath: impl Into<String>) -> Self {
         self.subpath = normalize_optional(Some(subpath.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn with_resolved_file(mut self, resolved_file: impl Into<String>) -> Self {
+        self.resolved_file = normalize_optional(Some(resolved_file.into()));
         self
     }
 
@@ -657,6 +674,7 @@ impl InputRows {
                 package_name: non_empty(row.package_name, "package_attribution.package_name")?,
                 package_version: normalize_optional(row.package_version),
                 subpath: normalize_optional(row.subpath),
+                resolved_file: normalize_optional(row.resolved_file),
                 export_specifier: normalize_optional(row.export_specifier),
                 emission_mode: row.emission_mode,
                 status: row.status,
@@ -858,6 +876,7 @@ pub struct PackageAttributionRow {
     pub package_name: String,
     pub package_version: Option<String>,
     pub subpath: Option<String>,
+    pub resolved_file: Option<String>,
     pub export_specifier: Option<String>,
     pub emission_mode: PackageEmissionMode,
     pub status: PackageAttributionStatus,
@@ -1817,6 +1836,7 @@ mod tests {
             package_name: "axios".to_string(),
             package_version: Some("1.6.0".to_string()),
             subpath: None,
+            resolved_file: None,
             export_specifier: None,
             emission_mode: PackageEmissionMode::ExternalImport,
             status: PackageAttributionStatus::Accepted,
@@ -2100,6 +2120,7 @@ mod tests {
             package_name: "lodash".to_string(),
             package_version: Some("4.17.21".to_string()),
             subpath: Some("fp.js".to_string()),
+            resolved_file: None,
             export_specifier: None,
             emission_mode: PackageEmissionMode::VendoredAsset,
             status: PackageAttributionStatus::Accepted,

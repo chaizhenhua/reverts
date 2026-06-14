@@ -524,17 +524,36 @@ pub struct VersionedPackageMatchReport {
 /// Unified package matching pipeline output.
 ///
 /// This is the single matcher-side orchestration point for the module/source
-/// version matcher, the function-level cascade matcher, and dependency-closure
-/// ownership promotion. CLI callers should
-/// use this instead of manually running those tracks in parallel.
+/// version matcher, the function-level cascade matcher, structural-bag
+/// ownership, and dependency-closure ownership promotion.
 pub struct PackageMatchingPipelineReport {
     /// Module-level package attributions/surfaces plus all promoted ownership
-    /// matches that generation and persistence consume.
+    /// matches that generation and persistence consume. Matcher-stage audit
+    /// findings are merged here so callers do not have to wire side reports.
     pub package_report: VersionedPackageMatchReport,
-    /// Function-level cascade attribution evidence. This is kept separate from
-    /// `package_report` so callers may persist or inspect function-span rows
-    /// without treating them as a second generation input path.
-    pub cascade_report: CascadeMatchReport,
+    /// Function-level package evidence produced while matching. These rows are
+    /// diagnostics/persistence evidence, not a second module-generation path.
+    pub function_attributions: Vec<PackageAttributionInput>,
+    /// Count of function-level ownership matches, including source-only
+    /// evidence that cannot be emitted as an external import.
+    pub function_ownership_matches: usize,
+}
+
+impl PackageMatchingPipelineReport {
+    #[must_use]
+    fn empty() -> Self {
+        Self {
+            package_report: VersionedPackageMatchReport {
+                attributions: Vec::new(),
+                surfaces: Vec::new(),
+                matches: Vec::new(),
+                version_matches: Vec::new(),
+                audit: AuditReport::default(),
+            },
+            function_attributions: Vec::new(),
+            function_ownership_matches: 0,
+        }
+    }
 }
 
 /// Runs the complete package matching pipeline through one matcher-owned
@@ -549,6 +568,10 @@ pub fn match_packages_with_pipeline(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> PackageMatchingPipelineReport {
+    if package_sources.is_empty() && package_filter.is_none_or(BTreeSet::is_empty) {
+        return PackageMatchingPipelineReport::empty();
+    }
+
     let mut package_report = if let Some(package_filter) = package_filter {
         VersionedPackageMatcher::default().match_rows_for_packages(
             rows,
@@ -568,6 +591,9 @@ pub fn match_packages_with_pipeline(
         &cascade_report,
         &mut package_report,
     );
+    let function_attributions = cascade_report.attributions;
+    let function_ownership_matches = cascade_report.ownership_matches.len();
+    package_report.audit.extend(cascade_report.audit);
 
     let structural_bag_excluded_modules = package_report
         .matches
@@ -585,6 +611,7 @@ pub fn match_packages_with_pipeline(
         structural_bag_report.matches.as_slice(),
         &mut package_report,
     );
+    package_report.audit.extend(structural_bag_report.audit);
     promote_exact_hint_ownership_matches(rows, package_sources, &mut package_report);
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
@@ -592,7 +619,8 @@ pub fn match_packages_with_pipeline(
 
     PackageMatchingPipelineReport {
         package_report,
-        cascade_report,
+        function_attributions,
+        function_ownership_matches,
     }
 }
 
@@ -994,6 +1022,7 @@ fn exact_hint_root_external_specifier(
             source.package_name == package_name
                 && source.package_version == package_version
                 && source.external_importable
+                && !is_json_source_path(source.source_path.as_str())
                 && source.export_specifier == package_name
         })
         .map(|source| source.export_specifier.clone())
@@ -1004,6 +1033,18 @@ fn exact_hint_root_external_specifier(
             .next()
             .expect("one root external specifier")
     })
+}
+
+fn is_json_source_path(source_path: &str) -> bool {
+    let source_path = source_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(source_path)
+        .trim();
+    matches!(
+        Path::new(source_path).extension().and_then(|ext| ext.to_str()),
+        Some(ext) if ext.eq_ignore_ascii_case("json")
+    )
 }
 
 fn promote_dependency_closure_ownership_matches(
@@ -2765,6 +2806,9 @@ fn module_package_match(
     string_anchor_matches: usize,
     external_importable: bool,
 ) -> ModulePackageMatch {
+    let external_importable = external_importable
+        && (!is_json_source_path(source.source.source_path.as_str())
+            || strategy == ModuleMatchStrategy::NormalizedSourceHash);
     ModulePackageMatch {
         module_id: module.module_id,
         package_name: source.source.package_name.clone(),
@@ -2808,7 +2852,8 @@ fn accepted_attribution_from_match(module_match: &ModulePackageMatch) -> Package
         module_match.package_name.as_str(),
         module_match.package_version.as_str(),
         module_match.export_specifier.as_str(),
-    );
+    )
+    .with_resolved_file(module_match.source_path.as_str());
     if let Some((_package_name, Some(subpath))) =
         split_bare_specifier(&module_match.export_specifier)
     {
@@ -2872,7 +2917,7 @@ mod tests {
     use super::{
         BestVersionMatch, ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
         PackageModuleSourceQuality, PackageSource, VersionedPackageMatcher,
-        match_packages_with_pipeline, match_structural_bags,
+        exact_hint_root_external_specifier, match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality,
     };
@@ -2900,6 +2945,19 @@ mod tests {
         let mut rows = rows_with_package_source(source);
         rows.modules[0].package_version = Some(version.to_string());
         rows
+    }
+
+    #[test]
+    fn pipeline_owns_empty_source_scope_without_cli_sidecar_report() {
+        let rows = rows_with_package_source("export function add(a,b){return a+b}");
+
+        let report = match_packages_with_pipeline(&rows, &[], None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(report.package_report.matches.is_empty());
+        assert!(report.package_report.attributions.is_empty());
+        assert!(report.function_attributions.is_empty());
+        assert_eq!(report.function_ownership_matches, 0);
     }
 
     #[test]
@@ -3080,6 +3138,48 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.matches[0].strategy,
             ModuleMatchStrategy::NormalizedSourceHash
         );
+    }
+
+    #[test]
+    fn versioned_matcher_externalizes_exact_json_source_with_resolved_file() {
+        let source = "export default {\"aliceblue\":\"#f0f8ff\"};\n";
+        let rows = rows_with_package_source_at_version(source, "1.0.0");
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "pkg@1.0.0/data.json",
+            source,
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::NormalizedSourceHash
+        );
+        assert!(report.matches[0].external_importable);
+        assert_eq!(
+            report.attributions[0].resolved_file.as_deref(),
+            Some("pkg@1.0.0/data.json")
+        );
+    }
+
+    #[test]
+    fn exact_hint_promotion_does_not_externalize_json_without_source_match() {
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "pkg@1.0.0/data.json",
+            "export default {\"aliceblue\":\"#f0f8ff\"};\n",
+        )];
+
+        let specifier = exact_hint_root_external_specifier(&package_sources, "pkg", "1.0.0");
+
+        assert_eq!(specifier, None);
     }
 
     #[test]
@@ -3329,7 +3429,16 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         let report = match_packages_with_pipeline(&rows, &package_sources, None);
 
         assert!(report.package_report.audit.is_clean());
-        assert_eq!(report.structural_bag_report.matches.len(), 1);
+        assert_eq!(
+            report
+                .package_report
+                .matches
+                .iter()
+                .filter(|package_match| package_match.strategy
+                    == ModuleMatchStrategy::AggregateStructuralBagSimilarity)
+                .count(),
+            1
+        );
         let package_match = report
             .package_report
             .matches
@@ -3552,8 +3661,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .source_path
                 .contains("exact-hint:pkg@1.2.3")
         );
-        assert!(report.cascade_report.audit.is_clean());
-        assert!(report.structural_bag_report.audit.is_clean());
+        assert!(report.package_report.audit.is_clean());
     }
 
     #[test]

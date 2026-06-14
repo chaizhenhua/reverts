@@ -58,6 +58,7 @@ pub enum ParseGoal {
 pub struct GeneratedImport {
     pub namespace: String,
     pub specifier: String,
+    pub attributes: Vec<(String, String)>,
 }
 
 impl GeneratedImport {
@@ -66,7 +67,14 @@ impl GeneratedImport {
         Self {
             namespace: namespace.into(),
             specifier: specifier.into(),
+            attributes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.push((key.into(), value.into()));
+        self
     }
 }
 
@@ -4631,12 +4639,25 @@ fn generated_import_statement<'a>(
     let specifier = builder.import_declaration_specifier_import_namespace_specifier(SPAN, local);
     let specifiers = Some(builder.vec1(specifier));
     let source = builder.string_literal(SPAN, generated_import.specifier.as_str(), None);
+    let with_clause = if generated_import.attributes.is_empty() {
+        None
+    } else {
+        let mut entries = builder.vec();
+        for (key, value) in &generated_import.attributes {
+            entries.push(builder.import_attribute(
+                SPAN,
+                builder.import_attribute_key_identifier_name(SPAN, key.as_str()),
+                builder.string_literal(SPAN, value.as_str(), None),
+            ));
+        }
+        Some(builder.alloc_with_clause(SPAN, builder.identifier_name(SPAN, "with"), entries))
+    };
     Statement::ImportDeclaration(builder.alloc_import_declaration(
         SPAN,
         specifiers,
         source,
         None,
-        NONE,
+        with_clause,
         ImportOrExportKind::Value,
     ))
 }
@@ -6041,6 +6062,24 @@ mod tests {
         assert!(formatted.contains("import * as pkg from 'pkg';"));
         assert!(formatted.contains("const answer = pkg.answer;"));
         assert!(formatted.contains("export { answer };"));
+    }
+
+    #[test]
+    fn module_item_formatting_emits_import_attributes() {
+        let formatted = format_source_with_module_items(
+            "const aliceblue = colors.default.aliceblue;",
+            &[GeneratedImport::new("colors", "css-color-names").with_attribute("type", "json")],
+            &[],
+            Some(Path::new("modules/runtime/source-1-colors.ts")),
+            ParseGoal::TypeScript,
+            CompilerLowering::None,
+        )
+        .expect("fixture should format");
+
+        assert!(
+            formatted.contains("import * as colors from 'css-color-names' with { type: 'json' };")
+        );
+        assert!(formatted.contains("const aliceblue = colors.default.aliceblue;"));
     }
 
     #[test]

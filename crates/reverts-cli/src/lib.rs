@@ -26,10 +26,9 @@ use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
 use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
-    BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
-    PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource, VersionMatchScore,
-    VersionedPackageMatchReport, match_packages_with_pipeline, package_import_names_from_sources,
-    package_module_source_quality,
+    BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
+    VersionMatchScore, VersionedPackageMatchReport, match_packages_with_pipeline,
+    package_import_names_from_sources, package_module_source_quality,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -369,16 +368,16 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} cascade attribution(s) ({} written), {} cascade ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
+        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
         outcome.matched_package_surfaces,
         outcome.written_attributions,
         outcome.written_surfaces,
-        outcome.cascade_attributions,
-        outcome.written_cascade_attributions,
-        outcome.cascade_ownership_matches,
+        outcome.function_attributions,
+        outcome.written_function_attributions,
+        outcome.function_ownership_matches,
         outcome.package_source_quality_trusted,
         outcome.package_source_quality_weak,
         outcome.package_source_quality_invalid,
@@ -495,16 +494,15 @@ pub struct MatchPackagesOutcome {
     pub matched_package_surfaces: usize,
     pub written_attributions: usize,
     pub written_surfaces: usize,
-    /// Number of attribution rows produced by the cascade-match pipeline
+    /// Number of function-level attribution rows produced while matching
     /// (computed regardless of whether persistence ran).
-    pub cascade_attributions: usize,
-    /// Number of accepted function-level package ownership matches produced by
-    /// the cascade-match pipeline, including source-only evidence that is not
-    /// safe to emit as an external import.
-    pub cascade_ownership_matches: usize,
-    /// Number of cascade-match rows actually written to
+    pub function_attributions: usize,
+    /// Number of accepted function-level package ownership matches, including
+    /// source-only evidence that is not safe to emit as an external import.
+    pub function_ownership_matches: usize,
+    /// Number of function-level match rows actually written to
     /// `package_function_attributions`. Zero when `apply=false`.
-    pub written_cascade_attributions: usize,
+    pub written_function_attributions: usize,
     pub package_source_quality_trusted: usize,
     pub package_source_quality_weak: usize,
     pub package_source_quality_invalid: usize,
@@ -926,13 +924,22 @@ pub fn match_packages_from_connection(
     let mut rows = load_project_rows_from_connection(connection, args.project_id)
         .map_err(MatchPackagesError::LoadInput)?;
 
+    let requested_package_filter = (!args.package_names.is_empty())
+        .then(|| args.package_names.iter().cloned().collect::<BTreeSet<_>>());
+    let repaired_single_module_source_files =
+        repair_package_module_source_slices(&mut rows, requested_package_filter.as_ref());
+
     // Bundle-aware module extraction (Phase α): split recognised bundle
-    // wrappers into per-module rows before the matcher sees them.
-    let extraction = reverts_bundle::extract(&rows);
+    // wrappers into per-module rows before the matcher sees them. Source files
+    // that were already repaired as single package modules are not bundle
+    // candidates; skipping them keeps repair and extraction in a single
+    // ordered path instead of suppressing parse findings after the fact.
+    let extraction_input = bundle_extraction_rows(&rows, &repaired_single_module_source_files);
+    let extraction = reverts_bundle::extract(&extraction_input);
     let extraction_audit = extraction.audit.clone();
     // Snapshot new_modules before merge_into consumes the extraction —
     // we need them later to persist synthetic rows into the SQLite
-    // modules table so cascade attributions can FK them.
+    // modules table so function-level attributions can FK them.
     let synthetic_modules: Vec<reverts_input::ModuleInput> = extraction.new_modules.clone();
     extraction.merge_into(&mut rows);
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
@@ -955,28 +962,25 @@ pub fn match_packages_from_connection(
         &rows,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
-    let pipeline_report = if package_sources.is_empty() && package_names.is_empty() {
-        empty_package_matching_pipeline_report()
-    } else {
-        match_packages_with_pipeline(
-            &rows,
-            &package_sources,
-            (!args.package_names.is_empty()).then_some(&package_names),
-        )
-    };
+    let pipeline_report = match_packages_with_pipeline(
+        &rows,
+        &package_sources,
+        (!args.package_names.is_empty()).then_some(&package_names),
+    );
     let report = pipeline_report.package_report;
-    let cascade_report = pipeline_report.cascade_report;
+    let function_attributions = pipeline_report.function_attributions;
+    let function_ownership_matches = pipeline_report.function_ownership_matches;
 
-    let (written_attributions, written_surfaces, written_cascade_attributions) = if args.apply {
+    let (written_attributions, written_surfaces, written_function_attributions) = if args.apply {
         // Persist synthetic modules first so the FK from
         // package_attributions.module_id and
         // package_function_attributions.module_id resolves.
         persist_synthetic_modules(connection, &synthetic_modules)?;
         // A few synthetic modules may have been skipped by `INSERT OR
         // IGNORE` due to `UNIQUE(file_id, original_name)` collisions
-        // with pre-existing legacy rows. Build the set of module ids
+        // with pre-existing rows. Build the set of module ids
         // that actually live in the SQLite `modules` table now, and
-        // filter cascade attributions to only those — the alternative
+        // filter function-level attributions to only those — the alternative
         // is a foreign-key violation that aborts the whole apply.
         let mut persisted_ids = std::collections::BTreeSet::new();
         {
@@ -991,33 +995,24 @@ pub fn match_packages_from_connection(
                 persisted_ids.insert(reverts_ir::ModuleId(id));
             }
         }
-        let cascade_report_filtered = reverts_package_matcher::CascadeMatchReport {
-            attributions: cascade_report
-                .attributions
-                .iter()
-                .filter(|a| persisted_ids.contains(&a.module_id))
-                .cloned()
-                .collect(),
-            ownership_matches: cascade_report
-                .ownership_matches
-                .iter()
-                .filter(|ownership| persisted_ids.contains(&ownership.module_id))
-                .cloned()
-                .collect(),
-            audit: cascade_report.audit.clone(),
-        };
+        let persistable_function_attributions = function_attributions
+            .iter()
+            .filter(|attribution| persisted_ids.contains(&attribution.module_id))
+            .cloned()
+            .collect::<Vec<_>>();
         (
             persist_package_attributions(connection, &rows, &report, &package_names)?,
             persist_package_surfaces(connection, &rows, &report)?,
-            persist_cascade_attributions(connection, &rows, &cascade_report_filtered)?,
+            persist_function_attributions(connection, &rows, &persistable_function_attributions)?,
         )
     } else {
         (0, 0, 0)
     };
 
+    let matched_modules = report.matches.len();
+    let matched_package_surfaces = report.surfaces.len();
     let mut audit = extraction_audit;
     audit.extend(report.audit);
-    audit.extend(cascade_report.audit);
     let audit = dedup_audit_report(audit);
 
     Ok(MatchPackagesOutcome {
@@ -1028,13 +1023,13 @@ pub fn match_packages_from_connection(
             .filter(|module| module.kind == ModuleKind::Package)
             .count(),
         loaded_package_sources: package_sources.len(),
-        matched_modules: report.matches.len(),
-        matched_package_surfaces: report.surfaces.len(),
+        matched_modules,
+        matched_package_surfaces,
         written_attributions,
         written_surfaces,
-        cascade_attributions: cascade_report.attributions.len(),
-        cascade_ownership_matches: cascade_report.ownership_matches.len(),
-        written_cascade_attributions,
+        function_attributions: function_attributions.len(),
+        function_ownership_matches,
+        written_function_attributions,
         package_source_quality_trusted: source_quality_counts.trusted,
         package_source_quality_weak: source_quality_counts.weak,
         package_source_quality_invalid: source_quality_counts.invalid,
@@ -1043,27 +1038,10 @@ pub fn match_packages_from_connection(
     })
 }
 
-fn empty_package_matching_pipeline_report() -> PackageMatchingPipelineReport {
-    PackageMatchingPipelineReport {
-        package_report: VersionedPackageMatchReport {
-            attributions: Vec::new(),
-            surfaces: Vec::new(),
-            matches: Vec::new(),
-            version_matches: Vec::new(),
-            audit: AuditReport::default(),
-        },
-        cascade_report: CascadeMatchReport {
-            attributions: Vec::new(),
-            ownership_matches: Vec::new(),
-            audit: AuditReport::default(),
-        },
-    }
-}
-
 fn repair_package_module_source_slices(
     rows: &mut InputRows,
     package_filter: Option<&BTreeSet<String>>,
-) -> usize {
+) -> BTreeSet<u32> {
     let module_count_by_source_file = rows
         .modules
         .iter()
@@ -1076,7 +1054,7 @@ fn repair_package_module_source_slices(
             },
         );
     let source_files = &rows.source_files;
-    let mut repaired = 0usize;
+    let mut repaired_single_module_source_files = BTreeSet::new();
     for module in &mut rows.modules {
         if module.kind != ModuleKind::Package {
             continue;
@@ -1125,9 +1103,28 @@ fn repair_package_module_source_slices(
             continue;
         };
         module.source_span = Some(repaired_span);
-        repaired += 1;
+        if module_count_by_source_file
+            .get(&source_file_id)
+            .copied()
+            .unwrap_or_default()
+            == 1
+        {
+            repaired_single_module_source_files.insert(source_file_id);
+        }
     }
-    repaired
+    repaired_single_module_source_files
+}
+
+fn bundle_extraction_rows(rows: &InputRows, skipped_source_file_ids: &BTreeSet<u32>) -> InputRows {
+    if skipped_source_file_ids.is_empty() {
+        return rows.clone();
+    }
+
+    let mut extraction_rows = rows.clone();
+    extraction_rows
+        .source_files
+        .retain(|source_file| !skipped_source_file_ids.contains(&source_file.id));
+    extraction_rows
 }
 
 fn module_source_repair_range(
@@ -2495,7 +2492,7 @@ fn ensure_package_source_cache_table(
     Ok(())
 }
 
-const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 3;
+const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 4;
 
 const PACKAGE_SOURCE_CACHE_CREATE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS package_source_cache (
@@ -3594,9 +3591,10 @@ fn collect_local_package_sources(
         let source = package_source_body_for_local_file(rel_path.as_str(), source.as_str())
             .unwrap_or(source);
         let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
-        if let Some(export_target) = importable_target.as_ref().filter(|target| {
-            target.esm_external_importable() && !is_json_source_path(rel_path.as_str())
-        }) {
+        if let Some(export_target) = importable_target
+            .as_ref()
+            .filter(|target| target.esm_external_importable())
+        {
             sources.push(PackageSource::external(
                 metadata.name.as_str(),
                 metadata.version.as_str(),
@@ -5197,7 +5195,7 @@ fn persist_rejected_package_attribution(
 }
 
 /// Persist bundle-extraction synthetic modules into the SQLite `modules`
-/// table. Required when `apply: true` so that cascade attribution rows
+/// table. Required when `apply: true` so that function-level attribution rows
 /// can satisfy their `module_id REFERENCES modules(id)` foreign key.
 ///
 /// Uses `INSERT OR IGNORE` to allow idempotent re-runs: if a previous
@@ -5256,12 +5254,12 @@ fn persist_synthetic_modules(
     Ok(written)
 }
 
-fn persist_cascade_attributions(
+fn persist_function_attributions(
     connection: &mut Connection,
     rows: &InputRows,
-    report: &CascadeMatchReport,
+    attributions: &[PackageAttributionInput],
 ) -> Result<usize, MatchPackagesError> {
-    if report.attributions.is_empty() {
+    if attributions.is_empty() {
         return Ok(0);
     }
     ensure_package_function_attributions_table(connection)?;
@@ -5277,20 +5275,20 @@ fn persist_cascade_attributions(
         .map_err(MatchPackagesError::WriteAttribution)?;
     let mut written = 0;
 
-    for attribution in &report.attributions {
+    for attribution in attributions {
         let Some(function_span) = attribution.function_span else {
-            // Function-level attribution requires a span; cascade only emits
-            // rows with `with_function_span(...)`, so this is a programmer
+            // Function-level attribution requires a span; matcher code only
+            // emits rows with `with_function_span(...)`, so this is a programmer
             // error rather than user input — surface it instead of skipping.
             return Err(MatchPackagesError::InvalidAttribution {
                 module_id: attribution.module_id,
-                message: "cascade attribution missing function_span".to_string(),
+                message: "function attribution missing function_span".to_string(),
             });
         };
         let Some(confidence) = attribution.confidence.as_ref() else {
             return Err(MatchPackagesError::InvalidAttribution {
                 module_id: attribution.module_id,
-                message: "cascade attribution missing confidence".to_string(),
+                message: "function attribution missing confidence".to_string(),
             });
         };
         let module_original_name = modules_by_id.get(&attribution.module_id).copied().ok_or(
@@ -5301,13 +5299,13 @@ fn persist_cascade_attributions(
         let package_version = attribution.package_version.as_deref().ok_or(
             MatchPackagesError::InvalidAttribution {
                 module_id: attribution.module_id,
-                message: "cascade attribution missing package version".to_string(),
+                message: "function attribution missing package version".to_string(),
             },
         )?;
         let export_specifier = attribution.export_specifier.as_deref().ok_or(
             MatchPackagesError::InvalidAttribution {
                 module_id: attribution.module_id,
-                message: "cascade attribution missing export specifier".to_string(),
+                message: "function attribution missing export specifier".to_string(),
             },
         )?;
         let matched_axes_json = serde_json::Value::Array(
@@ -6469,7 +6467,7 @@ mod tests {
                     ('pkg', '1.2.3', 'index.js', 'export const oldValue = 1;',
                      'hash-a', 1, 0, 'now', 'later'),
                     ('pkg', '1.2.4', 'index.js', 'export const newValue = 1;',
-                     'hash-b', 1, 3, 'now', 'later'),
+                     'hash-b', 1, 4, 'now', 'later'),
                     ('other', '9.9.9', 'index.js', 'export const other = 1;',
                      'hash-c', 1, 0, 'now', 'later');
                 ",
@@ -6549,7 +6547,7 @@ mod tests {
         assert!(sources[0].source_path.ends_with("css-color-names.json"));
         assert_eq!(sources[0].package_name, "css-color-names");
         assert_eq!(sources[0].package_version, "1.0.1");
-        assert!(!sources[0].external_importable);
+        assert!(sources[0].external_importable);
         assert!(sources[0].source.starts_with("export default "));
         assert!(sources[0].source.contains("aliceblue"));
     }
@@ -6899,7 +6897,7 @@ mod tests {
         assert_eq!(outcome.loaded_package_modules, 0);
         assert_eq!(outcome.loaded_package_sources, 0);
         assert_eq!(outcome.matched_modules, 0);
-        assert_eq!(outcome.cascade_attributions, 0);
+        assert_eq!(outcome.function_attributions, 0);
     }
 
     #[test]
@@ -6972,7 +6970,7 @@ mod tests {
         assert_eq!(outcome.package_source_quality_trusted, 0);
         assert_eq!(outcome.package_source_quality_invalid, 1);
         assert_eq!(outcome.matched_modules, 0);
-        assert_eq!(outcome.cascade_ownership_matches, 0);
+        assert_eq!(outcome.function_ownership_matches, 0);
     }
 
     #[test]
@@ -7060,7 +7058,7 @@ mod tests {
         );
         assert_eq!(outcome.matched_modules, 1);
         assert!(
-            outcome.cascade_ownership_matches >= 1,
+            outcome.function_ownership_matches >= 1,
             "source-only roots should still produce ownership evidence"
         );
         assert_eq!(
@@ -7068,10 +7066,10 @@ mod tests {
             "source-only ownership matches are persisted as application_source decisions"
         );
         assert_eq!(
-            outcome.cascade_attributions, 0,
-            "source-only roots must not feed external cascade attribution"
+            outcome.function_attributions, 0,
+            "source-only roots must not feed external function attribution"
         );
-        assert_eq!(outcome.written_cascade_attributions, 0);
+        assert_eq!(outcome.written_function_attributions, 0);
         let (status, emission_mode, rejection_reason, package_version): (
             String,
             String,
@@ -7129,7 +7127,7 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
-        assert!(outcome.cascade_ownership_matches >= 1);
+        assert!(outcome.function_ownership_matches >= 1);
         assert_eq!(outcome.written_attributions, 1);
         let (status, emission_mode, package_version, export_specifier): (
             String,
@@ -7189,7 +7187,7 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
-        assert!(outcome.cascade_ownership_matches >= 1);
+        assert!(outcome.function_ownership_matches >= 1);
         let (status, emission_mode, package_version, export_specifier): (
             String,
             String,
@@ -7308,7 +7306,7 @@ mod tests {
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
         assert_eq!(
-            outcome.cascade_attributions, 0,
+            outcome.function_attributions, 0,
             "require-only conditional exports must not produce ESM external attributions"
         );
         let (status, emission_mode, package_version, export_specifier, rejection_reason): (
@@ -7383,7 +7381,7 @@ mod tests {
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
         assert_eq!(
-            outcome.cascade_attributions, 0,
+            outcome.function_attributions, 0,
             "ambiguous wildcard exports must not produce safe external attribution"
         );
         let (status, emission_mode, package_version, export_specifier): (
@@ -7446,7 +7444,7 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
-        assert_eq!(outcome.cascade_attributions, 0);
+        assert_eq!(outcome.function_attributions, 0);
         assert_eq!(package_attribution_count(&connection), 0);
     }
 
@@ -7478,10 +7476,10 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(
             outcome.matched_modules, 1,
-            "legacy module-level matcher should be covered by cascade evidence"
+            "module-level attribution should be backed by function evidence"
         );
         assert_eq!(outcome.written_attributions, 1);
-        assert!(outcome.written_cascade_attributions >= 1);
+        assert!(outcome.written_function_attributions >= 1);
         let (status, emission_mode, package_version, evidence): (String, String, String, String) =
             connection
                 .query_row(
@@ -7539,14 +7537,14 @@ mod tests {
             "source-only cascade coverage should still count as package ownership"
         );
         assert_eq!(
-            outcome.cascade_ownership_matches, 1,
+            outcome.function_ownership_matches, 1,
             "the source-only function should still produce one ownership match"
         );
         assert_eq!(
-            outcome.cascade_attributions, 0,
+            outcome.function_attributions, 0,
             "source-only ownership must not become function-level external attributions"
         );
-        assert_eq!(outcome.written_cascade_attributions, 0);
+        assert_eq!(outcome.written_function_attributions, 0);
         assert_eq!(
             outcome.written_attributions, 1,
             "the module should receive an explicit rejected application-source decision"
@@ -7586,7 +7584,7 @@ mod tests {
                     ))
                 },
             )
-            .expect("source-only cascade ownership should write a rejected attribution");
+            .expect("source-only function ownership should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
@@ -7632,7 +7630,7 @@ mod tests {
             "structural bag evidence should be promoted as source-only ownership"
         );
         assert_eq!(
-            outcome.cascade_ownership_matches, 0,
+            outcome.function_ownership_matches, 0,
             "this fixture should not be matched by cascade"
         );
         assert_eq!(
@@ -7904,7 +7902,7 @@ mod tests {
             "partial ownership must be persisted as a rejected source decision"
         );
         assert!(
-            outcome.written_cascade_attributions >= 2,
+            outcome.written_function_attributions >= 2,
             "function-level cascade evidence should still be recorded"
         );
         let (status, emission_mode, package_version, export_specifier, rejection_reason): (
@@ -7932,7 +7930,7 @@ mod tests {
                     ))
                 },
             )
-            .expect("partial cascade ownership should write a rejected attribution");
+            .expect("partial function ownership should write a rejected attribution");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
@@ -8107,10 +8105,9 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_apply_writes_cascade_function_attribution() {
-        // Same fixture as the legacy-matcher test, but the assertion looks at
-        // the new `package_function_attributions` table populated by the
-        // cascade pipeline. The cascade should produce an Exact-tier match
+    fn match_packages_apply_writes_function_attribution() {
+        // The assertion looks at the `package_function_attributions` table populated
+        // by the function-level matcher. It should produce an Exact-tier match
         // for the bundle's `add` function against the package source, and
         // persist it with function_span + confidence rather than discarding
         // the row.
@@ -8139,8 +8136,8 @@ mod tests {
 
         assert!(outcome.audit.is_clean());
         assert!(
-            outcome.written_cascade_attributions >= 1,
-            "expected cascade attribution to be persisted, outcome={:?}",
+            outcome.written_function_attributions >= 1,
+            "expected function attribution to be persisted, outcome={:?}",
             outcome,
         );
 
@@ -8181,8 +8178,8 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_dry_run_does_not_persist_cascade_attributions() {
-        // With apply=false, the cascade pipeline still RUNS (the diagnostic
+    fn match_packages_dry_run_does_not_persist_function_attributions() {
+        // With apply=false, the function-level matcher still runs (the diagnostic
         // count is non-zero in the outcome), but no rows land in the new
         // function-attributions table.
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -8208,8 +8205,11 @@ mod tests {
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
 
-        assert!(outcome.cascade_attributions >= 1, "cascade should compute");
-        assert_eq!(outcome.written_cascade_attributions, 0);
+        assert!(
+            outcome.function_attributions >= 1,
+            "function matcher should compute"
+        );
+        assert_eq!(outcome.written_function_attributions, 0);
         // The new table should not exist yet since persistence never ran.
         let table_count: i64 = connection
             .query_row(

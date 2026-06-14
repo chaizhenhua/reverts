@@ -219,11 +219,10 @@ fn load_module_dependencies(
     collect_sqlite_rows(rows)
 }
 
-// Function-level cascade attributions (`function_span` + `confidence`)
+// Function-level package attributions (`function_span` + `confidence`)
 // live in the separate `package_function_attributions` table written by
-// `reverts-cli::persist_cascade_attributions`. This loader handles only
-// the legacy module-level rows; a cascade-aware loader would be a
-// separate function so the schemas stay decoupled.
+// `reverts-cli`. This loader handles module-level generation decisions only;
+// function-level evidence stays diagnostic so the schemas remain decoupled.
 fn load_package_attributions(
     connection: &Connection,
     project_id: u32,
@@ -232,13 +231,20 @@ fn load_package_attributions(
         return Ok(Vec::new());
     }
 
-    let mut statement = connection.prepare(
+    let resolved_file_expr =
+        if table_column_exists(connection, "package_attributions", "resolved_file")? {
+            "pa.resolved_file"
+        } else {
+            "NULL AS resolved_file"
+        };
+    let sql = format!(
         r"
         SELECT
             pa.module_id,
             pa.package_name,
             pa.package_version,
             pa.package_subpath,
+            {resolved_file_expr},
             pa.export_specifier,
             pa.emission_mode,
             pa.status,
@@ -248,20 +254,22 @@ fn load_package_attributions(
         JOIN project_files pf ON pf.file_id = m.file_id
         WHERE pf.project_id = ?1
         ORDER BY pa.module_id
-        ",
-    )?;
+        "
+    );
+    let mut statement = connection.prepare(sql.as_str())?;
     let rows = statement.query_map(params![i64::from(project_id)], |row| {
-        let emission_mode = emission_mode_from_database(row.get::<_, String>(5)?.as_str())?;
-        let status = attribution_status_from_database(row.get::<_, String>(6)?.as_str())?;
+        let emission_mode = emission_mode_from_database(row.get::<_, String>(6)?.as_str())?;
+        let status = attribution_status_from_database(row.get::<_, String>(7)?.as_str())?;
         Ok(PackageAttributionRow {
             module_id: row.get(0)?,
             package_name: row.get(1)?,
             package_version: row.get(2)?,
             subpath: row.get(3)?,
-            export_specifier: row.get(4)?,
+            resolved_file: row.get(4)?,
+            export_specifier: row.get(5)?,
             emission_mode,
             status,
-            rejection_reason: row.get(7)?,
+            rejection_reason: row.get(8)?,
         })
     })?;
 
@@ -362,6 +370,22 @@ fn table_exists(connection: &Connection, table: &str) -> Result<bool, SqliteInpu
         |row| row.get::<_, i64>(0),
     )?;
     Ok(exists == 1)
+}
+
+fn table_column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, SqliteInputError> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut statement = connection.prepare(sql.as_str())?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn collect_sqlite_rows<T>(

@@ -6,11 +6,14 @@ use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
     RuntimePreludeBindingKind, RuntimePreludeImport,
 };
-use reverts_input::{ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode};
+use reverts_input::{
+    ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
-    format_source_pretty, parse_error_message, verify_only_immediate_call_references,
+    format_source_pretty, parse_error_message, sanitize_identifier,
+    verify_only_immediate_call_references,
 };
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::PackageResolution;
@@ -541,12 +544,17 @@ impl RuntimeSetterMigrationBlockerReason {
     }
 }
 
-impl ImportExportPlanner {
-    #[must_use]
-    pub fn runtime_setter_migration_blocker_report(
-        self,
-        program: &EnrichedProgram,
-    ) -> RuntimeSetterMigrationBlockerReport {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannerAnalysis {
+    source_required_packages: BTreeSet<ModuleId>,
+    externalized_packages: BTreeSet<ModuleId>,
+    source_module_wiring: SourceModuleWiring,
+    lowered_runtime_sources: BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: RuntimeLazyFoldPlan,
+}
+
+impl PlannerAnalysis {
+    fn from_program(program: &EnrichedProgram) -> Self {
         let accepted_externalized_packages = externalized_package_modules(program);
         let source_required_packages =
             source_required_package_modules(program, &accepted_externalized_packages);
@@ -560,11 +568,29 @@ impl ImportExportPlanner {
             lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+
+        Self {
+            source_required_packages,
+            externalized_packages,
+            source_module_wiring,
+            lowered_runtime_sources,
+            runtime_lazy_folds,
+        }
+    }
+}
+
+impl ImportExportPlanner {
+    #[must_use]
+    pub fn runtime_setter_migration_blocker_report(
+        self,
+        program: &EnrichedProgram,
+    ) -> RuntimeSetterMigrationBlockerReport {
+        let analysis = PlannerAnalysis::from_program(program);
         runtime_setter_migration_blocker_report(
             program,
-            &lowered_runtime_sources,
-            &runtime_lazy_folds,
-            &externalized_packages,
+            &analysis.lowered_runtime_sources,
+            &analysis.runtime_lazy_folds,
+            &analysis.externalized_packages,
         )
     }
 
@@ -578,34 +604,27 @@ impl ImportExportPlanner {
         let mut used_lazy_value = BTreeSet::<u32>::new();
         let mut exported_lazy_module = BTreeSet::<u32>::new();
         let mut exported_lazy_value = BTreeSet::<u32>::new();
-        let accepted_externalized_packages = externalized_package_modules(program);
-        let source_required_packages =
-            source_required_package_modules(program, &accepted_externalized_packages);
-        let externalized_packages = accepted_externalized_packages
-            .difference(&source_required_packages)
-            .copied()
-            .collect::<BTreeSet<_>>();
-        let source_module_wiring = source_module_wiring(program, &externalized_packages);
-        let eager_safe_analysis = compute_eager_safe_analysis(program, &source_module_wiring);
-        let lowered_runtime_sources =
-            lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
-        let runtime_lazy_folds =
-            runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+        let analysis = PlannerAnalysis::from_program(program);
+        let source_required_packages = &analysis.source_required_packages;
+        let externalized_packages = &analysis.externalized_packages;
+        let source_module_wiring = &analysis.source_module_wiring;
+        let lowered_runtime_sources = &analysis.lowered_runtime_sources;
+        let runtime_lazy_folds = &analysis.runtime_lazy_folds;
         let omitted_folded_stub_modules =
-            folded_stub_modules_with_internal_consumers(&runtime_lazy_folds, &source_module_wiring);
+            folded_stub_modules_with_internal_consumers(runtime_lazy_folds, source_module_wiring);
         let pure_reexport_bypasses =
-            pure_reexport_bypass_plan(program, &source_module_wiring, &externalized_packages);
+            pure_reexport_bypass_plan(program, source_module_wiring, externalized_packages);
         let runtime_var_migrations = compute_runtime_var_migration_plan(
             program,
-            &lowered_runtime_sources,
-            &runtime_lazy_folds,
-            &externalized_packages,
+            lowered_runtime_sources,
+            runtime_lazy_folds,
+            externalized_packages,
         );
         let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
         let runtime_edge_direct_prelude_imports = runtime_edge_direct_prelude_imports(
             program,
-            &lowered_runtime_sources,
-            &runtime_lazy_folds,
+            lowered_runtime_sources,
+            runtime_lazy_folds,
             &runtime_prelude_direct_imports,
         );
 
@@ -639,6 +658,24 @@ impl ImportExportPlanner {
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
             file.set_compiler_recovery(compiler_recovery);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
+
+            if module.kind == ModuleKind::Package
+                && source_required_packages.contains(&module.id)
+                && let Some(attribution) = accepted_external_package_attribution(program, module.id)
+            {
+                let adapter_bindings = package_adapter_export_bindings(program, module.id);
+                if !adapter_bindings.is_empty()
+                    && can_emit_external_package_adapter(program, module.id, &adapter_bindings)
+                {
+                    populate_external_package_adapter_file(
+                        &mut file,
+                        attribution,
+                        &adapter_bindings,
+                    );
+                    plan.push_file(file);
+                    continue;
+                }
+            }
 
             if pure_reexport_bypasses.omitted_modules.contains(&module.id) {
                 continue;
@@ -5937,6 +5974,169 @@ fn externalized_package_modules(program: &EnrichedProgram) -> BTreeSet<ModuleId>
         })
         .map(|attribution| attribution.module_id)
         .collect()
+}
+
+fn accepted_external_package_attribution(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> Option<&PackageAttributionInput> {
+    program
+        .model()
+        .input()
+        .package_attributions
+        .iter()
+        .find(|attribution| {
+            attribution.module_id == module_id
+                && attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+                && attribution.export_specifier.is_some()
+        })
+}
+
+fn can_emit_external_package_adapter(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    adapter_bindings: &BTreeSet<BindingName>,
+) -> bool {
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return false;
+    };
+    let compact = compact_js_source(source.source);
+    if compact.contains("let_$cached;")
+        && compact.contains("return_$module.exports;")
+        && compact.contains("export{")
+    {
+        return true;
+    }
+    if adapter_bindings
+        .iter()
+        .any(|binding| compact.contains(format!("var{}=p(", binding.as_str()).as_str()))
+    {
+        return true;
+    }
+    adapter_bindings
+        .iter()
+        .all(|binding| !compact_source_defines_binding(compact.as_str(), binding.as_str()))
+}
+
+fn compact_source_defines_binding(compact_source: &str, binding: &str) -> bool {
+    [
+        format!("function{binding}("),
+        format!("var{binding}="),
+        format!("let{binding}="),
+        format!("const{binding}="),
+        format!("class{binding}"),
+    ]
+    .iter()
+    .any(|needle| compact_source.contains(needle))
+}
+
+fn populate_external_package_adapter_file(
+    file: &mut PlannedFile,
+    attribution: &PackageAttributionInput,
+    exportable_bindings: &BTreeSet<BindingName>,
+) {
+    let Some(specifier) = attribution.export_specifier.as_deref() else {
+        return;
+    };
+    let namespace = external_package_adapter_namespace(attribution, exportable_bindings);
+    file.add_import(PlannedImport {
+        namespace: namespace.clone(),
+        resolution: PackageResolution::External {
+            specifier: specifier.to_string(),
+            package_name: attribution.package_name.clone(),
+            import_attributes: import_attributes_for_package_attribution(attribution),
+        },
+        source_backed: false,
+    });
+    for binding in exportable_bindings {
+        file.push_source(format!(
+            "function {}() {{ return {}; }}",
+            binding.as_str(),
+            namespace.as_str()
+        ));
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            BindingShape::Callable,
+            true,
+        ));
+    }
+    file.push_source(named_export_statement(exportable_bindings.iter()));
+    for binding in exportable_bindings {
+        file.add_export_with_source_backed(binding.clone(), true);
+    }
+}
+
+fn package_adapter_export_bindings(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> BTreeSet<BindingName> {
+    let mut bindings: BTreeSet<BindingName> = program
+        .model()
+        .graph()
+        .import_export()
+        .exports_for(module_id)
+        .into_iter()
+        .collect();
+    let target_bindings = source_exportable_bindings(program, module_id);
+    let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    for dependency in &program.model().input().dependencies {
+        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+            continue;
+        };
+        if target_module_id != module_id {
+            continue;
+        }
+        let Some(candidate_reads) = candidate_reads_by_module.get(&dependency.from_module_id)
+        else {
+            continue;
+        };
+        bindings.extend(candidate_reads.intersection(&target_bindings).cloned());
+    }
+    bindings
+}
+
+fn external_package_adapter_namespace(
+    attribution: &PackageAttributionInput,
+    exportable_bindings: &BTreeSet<BindingName>,
+) -> BindingName {
+    let sanitized = sanitize_identifier(attribution.package_name.as_str());
+    let base = if sanitized.is_empty() {
+        "externalPackage".to_string()
+    } else {
+        format!("external_{sanitized}")
+    };
+    if !exportable_bindings
+        .iter()
+        .any(|binding| binding.as_str() == base.as_str())
+    {
+        return BindingName::new(base);
+    }
+    BindingName::new(format!("{base}Namespace"))
+}
+
+fn import_attributes_for_package_attribution(
+    attribution: &PackageAttributionInput,
+) -> BTreeMap<String, String> {
+    if attribution
+        .resolved_file
+        .as_deref()
+        .is_some_and(is_json_resolved_file)
+    {
+        return BTreeMap::from([("type".to_string(), "json".to_string())]);
+    }
+    BTreeMap::new()
+}
+
+fn is_json_resolved_file(resolved_file: &str) -> bool {
+    resolved_file
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(resolved_file)
+        .trim()
+        .to_ascii_lowercase()
+        .ends_with(".json")
 }
 
 fn source_required_package_modules(
@@ -13310,6 +13510,86 @@ mod tests {
                 .join("\n")
                 .contains("export { packageInit };")
         );
+    }
+
+    #[test]
+    fn source_required_commonjs_package_module_uses_external_adapter() {
+        let planner = ImportExportPlanner;
+        let app_source = "var value = packageInit().answer;\nexport { value };\n";
+        let package_source = r#"
+            var packageInit = (() => {
+                let _$cached;
+                return () => {
+                    if (_$cached) return _$cached.exports;
+                    var _$module = _$cached = { exports: {} };
+                    ((exports) => { exports.answer = 42; })(_$module.exports, _$module);
+                    return _$module.exports;
+                };
+            })();
+            export { packageInit };
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("adapter package file should be emitted");
+        let source = package_file.body.join("\n");
+
+        assert_eq!(package_file.imports.len(), 1);
+        assert_eq!(
+            package_file.imports[0].resolution.specifier(),
+            Some("fixture-package")
+        );
+        assert!(source.contains("function packageInit() { return external_fixture_package; }"));
+        assert!(source.contains("export { packageInit };"));
+        assert!(!source.contains("_$cached"));
     }
 
     #[test]

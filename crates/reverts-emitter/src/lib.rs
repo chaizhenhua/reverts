@@ -35,10 +35,15 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
             continue;
         }
         if let Some(specifier) = import.resolution.specifier() {
-            generated_imports.push(GeneratedImport::new(
-                emit_binding_name(&import.namespace),
-                specifier,
-            ));
+            let mut generated_import =
+                GeneratedImport::new(emit_binding_name(&import.namespace), specifier);
+            if let Some(import_attributes) = import.resolution.import_attributes() {
+                for (key, value) in import_attributes {
+                    generated_import =
+                        generated_import.with_attribute(key.as_str(), value.as_str());
+                }
+            }
+            generated_imports.push(generated_import);
         }
     }
 
@@ -143,6 +148,8 @@ impl Error for EmitError {}
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use reverts_ir::BindingName;
     use reverts_package::PackageResolution;
     use reverts_planner::{EmitPlan, PlannedFile, PlannedImport};
@@ -172,6 +179,7 @@ mod tests {
             resolution: PackageResolution::External {
                 package_name: "pkg".to_string(),
                 specifier: "pkg".to_string(),
+                import_attributes: Default::default(),
             },
             source_backed: false,
         });
@@ -189,6 +197,32 @@ mod tests {
     }
 
     #[test]
+    fn planned_json_package_import_emits_import_attributes() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.add_import(PlannedImport {
+            namespace: BindingName::new("colors"),
+            resolution: PackageResolution::External {
+                package_name: "css-color-names".to_string(),
+                specifier: "css-color-names".to_string(),
+                import_attributes: BTreeMap::from([("type".to_string(), "json".to_string())]),
+            },
+            source_backed: false,
+        });
+        file.push_source("const aliceblue = colors.default.aliceblue;");
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        let source = project.files[0].source.as_str();
+        assert!(
+            source.contains("import * as colors from 'css-color-names' with { type: 'json' };"),
+            "{source}"
+        );
+        assert!(source.contains("const aliceblue = colors.default.aliceblue;"));
+    }
+
+    #[test]
     fn source_backed_imports_and_exports_are_not_emitted_twice() {
         let mut file = PlannedFile::new("src/index.ts");
         file.add_import(PlannedImport {
@@ -196,6 +230,7 @@ mod tests {
             resolution: PackageResolution::External {
                 package_name: "pkg".to_string(),
                 specifier: "pkg".to_string(),
+                import_attributes: Default::default(),
             },
             source_backed: true,
         });
@@ -220,6 +255,7 @@ mod tests {
             resolution: PackageResolution::External {
                 package_name: "pkg-name".to_string(),
                 specifier: "pkg-name/value".to_string(),
+                import_attributes: Default::default(),
             },
             source_backed: false,
         });

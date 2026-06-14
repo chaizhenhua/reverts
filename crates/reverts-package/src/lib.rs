@@ -8,6 +8,7 @@ use reverts_ir::{PackageSurface, is_valid_package_name, split_bare_specifier};
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackageSurfaceIndex {
     surfaces: BTreeMap<String, PackageSurface>,
+    import_attributes_by_specifier: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 impl PackageSurfaceIndex {
@@ -21,6 +22,9 @@ impl PackageSurfaceIndex {
         package_surfaces: &[PackageSurfaceInput],
     ) -> Self {
         let mut surfaces = BTreeMap::<String, PackageSurface>::new();
+        let mut import_attribute_candidates =
+            BTreeMap::<String, Option<BTreeMap<String, String>>>::new();
+        let mut import_attribute_conflicts = BTreeMap::<String, ()>::new();
 
         for attribution in attributions {
             if attribution.status != PackageAttributionStatus::Accepted
@@ -34,6 +38,12 @@ impl PackageSurfaceIndex {
                     &mut surfaces,
                     attribution.package_name.as_str(),
                     specifier,
+                );
+                record_import_attribute_candidate(
+                    &mut import_attribute_candidates,
+                    &mut import_attribute_conflicts,
+                    specifier,
+                    import_attributes_for_attribution(attribution),
                 );
             }
 
@@ -56,6 +66,17 @@ impl PackageSurfaceIndex {
         let mut index = Self::default();
         for surface in surfaces.into_values() {
             index.insert(surface);
+        }
+        for (specifier, attributes) in import_attribute_candidates {
+            if import_attribute_conflicts.contains_key(&specifier) {
+                continue;
+            }
+            let Some(attributes) = attributes.filter(|attributes| !attributes.is_empty()) else {
+                continue;
+            };
+            index
+                .import_attributes_by_specifier
+                .insert(specifier, attributes);
         }
         index
     }
@@ -89,6 +110,11 @@ impl PackageSurfaceIndex {
             PackageResolution::External {
                 specifier: specifier.to_string(),
                 package_name,
+                import_attributes: self
+                    .import_attributes_by_specifier
+                    .get(specifier)
+                    .cloned()
+                    .unwrap_or_default(),
             }
         } else {
             PackageResolution::rejected(specifier, "package surface does not accept subpath")
@@ -104,6 +130,7 @@ pub enum PackageResolution {
     External {
         specifier: String,
         package_name: String,
+        import_attributes: BTreeMap<String, String>,
     },
     Local {
         specifier: String,
@@ -126,10 +153,19 @@ impl PackageResolution {
     #[must_use]
     pub fn specifier(&self) -> Option<&str> {
         match self {
-            Self::Builtin { specifier }
-            | Self::External { specifier, .. }
-            | Self::Local { specifier } => Some(specifier),
+            Self::Builtin { specifier } | Self::Local { specifier } => Some(specifier),
+            Self::External { specifier, .. } => Some(specifier),
             Self::Rejected { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn import_attributes(&self) -> Option<&BTreeMap<String, String>> {
+        match self {
+            Self::External {
+                import_attributes, ..
+            } => Some(import_attributes),
+            Self::Builtin { .. } | Self::Local { .. } | Self::Rejected { .. } => None,
         }
     }
 
@@ -139,6 +175,49 @@ impl PackageResolution {
             reason: reason.to_string(),
         }
     }
+}
+
+fn record_import_attribute_candidate(
+    candidates: &mut BTreeMap<String, Option<BTreeMap<String, String>>>,
+    conflicts: &mut BTreeMap<String, ()>,
+    specifier: &str,
+    attributes: Option<BTreeMap<String, String>>,
+) {
+    use std::collections::btree_map::Entry;
+
+    match candidates.entry(specifier.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(attributes);
+        }
+        Entry::Occupied(entry) => {
+            if entry.get() != &attributes {
+                conflicts.insert(specifier.to_string(), ());
+            }
+        }
+    }
+}
+
+fn import_attributes_for_attribution(
+    attribution: &PackageAttributionInput,
+) -> Option<BTreeMap<String, String>> {
+    if attribution
+        .resolved_file
+        .as_deref()
+        .is_some_and(is_json_resolved_file)
+    {
+        return Some(BTreeMap::from([("type".to_string(), "json".to_string())]));
+    }
+    None
+}
+
+fn is_json_resolved_file(resolved_file: &str) -> bool {
+    resolved_file
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(resolved_file)
+        .trim()
+        .to_ascii_lowercase()
+        .ends_with(".json")
 }
 
 fn insert_surface_specifier(
@@ -246,6 +325,8 @@ fn normalize_builtin(specifier: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use reverts_input::{
         PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
     };
@@ -319,6 +400,50 @@ mod tests {
             index.resolve("react/jsx-runtime"),
             PackageResolution::External { .. }
         ));
+    }
+
+    #[test]
+    fn from_attributions_marks_json_package_import_attributes() {
+        let attributions = [PackageAttributionInput::accepted_external(
+            ModuleId(1),
+            "css-color-names",
+            "1.0.1",
+            "css-color-names",
+        )
+        .with_resolved_file("css-color-names@1.0.1/css-color-names.json")];
+
+        let index = PackageSurfaceIndex::from_attributions(&attributions, &[]);
+
+        let PackageResolution::External {
+            import_attributes, ..
+        } = index.resolve("css-color-names")
+        else {
+            panic!("json package root should resolve");
+        };
+        assert_eq!(
+            import_attributes,
+            BTreeMap::from([("type".to_string(), "json".to_string())])
+        );
+    }
+
+    #[test]
+    fn conflicting_import_attribute_evidence_is_not_emitted() {
+        let attributions = [
+            PackageAttributionInput::accepted_external(ModuleId(1), "pkg", "1.0.0", "pkg")
+                .with_resolved_file("pkg@1.0.0/data.json"),
+            PackageAttributionInput::accepted_external(ModuleId(2), "pkg", "1.0.0", "pkg")
+                .with_resolved_file("pkg@1.0.0/index.js"),
+        ];
+
+        let index = PackageSurfaceIndex::from_attributions(&attributions, &[]);
+
+        let PackageResolution::External {
+            import_attributes, ..
+        } = index.resolve("pkg")
+        else {
+            panic!("package root should resolve");
+        };
+        assert!(import_attributes.is_empty());
     }
 
     #[test]
@@ -409,6 +534,7 @@ mod tests {
         let accepted = PackageResolution::External {
             specifier: "pkg/sub".to_string(),
             package_name: "pkg".to_string(),
+            import_attributes: BTreeMap::new(),
         };
         let rejected = PackageResolution::Rejected {
             specifier: "pkg/missing".to_string(),
