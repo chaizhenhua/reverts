@@ -5041,8 +5041,10 @@ fn migratable_runtime_reader_cluster_result(
         // with the same cluster. Writes to runtime state left behind in the
         // helper file would require assigning to an ESM import, so those still
         // block the migration.
+        let local_bindings = local_bindings_in_source(snippet.source.as_str());
         let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
             .into_iter()
+            .filter(|write| !local_bindings.contains(write.as_str()))
             .filter(|write| ctx.prelude.defines(write))
             .collect::<BTreeSet<_>>();
         for write in runtime_writes {
@@ -5383,7 +5385,7 @@ fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bo
     if !keyword_at(source, 0, "function") {
         return false;
     }
-    parse_identifier_after_keyword(source, 0, "function")
+    parse_identifier_after_function_keyword(source, 0)
         .is_some_and(|(name, _)| name == binding.as_str())
 }
 
@@ -5449,6 +5451,14 @@ fn class_body_has_top_level_computed_key(source: &str) -> bool {
             }
             b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
                 cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            // `field = [];` is an instance-field initializer, not a
+            // computed property key. It is evaluated when instances are
+            // constructed, so moving the class with its reader cluster does
+            // not introduce class-definition-time reads.
+            b'=' => {
+                cursor =
+                    find_statement_end(&source[..close], cursor + 1).map_or(close, |end| end + 1);
             }
             b'[' => return true,
             b'(' => {
@@ -6071,7 +6081,7 @@ fn pure_runtime_value_bindings(source: &str) -> BTreeSet<BindingName> {
         if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 {
             if keyword_at(source, cursor, "function")
                 && let Some((binding, next)) =
-                    parse_identifier_after_keyword(source, cursor, "function")
+                    parse_identifier_after_function_keyword(source, cursor)
             {
                 bindings.insert(BindingName::new(binding));
                 cursor = next;
@@ -7245,18 +7255,20 @@ fn identifier_is_declaration_name_after_keyword(source: &str, start: usize, keyw
 }
 
 fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
+    matches!(
+        keyword_before_paren(source, open_paren),
+        Some("if" | "while" | "switch" | "for" | "catch" | "with")
+    )
+}
+
+fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
     let bytes = source.as_bytes();
-    let Some(before) = previous_non_ws(bytes, open_paren) else {
-        return false;
-    };
+    let before = previous_non_ws(bytes, open_paren)?;
     let mut start = before;
     while start > 0 && is_identifier_continue(bytes[start - 1]) {
         start -= 1;
     }
-    matches!(
-        &source[start..=before],
-        "if" | "while" | "switch" | "for" | "catch" | "with"
-    )
+    Some(&source[start..=before])
 }
 
 fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
@@ -7405,8 +7417,9 @@ fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
                 cursor = skip_regex_literal(bytes, cursor);
             }
             _ if keyword_at(source, cursor, "function") => {
+                bindings.insert("arguments".to_string());
                 if let Some((binding, next)) =
-                    parse_identifier_after_keyword(source, cursor, "function")
+                    parse_identifier_after_function_keyword(source, cursor)
                 {
                     bindings.insert(binding.to_string());
                     cursor = next;
@@ -7442,6 +7455,11 @@ fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
                     continue;
                 };
                 let after = skip_ws(bytes, close + 1);
+                if keyword_before_paren(source, cursor) == Some("catch") {
+                    collect_binding_pattern_identifiers(&source[cursor + 1..close], &mut bindings);
+                    cursor = close + 1;
+                    continue;
+                }
                 if !control_flow_keyword_before_paren(source, cursor)
                     && (bytes.get(after) == Some(&b'{')
                         || (bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>')))
@@ -7506,10 +7524,53 @@ fn collect_local_variable_bindings(
                 b'/' if looks_like_regex_literal(bytes, cursor) => {
                     cursor = skip_regex_literal(bytes, cursor);
                 }
+                _ if keyword_at(source, cursor, "function")
+                    && keyword_starts_statement_declaration(source, cursor) =>
+                {
+                    bindings.insert("arguments".to_string());
+                    if let Some((binding, next)) =
+                        parse_identifier_after_function_keyword(source, cursor)
+                    {
+                        bindings.insert(binding.to_string());
+                        cursor = next;
+                    } else {
+                        cursor += "function".len();
+                    }
+                }
+                _ if keyword_at(source, cursor, "class")
+                    && keyword_starts_statement_declaration(source, cursor) =>
+                {
+                    if let Some((binding, next)) =
+                        parse_identifier_after_keyword(source, cursor, "class")
+                    {
+                        bindings.insert(binding.to_string());
+                        cursor = next;
+                    } else {
+                        cursor += "class".len();
+                    }
+                }
+                _ if keyword_at(source, cursor, "var") => {
+                    cursor =
+                        collect_local_variable_bindings(source, cursor + "var".len(), bindings);
+                }
+                _ if keyword_at(source, cursor, "let") => {
+                    cursor =
+                        collect_local_variable_bindings(source, cursor + "let".len(), bindings);
+                }
+                _ if keyword_at(source, cursor, "const") => {
+                    cursor =
+                        collect_local_variable_bindings(source, cursor + "const".len(), bindings);
+                }
                 b'(' => {
                     if let Some(close) = find_matching_paren(source, cursor) {
                         let after = skip_ws(bytes, close + 1);
-                        if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) == Some(&b'>') {
+                        let captures_binding_pattern = keyword_before_paren(source, cursor)
+                            == Some("catch")
+                            || (!control_flow_keyword_before_paren(source, cursor)
+                                && (bytes.get(after) == Some(&b'{')
+                                    || (bytes.get(after) == Some(&b'=')
+                                        && bytes.get(after + 1) == Some(&b'>'))));
+                        if captures_binding_pattern {
                             collect_binding_pattern_identifiers(
                                 &source[cursor + 1..close],
                                 bindings,
@@ -7583,6 +7644,11 @@ fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<Str
     }
 }
 
+fn keyword_starts_statement_declaration(source: &str, cursor: usize) -> bool {
+    let bytes = source.as_bytes();
+    previous_non_ws(bytes, cursor).is_none_or(|index| matches!(bytes[index], b'{' | b'}' | b';'))
+}
+
 fn is_runtime_global_identifier(identifier: &str) -> bool {
     matches!(
         identifier,
@@ -7591,15 +7657,27 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "Array"
             | "ArrayBuffer"
             | "BigInt"
+            | "Blob"
             | "Boolean"
             | "Buffer"
+            | "ByteLengthQueuingStrategy"
+            | "CompressionStream"
+            | "CountQueuingStrategy"
+            | "CustomEvent"
             | "DataView"
             | "Date"
+            | "DecompressionStream"
+            | "DOMException"
             | "Error"
+            | "Event"
+            | "EventTarget"
             | "EvalError"
+            | "File"
             | "Float32Array"
             | "Float64Array"
+            | "FormData"
             | "Function"
+            | "Headers"
             | "Infinity"
             | "Int16Array"
             | "Int32Array"
@@ -7614,15 +7692,22 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "Promise"
             | "Proxy"
             | "RangeError"
+            | "ReadableStream"
             | "ReferenceError"
             | "Reflect"
             | "RegExp"
+            | "Request"
+            | "Response"
+            | "Screen"
             | "Set"
             | "String"
             | "Symbol"
             | "SyntaxError"
             | "TextDecoder"
+            | "TextDecoderStream"
             | "TextEncoder"
+            | "TextEncoderStream"
+            | "TransformStream"
             | "TypeError"
             | "URIError"
             | "URL"
@@ -7633,31 +7718,48 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "Uint8ClampedArray"
             | "WeakMap"
             | "WeakSet"
+            | "WritableStream"
             | "__dirname"
             | "__filename"
+            | "atob"
+            | "browser"
+            | "btoa"
+            | "chrome"
             | "clearImmediate"
             | "clearInterval"
             | "clearTimeout"
             | "console"
+            | "crypto"
             | "decodeURI"
             | "decodeURIComponent"
+            | "document"
             | "encodeURI"
             | "encodeURIComponent"
+            | "eval"
             | "exports"
+            | "fetch"
             | "global"
             | "globalThis"
             | "isFinite"
             | "isNaN"
+            | "localStorage"
+            | "location"
             | "module"
+            | "navigator"
             | "parseFloat"
             | "parseInt"
+            | "performance"
             | "process"
             | "queueMicrotask"
             | "require"
+            | "self"
             | "setImmediate"
             | "setInterval"
             | "setTimeout"
+            | "structuredClone"
             | "undefined"
+            | "window"
+            | "XMLHttpRequest"
     )
 }
 
@@ -10814,7 +10916,7 @@ fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
             }
             _ if depth == 0 && keyword_at(source, cursor, "function") => {
                 if let Some((binding, next)) =
-                    parse_identifier_after_keyword(source, cursor, "function")
+                    parse_identifier_after_function_keyword(source, cursor)
                 {
                     definitions.insert(BindingName::new(binding));
                     cursor = next;
@@ -10971,6 +11073,15 @@ fn parse_identifier_after_keyword<'a>(
     keyword: &str,
 ) -> Option<(&'a str, usize)> {
     parse_identifier(source, skip_ws(source.as_bytes(), cursor + keyword.len()))
+}
+
+fn parse_identifier_after_function_keyword(source: &str, cursor: usize) -> Option<(&str, usize)> {
+    let bytes = source.as_bytes();
+    let mut cursor = skip_ws(bytes, cursor + "function".len());
+    if bytes.get(cursor) == Some(&b'*') {
+        cursor = skip_ws(bytes, cursor + 1);
+    }
+    parse_identifier(source, cursor)
 }
 
 fn keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
@@ -15663,6 +15774,70 @@ mod tests {
     }
 
     #[test]
+    fn runtime_import_identifier_scan_ignores_catch_bindings() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "function reader() { try { return shared; } catch (_) { return _.code || fallback; } }",
+        );
+
+        assert!(identifiers.contains("shared"));
+        assert!(identifiers.contains("fallback"));
+        assert!(!identifiers.contains("_"));
+        assert!(!identifiers.contains("code"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_ignores_function_arguments_object() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "function reader() { return arguments.length ? shared : fallback; }",
+        );
+
+        assert!(identifiers.contains("shared"));
+        assert!(identifiers.contains("fallback"));
+        assert!(!identifiers.contains("arguments"));
+        assert!(!identifiers.contains("length"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_ignores_comma_sequence_locals() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "async function reader() { let y = await new Promise((R, I) => { let x = !1, B = (C) => { R(C); }; B(shared); }); return y; }",
+        );
+
+        assert!(identifiers.contains("shared"));
+        assert!(!identifiers.contains("B"));
+        assert!(!identifiers.contains("C"));
+        assert!(!identifiers.contains("I"));
+        assert!(!identifiers.contains("R"));
+        assert!(!identifiers.contains("x"));
+        assert!(!identifiers.contains("y"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_ignores_web_platform_globals() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "const response = Response.json({ ok: true });\n\
+             const encoded = btoa('x');\n\
+             fetch('/ready');\n\
+             new Event('ready');\n\
+             document.dispatchEvent(new CustomEvent('ready'));\n\
+             window.localStorage.getItem('ready');\n\
+             new XMLHttpRequest();\n\
+             shared;",
+        );
+
+        assert!(identifiers.contains("shared"));
+        assert!(!identifiers.contains("Response"));
+        assert!(!identifiers.contains("btoa"));
+        assert!(!identifiers.contains("fetch"));
+        assert!(!identifiers.contains("Event"));
+        assert!(!identifiers.contains("document"));
+        assert!(!identifiers.contains("CustomEvent"));
+        assert!(!identifiers.contains("window"));
+        assert!(!identifiers.contains("localStorage"));
+        assert!(!identifiers.contains("XMLHttpRequest"));
+    }
+
+    #[test]
     fn runtime_import_identifier_scan_ignores_setter_class_expression_name() {
         let identifiers = super::runtime_import_identifiers_in_source(
             "var init = lazyValue(() => { __reverts_set_$F(class $F extends qP8 { method() { return qP8; } }); });",
@@ -16723,6 +16898,90 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_moves_generator_reader_with_writer() {
+        let prelude = "var shared;\nfunction* streamShared() { yield shared; }\n";
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = streamShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("function* streamShared() { yield shared; }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { streamShared };"));
+        assert!(consumer_source.contains("import { streamShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_moves_async_generator_reader_with_writer() {
+        let prelude = "var shared;\nasync function* streamShared() { yield shared; }\n";
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = streamShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("async function* streamShared() { yield shared; }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { streamShared };"));
+        assert!(consumer_source.contains("import { streamShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn reader_cluster_runtime_var_migration_moves_class_reader_with_writer() {
         let prelude = concat!(
             "var shared;\n",
@@ -16761,6 +17020,58 @@ mod tests {
         );
         assert!(writer_source.contains("var shared;"), "{writer_source}");
         assert!(writer_source.contains("class ReadsShared { value() { return shared; } }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { ReadsShared };"));
+        assert!(consumer_source.contains("import { ReadsShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_allows_instance_field_array_initializer() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { cache = []; value() { return shared; } }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = new ReadsShared().value();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(
+            writer_source.contains("class ReadsShared"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("cache = [];"), "{writer_source}");
+        assert!(
+            writer_source.contains("value() { return shared; }"),
+            "{writer_source}"
+        );
         assert!(writer_source.contains("shared = 1;"));
         assert!(writer_source.contains("export { ReadsShared };"));
         assert!(consumer_source.contains("import { ReadsShared } from './writer.js';"));
@@ -17068,6 +17379,52 @@ mod tests {
         assert!(writer_source.contains("shared = 1;"));
         assert!(writer_source.contains("export { resetShared };"));
         assert!(consumer_source.contains("import { resetShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_ignores_local_write_shadowing_runtime_name() {
+        let prelude = concat!(
+            "var shared;\n",
+            "var cache;\n",
+            "function readShared() { let cache = 0; cache = shared; return cache; }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = readShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(
+            writer_source
+                .contains("function readShared() { let cache = 0; cache = shared; return cache; }"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 1;"), "{writer_source}");
+        assert!(writer_source.contains("export { readShared };"));
+        assert!(consumer_source.contains("import { readShared } from './writer.js';"));
         assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
