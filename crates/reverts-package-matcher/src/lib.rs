@@ -555,6 +555,7 @@ pub fn match_packages_with_pipeline(
     );
 
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
+    promote_dependency_cluster_ownership_matches(rows, &mut package_report);
 
     PackageMatchingPipelineReport {
         package_report,
@@ -826,7 +827,196 @@ fn promote_dependency_closure_ownership_matches(
     rows: &InputRows,
     report: &mut VersionedPackageMatchReport,
 ) {
-    let already_accepted = report
+    let already_accepted = accepted_external_modules(rows, report);
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let mut ownership_by_module = ownership_by_module(rows, report);
+
+    let mut round = 0usize;
+    loop {
+        round += 1;
+        let mut promoted = Vec::<(PackageMatch, DependencyNeighborhoodEvidence)>::new();
+        for module in &rows.modules {
+            if module.kind != ModuleKind::Package
+                || already_accepted.contains(&module.id)
+                || matched_modules.contains(&module.id)
+            {
+                continue;
+            }
+            let Some(package_name) = module.package_name.as_deref() else {
+                continue;
+            };
+            let Some(evidence) = dependency_neighborhood_ownership_evidence(
+                rows,
+                module,
+                package_name,
+                &ownership_by_module,
+            ) else {
+                continue;
+            };
+            promoted.push((
+                PackageMatch {
+                    module_id: module.id,
+                    package_name: package_name.to_string(),
+                    package_version: evidence.package_version.clone(),
+                    export_specifier: package_name.to_string(),
+                    source_path: dependency_neighborhood_source_path(
+                        package_name,
+                        &evidence,
+                        round,
+                    ),
+                    normalized_source_hash: String::new(),
+                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+                    function_signature_matches: evidence.same_package_owned_neighbors,
+                    string_anchor_matches: evidence.owned_neighbors,
+                    external_importable: false,
+                },
+                evidence,
+            ));
+        }
+        if promoted.is_empty() {
+            break;
+        }
+        for (package_match, evidence) in promoted {
+            matched_modules.insert(package_match.module_id);
+            ownership_by_module.insert(
+                package_match.module_id,
+                (
+                    package_match.package_name.clone(),
+                    evidence.package_version.clone(),
+                ),
+            );
+            report.matches.push(package_match);
+        }
+    }
+}
+
+fn promote_dependency_cluster_ownership_matches(
+    rows: &InputRows,
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = accepted_external_modules(rows, report);
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let mut ownership_by_module = ownership_by_module(rows, report);
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+
+    for component in package_dependency_components(rows) {
+        let component_modules = component
+            .iter()
+            .filter_map(|module_id| modules_by_id.get(module_id).copied())
+            .collect::<Vec<_>>();
+        let package_named_count = component_modules
+            .iter()
+            .filter(|module| module.package_name.is_some())
+            .count();
+        if package_named_count < 4 {
+            continue;
+        }
+        let component_owned_total = component
+            .iter()
+            .filter(|module_id| ownership_by_module.contains_key(module_id))
+            .count();
+        if component_owned_total < 3 {
+            continue;
+        }
+        let mut hint_counts = BTreeMap::<String, usize>::new();
+        let mut seed_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
+        for module in &component_modules {
+            if let Some(package_name) = module.package_name.as_deref() {
+                *hint_counts.entry(package_name.to_string()).or_default() += 1;
+            }
+            if let Some((package_name, package_version)) = ownership_by_module.get(&module.id) {
+                *seed_counts
+                    .entry(package_name.clone())
+                    .or_default()
+                    .entry(package_version.clone())
+                    .or_default() += 1;
+            }
+        }
+
+        for (package_name, hint_count) in hint_counts {
+            let Some(version_counts) = seed_counts.get(&package_name) else {
+                continue;
+            };
+            let same_package_seed_count = version_counts.values().sum::<usize>();
+            if same_package_seed_count < 3
+                || same_package_seed_count * 100 < component_owned_total * 70
+                || same_package_seed_count * 100 < hint_count * 10
+            {
+                continue;
+            }
+            let Some((package_version, version_seed_count)) = version_counts
+                .iter()
+                .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+            else {
+                continue;
+            };
+            if *version_seed_count * 100 < same_package_seed_count * 70 {
+                continue;
+            }
+
+            let target_modules = component_modules
+                .iter()
+                .copied()
+                .filter(|module| {
+                    module.package_name.as_deref() == Some(package_name.as_str())
+                        && !already_accepted.contains(&module.id)
+                        && !matched_modules.contains(&module.id)
+                        && module.package_version.as_deref().is_none_or(|expected| {
+                            expected.trim().is_empty() || expected.trim() == package_version
+                        })
+                        && !has_direct_neighborhood_package_contradiction(
+                            rows,
+                            module.id,
+                            package_name.as_str(),
+                            &ownership_by_module,
+                        )
+                })
+                .collect::<Vec<_>>();
+            if target_modules.is_empty() {
+                continue;
+            }
+
+            for module in target_modules {
+                matched_modules.insert(module.id);
+                ownership_by_module
+                    .insert(module.id, (package_name.clone(), package_version.clone()));
+                report.matches.push(PackageMatch {
+                    module_id: module.id,
+                    package_name: package_name.clone(),
+                    package_version: package_version.clone(),
+                    export_specifier: package_name.clone(),
+                    source_path: format!(
+                        "dependency-cluster:{package_name}@{package_version}:owned_seeds={same_package_seed_count}/{component_owned_total}:version_seeds={version_seed_count}:hinted={hint_count}/{package_named_count}:component_size={}",
+                        component.len(),
+                    ),
+                    normalized_source_hash: String::new(),
+                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+                    function_signature_matches: same_package_seed_count,
+                    string_anchor_matches: hint_count,
+                    external_importable: false,
+                });
+            }
+        }
+    }
+}
+
+fn accepted_external_modules(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeSet<ModuleId> {
+    report
         .attributions
         .iter()
         .chain(rows.package_attributions.iter())
@@ -835,12 +1025,13 @@ fn promote_dependency_closure_ownership_matches(
                 && attribution.emission_mode == PackageEmissionMode::ExternalImport
         })
         .map(|attribution| attribution.module_id)
-        .collect::<BTreeSet<_>>();
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
+        .collect()
+}
+
+fn ownership_by_module(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeMap<ModuleId, (String, String)> {
     let mut ownership_by_module = report
         .matches
         .iter()
@@ -872,73 +1063,200 @@ fn promote_dependency_closure_ownership_matches(
             );
         }
     }
+    ownership_by_module
+}
 
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package
-            || already_accepted.contains(&module.id)
-            || matched_modules.contains(&module.id)
-        {
-            continue;
-        }
-        let Some(package_name) = module.package_name.as_deref() else {
+fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
+    let package_modules = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .map(|module| module.id)
+        .collect::<BTreeSet<_>>();
+    let mut adjacency = package_modules
+        .iter()
+        .map(|module_id| (*module_id, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for dependency in &rows.dependencies {
+        let from = dependency.from_module_id;
+        let ModuleDependencyTarget::Module(to) = dependency.target else {
             continue;
         };
-        let mut same_package_by_version = BTreeMap::<String, usize>::new();
-        let mut owned_dependencies = 0usize;
-        for dependency_id in direct_module_dependencies(rows, module.id) {
-            let Some((dependency_package, dependency_version)) =
-                ownership_by_module.get(&dependency_id).cloned()
-            else {
-                continue;
-            };
-            owned_dependencies += 1;
-            if dependency_package == package_name {
-                *same_package_by_version
-                    .entry(dependency_version)
-                    .or_default() += 1;
-            }
-        }
-        let same_package_dependencies = same_package_by_version.values().sum::<usize>();
-        if same_package_dependencies < 2
-            || owned_dependencies == 0
-            || same_package_dependencies * 100 < owned_dependencies * 70
-        {
+        if !package_modules.contains(&from) || !package_modules.contains(&to) {
             continue;
         }
-        let Some((package_version, version_dependency_count)) = same_package_by_version
-            .iter()
-            .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
+        adjacency.entry(from).or_default().insert(to);
+        adjacency.entry(to).or_default().insert(from);
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut components = Vec::new();
+    for module_id in package_modules {
+        if seen.contains(&module_id) {
+            continue;
+        }
+        let mut stack = vec![module_id];
+        let mut component = BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            component.insert(current);
+            if let Some(neighbors) = adjacency.get(&current) {
+                for neighbor in neighbors {
+                    if !seen.contains(neighbor) {
+                        stack.push(*neighbor);
+                    }
+                }
+            }
+        }
+        components.push(component);
+    }
+    components
+}
+
+fn has_direct_neighborhood_package_contradiction(
+    rows: &InputRows,
+    module_id: ModuleId,
+    package_name: &str,
+    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
+) -> bool {
+    let (same, owned) = directional_owned_neighbor_counts(
+        direct_module_neighborhood(rows, module_id)
+            .into_iter()
+            .collect(),
+        package_name,
+        ownership_by_module,
+    );
+    owned > 0 && same * 100 < owned * 50
+}
+
+#[derive(Debug, Clone)]
+struct DependencyNeighborhoodEvidence {
+    package_version: String,
+    same_package_owned_neighbors: usize,
+    owned_neighbors: usize,
+    same_version_owned_neighbors: usize,
+    same_outgoing_neighbors: usize,
+    owned_outgoing_neighbors: usize,
+    same_incoming_neighbors: usize,
+    owned_incoming_neighbors: usize,
+}
+
+fn dependency_neighborhood_ownership_evidence(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_name: &str,
+    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
+) -> Option<DependencyNeighborhoodEvidence> {
+    let mut same_package_by_version = BTreeMap::<String, usize>::new();
+    let mut owned_neighbors = 0usize;
+    for neighbor_id in direct_module_neighborhood(rows, module.id) {
+        let Some((neighbor_package, neighbor_version)) = ownership_by_module.get(&neighbor_id)
         else {
             continue;
         };
-        if let Some(expected_version) = module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            && expected_version != package_version
-        {
-            continue;
+        owned_neighbors += 1;
+        if neighbor_package == package_name {
+            *same_package_by_version
+                .entry(neighbor_version.clone())
+                .or_default() += 1;
         }
-        if *version_dependency_count * 100 < same_package_dependencies * 70 {
-            continue;
-        }
-        matched_modules.insert(module.id);
-        report.matches.push(PackageMatch {
-            module_id: module.id,
-            package_name: package_name.to_string(),
-            package_version: package_version.to_string(),
-            export_specifier: package_name.to_string(),
-            source_path: format!(
-                "dependency-closure:{package_name}@{package_version}:owned_deps={same_package_dependencies}/{owned_dependencies}"
-            ),
-            normalized_source_hash: String::new(),
-            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-            function_signature_matches: same_package_dependencies,
-            string_anchor_matches: owned_dependencies,
-            external_importable: false,
-        });
     }
+    let same_package_owned_neighbors = same_package_by_version.values().sum::<usize>();
+    if same_package_owned_neighbors < 2
+        || owned_neighbors == 0
+        || same_package_owned_neighbors * 100 < owned_neighbors * 70
+    {
+        return None;
+    }
+    let (package_version, same_version_owned_neighbors) = same_package_by_version
+        .iter()
+        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))?;
+    if let Some(expected_version) = module
+        .package_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        && expected_version != package_version
+    {
+        return None;
+    }
+    if *same_version_owned_neighbors * 100 < same_package_owned_neighbors * 70 {
+        return None;
+    }
+
+    let (same_outgoing_neighbors, owned_outgoing_neighbors) = directional_owned_neighbor_counts(
+        direct_module_dependencies(rows, module.id),
+        package_name,
+        ownership_by_module,
+    );
+    let (same_incoming_neighbors, owned_incoming_neighbors) = directional_owned_neighbor_counts(
+        direct_module_dependents(rows, module.id),
+        package_name,
+        ownership_by_module,
+    );
+
+    Some(DependencyNeighborhoodEvidence {
+        package_version: package_version.clone(),
+        same_package_owned_neighbors,
+        owned_neighbors,
+        same_version_owned_neighbors: *same_version_owned_neighbors,
+        same_outgoing_neighbors,
+        owned_outgoing_neighbors,
+        same_incoming_neighbors,
+        owned_incoming_neighbors,
+    })
+}
+
+fn directional_owned_neighbor_counts(
+    neighbor_ids: Vec<ModuleId>,
+    package_name: &str,
+    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
+) -> (usize, usize) {
+    let mut seen = BTreeSet::new();
+    let mut same = 0usize;
+    let mut owned = 0usize;
+    for neighbor_id in neighbor_ids {
+        if !seen.insert(neighbor_id) {
+            continue;
+        }
+        let Some((neighbor_package, _)) = ownership_by_module.get(&neighbor_id) else {
+            continue;
+        };
+        owned += 1;
+        if neighbor_package == package_name {
+            same += 1;
+        }
+    }
+    (same, owned)
+}
+
+fn dependency_neighborhood_source_path(
+    package_name: &str,
+    evidence: &DependencyNeighborhoodEvidence,
+    round: usize,
+) -> String {
+    format!(
+        "dependency-closure:{}@{}:owned_neighbors={}/{}:version_neighbors={}:out={}/{}:in={}/{}:round={}",
+        package_name,
+        evidence.package_version,
+        evidence.same_package_owned_neighbors,
+        evidence.owned_neighbors,
+        evidence.same_version_owned_neighbors,
+        evidence.same_outgoing_neighbors,
+        evidence.owned_outgoing_neighbors,
+        evidence.same_incoming_neighbors,
+        evidence.owned_incoming_neighbors,
+        round,
+    )
+}
+
+fn direct_module_neighborhood(rows: &InputRows, module_id: ModuleId) -> BTreeSet<ModuleId> {
+    direct_module_dependencies(rows, module_id)
+        .into_iter()
+        .chain(direct_module_dependents(rows, module_id))
+        .collect()
 }
 
 fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
@@ -948,6 +1266,18 @@ fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<Modu
         .filter_map(|dependency| match dependency.target {
             ModuleDependencyTarget::Module(target) => Some(target),
             ModuleDependencyTarget::Package { .. } => None,
+        })
+        .collect()
+}
+
+fn direct_module_dependents(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
+    rows.dependencies
+        .iter()
+        .filter_map(|dependency| match dependency.target {
+            ModuleDependencyTarget::Module(target) if target == module_id => {
+                Some(dependency.from_module_id)
+            }
+            ModuleDependencyTarget::Module(_) | ModuleDependencyTarget::Package { .. } => None,
         })
         .collect()
 }
@@ -2168,12 +2498,13 @@ mod tests {
 
     use super::{
         BestVersionMatch, ModuleMatchStrategy, PackageModuleSourceQuality, PackageSource,
-        VersionedPackageMatcher, match_structural_bags,
+        VersionedPackageMatcher, match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality,
     };
     use reverts_input::{
-        InputRows, ModuleInput, PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan,
+        InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
+        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan,
     };
     use reverts_ir::ModuleId;
 
@@ -2695,6 +3026,273 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ModuleMatchStrategy::NormalizedSourceHash
         );
         assert!(!report.matches[0].external_importable);
+    }
+
+    #[test]
+    fn pipeline_promotes_dependency_neighborhood_from_incoming_edges() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "wrapper.js",
+            Some("var wrap = E(() => { return {}; });".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "one.js",
+            Some("export function one(){return 'one-anchor';}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "two.js",
+            Some("export function two(){return 'two-anchor';}".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(10),
+                "wrapper",
+                "pkg/incoming-wrapper.js",
+                "pkg",
+                None,
+            )
+            .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(11), "one", "pkg/one.js", "pkg", None)
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(12), "two", "pkg/two.js", "pkg", None)
+                .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(12),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/one",
+                "one.js",
+                "export function one(){return 'one-anchor';}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/two",
+                "two.js",
+                "export function two(){return 'two-anchor';}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 3);
+        let wrapper_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == ModuleId(10))
+            .expect("incoming wrapper should be promoted");
+        assert_eq!(
+            wrapper_match.strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(wrapper_match.source_path.contains("owned_neighbors=2/2"));
+        assert!(wrapper_match.source_path.contains("out=0/0"));
+        assert!(wrapper_match.source_path.contains("in=2/2"));
+        assert!(!wrapper_match.external_importable);
+    }
+
+    #[test]
+    fn pipeline_iterates_dependency_neighborhood_ownership() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "first-wrapper.js",
+            Some("var wrap = E(() => { one(); two(); });".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "one.js",
+            Some("export function one(){return 'one-anchor';}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "two.js",
+            Some("export function two(){return 'two-anchor';}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            4,
+            "second-wrapper.js",
+            Some("var secondWrap = E(() => { wrap(); two(); });".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(ModuleId(10), "wrapper", "pkg/first-wrapper.js", "pkg", None)
+                .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(11), "one", "pkg/one.js", "pkg", None)
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(12), "two", "pkg/two.js", "pkg", None)
+                .with_source_file(3),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(13),
+                "secondWrapper",
+                "pkg/second-wrapper.js",
+                "pkg",
+                None,
+            )
+            .with_source_file(4),
+        );
+        for (from, to) in [
+            (ModuleId(10), ModuleId(11)),
+            (ModuleId(10), ModuleId(12)),
+            (ModuleId(13), ModuleId(10)),
+            (ModuleId(13), ModuleId(12)),
+        ] {
+            rows.dependencies.push(ModuleDependencyInput {
+                from_module_id: from,
+                target: ModuleDependencyTarget::Module(to),
+            });
+        }
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/one",
+                "one.js",
+                "export function one(){return 'one-anchor';}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/two",
+                "two.js",
+                "export function two(){return 'two-anchor';}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 4);
+        let second_wrapper_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == ModuleId(13))
+            .expect("second wrapper should be promoted in a later round");
+        assert!(
+            second_wrapper_match
+                .source_path
+                .contains("owned_neighbors=2/2")
+        );
+        assert!(second_wrapper_match.source_path.contains("round=2"));
+    }
+
+    #[test]
+    fn pipeline_promotes_dependency_cluster_ownership() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        for (id, path, source) in [
+            (
+                1,
+                "cluster-member.js",
+                "var clusterMember = E(() => { one(); });",
+            ),
+            (2, "one.js", "export function one(){return 'one-anchor';}"),
+            (3, "two.js", "export function two(){return 'two-anchor';}"),
+            (
+                4,
+                "three.js",
+                "export function three(){return 'three-anchor';}",
+            ),
+        ] {
+            rows.source_files
+                .push(SourceFileInput::new(id, path, Some(source.to_string())));
+        }
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(10),
+                "clusterMember",
+                "pkg/cluster-member.js",
+                "pkg",
+                None,
+            )
+            .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(11), "one", "pkg/one.js", "pkg", None)
+                .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(12), "two", "pkg/two.js", "pkg", None)
+                .with_source_file(3),
+        );
+        rows.modules.push(
+            ModuleInput::package(ModuleId(13), "three", "pkg/three.js", "pkg", None)
+                .with_source_file(4),
+        );
+        for (from, to) in [
+            (ModuleId(10), ModuleId(11)),
+            (ModuleId(11), ModuleId(12)),
+            (ModuleId(12), ModuleId(13)),
+        ] {
+            rows.dependencies.push(ModuleDependencyInput {
+                from_module_id: from,
+                target: ModuleDependencyTarget::Module(to),
+            });
+        }
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/one",
+                "one.js",
+                "export function one(){return 'one-anchor';}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/two",
+                "two.js",
+                "export function two(){return 'two-anchor';}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/three",
+                "three.js",
+                "export function three(){return 'three-anchor';}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 4);
+        let cluster_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == ModuleId(10))
+            .expect("cluster member should be promoted");
+        assert!(
+            cluster_match
+                .source_path
+                .contains("dependency-cluster:pkg@1.2.3")
+        );
+        assert!(cluster_match.source_path.contains("owned_seeds=3/3"));
+        assert!(!cluster_match.external_importable);
     }
 
     #[test]
