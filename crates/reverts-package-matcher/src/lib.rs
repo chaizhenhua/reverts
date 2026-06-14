@@ -3824,106 +3824,116 @@ fn force_externalize_remaining_package_modules(
     let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
     let mut forced = 0usize;
 
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
-            continue;
+    loop {
+        let mut round_forced = 0usize;
+        for module in &rows.modules {
+            if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
+                continue;
+            }
+            let Some(package_name) =
+                module
+                    .package_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|package_name| {
+                        !package_name.is_empty() && is_valid_package_name(package_name)
+                    })
+            else {
+                continue;
+            };
+            if !matched_package_names.contains(package_name) {
+                continue;
+            }
+            let source_only_match = source_only_matches.get(&module.id);
+            let package_version =
+                forced_external_package_version(module, source_only_match, package_sources)
+                    .unwrap_or_else(|| "*".to_string());
+            let module_source = rows
+                .module_source_slice(module.id)
+                .map(|slice| slice.source)
+                .unwrap_or_default();
+            let standard_target = forced_external_import_target(
+                rows,
+                module,
+                package_name,
+                package_version.as_str(),
+                source_only_match,
+                &external_source_index,
+            );
+            let Some(target) = standard_target.or_else(|| {
+                source_only_match.and_then(|package_match| {
+                    dependency_graph_source_fingerprint_external_import_target(
+                        rows,
+                        module,
+                        package_match,
+                        &external_source_index,
+                        module_source,
+                        &concrete_sources_by_module,
+                    )
+                })
+            }) else {
+                continue;
+            };
+            let target_source_path = target.source_path.clone();
+            let accepted_package_version = package_version.clone();
+            let mut attribution = PackageAttributionInput::accepted_external(
+                module.id,
+                package_name,
+                package_version.as_str(),
+                target.export_specifier.as_str(),
+            )
+            .with_resolved_file(target.source_path.as_str());
+            if let Some((_package_name, Some(subpath))) =
+                split_bare_specifier(target.export_specifier.as_str())
+            {
+                attribution = attribution.with_subpath(subpath);
+            }
+            report.attributions.push(attribution);
+            if let Some(index) = source_only_match_indices.get(&module.id).copied() {
+                let package_match = &mut report.matches[index];
+                package_match.package_name = package_name.to_string();
+                package_match.package_version = package_version.clone();
+                package_match.export_specifier = target.export_specifier;
+                package_match.source_path = target.source_path;
+                package_match.external_importable = true;
+            } else {
+                report.matches.push(PackageMatch {
+                    module_id: module.id,
+                    package_name: package_name.to_string(),
+                    package_version: package_version.clone(),
+                    export_specifier: target.export_specifier,
+                    source_path: target.source_path,
+                    normalized_source_hash: String::new(),
+                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+                    function_signature_matches: source_only_match
+                        .map(|package_match| package_match.function_signature_matches)
+                        .unwrap_or_default(),
+                    string_anchor_matches: source_only_match
+                        .map(|package_match| package_match.string_anchor_matches)
+                        .unwrap_or_default(),
+                    external_importable: true,
+                });
+            }
+            accepted_modules.insert(module.id);
+            if let Some(concrete) = concrete_package_source_from_parts(
+                module.id,
+                package_name,
+                report
+                    .matches
+                    .iter()
+                    .find(|package_match| package_match.module_id == module.id)
+                    .map(|package_match| package_match.package_version.as_str())
+                    .unwrap_or(accepted_package_version.as_str()),
+                target_source_path.as_str(),
+            ) {
+                concrete_sources_by_module.insert(module.id, concrete);
+            }
+            forced += 1;
+            round_forced += 1;
         }
-        let Some(package_name) = module
-            .package_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|package_name| !package_name.is_empty() && is_valid_package_name(package_name))
-        else {
-            continue;
-        };
-        if !matched_package_names.contains(package_name) {
-            continue;
+        if round_forced == 0 {
+            break;
         }
-        let source_only_match = source_only_matches.get(&module.id);
-        let package_version =
-            forced_external_package_version(module, source_only_match, package_sources)
-                .unwrap_or_else(|| "*".to_string());
-        let module_source = rows
-            .module_source_slice(module.id)
-            .map(|slice| slice.source)
-            .unwrap_or_default();
-        let standard_target = forced_external_import_target(
-            rows,
-            module,
-            package_name,
-            package_version.as_str(),
-            source_only_match,
-            &external_source_index,
-        );
-        let Some(target) = standard_target.or_else(|| {
-            source_only_match.and_then(|package_match| {
-                dependency_graph_source_fingerprint_external_import_target(
-                    rows,
-                    module,
-                    package_match,
-                    &external_source_index,
-                    module_source,
-                    &concrete_sources_by_module,
-                )
-            })
-        }) else {
-            continue;
-        };
-        let target_source_path = target.source_path.clone();
-        let accepted_package_version = package_version.clone();
-        let mut attribution = PackageAttributionInput::accepted_external(
-            module.id,
-            package_name,
-            package_version.as_str(),
-            target.export_specifier.as_str(),
-        )
-        .with_resolved_file(target.source_path.as_str());
-        if let Some((_package_name, Some(subpath))) =
-            split_bare_specifier(target.export_specifier.as_str())
-        {
-            attribution = attribution.with_subpath(subpath);
-        }
-        report.attributions.push(attribution);
-        if let Some(index) = source_only_match_indices.get(&module.id).copied() {
-            let package_match = &mut report.matches[index];
-            package_match.package_name = package_name.to_string();
-            package_match.package_version = package_version.clone();
-            package_match.export_specifier = target.export_specifier;
-            package_match.source_path = target.source_path;
-            package_match.external_importable = true;
-        } else {
-            report.matches.push(PackageMatch {
-                module_id: module.id,
-                package_name: package_name.to_string(),
-                package_version: package_version.clone(),
-                export_specifier: target.export_specifier,
-                source_path: target.source_path,
-                normalized_source_hash: String::new(),
-                strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-                function_signature_matches: source_only_match
-                    .map(|package_match| package_match.function_signature_matches)
-                    .unwrap_or_default(),
-                string_anchor_matches: source_only_match
-                    .map(|package_match| package_match.string_anchor_matches)
-                    .unwrap_or_default(),
-                external_importable: true,
-            });
-        }
-        accepted_modules.insert(module.id);
-        if let Some(concrete) = concrete_package_source_from_parts(
-            module.id,
-            package_name,
-            report
-                .matches
-                .iter()
-                .find(|package_match| package_match.module_id == module.id)
-                .map(|package_match| package_match.package_version.as_str())
-                .unwrap_or(accepted_package_version.as_str()),
-            target_source_path.as_str(),
-        ) {
-            concrete_sources_by_module.insert(module.id, concrete);
-        }
-        forced += 1;
     }
     forced
 }
@@ -7436,6 +7446,137 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                     .starts_with("forced-external:dependency-graph-source:string-graph:")),
             "{attribution:?}"
         );
+    }
+
+    #[test]
+    fn pipeline_iterates_dependency_graph_source_fingerprint_matches() {
+        let module_a_source = r#"
+            export function runtimeA(input) {
+                return [
+                    "a-alpha", "a-beta", "a-gamma", "a-delta",
+                    "a-epsilon", "a-zeta", "a-eta", "a-theta",
+                    input
+                ].join(":");
+            }
+        "#;
+        let module_b_source = r#"
+            export function runtimeB(input) {
+                return [
+                    "b-alpha", "b-beta", "b-gamma", "b-delta",
+                    "b-epsilon", "b-zeta", "b-eta", "b-theta",
+                    input
+                ].join(":");
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(module_a_source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/opaque-a.ts".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "b.js",
+            Some(module_b_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "c.js",
+            Some("export const seedC = 'seed-c';".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "b",
+                "modules/11-pkg/opaque-b.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(12),
+                "c",
+                "pkg/c.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(12), "pkg", "1.0.0", "pkg/c")
+                .with_resolved_file("pkg@1.0.0/lib/c.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/a",
+                "pkg@1.0.0/lib/a.js",
+                r#"
+                const b = require("./b");
+                exports.runtimeA = function runtimeA(input) {
+                    return [
+                        "a-alpha", "a-beta", "a-gamma", "a-delta",
+                        "a-epsilon", "a-zeta", "a-eta", "a-theta",
+                        input
+                    ].join(":");
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/b",
+                "pkg@1.0.0/lib/b.js",
+                r#"
+                const c = require("./c");
+                exports.runtimeB = function runtimeB(input) {
+                    return [
+                        "b-alpha", "b-beta", "b-gamma", "b-delta",
+                        "b-epsilon", "b-zeta", "b-eta", "b-theta",
+                        input
+                    ].join(":");
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/c",
+                "pkg@1.0.0/lib/c.js",
+                "exports.seedC = 'seed-c';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        for (module_id, expected_specifier) in [(ModuleId(10), "pkg/a"), (ModuleId(11), "pkg/b")] {
+            let attribution = report
+                .package_report
+                .attributions
+                .iter()
+                .find(|attribution| attribution.module_id == module_id)
+                .unwrap_or_else(|| panic!("module {module_id:?} should be externalized"));
+            assert_eq!(
+                attribution.export_specifier.as_deref(),
+                Some(expected_specifier)
+            );
+            assert!(
+                attribution
+                    .resolved_file
+                    .as_deref()
+                    .is_some_and(|resolved| resolved
+                        .starts_with("forced-external:dependency-graph-source:string-graph:")),
+                "{attribution:?}"
+            );
+        }
     }
 
     #[test]
