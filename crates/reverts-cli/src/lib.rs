@@ -486,6 +486,24 @@ fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrat
     });
     for (reason, count) in reasons {
         println!("  {}={}", reason.as_str(), count);
+        if std::env::var_os("REVERTS_RUNTIME_BLOCKER_EXAMPLES").is_some() {
+            let examples = report
+                .binding_statuses
+                .iter()
+                .filter_map(|(key, status)| match status {
+                    RuntimeSetterMigrationBindingStatus::Blocked(blocked_reason)
+                        if *blocked_reason == reason =>
+                    {
+                        Some(format!("{}:{}", key.source_file_id, key.binding.as_str()))
+                    }
+                    _ => None,
+                })
+                .take(10)
+                .collect::<Vec<_>>();
+            if !examples.is_empty() {
+                println!("    examples: {}", examples.join(", "));
+            }
+        }
     }
 }
 
@@ -6175,7 +6193,7 @@ mod tests {
         let files = vec![
             EmittedFile {
                 path: "modules/runtime/source-1-helpers.ts".to_string(),
-                source: "// @ts-nocheck\nexport { X } from '../real.js';\nfunction __reverts_set_X(v) { X = v; return v; }\n".to_string(),
+                source: "// @ts-nocheck\nexport { X } from '../real.js';\nfunction __reverts_set_X(value) { return X = value; }\n".to_string(),
             },
             EmittedFile {
                 path: "modules/consumer.ts".to_string(),
