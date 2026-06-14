@@ -2385,6 +2385,7 @@ struct PackageRuntimeHelperUsage {
     public_bindings: BTreeSet<BindingName>,
     required_bindings: BTreeSet<BindingName>,
     setter_bindings: BTreeSet<BindingName>,
+    consumer_modules: BTreeSet<ModuleId>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -2784,6 +2785,7 @@ fn emit_package_runtime_helper_import(
         .used_package_runtime_helper_files
         .entry(key.clone())
         .or_default();
+    usage.consumer_modules.insert(emitter.module_id);
     usage.public_bindings.extend(bindings.iter().cloned());
     usage.required_bindings.extend(bindings.iter().cloned());
     usage
@@ -2815,6 +2817,87 @@ fn emit_package_runtime_helper_import(
             None,
         ));
     }
+}
+
+fn inline_package_runtime_helper_into_single_consumer(
+    program: &EnrichedProgram,
+    plan: &mut EmitPlan,
+    usage: &PackageRuntimeHelperUsage,
+    helper_path: &str,
+    helper_closure: &ClosedRuntimeHelperSource,
+    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    package_init_shims: &BTreeSet<BindingName>,
+) -> Result<bool, PlanError> {
+    let Some(consumer_module) = usage.consumer_modules.iter().next().copied() else {
+        return Ok(false);
+    };
+    if usage.consumer_modules.len() != 1 {
+        return Ok(false);
+    }
+    if helper_closure.source.contains("lazyModule(") || helper_closure.source.contains("lazyValue(")
+    {
+        return Ok(false);
+    }
+    let Some(consumer_path) = module_output_path(program, consumer_module) else {
+        return Ok(false);
+    };
+    let helper_specifier = relative_import_specifier(consumer_path.as_str(), helper_path);
+
+    for (module_id, bindings) in helper_imports {
+        ensure_planned_module_exports(plan, program, *module_id, bindings);
+    }
+
+    let mut replacement = Vec::<String>::new();
+    for (module_id, bindings) in helper_imports {
+        let Some(module_path) = module_output_path(program, *module_id) else {
+            continue;
+        };
+        let specifier = relative_import_specifier(consumer_path.as_str(), module_path.as_str());
+        replacement.push(named_import_statement(bindings.iter(), specifier.as_str()));
+    }
+    for binding in package_init_shims {
+        replacement.push(noop_function_statement(binding));
+    }
+    if !helper_closure.source.trim().is_empty() {
+        replacement.push(helper_closure.source.clone());
+    }
+
+    let Some(file) = plan
+        .files
+        .iter_mut()
+        .find(|file| file.path == consumer_path)
+    else {
+        return Ok(false);
+    };
+    let mut inserted = false;
+    let mut body = Vec::<String>::new();
+    for source in std::mem::take(&mut file.body) {
+        if parse_generated_named_import_statement(source.as_str())
+            .is_some_and(|(_bindings, specifier)| specifier == helper_specifier)
+        {
+            if !inserted {
+                body.extend(replacement.iter().cloned());
+                inserted = true;
+            }
+            continue;
+        }
+        body.push(source);
+    }
+    if !inserted {
+        file.body = body;
+        return Ok(false);
+    }
+
+    if !usage.setter_bindings.is_empty() {
+        for source in &mut body {
+            *source =
+                inline_internal_setter_calls_for_bindings(source.as_str(), &usage.setter_bindings);
+        }
+    }
+    file.body = body;
+    file.coalesce_generated_named_imports();
+
+    Ok(true)
 }
 
 fn emit_package_runtime_helper_files(
@@ -2866,6 +2949,18 @@ fn emit_package_runtime_helper_files(
                 path: helper_path,
                 bindings: unresolved.into_iter().collect(),
             });
+        }
+
+        if inline_package_runtime_helper_into_single_consumer(
+            program,
+            plan,
+            usage,
+            helper_path.as_str(),
+            &helper_closure,
+            &helper_imports,
+            &package_init_shims,
+        )? {
+            continue;
         }
 
         let mut file = PlannedFile::new(helper_path.clone());
@@ -11348,6 +11443,24 @@ fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
 /// module mutation channel (the setter function) is still defined and
 /// exported afterwards — only the runtime's own internal calls collapse.
 fn inline_internal_setter_calls(source: &str) -> String {
+    inline_internal_setter_calls_matching(source, None)
+}
+
+fn inline_internal_setter_calls_for_bindings(
+    source: &str,
+    bindings: &BTreeSet<BindingName>,
+) -> String {
+    if bindings.is_empty() {
+        source.to_string()
+    } else {
+        inline_internal_setter_calls_matching(source, Some(bindings))
+    }
+}
+
+fn inline_internal_setter_calls_matching(
+    source: &str,
+    allowed_bindings: Option<&BTreeSet<BindingName>>,
+) -> String {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
     let mut cursor = 0;
@@ -11382,6 +11495,10 @@ fn inline_internal_setter_calls(source: &str) -> String {
             continue;
         };
         if target.is_empty() {
+            out.push_str(ident);
+            continue;
+        }
+        if allowed_bindings.is_some_and(|bindings| !bindings.contains(&BindingName::new(target))) {
             out.push_str(ident);
             continue;
         }
@@ -15273,7 +15390,7 @@ mod tests {
     }
 
     #[test]
-    fn package_only_runtime_helper_moves_to_package_runtime_island() {
+    fn package_only_runtime_helper_inlines_into_single_consumer() {
         let prelude = "function packageHelper() { return 1; }\n";
         let package_body = "var value = packageHelper();\nexport { value };\n";
         let source = format!("{prelude}{package_body}");
@@ -15300,26 +15417,137 @@ mod tests {
 
         let plan = plan_from_rows(rows);
         let package_source = planned_source(&plan, "modules/package.ts");
+
+        assert!(
+            package_source.contains("function packageHelper() { return 1; }"),
+            "{package_source}"
+        );
+        assert!(
+            !package_source.contains("package-runtime"),
+            "{package_source}"
+        );
+        assert!(
+            planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+            "central runtime helper should not be emitted for package-only helper"
+        );
+        assert!(
+            planned_source_opt(
+                &plan,
+                "modules/package-runtime/fixture-package-1.0.0/source-1-helpers.ts"
+            )
+            .is_none(),
+            "single-consumer package helper should be inlined instead of emitted as a helper file"
+        );
+    }
+
+    #[test]
+    fn package_runtime_single_consumer_inlining_eliminates_setter_functions() {
+        let prelude = "function seed() { return 0; }\nvar shared = seed();\n";
+        let package_body = "shared = 1;\nvar value = shared;\nexport { value };\n";
+        let source = format!("{prelude}{package_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::rejected_source(
+                ModuleId(1),
+                "fixture-package",
+                "fixture package stays source-backed in planner fixture",
+            ));
+
+        let plan = plan_from_rows(rows);
+        let package_source = planned_source(&plan, "modules/package.ts");
+
+        assert!(package_source.contains("function seed() { return 0; }"));
+        assert!(package_source.contains("var shared = seed();"));
+        assert!(package_source.contains("(shared = 1);"), "{package_source}");
+        assert!(!package_source.contains("__reverts_set_shared"));
+        assert!(
+            planned_source_opt(
+                &plan,
+                "modules/package-runtime/fixture-package-1.0.0/source-1-helpers.ts"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn package_runtime_multi_consumer_keeps_package_runtime_island() {
+        let prelude = "function sharedHelper() { return 1; }\n";
+        let left_body = "var leftValue = sharedHelper();\nexport { leftValue };\n";
+        let right_body = "var rightValue = sharedHelper();\nexport { rightValue };\n";
+        let source = format!("{prelude}{left_body}{right_body}");
+        let left_start = prelude.len() as u32;
+        let left_end = left_start + left_body.len() as u32;
+        let right_end = source.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "left",
+                "modules/left.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(left_start, left_end)),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "right",
+                "modules/right.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(left_end, right_end)),
+        );
+        for module_id in [ModuleId(1), ModuleId(2)] {
+            rows.package_attributions
+                .push(PackageAttributionInput::rejected_source(
+                    module_id,
+                    "fixture-package",
+                    "fixture package stays source-backed in planner fixture",
+                ));
+        }
+
+        let plan = plan_from_rows(rows);
+        let left_source = planned_source(&plan, "modules/left.ts");
+        let right_source = planned_source(&plan, "modules/right.ts");
         let island_source = planned_source(
             &plan,
             "modules/package-runtime/fixture-package-1.0.0/source-1-helpers.ts",
         );
 
         assert!(
-            package_source.contains(
-                "import { packageHelper } from './package-runtime/fixture-package-1.0.0/source-1-helpers.js';"
+            left_source.contains(
+                "import { sharedHelper } from './package-runtime/fixture-package-1.0.0/source-1-helpers.js';"
             ),
-            "{package_source}"
+            "{left_source}"
         );
         assert!(
-            island_source.contains("function packageHelper() { return 1; }"),
-            "{island_source}"
+            right_source.contains(
+                "import { sharedHelper } from './package-runtime/fixture-package-1.0.0/source-1-helpers.js';"
+            ),
+            "{right_source}"
         );
-        assert!(island_source.contains("export { packageHelper };"));
-        assert!(
-            planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
-            "central runtime helper should not be emitted for package-only helper"
-        );
+        assert!(island_source.contains("function sharedHelper() { return 1; }"));
+        assert!(island_source.contains("export { sharedHelper };"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
     }
 
     #[test]
