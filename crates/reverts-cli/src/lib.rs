@@ -5683,6 +5683,8 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
         "normalized_source_adapter"
     } else if source_path.starts_with("ownership-source-match:") {
         "ownership_source_match"
+    } else if source_path.starts_with("forced-external:export-members:") {
+        "export_members_adapter"
     } else if source_path.starts_with("forced-external:semantic-export:") {
         "semantic_export"
     } else if source_path.starts_with("forced-external:semantic-source:") {
@@ -7805,6 +7807,37 @@ mod tests {
                 RuntimeDependency {
                     package_name: "react-devtools-core".to_string(),
                     package_version: "4.28.5".to_string(),
+                },
+            ],
+        )
+        .expect("project should be written");
+
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(".npmrc")).expect("npmrc"),
+            "legacy-peer-deps=true\n"
+        );
+    }
+
+    #[test]
+    fn project_writer_emits_npmrc_for_externalized_zod_anthropic_peer_conflict() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let files = vec![EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nconsole.log('ok');".to_string(),
+        }];
+
+        write_emitted_project(
+            &files,
+            &[],
+            tempdir.path(),
+            &[
+                RuntimeDependency {
+                    package_name: "@anthropic-ai/sdk".to_string(),
+                    package_version: "0.91.1".to_string(),
+                },
+                RuntimeDependency {
+                    package_name: "zod".to_string(),
+                    package_version: "3.22.5".to_string(),
                 },
             ],
         )

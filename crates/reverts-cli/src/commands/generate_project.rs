@@ -154,7 +154,7 @@ fn write_typescript_project_scaffold(
 // Generated projects preserve the package versions proven from the bundled
 // source. Modern npm peer-dependency resolution can reject historical
 // lockfile combinations even though they are the versions that were bundled,
-// so only known source-preservation conflicts opt into legacy peer semantics.
+// so only known generated-output peer conflicts opt into legacy peer semantics.
 const TYPESCRIPT_NPMRC: &str = r"legacy-peer-deps=true
 ";
 
@@ -169,6 +169,7 @@ fn should_write_legacy_peer_deps_npmrc(runtime_dependencies: &[RuntimeDependency
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     has_unsatisfied_ink_7_peer_dependency(&dependency_versions)
+        || has_unsatisfied_anthropic_zod_peer_dependency(&dependency_versions)
 }
 
 fn has_unsatisfied_ink_7_peer_dependency(
@@ -188,6 +189,18 @@ fn has_unsatisfied_ink_7_peer_dependency(
             .get("react-devtools-core")
             .copied()
             .is_some_and(|version| !version_satisfies(version, ">=6.1.2"))
+}
+
+fn has_unsatisfied_anthropic_zod_peer_dependency(
+    dependency_versions: &std::collections::BTreeMap<&str, &str>,
+) -> bool {
+    if !dependency_versions.contains_key("@anthropic-ai/sdk") {
+        return false;
+    }
+    dependency_versions
+        .get("zod")
+        .copied()
+        .is_some_and(|version| !version_satisfies(version, "^3.25.0 || ^4.0.0"))
 }
 
 fn version_satisfies(version: &str, requirement: &str) -> bool {

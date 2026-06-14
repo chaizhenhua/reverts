@@ -28,6 +28,7 @@ pub use tier::{
     try_feature_similarity, try_structural_anchored, try_structural_only,
 };
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -37,12 +38,15 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind, Visit,
     ast::{
-        Argument, ArrowFunctionExpression, CallExpression, ExportAllDeclaration,
-        ExportNamedDeclaration, Expression, ImportDeclaration, ImportExpression, TemplateElement,
+        Argument, ArrowFunctionExpression, BindingPattern, BindingPatternKind, CallExpression,
+        Declaration, ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, ImportDeclaration, ImportExpression, ModuleExportName,
+        ObjectExpression, ObjectPropertyKind, PropertyKey, TemplateElement,
     },
     visit::walk::{
-        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
-        walk_import_expression, walk_template_element,
+        walk_assignment_expression, walk_call_expression, walk_export_all_declaration,
+        walk_export_default_declaration, walk_export_named_declaration, walk_import_expression,
+        walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -1453,7 +1457,8 @@ fn promote_importable_ownership_matches(
             package_match.package_name.as_str(),
             package_match.package_version.as_str(),
             import_target.export_specifier.as_str(),
-        );
+        )
+        .with_resolved_file(import_target.source_path.as_str());
         if let Some((_package_name, Some(subpath))) =
             split_bare_specifier(import_target.export_specifier.as_str())
         {
@@ -1493,18 +1498,30 @@ struct ExternalImportTarget {
 
 #[derive(Debug, Default)]
 struct ExternalImportSourceIndex<'a> {
+    all_by_version_path:
+        BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
     by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
     normalized_by_version_hash:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
+    export_members_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl<'a> ExternalImportSourceIndex<'a> {
     fn build(package_sources: &'a [PackageSource]) -> Self {
         let mut index = Self::default();
-        for source in package_sources
-            .iter()
-            .filter(|source| source.external_importable)
-        {
+        for source in package_sources {
+            index
+                .all_by_version_path
+                .entry(source.package_name.clone())
+                .or_default()
+                .entry(source.package_version.clone())
+                .or_default()
+                .entry(source.source_path.clone())
+                .or_default()
+                .push(source);
+            if !source.external_importable {
+                continue;
+            }
             index
                 .by_version
                 .entry(source.package_name.clone())
@@ -1527,6 +1544,13 @@ impl<'a> ExternalImportSourceIndex<'a> {
                     .push(source);
             }
         }
+        for versions in index.all_by_version_path.values_mut() {
+            for paths in versions.values_mut() {
+                for sources in paths.values_mut() {
+                    sort_external_sources(sources);
+                }
+            }
+        }
         for versions in index.by_version.values_mut() {
             for sources in versions.values_mut() {
                 sort_external_sources(sources);
@@ -1540,6 +1564,20 @@ impl<'a> ExternalImportSourceIndex<'a> {
             }
         }
         index
+    }
+
+    fn all_sources_by_path(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        source_path: &str,
+    ) -> &[&'a PackageSource] {
+        self.all_by_version_path
+            .get(package_name)
+            .and_then(|versions| versions.get(package_version))
+            .and_then(|paths| paths.get(source_path))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
@@ -1562,6 +1600,22 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .and_then(|hashes| hashes.get(normalized_hash))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    fn export_members(&self, source: &PackageSource) -> BTreeSet<String> {
+        let key = format!(
+            "{}@{}:{}",
+            source.package_name, source.package_version, source.source_path
+        );
+        if let Some(members) = self.export_members_by_source_path.borrow().get(&key) {
+            return members.clone();
+        }
+        let members =
+            exported_members_from_source(source.source_path.as_str(), source.source.as_str());
+        self.export_members_by_source_path
+            .borrow_mut()
+            .insert(key, members.clone());
+        members
     }
 }
 
@@ -1634,6 +1688,13 @@ fn resolve_external_import_target_with_index(
         external_source_index,
         module_source,
     ) {
+        return Some(target);
+    }
+
+    if let Some(package_match) = package_match
+        && let Some(target) =
+            export_member_external_package_source(package_match, external_source_index)
+    {
         return Some(target);
     }
 
@@ -1886,6 +1947,680 @@ fn normalized_source_external_package_source(
         export_specifier: best.export_specifier.clone(),
         source_path: format!("normalized-source-export:{}", best.source_path),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ExportMemberSourceProof {
+    BarrelReference,
+    BuildVariantPeer,
+    SourceEquivalent,
+}
+
+impl ExportMemberSourceProof {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BarrelReference => "barrel-reference",
+            Self::BuildVariantPeer => "build-variant-peer",
+            Self::SourceEquivalent => "source-equivalent",
+        }
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::BarrelReference => 1,
+            Self::BuildVariantPeer => 2,
+            Self::SourceEquivalent => 3,
+        }
+    }
+}
+
+fn export_member_external_package_source(
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+) -> Option<ExternalImportTarget> {
+    if !source_only_match_can_be_promoted_to_import(package_match.strategy) {
+        return None;
+    }
+    let matched_sources = external_source_index.all_sources_by_path(
+        package_match.package_name.as_str(),
+        package_match.package_version.as_str(),
+        package_match.source_path.as_str(),
+    );
+    if matched_sources.is_empty() {
+        return None;
+    }
+
+    let matched_members = matched_sources
+        .iter()
+        .flat_map(|source| external_source_index.export_members(source))
+        .filter(|member| is_usable_export_member(member))
+        .collect::<BTreeSet<_>>();
+    if !export_member_set_is_strong(matched_members.iter()) {
+        return None;
+    }
+
+    let mut candidates = Vec::<(&PackageSource, ExportMemberSourceProof)>::new();
+    for external in external_source_index.sources(
+        package_match.package_name.as_str(),
+        package_match.package_version.as_str(),
+    ) {
+        let external_members = external_source_index.export_members(external);
+        if !matched_members.is_subset(&external_members) {
+            continue;
+        }
+        let Some(proof) = matched_sources
+            .iter()
+            .filter_map(|matched| {
+                export_member_source_proof(matched, external, &matched_members, &external_members)
+            })
+            .max_by(|left, right| left.rank().cmp(&right.rank()))
+        else {
+            continue;
+        };
+        candidates.push((external, proof));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        right
+            .1
+            .rank()
+            .cmp(&left.1.rank())
+            .then_with(|| {
+                package_source_external_import_rank(left.0)
+                    .cmp(&package_source_external_import_rank(right.0))
+            })
+            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+    let best_proof = candidates.first()?.1;
+    let best_rank = package_source_external_import_rank(candidates.first()?.0);
+    let best = candidates
+        .into_iter()
+        .filter(|(source, proof)| {
+            *proof == best_proof && package_source_external_import_rank(source) == best_rank
+        })
+        .map(|(source, _proof)| source)
+        .collect::<Vec<_>>();
+    let export_specifiers = best
+        .iter()
+        .map(|source| source.export_specifier.as_str())
+        .collect::<BTreeSet<_>>();
+    if export_specifiers.len() != 1 {
+        return None;
+    }
+    let export_specifier = export_specifiers.into_iter().next()?;
+    let source = best.into_iter().min_by(|left, right| {
+        package_source_external_import_rank(left)
+            .cmp(&package_source_external_import_rank(right))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+    })?;
+    Some(ExternalImportTarget {
+        export_specifier: export_specifier.to_string(),
+        source_path: export_member_proof_source_path(source, best_proof, &matched_members),
+    })
+}
+
+fn export_member_source_proof(
+    matched: &PackageSource,
+    external: &PackageSource,
+    matched_members: &BTreeSet<String>,
+    external_members: &BTreeSet<String>,
+) -> Option<ExportMemberSourceProof> {
+    if package_sources_are_equivalent(matched, external) {
+        return Some(ExportMemberSourceProof::SourceEquivalent);
+    }
+    if export_member_build_variant_peer(matched, external)
+        && matched_members == external_members
+        && export_member_set_is_strong(matched_members.iter())
+    {
+        return Some(ExportMemberSourceProof::BuildVariantPeer);
+    }
+    if external_source_references_matched_member_source(external, matched) {
+        return Some(ExportMemberSourceProof::BarrelReference);
+    }
+    None
+}
+
+fn package_sources_are_equivalent(left: &PackageSource, right: &PackageSource) -> bool {
+    if left.source == right.source {
+        return true;
+    }
+    if let (Ok(left_normalized), Ok(right_normalized)) = (
+        normalize_source(left.source_path.as_str(), left.source.as_str()),
+        normalize_source(right.source_path.as_str(), right.source.as_str()),
+    ) && stable_hash(left_normalized.as_bytes()) == stable_hash(right_normalized.as_bytes())
+    {
+        return true;
+    }
+    if left.source.len() > PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES
+        || right.source.len() > PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES
+    {
+        return false;
+    }
+    let (Ok(left_fingerprint), Ok(right_fingerprint)) = (
+        fingerprint_source(left.source_path.as_str(), left.source.as_str()),
+        fingerprint_source(right.source_path.as_str(), right.source.as_str()),
+    ) else {
+        return false;
+    };
+    let function_matches = left_fingerprint
+        .function_signature_hashes
+        .intersection(&right_fingerprint.function_signature_hashes)
+        .count();
+    let string_matches = left_fingerprint
+        .string_anchors
+        .intersection(&right_fingerprint.string_anchors)
+        .count();
+    function_matches >= 3 || (function_matches >= 2 && string_matches >= 1)
+}
+
+fn export_member_build_variant_peer(left: &PackageSource, right: &PackageSource) -> bool {
+    package_source_variant_neutral_path(left) == package_source_variant_neutral_path(right)
+}
+
+fn package_source_variant_neutral_path(source: &PackageSource) -> String {
+    let entry = strip_source_extension(package_source_entry_path(source).as_str())
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    entry
+        .split('/')
+        .filter(|segment| {
+            !matches!(
+                *segment,
+                "dist-cjs"
+                    | "dist-es"
+                    | "dist-esm"
+                    | "cjs"
+                    | "commonjs"
+                    | "esm"
+                    | "es"
+                    | "module"
+                    | "modules"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn external_source_references_matched_member_source(
+    external: &PackageSource,
+    matched: &PackageSource,
+) -> bool {
+    let external_source = external.source.replace('\\', "/").to_ascii_lowercase();
+    let matched_entry = strip_source_extension(package_source_entry_path(matched).as_str())
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    let leaf = matched_entry
+        .rsplit('/')
+        .next()
+        .unwrap_or(matched_entry.as_str());
+    let mut candidates = BTreeSet::new();
+    if is_strong_path_hint_token(leaf) {
+        candidates.insert(leaf.to_string());
+    }
+    let tail = matched_entry
+        .rsplit('/')
+        .take(2)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("/");
+    if tail.len() >= 4 {
+        candidates.insert(tail);
+    }
+    if matched_entry.len() >= 4 {
+        candidates.insert(matched_entry);
+    }
+    candidates.into_iter().any(|candidate| {
+        external_source_contains_path_reference(external_source.as_str(), candidate.as_str())
+    })
+}
+
+fn external_source_contains_path_reference(source: &str, candidate: &str) -> bool {
+    source.contains(format!("./{candidate}").as_str())
+        || source.contains(format!("../{candidate}").as_str())
+        || source.contains(format!("/{candidate}").as_str())
+        || (candidate.contains('/') && source.contains(candidate))
+}
+
+fn export_member_proof_source_path(
+    source: &PackageSource,
+    proof: ExportMemberSourceProof,
+    members: &BTreeSet<String>,
+) -> String {
+    let members = members
+        .iter()
+        .take(64)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "forced-external:export-members:{}:{}:{}",
+        proof.label(),
+        members,
+        source.source_path
+    )
+}
+
+fn export_member_set_is_strong<'a>(members: impl Iterator<Item = &'a String>) -> bool {
+    let members = members.collect::<Vec<_>>();
+    !members.is_empty()
+        && members
+            .iter()
+            .any(|member| is_specific_export_member(member.as_str()))
+}
+
+fn is_usable_export_member(member: &str) -> bool {
+    !matches!(member, "default" | "__esModule")
+        && is_identifier_name(member)
+        && is_specific_export_member(member)
+}
+
+fn is_specific_export_member(member: &str) -> bool {
+    let normalized = normalize_hint_text(member);
+    normalized.len() >= 3
+        && !matches!(
+            normalized.as_str(),
+            "get"
+                | "set"
+                | "has"
+                | "map"
+                | "key"
+                | "keys"
+                | "add"
+                | "run"
+                | "main"
+                | "init"
+                | "name"
+                | "type"
+                | "types"
+                | "value"
+                | "values"
+                | "index"
+        )
+}
+
+fn is_identifier_name(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
+fn exported_members_from_source(path: &str, source: &str) -> BTreeSet<String> {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(Some(Path::new(path)), ParseGoal::TypeScript) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            let mut visitor = ExportMemberCollector::default();
+            visitor.visit_program(&parsed.program);
+            return visitor
+                .members
+                .into_iter()
+                .filter(|member| is_usable_export_member(member))
+                .collect();
+        }
+    }
+    commonjs_export_members_from_text(source)
+        .into_iter()
+        .filter(|member| is_usable_export_member(member))
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct ExportMemberCollector {
+    members: BTreeSet<String>,
+}
+
+impl ExportMemberCollector {
+    fn insert(&mut self, member: impl Into<String>) {
+        let member = member.into();
+        if is_usable_export_member(member.as_str()) {
+            self.members.insert(member);
+        }
+    }
+}
+
+impl<'a> Visit<'a> for ExportMemberCollector {
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if let Some(declaration) = &declaration.declaration {
+            for binding in declaration_binding_names(declaration) {
+                self.insert(binding);
+            }
+        }
+        for specifier in &declaration.specifiers {
+            if let Some(exported) = module_export_name(&specifier.exported) {
+                self.insert(exported);
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
+        match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    self.insert(id.name.as_str());
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    self.insert(id.name.as_str());
+                }
+            }
+            _ => {}
+        }
+        walk_export_default_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        if let Some(exported) = &declaration.exported
+            && let Some(binding) = module_export_name(exported)
+        {
+            self.insert(binding);
+        }
+        walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_assignment_expression(&mut self, expression: &oxc_ast::ast::AssignmentExpression<'a>) {
+        if expression.operator.is_assign() {
+            if let Some(exported) = commonjs_export_property_name(&expression.left) {
+                self.insert(exported);
+            }
+            if commonjs_module_exports_target(&expression.left)
+                && let Expression::ObjectExpression(object) = &expression.right
+            {
+                for member in object_expression_static_keys(object) {
+                    self.insert(member);
+                }
+            }
+        }
+        walk_assignment_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Some(exported) = object_define_property_export_member(call) {
+            self.insert(exported);
+        }
+        walk_call_expression(self, call);
+    }
+}
+
+fn declaration_binding_names<'a>(declaration: &'a Declaration<'a>) -> Vec<&'a str> {
+    match declaration {
+        Declaration::VariableDeclaration(variable) => variable
+            .declarations
+            .iter()
+            .flat_map(|declarator| binding_pattern_names(&declarator.id))
+            .collect(),
+        Declaration::FunctionDeclaration(function) => function
+            .id
+            .as_ref()
+            .map(|id| vec![id.name.as_str()])
+            .unwrap_or_default(),
+        Declaration::ClassDeclaration(class) => class
+            .id
+            .as_ref()
+            .map(|id| vec![id.name.as_str()])
+            .unwrap_or_default(),
+        Declaration::TSTypeAliasDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSInterfaceDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSEnumDeclaration(declaration) => vec![declaration.id.name.as_str()],
+        Declaration::TSModuleDeclaration(declaration) => vec![declaration.id.name().as_str()],
+        Declaration::TSImportEqualsDeclaration(declaration) => vec![declaration.id.name.as_str()],
+    }
+}
+
+fn binding_pattern_names<'a>(pattern: &'a BindingPattern<'a>) -> Vec<&'a str> {
+    let mut names = Vec::new();
+    collect_binding_pattern_names(pattern, &mut names);
+    names
+}
+
+fn collect_binding_pattern_names<'a>(pattern: &'a BindingPattern<'a>, names: &mut Vec<&'a str>) {
+    match &pattern.kind {
+        BindingPatternKind::BindingIdentifier(identifier) => names.push(identifier.name.as_str()),
+        BindingPatternKind::AssignmentPattern(pattern) => {
+            collect_binding_pattern_names(&pattern.left, names);
+        }
+        BindingPatternKind::ObjectPattern(pattern) => {
+            for property in &pattern.properties {
+                collect_binding_pattern_names(&property.value, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+        BindingPatternKind::ArrayPattern(pattern) => {
+            for element in pattern.elements.iter().flatten() {
+                collect_binding_pattern_names(element, names);
+            }
+            if let Some(rest) = &pattern.rest {
+                collect_binding_pattern_names(&rest.argument, names);
+            }
+        }
+    }
+}
+
+fn module_export_name<'a>(name: &'a ModuleExportName<'a>) -> Option<&'a str> {
+    match name {
+        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        ModuleExportName::StringLiteral(literal) => Some(literal.value.as_str()),
+    }
+}
+
+fn commonjs_export_property_name(target: &oxc_ast::ast::AssignmentTarget<'_>) -> Option<String> {
+    match target {
+        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+            if expression_is_commonjs_exports_object(&member.object) {
+                return Some(member.property.name.as_str().to_string());
+            }
+        }
+        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+            if expression_is_commonjs_exports_object(&member.object)
+                && let Expression::StringLiteral(property) = &member.expression
+            {
+                return Some(property.value.as_str().to_string());
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn commonjs_module_exports_target(target: &oxc_ast::ast::AssignmentTarget<'_>) -> bool {
+    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = target else {
+        return false;
+    };
+    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
+}
+
+fn expression_is_commonjs_exports_object(expression: &Expression<'_>) -> bool {
+    if expression_identifier(expression) == Some("exports") {
+        return true;
+    }
+    let Expression::StaticMemberExpression(member) = expression else {
+        return false;
+    };
+    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
+}
+
+fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn object_define_property_export_member(call: &CallExpression<'_>) -> Option<String> {
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return None;
+    };
+    if expression_identifier(&callee.object) != Some("Object")
+        || callee.property.name != "defineProperty"
+        || call.arguments.len() < 2
+    {
+        return None;
+    }
+    if !argument_is_commonjs_exports_object(&call.arguments[0]) {
+        return None;
+    }
+    argument_string_literal_owned(&call.arguments[1])
+}
+
+fn argument_is_commonjs_exports_object(argument: &Argument<'_>) -> bool {
+    match argument {
+        Argument::Identifier(identifier) => identifier.name == "exports",
+        Argument::StaticMemberExpression(member) => {
+            expression_identifier(&member.object) == Some("module")
+                && member.property.name == "exports"
+        }
+        _ => false,
+    }
+}
+
+fn argument_string_literal_owned(argument: &Argument<'_>) -> Option<String> {
+    let Argument::StringLiteral(literal) = argument else {
+        return None;
+    };
+    Some(literal.value.as_str().to_string())
+}
+
+fn object_expression_static_keys(object: &ObjectExpression<'_>) -> Vec<String> {
+    object
+        .properties
+        .iter()
+        .filter_map(|property| {
+            let ObjectPropertyKind::ObjectProperty(property) = property else {
+                return None;
+            };
+            if property.computed {
+                return None;
+            }
+            property_key_name(&property.key)
+        })
+        .collect()
+}
+
+fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str().to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
+        _ => None,
+    }
+}
+
+fn commonjs_export_members_from_text(source: &str) -> BTreeSet<String> {
+    let mut members = BTreeSet::new();
+    collect_member_assignments_from_text(source, "exports.", &mut members);
+    collect_member_assignments_from_text(source, "module.exports.", &mut members);
+    collect_define_property_members_from_text(source, "exports", &mut members);
+    collect_define_property_members_from_text(source, "module.exports", &mut members);
+    members
+}
+
+fn collect_member_assignments_from_text(
+    source: &str,
+    prefix: &str,
+    members: &mut BTreeSet<String>,
+) {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find(prefix) {
+        let start = cursor + relative + prefix.len();
+        let Some(member) = read_identifier_at(source, start) else {
+            cursor = start;
+            continue;
+        };
+        let after = start + member.len();
+        let after_ws = skip_ascii_ws(source.as_bytes(), after);
+        if source.as_bytes().get(after_ws) == Some(&b'=') {
+            members.insert(member.to_string());
+        }
+        cursor = after;
+    }
+}
+
+fn collect_define_property_members_from_text(
+    source: &str,
+    object: &str,
+    members: &mut BTreeSet<String>,
+) {
+    let needle = format!("Object.defineProperty({object},");
+    let compact = compact_ascii_ws(source);
+    let mut cursor = 0;
+    while let Some(relative) = compact[cursor..].find(needle.as_str()) {
+        let start = cursor + relative + needle.len();
+        let start = skip_ascii_ws(compact.as_bytes(), start);
+        let Some((member, end)) = read_quoted_string_at(compact.as_str(), start) else {
+            cursor = start;
+            continue;
+        };
+        members.insert(member);
+        cursor = end;
+    }
+}
+
+fn compact_ascii_ws(source: &str) -> String {
+    source
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect()
+}
+
+fn skip_ascii_ws(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn read_identifier_at(source: &str, start: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let first = *bytes.get(start)?;
+    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| *byte == b'_' || *byte == b'$' || byte.is_ascii_alphanumeric())
+    {
+        end += 1;
+    }
+    source.get(start..end)
+}
+
+fn read_quoted_string_at(source: &str, start: usize) -> Option<(String, usize)> {
+    let quote = *source.as_bytes().get(start)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    let mut out = String::new();
+    for (offset, ch) in source[start + 1..].char_indices() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch as u8 == quote {
+            return Some((out, start + 1 + offset + ch.len_utf8()));
+        }
+        out.push(ch);
+    }
+    None
 }
 
 fn module_file_order_key(module: &ModuleInput) -> (u32, u32) {
@@ -5039,6 +5774,90 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             }
             other => panic!("expected source-only match to select a version, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn source_only_match_promotes_to_export_member_adapter_when_barrel_reexports_members() {
+        let source = r#"
+            function Widget() { return "widget-anchor"; }
+            function makeWidget() { return new Widget(); }
+            exports.Widget = Widget;
+            exports.makeWidget = makeWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-es/index.js",
+                "export { Widget, makeWidget } from './widget.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:"),
+            "{}",
+            package_match.source_path
+        );
+        assert_eq!(
+            report.package_report.attributions[0]
+                .resolved_file
+                .as_deref(),
+            Some(package_match.source_path.as_str())
+        );
+    }
+
+    #[test]
+    fn export_member_adapter_rejects_barrel_without_source_reference() {
+        let source = r#"
+            function Widget() { return "widget-anchor"; }
+            function makeWidget() { return new Widget(); }
+            exports.Widget = Widget;
+            exports.makeWidget = makeWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-es/index.js",
+                "export { Widget, makeWidget } from './different.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]

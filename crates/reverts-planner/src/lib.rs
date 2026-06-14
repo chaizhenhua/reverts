@@ -769,6 +769,7 @@ impl ImportExportPlanner {
                     attribution,
                     &adapter_plan.bindings,
                     adapter_plan.kind,
+                    adapter_plan.member_proof.as_ref(),
                 );
                 plan.push_file(file);
                 continue;
@@ -8980,6 +8981,29 @@ enum ExternalPackageAdapterKind {
 struct ExternalPackageAdapterPlan {
     bindings: BTreeSet<BindingName>,
     kind: ExternalPackageAdapterKind,
+    member_proof: Option<ExportMemberAdapterProof>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportMemberAdapterProof {
+    exported_members: BTreeSet<String>,
+}
+
+fn export_member_adapter_proof(
+    attribution: &PackageAttributionInput,
+) -> Option<ExportMemberAdapterProof> {
+    let resolved_file = attribution.resolved_file.as_deref()?;
+    let rest = resolved_file.strip_prefix("forced-external:export-members:")?;
+    let mut parts = rest.splitn(3, ':');
+    let _proof_kind = parts.next()?;
+    let members = parts.next()?;
+    let exported_members = members
+        .split(',')
+        .map(str::trim)
+        .filter(|member| is_identifier_like(member))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    (!exported_members.is_empty()).then_some(ExportMemberAdapterProof { exported_members })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8998,10 +9022,21 @@ fn external_package_adapter_analysis(
     let adapters = adapter_required_packages
         .iter()
         .filter_map(|module_id| {
+            let attribution = accepted_external_attribution_for_module(
+                &program.model().input().package_attributions,
+                *module_id,
+            )?;
+            let member_proof = export_member_adapter_proof(attribution);
             let bindings = package_adapter_export_bindings(program, *module_id, source_facts);
             let kind = external_package_adapter_kind(program, *module_id, &bindings);
-            adapter_plan_is_safe(program, *module_id, &bindings)
-                .then_some((*module_id, ExternalPackageAdapterPlan { bindings, kind }))
+            adapter_plan_is_safe(program, *module_id, &bindings, member_proof.as_ref()).then_some((
+                *module_id,
+                ExternalPackageAdapterPlan {
+                    bindings,
+                    kind,
+                    member_proof,
+                },
+            ))
         })
         .collect();
     ExternalPackageAdapterAnalysis {
@@ -9014,6 +9049,7 @@ fn adapter_plan_is_safe(
     program: &EnrichedProgram,
     module_id: ModuleId,
     bindings: &BTreeSet<BindingName>,
+    member_proof: Option<&ExportMemberAdapterProof>,
 ) -> bool {
     let original_name = program
         .model()
@@ -9026,6 +9062,10 @@ fn adapter_plan_is_safe(
     }
     bindings.iter().all(|binding| {
         if Some(binding.as_str()) == original_name {
+            return true;
+        }
+        if export_member_adapter_binding_map(program, module_id, member_proof).contains_key(binding)
+        {
             return true;
         }
         external_adapter_non_original_binding_is_safe(program, module_id, binding)
@@ -9072,6 +9112,129 @@ fn external_adapter_non_original_binding_is_safe(
     };
     let compact = compact_js_source(source.source);
     compact_source_declares_adapter_safe_binding(compact.as_str(), binding.as_str())
+}
+
+fn export_member_adapter_binding_map(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    member_proof: Option<&ExportMemberAdapterProof>,
+) -> BTreeMap<BindingName, String> {
+    let Some(member_proof) = member_proof else {
+        return BTreeMap::new();
+    };
+    let mut bindings = member_proof
+        .exported_members
+        .iter()
+        .filter(|member| is_identifier_like(member.as_str()))
+        .map(|member| (BindingName::new(member.clone()), member.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return bindings;
+    };
+    for (local, exported) in commonjs_exported_member_bindings(source.source) {
+        if member_proof.exported_members.contains(exported.as_str()) {
+            bindings.insert(local, exported);
+        }
+    }
+    bindings
+}
+
+fn commonjs_exported_member_bindings(source: &str) -> BTreeMap<BindingName, String> {
+    let compact = compact_js_source(source);
+    let mut bindings = BTreeMap::new();
+    collect_direct_member_export_assignments(compact.as_str(), &mut bindings);
+    collect_define_property_member_getters(compact.as_str(), &mut bindings);
+    bindings
+}
+
+fn collect_direct_member_export_assignments(
+    compact_source: &str,
+    bindings: &mut BTreeMap<BindingName, String>,
+) {
+    let bytes = compact_source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        let Some(dot) = compact_source[cursor..].find('.') else {
+            return;
+        };
+        let member_start = cursor + dot + 1;
+        let Some((exported, after_member)) = parse_identifier(compact_source, member_start) else {
+            cursor = member_start;
+            continue;
+        };
+        if bytes.get(after_member) != Some(&b'=') {
+            cursor = after_member;
+            continue;
+        }
+        let Some((local, after_local)) = parse_identifier(compact_source, after_member + 1) else {
+            cursor = after_member + 1;
+            continue;
+        };
+        if is_identifier_like(exported) && is_identifier_like(local) {
+            bindings.insert(BindingName::new(local), exported.to_string());
+        }
+        cursor = after_local;
+    }
+}
+
+fn collect_define_property_member_getters(
+    compact_source: &str,
+    bindings: &mut BTreeMap<BindingName, String>,
+) {
+    let needle = "Object.defineProperty(";
+    let mut cursor = 0;
+    while let Some(relative) = compact_source[cursor..].find(needle) {
+        let start = cursor + relative + needle.len();
+        let Some(first_comma) = compact_source[start..].find(',').map(|index| start + index) else {
+            return;
+        };
+        let member_start = first_comma + 1;
+        let Some((exported, after_exported)) = read_quoted_string(compact_source, member_start)
+        else {
+            cursor = member_start;
+            continue;
+        };
+        let Some(return_index) = compact_source[after_exported..]
+            .find("return")
+            .map(|index| after_exported + index + "return".len())
+        else {
+            cursor = after_exported;
+            continue;
+        };
+        let Some((local, after_local)) = parse_identifier(compact_source, return_index) else {
+            cursor = return_index;
+            continue;
+        };
+        if is_identifier_like(exported.as_str()) && is_identifier_like(local) {
+            bindings.insert(BindingName::new(local), exported);
+        }
+        cursor = after_local;
+    }
+}
+
+fn read_quoted_string(source: &str, start: usize) -> Option<(String, usize)> {
+    let quote = *source.as_bytes().get(start)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    let mut out = String::new();
+    for (offset, ch) in source[start + 1..].char_indices() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch as u8 == quote {
+            return Some((out, start + 1 + offset + ch.len_utf8()));
+        }
+        out.push(ch);
+    }
+    None
 }
 
 fn compact_source_declares_adapter_safe_binding(compact_source: &str, binding: &str) -> bool {
@@ -9188,6 +9351,7 @@ fn populate_external_package_adapter_file(
     attribution: &PackageAttributionInput,
     exportable_bindings: &BTreeSet<BindingName>,
     adapter_kind: ExternalPackageAdapterKind,
+    member_proof: Option<&ExportMemberAdapterProof>,
 ) {
     let Some(specifier) = attribution.export_specifier.as_deref() else {
         return;
@@ -9205,23 +9369,38 @@ fn populate_external_package_adapter_file(
     let return_expression =
         external_package_adapter_return_expression(namespace.as_str(), adapter_kind);
     let namespace_expression = namespace.as_str().to_string();
+    let member_bindings = export_member_adapter_binding_map(program, module_id, member_proof);
     for binding in exportable_bindings {
         let adapter_binding_kind =
             external_package_adapter_binding_kind(program, module_id, binding);
-        match adapter_binding_kind {
-            ExternalPackageAdapterBindingKind::Callable => {
-                file.push_source(format!(
-                    "function {}() {{ return {}; }}",
-                    binding.as_str(),
-                    return_expression
-                ));
-            }
-            ExternalPackageAdapterBindingKind::Value => {
-                file.push_source(format!(
-                    "const {} = {};",
-                    binding.as_str(),
-                    namespace_expression
-                ));
+        if !external_package_adapter_binding_is_original(program, module_id, binding)
+            && let Some(exported_member) = member_bindings.get(binding)
+        {
+            file.push_source(format!(
+                "const {} = {};",
+                binding.as_str(),
+                external_package_adapter_member_expression(
+                    namespace.as_str(),
+                    adapter_kind,
+                    exported_member.as_str()
+                )
+            ));
+        } else {
+            match adapter_binding_kind {
+                ExternalPackageAdapterBindingKind::Callable => {
+                    file.push_source(format!(
+                        "function {}() {{ return {}; }}",
+                        binding.as_str(),
+                        return_expression
+                    ));
+                }
+                ExternalPackageAdapterBindingKind::Value => {
+                    file.push_source(format!(
+                        "const {} = {};",
+                        binding.as_str(),
+                        namespace_expression
+                    ));
+                }
             }
         }
         file.add_binding(PlannedBinding::new(
@@ -9257,13 +9436,7 @@ fn external_package_adapter_binding_kind(
     module_id: ModuleId,
     binding: &BindingName,
 ) -> ExternalPackageAdapterBindingKind {
-    if program
-        .model()
-        .modules()
-        .iter()
-        .find(|module| module.id == module_id)
-        .is_some_and(|module| module.original_name == binding.as_str())
-    {
+    if external_package_adapter_binding_is_original(program, module_id, binding) {
         return ExternalPackageAdapterBindingKind::Callable;
     }
     match program.binding_shape(module_id, binding.as_str()) {
@@ -9280,6 +9453,19 @@ fn external_package_adapter_binding_kind(
         return ExternalPackageAdapterBindingKind::Callable;
     }
     ExternalPackageAdapterBindingKind::Value
+}
+
+fn external_package_adapter_binding_is_original(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    program
+        .model()
+        .modules()
+        .iter()
+        .find(|module| module.id == module_id)
+        .is_some_and(|module| module.original_name == binding.as_str())
 }
 
 fn external_package_source_defines_callable_binding(
@@ -9347,6 +9533,19 @@ fn external_package_adapter_return_expression(
             "Object.prototype.hasOwnProperty.call({namespace}, \"default\") ? {namespace}.default : {namespace}"
         ),
         ExternalPackageAdapterKind::NamespaceReturn => namespace.to_string(),
+    }
+}
+
+fn external_package_adapter_member_expression(
+    namespace: &str,
+    adapter_kind: ExternalPackageAdapterKind,
+    member: &str,
+) -> String {
+    let object = external_package_adapter_return_expression(namespace, adapter_kind);
+    if object == namespace {
+        format!("{namespace}.{member}")
+    } else {
+        format!("({object}).{member}")
     }
 }
 
@@ -17264,6 +17463,147 @@ mod tests {
         assert!(source.contains("function memoize(fn)"));
         assert!(source.contains("export { memoize, packageInit };"));
         assert!(!source.contains("external_fixture_package"));
+    }
+
+    #[test]
+    fn export_member_adapter_proof_allows_callable_binding_with_arguments() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nconst value = memoize(() => 1);\nexport { value };\n";
+        let package_source =
+            "var packageInit = E(() => {});\nfunction memoize(fn) { return fn; }\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            )
+            .with_resolved_file(
+                "forced-external:export-members:barrel-reference:memoize:fixture-package@1.0.0/dist/index.js",
+            ),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2))
+        );
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_file = plan
+            .files
+            .iter()
+            .find(|file| file.path == "modules/package.ts")
+            .expect("adapter package file should be emitted");
+        let source = package_file.body.join("\n");
+        assert!(source.contains("function packageInit() { return external_fixture_package; }"));
+        assert!(source.contains("const memoize = external_fixture_package.memoize;"));
+        assert!(source.contains("export { memoize, packageInit };"));
+        assert!(!source.contains("function memoize(fn)"));
+    }
+
+    #[test]
+    fn export_member_adapter_maps_local_cjs_export_alias_to_external_member() {
+        let planner = ImportExportPlanner;
+        let app_source = "const value = new LocalClient();\nexport { value };\n";
+        let package_source = "var packageInit = E(() => {});\nclass LocalClient {}\nexports.PublicClient = LocalClient;\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            )
+            .with_resolved_file(
+                "forced-external:export-members:barrel-reference:PublicClient:fixture-package@1.0.0/dist/index.js",
+            ),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_source = planned_source(&plan, "modules/package.ts");
+        assert!(
+            package_source.contains("const LocalClient = external_fixture_package.PublicClient;"),
+            "{package_source}"
+        );
+        assert!(!package_source.contains("class LocalClient"));
     }
 
     #[test]
