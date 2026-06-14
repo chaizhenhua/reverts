@@ -3784,10 +3784,39 @@ fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool 
 }
 
 fn is_migratable_reader_class(source: &str) -> bool {
-    if !pure_class_expression(source) {
+    let Some(open) = find_top_level_byte(source, b'{') else {
+        return false;
+    };
+    let header = source[..open].trim();
+    if !migratable_reader_class_header(header) {
         return false;
     }
-    !class_body_has_top_level_computed_key(source)
+    let Some(close) = find_matching_brace(source, open) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    !class_body_has_top_level_computed_key(source) && !class_body_has_eager_static_element(source)
+}
+
+fn migratable_reader_class_header(header: &str) -> bool {
+    if header.contains('[') {
+        return false;
+    }
+    if let Some(extends) = header
+        .split_once("extends")
+        .map(|(_, extends)| extends.trim())
+    {
+        let (base, end) = match parse_identifier(extends, 0) {
+            Some(parsed) => parsed,
+            None => return false,
+        };
+        if end != extends.len() || !is_runtime_global_identifier(base) {
+            return false;
+        }
+    }
+    true
 }
 
 fn class_body_has_top_level_computed_key(source: &str) -> bool {
@@ -3821,6 +3850,84 @@ fn class_body_has_top_level_computed_key(source: &str) -> bool {
                 };
                 cursor = end + 1;
             }
+            _ => cursor += 1,
+        }
+    }
+    false
+}
+
+fn class_body_has_eager_static_element(source: &str) -> bool {
+    let Some(open) = find_top_level_byte(source, b'{') else {
+        return true;
+    };
+    let Some(close) = find_matching_brace(source, open) else {
+        return true;
+    };
+    let bytes = source.as_bytes();
+    let mut cursor = open + 1;
+    while cursor < close {
+        cursor = skip_ws_and_comments(bytes, cursor, close);
+        if cursor >= close {
+            break;
+        }
+        if keyword_at(source, cursor, "static")
+            && static_class_element_is_eager(source, cursor + "static".len(), close)
+        {
+            return true;
+        }
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'(' => {
+                let Some(end) = find_matching_paren(source, cursor) else {
+                    return true;
+                };
+                cursor = end + 1;
+            }
+            b'{' => {
+                let Some(end) = find_matching_brace(source, cursor) else {
+                    return true;
+                };
+                cursor = end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    false
+}
+
+fn static_class_element_is_eager(source: &str, after_static: usize, close: usize) -> bool {
+    let bytes = source.as_bytes();
+    let cursor = skip_ws_and_comments(bytes, after_static, close);
+    if cursor >= close {
+        return false;
+    }
+    match bytes[cursor] {
+        // `static() {}` / `static = ...` / `static;` are instance
+        // members named "static", not static elements, so they don't run
+        // during class definition.
+        b'(' | b'=' | b';' => return false,
+        // Static blocks run immediately while the class is being defined.
+        b'{' => return true,
+        _ => {}
+    }
+
+    let mut cursor = cursor;
+    while cursor < close {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            // Method/accessor parameter list: safe, because the body is not
+            // evaluated until the method is called after the writer module's
+            // same-module assignment has run.
+            b'(' => return false,
+            // Static fields evaluate during class definition and would read
+            // the migrated var before the writer's assignment.
+            b'=' | b';' | b'{' => return true,
             _ => cursor += 1,
         }
     }
@@ -9773,6 +9880,24 @@ fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {
     cursor
 }
 
+fn skip_ws_and_comments(bytes: &[u8], mut cursor: usize, limit: usize) -> usize {
+    let limit = limit.min(bytes.len());
+    loop {
+        while cursor < limit && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor + 1 < limit && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
+            cursor = skip_line_comment(bytes, cursor + 2).min(limit);
+            continue;
+        }
+        if cursor + 1 < limit && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
+            cursor = skip_block_comment(bytes, cursor + 2).min(limit);
+            continue;
+        }
+        return cursor;
+    }
+}
+
 fn is_identifier_start(byte: u8) -> bool {
     byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
 }
@@ -14343,6 +14468,51 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_moves_static_method_class_reader_with_writer() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { static value() { return shared; } }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = ReadsShared.value();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("class ReadsShared { static value() { return shared; } }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { ReadsShared };"));
+        assert!(consumer_source.contains("import { ReadsShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn reader_cluster_runtime_var_migration_rejects_static_class_reader() {
         let prelude = concat!(
             "var shared;\n",
@@ -14378,6 +14548,48 @@ mod tests {
         assert!(writer_source.contains("__reverts_set_shared(1);"));
         assert!(!writer_source.contains("class ReadsShared"));
         assert!(helper_source.contains("class ReadsShared { static value = shared; }"));
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { shared = value; return value; }")
+        );
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_rejects_static_block_class_reader() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { static { this.value = shared; } }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = ReadsShared.value;\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(writer_source.contains("__reverts_set_shared(1);"));
+        assert!(!writer_source.contains("class ReadsShared"));
+        assert!(helper_source.contains("class ReadsShared { static { this.value = shared; } }"));
         assert!(
             helper_source
                 .contains("function __reverts_set_shared(value) { shared = value; return value; }")
