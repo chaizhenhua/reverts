@@ -208,8 +208,13 @@ pub enum ModuleMatchStrategy {
     /// package ownership only.
     AggregateFunctionSignatureAndStringAnchors,
     /// Every function fingerprint in the module was attributed to one package
-    /// version by the cascade matcher.
+    /// version by the cascade matcher using exact function-level evidence.
     CascadeFunctionCoverage,
+    /// Every function fingerprint in the module was attributed to one package
+    /// version by the cascade matcher, but at least one function only matched
+    /// through a weak/non-exact tier. This proves ownership only; it is not
+    /// sufficient to externalize the whole module as an import.
+    CascadeFunctionOwnership,
     /// A dominant subset of function fingerprints in the module was
     /// attributed to one package version by the cascade matcher. This proves
     /// package ownership only; it is not sufficient to externalize the whole
@@ -235,6 +240,7 @@ impl ModuleMatchStrategy {
                 "aggregate_function_signature_and_string_anchors"
             }
             Self::CascadeFunctionCoverage => "cascade_function_coverage",
+            Self::CascadeFunctionOwnership => "cascade_function_ownership",
             Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
             Self::AggregateStructuralBagSimilarity => "aggregate_structural_bag_similarity",
             Self::DependencyClosureOwnership => "dependency_closure_ownership",
@@ -862,13 +868,19 @@ fn promote_cascade_function_coverage_to_module_attributions(
             .iter()
             .map(|ownership| ownership.export_specifier.as_str())
             .collect::<BTreeSet<_>>();
+        let has_exact_function_import_proof = selected_ownership
+            .iter()
+            .all(cascade_ownership_has_exact_import_proof);
         let can_externalize = is_full_coverage
+            && has_exact_function_import_proof
             && selected_ownership
                 .iter()
                 .all(|ownership| ownership.external_importable)
             && export_specifiers.len() == 1;
-        let strategy = if is_full_coverage {
+        let strategy = if is_full_coverage && has_exact_function_import_proof {
             ModuleMatchStrategy::CascadeFunctionCoverage
+        } else if is_full_coverage {
+            ModuleMatchStrategy::CascadeFunctionOwnership
         } else {
             ModuleMatchStrategy::CascadePartialFunctionCoverage
         };
@@ -899,6 +911,13 @@ fn promote_cascade_function_coverage_to_module_attributions(
             external_importable: can_externalize,
         });
     }
+}
+
+fn cascade_ownership_has_exact_import_proof(ownership: &&CascadeOwnershipMatch) -> bool {
+    matches!(
+        ownership.confidence.tier,
+        reverts_ir::MatchTier::Exact | reverts_ir::MatchTier::ExactAlternate
+    )
 }
 
 fn promote_structural_bag_ownership_matches(
@@ -1377,7 +1396,6 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
         strategy,
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-            | ModuleMatchStrategy::CascadeFunctionCoverage
             | ModuleMatchStrategy::AggregateStructuralBagSimilarity
             | ModuleMatchStrategy::DependencyClosureOwnership
     )
@@ -1482,7 +1500,6 @@ fn source_match_strategy_has_exact_import_proof(strategy: ModuleMatchStrategy) -
         strategy,
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-            | ModuleMatchStrategy::CascadeFunctionCoverage
     )
 }
 
@@ -1496,6 +1513,7 @@ fn semantic_export_surface_min_score(strategy: ModuleMatchStrategy) -> usize {
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage => 1,
     }
 }
@@ -3310,20 +3328,22 @@ fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool 
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        BestVersionMatch, ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
-        PackageModuleSourceQuality, PackageSource, VersionedPackageMatcher,
-        exact_hint_root_external_specifier, match_packages_with_pipeline, match_structural_bags,
+        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy,
+        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageModuleSourceQuality, PackageSource,
+        VersionedPackageMatchReport, VersionedPackageMatcher, exact_hint_root_external_specifier,
+        match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
-        package_module_source_quality,
+        package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
     };
+    use reverts_graph::FunctionExtractor;
     use reverts_input::{
-        InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan,
+        AttributionConfidence, InputRows, ModuleDependencyInput, ModuleDependencyTarget,
+        ModuleInput, PackageAttributionInput, ProjectInput, SourceFileInput, SourceSpan,
     };
-    use reverts_ir::ModuleId;
+    use reverts_ir::{AxisKind, MatchTier, ModuleId};
 
     fn rows_with_package_source(source: &str) -> InputRows {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -3343,6 +3363,17 @@ mod tests {
         let mut rows = rows_with_package_source(source);
         rows.modules[0].package_version = Some(version.to_string());
         rows
+    }
+
+    fn cascade_confidence(tier: MatchTier) -> AttributionConfidence {
+        AttributionConfidence {
+            tier,
+            matched_axes: vec![AxisKind::StructuralAnchor],
+            matched_alternate: None,
+            top_score: tier.weight() as f64,
+            runner_up_score: 0.0,
+            margin: 1.0,
+        }
     }
 
     #[test]
@@ -3857,6 +3888,53 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.attributions.is_empty(),
             "structural ownership alone must not emit an external import"
         );
+    }
+
+    #[test]
+    fn pipeline_keeps_weak_full_cascade_coverage_source_only() {
+        let source = "function initPackage(){return helper(1);}";
+        let rows = rows_with_package_source_at_version(source, "1.2.3");
+        let fingerprints = FunctionExtractor::fingerprint(ModuleId(10), source);
+        assert_eq!(fingerprints.len(), 1);
+        let function_span = fingerprints[0].id.span;
+        let cascade_report = CascadeMatchReport {
+            attributions: Vec::new(),
+            ownership_matches: vec![CascadeOwnershipMatch {
+                module_id: ModuleId(10),
+                package_name: "pkg".to_string(),
+                package_version: "1.2.3".to_string(),
+                export_specifier: "pkg/init".to_string(),
+                function_span,
+                confidence: cascade_confidence(MatchTier::StructuralOnly),
+                external_importable: true,
+            }],
+            audit: Default::default(),
+        };
+        let mut report = VersionedPackageMatchReport {
+            attributions: Vec::new(),
+            surfaces: Vec::new(),
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: Default::default(),
+        };
+
+        promote_cascade_function_coverage_to_module_attributions(
+            &rows,
+            &BTreeMap::from([(ModuleId(10), fingerprints)]),
+            &cascade_report,
+            &mut report,
+        );
+
+        assert_eq!(report.matches.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::CascadeFunctionOwnership
+        );
+        assert!(
+            !report.matches[0].external_importable,
+            "weak structural-only function coverage proves ownership but must not wire an external import"
+        );
+        assert!(report.attributions.is_empty());
     }
 
     #[test]

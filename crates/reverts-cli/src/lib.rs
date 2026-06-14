@@ -948,6 +948,7 @@ pub fn match_packages_from_connection(
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
 
     let package_names = package_source_filter(&rows, &args.package_names);
+    remove_requested_package_attributions_for_revalidation(&mut rows, &args.package_names);
     repair_package_module_source_slices(
         &mut rows,
         (!args.package_names.is_empty()).then_some(&package_names),
@@ -1039,6 +1040,22 @@ pub fn match_packages_from_connection(
         package_source_quality_missing: source_quality_counts.missing,
         audit,
     })
+}
+
+fn remove_requested_package_attributions_for_revalidation(
+    rows: &mut InputRows,
+    requested_package_names: &[String],
+) -> usize {
+    if requested_package_names.is_empty() {
+        return 0;
+    }
+    let requested = requested_package_names.iter().collect::<BTreeSet<_>>();
+    let before = rows.package_attributions.len();
+    rows.package_attributions.retain(|attribution| {
+        !requested.contains(&attribution.package_name)
+            || attribution.emission_mode != PackageEmissionMode::ExternalImport
+    });
+    before.saturating_sub(rows.package_attributions.len())
 }
 
 fn repair_package_module_source_slices(
@@ -4768,6 +4785,7 @@ fn rejected_package_attributions_for_unaccepted_modules(
                     package_match.strategy,
                     ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
                         | ModuleMatchStrategy::CascadeFunctionCoverage
+                        | ModuleMatchStrategy::CascadeFunctionOwnership
                         | ModuleMatchStrategy::CascadePartialFunctionCoverage
                         | ModuleMatchStrategy::AggregateStructuralBagSimilarity
                         | ModuleMatchStrategy::DependencyClosureOwnership
@@ -7035,6 +7053,73 @@ mod tests {
         assert_eq!(outcome.written_attributions, 0);
         assert_eq!(outcome.written_surfaces, 0);
         assert_eq!(package_attribution_count(&connection), 0);
+    }
+
+    #[test]
+    fn match_packages_revalidates_requested_existing_accepted_attribution() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "function localOnly(){return 1;}",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        connection
+            .execute(
+                r"
+                INSERT INTO package_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     package_subpath, resolved_file, export_specifier, emission_mode,
+                     status, evidence_json, rejection_reason, created_at, updated_at)
+                VALUES (10, 'm10', 'pkg', '1.2.3',
+                        'add.js', 'pkg@1.2.3/add.js', 'pkg/add.js',
+                        'external_import', 'accepted', '{}', NULL, 'old', 'old')
+                ",
+                [],
+            )
+            .expect("seed stale accepted attribution");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            package_attribution_count(&connection),
+            1,
+            "revalidation should overwrite the stale row instead of adding a duplicate"
+        );
+        let (status, emission_mode, export_specifier, rejection_reason): (
+            String,
+            String,
+            Option<String>,
+            String,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, export_specifier, rejection_reason
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("stale accepted attribution should be rewritten");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(export_specifier, None);
+        assert!(rejection_reason.contains("matched package ownership"));
     }
 
     #[test]
