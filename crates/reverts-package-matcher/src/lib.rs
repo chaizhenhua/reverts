@@ -1993,7 +1993,11 @@ fn semantic_source_only_export_member_package_source(
     // For source-only package files, require at least a structured suffix/path
     // match and then separately prove that a public import surface re-exports
     // the matched members.
-    let min_score = min_score.max(4);
+    let min_score = if package_match.source_path.contains(":quality=trusted:") && min_score <= 1 {
+        3
+    } else {
+        min_score.max(4)
+    };
     let mut scored = external_source_index
         .all_sources(
             package_match.package_name.as_str(),
@@ -2030,21 +2034,27 @@ fn semantic_source_only_export_member_package_source(
         .filter(|(_source, score, proof)| *score == best_score && *proof == best_proof)
         .map(|(source, _score, _proof)| source)
         .collect::<Vec<_>>();
-    let source_paths = best
-        .iter()
-        .map(|source| source.source_path.as_str())
+    let targets = best
+        .into_iter()
+        .filter_map(|source| {
+            export_member_external_package_source_for_source_path(
+                package_match.package_name.as_str(),
+                package_match.package_version.as_str(),
+                source.source_path.as_str(),
+                external_source_index,
+                module_source,
+            )
+        })
+        .map(|target| (target.export_specifier, target.source_path))
         .collect::<BTreeSet<_>>();
-    if source_paths.len() != 1 {
+    if targets.len() != 1 {
         return None;
     }
-    let matched_source_path = source_paths.into_iter().next()?;
-    export_member_external_package_source_for_source_path(
-        package_match.package_name.as_str(),
-        package_match.package_version.as_str(),
-        matched_source_path,
-        external_source_index,
-        module_source,
-    )
+    let (export_specifier, source_path) = targets.into_iter().next()?;
+    Some(ExternalImportTarget {
+        export_specifier,
+        source_path,
+    })
 }
 
 fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch) -> bool {
@@ -2172,6 +2182,7 @@ enum ExportMemberSourceProof {
     BarrelReference,
     BuildVariantPeer,
     CommonJsReexport,
+    ExportAllReexport,
     SourceEquivalent,
 }
 
@@ -2181,6 +2192,7 @@ impl ExportMemberSourceProof {
             Self::BarrelReference => "barrel-reference",
             Self::BuildVariantPeer => "build-variant-peer",
             Self::CommonJsReexport => "commonjs-reexport",
+            Self::ExportAllReexport => "export-all-reexport",
             Self::SourceEquivalent => "source-equivalent",
         }
     }
@@ -2190,6 +2202,7 @@ impl ExportMemberSourceProof {
             Self::BarrelReference => 1,
             Self::BuildVariantPeer => 2,
             Self::CommonJsReexport => 2,
+            Self::ExportAllReexport => 2,
             Self::SourceEquivalent => 3,
         }
     }
@@ -2358,6 +2371,9 @@ fn export_member_source_proof(
     {
         return Some(ExportMemberSourceProof::BarrelReference);
     }
+    if external_source_export_all_reexports_matched_source(external, matched) {
+        return Some(ExportMemberSourceProof::ExportAllReexport);
+    }
     if external_source_commonjs_reexports_matched_source(external, matched) {
         return Some(ExportMemberSourceProof::CommonJsReexport);
     }
@@ -2474,6 +2490,61 @@ fn external_source_commonjs_reexports_matched_source(
     commonjs_module_exports_require_targets(external.source.as_str())
         .into_iter()
         .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
+}
+
+fn external_source_export_all_reexports_matched_source(
+    external: &PackageSource,
+    matched: &PackageSource,
+) -> bool {
+    export_all_reexport_targets(external.source.as_str())
+        .into_iter()
+        .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
+}
+
+fn export_all_reexport_targets(source: &str) -> BTreeSet<String> {
+    let compact = compact_ascii_ws(source);
+    let mut targets = BTreeSet::new();
+    collect_export_all_declaration_targets(compact.as_str(), &mut targets);
+    collect_export_star_helper_targets(compact.as_str(), &mut targets);
+    targets
+}
+
+fn collect_export_all_declaration_targets(source: &str, targets: &mut BTreeSet<String>) {
+    let needle = "export*from";
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find(needle) {
+        let start = cursor + relative + needle.len();
+        let Some((target, end)) = read_quoted_string_at(source, start) else {
+            cursor = start;
+            continue;
+        };
+        if target.starts_with('.') {
+            targets.insert(target);
+        }
+        cursor = end;
+    }
+}
+
+fn collect_export_star_helper_targets(source: &str, targets: &mut BTreeSet<String>) {
+    for helper in ["__exportStar(", "__export("] {
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find(helper) {
+            let call_start = cursor + relative + helper.len();
+            let Some(require_offset) = source[call_start..].find("require(") else {
+                cursor = call_start;
+                continue;
+            };
+            let require_start = call_start + require_offset + "require(".len();
+            let Some((target, end)) = read_quoted_string_at(source, require_start) else {
+                cursor = require_start;
+                continue;
+            };
+            if target.starts_with('.') {
+                targets.insert(target);
+            }
+            cursor = end;
+        }
+    }
 }
 
 fn commonjs_module_exports_require_targets(source: &str) -> BTreeSet<String> {
@@ -6840,6 +6911,195 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .resolved_file
                 .as_deref(),
             Some(package_match.source_path.as_str())
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_export_star_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            function makePublicWidget() { return new PublicWidget(); }
+            exports.PublicWidget = PublicWidget;
+            exports.makePublicWidget = makePublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist/internal/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist/index.js",
+                "export * from './internal/widget.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:export-all-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+        assert!(
+            package_match.source_path.contains("PublicWidget")
+                && package_match.source_path.contains("makePublicWidget"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_commonjs_export_star_helper_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            exports.PublicWidget = PublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/internal/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-cjs/index.js",
+                r#"
+                var __exportStar = function(m, exports) {
+                  for (var p in m) if (p !== "default") exports[p] = m[p];
+                };
+                __exportStar(require("./internal/widget.js"), exports);
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:export-all-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_trusted_leaf_when_public_barrel_reexports_members() {
+        let source = r#"
+            class Alias {
+                constructor(source) {
+                    this.source = source;
+                }
+            }
+            exports.Alias = Alias;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "2.7.0");
+        rows.modules[0].semantic_path = "modules/10-yaml/alias.ts".to_string();
+        rows.modules[0].package_name = Some("yaml".to_string());
+        let package_sources = [
+            PackageSource::source_only(
+                "yaml",
+                "2.7.0",
+                "yaml/dist/nodes/Alias.js",
+                "yaml@2.7.0/dist/nodes/Alias.js",
+                source,
+            ),
+            PackageSource::external(
+                "yaml",
+                "2.7.0",
+                "yaml",
+                "yaml@2.7.0/dist/index.js",
+                "var Alias = require('./nodes/Alias.js');\nexports.Alias = Alias.Alias;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "yaml");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:Alias:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_leaf_ambiguity_is_resolved_by_unique_public_bridge() {
+        let source = r#"
+            function stringifyString(value) { return String(value); }
+            exports.stringifyString = stringifyString;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "2.7.0");
+        rows.modules[0].semantic_path = "modules/10-yaml/stringify-string.ts".to_string();
+        rows.modules[0].package_name = Some("yaml".to_string());
+        let package_sources = [
+            PackageSource::source_only(
+                "yaml",
+                "2.7.0",
+                "yaml/browser/dist/stringify/stringifyString.js",
+                "yaml@2.7.0/browser/dist/stringify/stringifyString.js",
+                source,
+            ),
+            PackageSource::source_only(
+                "yaml",
+                "2.7.0",
+                "yaml/dist/stringify/stringifyString.js",
+                "yaml@2.7.0/dist/stringify/stringifyString.js",
+                source,
+            ),
+            PackageSource::external(
+                "yaml",
+                "2.7.0",
+                "yaml/util",
+                "yaml@2.7.0/dist/util.js",
+                "var stringifyString = require('./stringify/stringifyString.js');\nexports.stringifyString = stringifyString.stringifyString;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "yaml/util");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:stringifyString:"),
+            "{}",
+            package_match.source_path
         );
     }
 

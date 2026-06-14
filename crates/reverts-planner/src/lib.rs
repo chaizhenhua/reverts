@@ -9026,6 +9026,7 @@ enum ExportMemberAdapterProofKind {
     BarrelReference,
     BuildVariantPeer,
     CommonJsReexport,
+    ExportAllReexport,
     SourceEquivalent,
     Unknown,
 }
@@ -9036,6 +9037,7 @@ impl ExportMemberAdapterProofKind {
             "barrel-reference" => Self::BarrelReference,
             "build-variant-peer" => Self::BuildVariantPeer,
             "commonjs-reexport" => Self::CommonJsReexport,
+            "export-all-reexport" => Self::ExportAllReexport,
             "source-equivalent" => Self::SourceEquivalent,
             _ => Self::Unknown,
         }
@@ -14426,13 +14428,13 @@ mod tests {
     use reverts_package::accepted_external_module_ids;
 
     use super::{
-        CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile,
-        RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
+        CompilerRecoveryAction, EmitPlan, ExportMemberAdapterProofKind, ImportExportPlanner,
+        PlannedFile, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
         RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
-        RuntimeSourceReadIndex, SourceCompilerStrategy, inline_internal_setter_calls,
-        inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
-        merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
-        purify_private_runtime_lazy_initializers,
+        RuntimeSourceReadIndex, SourceCompilerStrategy, export_member_adapter_proof,
+        inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
+        lower_runtime_helpers, merge_same_owner_overlapping_reader_migrations,
+        parse_generated_named_export_statement, purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -17999,6 +18001,25 @@ mod tests {
         assert!(source.contains("const memoize = external_fixture_package.memoize;"));
         assert!(source.contains("export { memoize, packageInit };"));
         assert!(!source.contains("function memoize(fn)"));
+    }
+
+    #[test]
+    fn export_member_adapter_parses_export_all_reexport_proof() {
+        let attribution = PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        )
+        .with_resolved_file(
+            "forced-external:export-members:export-all-reexport:PublicWidget:fixture-package@1.0.0/dist/index.js",
+        );
+
+        let proof = export_member_adapter_proof(&attribution)
+            .expect("export-all reexport proof should parse");
+
+        assert_eq!(proof.kind, ExportMemberAdapterProofKind::ExportAllReexport);
+        assert!(proof.exported_members.contains("PublicWidget"));
     }
 
     #[test]
