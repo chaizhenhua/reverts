@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
     AssetKind, InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
@@ -26,7 +27,7 @@ use reverts_js::{ParseGoal, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
-    PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource,
+    PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource, VersionMatchScore,
     VersionedPackageMatchReport, match_packages_with_pipeline, package_import_names_from_sources,
     package_module_source_quality,
 };
@@ -1463,6 +1464,56 @@ fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<Modu
             ModuleDependencyTarget::Package { .. } => None,
         })
         .collect()
+}
+
+fn direct_module_dependents(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
+    rows.dependencies
+        .iter()
+        .filter_map(|dependency| match dependency.target {
+            ModuleDependencyTarget::Module(target) if target == module_id => {
+                Some(dependency.from_module_id)
+            }
+            ModuleDependencyTarget::Module(_) | ModuleDependencyTarget::Package { .. } => None,
+        })
+        .collect()
+}
+
+fn ownership_by_module(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeMap<ModuleId, (String, String)> {
+    let mut ownership_by_module = report
+        .matches
+        .iter()
+        .map(|package_match| {
+            (
+                package_match.module_id,
+                (
+                    package_match.package_name.clone(),
+                    package_match.package_version.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for attribution in rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+    {
+        if attribution.status == PackageAttributionStatus::Accepted
+            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+            && let Some(package_version) = attribution.package_version.as_deref()
+        {
+            ownership_by_module.insert(
+                attribution.module_id,
+                (
+                    attribution.package_name.clone(),
+                    package_version.to_string(),
+                ),
+            );
+        }
+    }
+    ownership_by_module
 }
 
 pub fn extract_assets_from_sqlite(
@@ -3493,7 +3544,7 @@ fn persist_package_attributions(
     let modules_by_id = rows
         .modules
         .iter()
-        .map(|module| (module.id, module.original_name.as_str()))
+        .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
     let transaction = connection
         .transaction()
@@ -3506,30 +3557,31 @@ fn persist_package_attributions(
                 module_id: attribution.module_id,
             },
         )?;
-        let module_original_name = modules_by_id.get(&attribution.module_id).copied().ok_or(
+        let module = modules_by_id.get(&attribution.module_id).copied().ok_or(
             MatchPackagesError::MissingModuleForAttribution {
                 module_id: attribution.module_id,
             },
         )?;
         persist_package_attribution(
             &transaction,
-            module_original_name,
+            module.original_name.as_str(),
             attribution,
             module_match,
         )?;
         written += 1;
     }
     for attribution in &rejected_attributions {
-        let module_original_name = modules_by_id.get(&attribution.module_id).copied().ok_or(
+        let module = modules_by_id.get(&attribution.module_id).copied().ok_or(
             MatchPackagesError::MissingModuleForAttribution {
                 module_id: attribution.module_id,
             },
         )?;
         persist_rejected_package_attribution(
             &transaction,
-            module_original_name,
+            module.original_name.as_str(),
             attribution,
             matches_by_module.get(&attribution.module_id).copied(),
+            unmatched_package_diagnostics(rows, report, module),
         )?;
         written += 1;
     }
@@ -3862,6 +3914,210 @@ fn rejection_reason_from_decision(decision: &BestVersionMatch) -> String {
     }
 }
 
+fn unmatched_package_diagnostics(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+    module: &ModuleInput,
+) -> serde_json::Value {
+    let package_name = module.package_name.as_deref().unwrap_or_default();
+    serde_json::json!({
+        "module_id": module.id.0,
+        "module_original_name": module.original_name,
+        "semantic_path": module.semantic_path,
+        "package_hint": {
+            "package_name": module.package_name,
+            "package_version": module.package_version,
+        },
+        "source_slice": source_slice_diagnostics(rows, module),
+        "dependency_neighborhood": dependency_neighborhood_diagnostics(rows, report, module.id),
+        "version_decision": version_decision_diagnostics(report, package_name),
+    })
+}
+
+fn source_slice_diagnostics(rows: &InputRows, module: &ModuleInput) -> serde_json::Value {
+    let Some(slice) = rows.module_source_slice(module.id) else {
+        return serde_json::json!({
+            "available": false,
+            "source_file_id": module.source_file_id,
+            "has_source_span": module.source_span.is_some(),
+            "reason": "missing_or_ambiguous_source_slice",
+        });
+    };
+    let quality = package_module_source_quality(module, slice.source_file_path, slice.source);
+    serde_json::json!({
+        "available": true,
+        "source_file_id": slice.source_file_id,
+        "source_file_path": slice.source_file_path,
+        "has_source_span": slice.span.is_some(),
+        "byte_start": slice.span.map(|span| span.byte_start),
+        "byte_end": slice.span.map(|span| span.byte_end),
+        "source_len": slice.source.len(),
+        "quality": package_source_quality_label(quality),
+        "function_count": FunctionExtractor::fingerprint(module.id, slice.source).len(),
+    })
+}
+
+fn package_source_quality_label(quality: PackageModuleSourceQuality) -> &'static str {
+    match quality {
+        PackageModuleSourceQuality::Trusted => "trusted",
+        PackageModuleSourceQuality::Weak => "weak",
+        PackageModuleSourceQuality::Invalid => "invalid",
+    }
+}
+
+fn dependency_neighborhood_diagnostics(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+    module_id: ModuleId,
+) -> serde_json::Value {
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let ownership_by_module = ownership_by_module(rows, report);
+    let outgoing_ids = direct_module_dependencies(rows, module_id);
+    let incoming_ids = direct_module_dependents(rows, module_id);
+    let outgoing = dependency_package_summary(&outgoing_ids, &modules_by_id, &ownership_by_module);
+    let incoming = dependency_package_summary(&incoming_ids, &modules_by_id, &ownership_by_module);
+    serde_json::json!({
+        "outgoing_package_counts": outgoing.package_counts.clone(),
+        "incoming_package_counts": incoming.package_counts.clone(),
+        "outgoing_owned_package_counts": outgoing.owned_package_counts.clone(),
+        "incoming_owned_package_counts": incoming.owned_package_counts.clone(),
+        "outgoing": dependency_package_summary_json(&outgoing),
+        "incoming": dependency_package_summary_json(&incoming),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DependencyPackageSummary {
+    module_count: usize,
+    package_counts: BTreeMap<String, usize>,
+    owned_module_count: usize,
+    owned_package_counts: BTreeMap<String, usize>,
+    owned_version_counts: BTreeMap<String, usize>,
+}
+
+fn dependency_package_summary(
+    module_ids: &[ModuleId],
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
+) -> DependencyPackageSummary {
+    let mut seen = BTreeSet::new();
+    let mut package_counts = BTreeMap::<String, usize>::new();
+    let mut owned_package_counts = BTreeMap::<String, usize>::new();
+    let mut owned_version_counts = BTreeMap::<String, usize>::new();
+    let mut module_count = 0usize;
+    let mut owned_module_count = 0usize;
+    for module_id in module_ids.iter().copied() {
+        if !seen.insert(module_id) {
+            continue;
+        }
+        let Some(module) = modules_by_id.get(&module_id) else {
+            continue;
+        };
+        module_count += 1;
+        if let Some(package_name) = module.package_name.as_deref() {
+            *package_counts.entry(package_name.to_string()).or_default() += 1;
+        }
+        let Some((owned_package_name, owned_package_version)) = ownership_by_module.get(&module_id)
+        else {
+            continue;
+        };
+        owned_module_count += 1;
+        *owned_package_counts
+            .entry(owned_package_name.clone())
+            .or_default() += 1;
+        *owned_version_counts
+            .entry(format!("{owned_package_name}@{owned_package_version}"))
+            .or_default() += 1;
+    }
+    DependencyPackageSummary {
+        module_count,
+        package_counts,
+        owned_module_count,
+        owned_package_counts,
+        owned_version_counts,
+    }
+}
+
+fn dependency_package_summary_json(summary: &DependencyPackageSummary) -> serde_json::Value {
+    serde_json::json!({
+        "module_count": summary.module_count,
+        "package_counts": summary.package_counts,
+        "owned_module_count": summary.owned_module_count,
+        "owned_package_counts": summary.owned_package_counts,
+        "owned_version_counts": summary.owned_version_counts,
+    })
+}
+
+fn version_decision_diagnostics(
+    report: &VersionedPackageMatchReport,
+    package_name: &str,
+) -> serde_json::Value {
+    let Some(decision) = report
+        .version_matches
+        .iter()
+        .find(|decision| decision_package_name(decision) == package_name)
+    else {
+        return serde_json::json!({
+            "kind": "not_evaluated",
+            "top_scores": [],
+        });
+    };
+    let mut scores = decision_scores(decision);
+    scores.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| right.package_version.cmp(&left.package_version))
+    });
+    let top_scores = scores
+        .into_iter()
+        .take(3)
+        .map(version_score_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "kind": decision_kind(decision),
+        "reason": rejection_reason_from_decision(decision),
+        "top_scores": top_scores,
+    })
+}
+
+fn decision_kind(decision: &BestVersionMatch) -> &'static str {
+    match decision {
+        BestVersionMatch::Selected { .. } => "selected",
+        BestVersionMatch::Ambiguous { .. } => "ambiguous",
+        BestVersionMatch::NoMatch { .. } => "no_match",
+        BestVersionMatch::InsufficientEvidence { .. } => "insufficient_evidence",
+    }
+}
+
+fn decision_scores(decision: &BestVersionMatch) -> Vec<&VersionMatchScore> {
+    match decision {
+        BestVersionMatch::Selected { score, .. }
+        | BestVersionMatch::InsufficientEvidence { score } => vec![score],
+        BestVersionMatch::Ambiguous { scores, .. } | BestVersionMatch::NoMatch { scores, .. } => {
+            scores.iter().collect()
+        }
+    }
+}
+
+fn version_score_json(score: &VersionMatchScore) -> serde_json::Value {
+    serde_json::json!({
+        "package_name": score.package_name,
+        "package_version": score.package_version,
+        "score": score.score,
+        "total_modules": score.total_modules,
+        "matched_modules": score.matched_modules,
+        "source_hash_matches": score.source_hash_matches,
+        "function_signature_matches": score.function_signature_matches,
+        "string_anchor_matches": score.string_anchor_matches,
+        "binary_search_probes": score.binary_search_probes,
+    })
+}
+
 fn persist_package_attribution(
     connection: &Connection,
     module_original_name: &str,
@@ -3940,6 +4196,7 @@ fn persist_rejected_package_attribution(
     module_original_name: &str,
     attribution: &PackageAttributionInput,
     module_match: Option<&PackageMatch>,
+    unmatched_diagnostics: serde_json::Value,
 ) -> Result<(), MatchPackagesError> {
     let rejection_reason =
         attribution
@@ -3976,6 +4233,7 @@ fn persist_rejected_package_attribution(
         "status": "rejected",
         "rejection_reason": rejection_reason,
         "ownership_match": match_evidence,
+        "unmatched_diagnostics": unmatched_diagnostics,
         "writes_external_import": false,
     })
     .to_string();
@@ -6158,19 +6416,24 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.matched_modules, 0);
         assert_eq!(outcome.written_attributions, 1);
-        let rejection_reason: String = connection
+        let (rejection_reason, evidence_json): (String, String) = connection
             .query_row(
                 r"
-                SELECT rejection_reason
+                SELECT rejection_reason, evidence_json
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("weak inconsistent hint should write rejected reason");
         assert!(rejection_reason.contains("package hint is weak"));
         assert!(rejection_reason.contains("dependency graph points at other packages"));
+        assert!(evidence_json.contains("unmatched_diagnostics"));
+        assert!(evidence_json.contains("dependency_neighborhood"));
+        assert!(evidence_json.contains("outgoing_package_counts"));
+        assert!(evidence_json.contains("axios"));
+        assert!(evidence_json.contains("version_decision"));
     }
 
     #[test]
