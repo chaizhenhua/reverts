@@ -9025,6 +9025,7 @@ struct ExternalPackageAdapterPlan {
 enum ExportMemberAdapterProofKind {
     BarrelReference,
     BuildVariantPeer,
+    CommonJsReexport,
     SourceEquivalent,
     Unknown,
 }
@@ -9034,6 +9035,7 @@ impl ExportMemberAdapterProofKind {
         match value {
             "barrel-reference" => Self::BarrelReference,
             "build-variant-peer" => Self::BuildVariantPeer,
+            "commonjs-reexport" => Self::CommonJsReexport,
             "source-equivalent" => Self::SourceEquivalent,
             _ => Self::Unknown,
         }
@@ -9041,6 +9043,13 @@ impl ExportMemberAdapterProofKind {
 
     const fn allows_runtime_alias_side_effect_elision(self) -> bool {
         matches!(self, Self::BuildVariantPeer | Self::SourceEquivalent)
+    }
+
+    const fn allows_full_source_replacement(self) -> bool {
+        matches!(
+            self,
+            Self::BuildVariantPeer | Self::CommonJsReexport | Self::SourceEquivalent
+        )
     }
 }
 
@@ -9155,6 +9164,7 @@ fn adapter_plan_is_safe(
         original_name,
         member_proof,
         &member_bindings,
+        bindings,
     ) {
         return false;
     }
@@ -9176,6 +9186,7 @@ fn adapter_source_has_implicit_side_effect_exports(
     original_name: Option<&str>,
     member_proof: Option<&ExportMemberAdapterProof>,
     member_backed_bindings: &BTreeMap<BindingName, String>,
+    requested_bindings: &BTreeSet<BindingName>,
 ) -> bool {
     let Some(source) = program.model().input().module_source_slice(module_id) else {
         return false;
@@ -9185,6 +9196,14 @@ fn adapter_source_has_implicit_side_effect_exports(
         return false;
     }
     let writes = adapter_relevant_implicit_writes(source.source, member_backed_bindings);
+    if adapter_member_proof_allows_full_source_replacement(
+        original_name,
+        member_proof,
+        member_backed_bindings,
+        requested_bindings,
+    ) {
+        return false;
+    }
     if call_identifiers_in_source(source.source)
         .into_iter()
         .any(|callee| {
@@ -9208,6 +9227,23 @@ fn adapter_source_has_implicit_side_effect_exports(
     }
     writes.into_iter().any(|binding| {
         Some(binding.as_str()) != original_name && !member_backed_bindings.contains_key(&binding)
+    })
+}
+
+fn adapter_member_proof_allows_full_source_replacement(
+    original_name: Option<&str>,
+    member_proof: Option<&ExportMemberAdapterProof>,
+    member_backed_bindings: &BTreeMap<BindingName, String>,
+    requested_bindings: &BTreeSet<BindingName>,
+) -> bool {
+    let Some(member_proof) = member_proof else {
+        return false;
+    };
+    if !member_proof.kind.allows_full_source_replacement() || requested_bindings.is_empty() {
+        return false;
+    }
+    requested_bindings.iter().all(|binding| {
+        Some(binding.as_str()) == original_name || member_backed_bindings.contains_key(binding)
     })
 }
 
@@ -9815,13 +9851,7 @@ fn package_adapter_export_bindings(
     module_id: ModuleId,
     source_facts: &SourceModuleFacts,
 ) -> BTreeSet<BindingName> {
-    let mut bindings: BTreeSet<BindingName> = program
-        .model()
-        .graph()
-        .import_export()
-        .exports_for(module_id)
-        .into_iter()
-        .collect();
+    let mut bindings = BTreeSet::new();
     let target_bindings = source_facts
         .exportable_bindings_by_module
         .get(&module_id)
@@ -10801,22 +10831,44 @@ fn candidate_source_reads_by_module_with_exportable(
     exportable_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut reads = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    let local_bindings_by_module = program
+        .model()
+        .modules()
+        .iter()
+        .filter_map(|module| {
+            let source = program.model().input().module_source_slice(module.id)?;
+            Some((module.id, local_bindings_in_source(source.source)))
+        })
+        .collect::<BTreeMap<_, _>>();
     for (module_id, binding) in program.model().graph().def_use().unresolved_reads() {
+        if local_bindings_by_module
+            .get(&module_id)
+            .is_some_and(|bindings| bindings.contains(binding.as_str()))
+        {
+            continue;
+        }
         reads.entry(module_id).or_default().insert(binding);
     }
     let empty_bindings = BTreeSet::<BindingName>::new();
+    let empty_local_bindings = BTreeSet::<String>::new();
     for module in program.model().modules() {
         let Some(source) = program.model().input().module_source_slice(module.id) else {
             continue;
         };
-        let local_bindings = exportable_bindings_by_module
+        let exportable_bindings = exportable_bindings_by_module
             .get(&module.id)
             .unwrap_or(&empty_bindings);
+        let local_bindings = local_bindings_by_module
+            .get(&module.id)
+            .unwrap_or(&empty_local_bindings);
         reads.entry(module.id).or_default().extend(
             identifiers_in_source(source.source)
                 .into_iter()
                 .map(BindingName::new)
-                .filter(|binding| !local_bindings.contains(binding)),
+                .filter(|binding| {
+                    !exportable_bindings.contains(binding)
+                        && !local_bindings.contains(binding.as_str())
+                }),
         );
     }
     reads
@@ -17578,6 +17630,152 @@ mod tests {
 
         assert!(source.contains("function packageInit() { return external_fixture_package; }"));
         assert!(!source.contains("const packageInit = external_fixture_package;"));
+    }
+
+    #[test]
+    fn adapter_required_package_ignores_unused_exported_bindings() {
+        let planner = ImportExportPlanner;
+        let app_source =
+            "function render(A) { let q = 1; return A + q; }\npackageInit();\nexport { render };\n";
+        let package_source =
+            "var A;\nvar q;\nvar packageInit = E(() => {});\nexport { A, q, packageInit };\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2)),
+            "unused exported locals must not prevent adapter generation"
+        );
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_source = planned_source(&plan, "modules/package.ts");
+        assert!(
+            package_source.contains("function packageInit() { return external_fixture_package; }")
+        );
+        assert!(package_source.contains("export { packageInit };"));
+        assert!(!package_source.contains("export { A"));
+        assert!(!package_source.contains("var A"));
+        assert!(!package_source.contains("var q"));
+    }
+
+    #[test]
+    fn commonjs_reexport_proof_allows_original_binding_adapter_despite_noisy_source() {
+        let planner = ImportExportPlanner;
+        let app_source = "packageInit();\nexport const value = 1;\n";
+        let package_source = "function noisySideEffect() { return Date.now(); }\nnoisySideEffect();\nvar packageInit = E(() => {});\nexport { packageInit };\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "app.js",
+            Some(app_source.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "package.js",
+            Some(package_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "packageInit",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "fixture-package",
+                "1.0.0",
+                "fixture-package",
+            )
+            .with_resolved_file(
+                "forced-external:export-members:commonjs-reexport:PublicApi:fixture-package@1.0.0/index.js",
+            ),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = super::PlannerAnalysis::from_program(&enriched);
+        assert!(
+            analysis
+                .external_package_adapters
+                .contains_key(&ModuleId(2)),
+            "commonjs reexport proof should allow replacing noisy source when only original binding is requested"
+        );
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let package_source = planned_source(&plan, "modules/package.ts");
+        assert!(
+            package_source.contains("function packageInit() { return external_fixture_package; }")
+        );
+        assert!(package_source.contains("export { packageInit };"));
+        assert!(!package_source.contains("noisySideEffect"));
     }
 
     #[test]

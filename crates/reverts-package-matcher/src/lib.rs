@@ -1956,6 +1956,7 @@ fn normalized_source_external_package_source(
 enum ExportMemberSourceProof {
     BarrelReference,
     BuildVariantPeer,
+    CommonJsReexport,
     SourceEquivalent,
 }
 
@@ -1964,6 +1965,7 @@ impl ExportMemberSourceProof {
         match self {
             Self::BarrelReference => "barrel-reference",
             Self::BuildVariantPeer => "build-variant-peer",
+            Self::CommonJsReexport => "commonjs-reexport",
             Self::SourceEquivalent => "source-equivalent",
         }
     }
@@ -1972,9 +1974,21 @@ impl ExportMemberSourceProof {
         match self {
             Self::BarrelReference => 1,
             Self::BuildVariantPeer => 2,
+            Self::CommonJsReexport => 2,
             Self::SourceEquivalent => 3,
         }
     }
+
+    const fn alias_source_is_matched(self) -> bool {
+        matches!(self, Self::CommonJsReexport)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportMemberExternalCandidate<'a> {
+    external: &'a PackageSource,
+    matched: &'a PackageSource,
+    proof: ExportMemberSourceProof,
 }
 
 fn export_member_external_package_source(
@@ -2003,70 +2017,92 @@ fn export_member_external_package_source(
         return None;
     }
 
-    let mut candidates = Vec::<(&PackageSource, ExportMemberSourceProof)>::new();
+    let mut candidates = Vec::<ExportMemberExternalCandidate<'_>>::new();
     for external in external_source_index.sources(
         package_match.package_name.as_str(),
         package_match.package_version.as_str(),
     ) {
         let external_members = external_source_index.export_members(external);
-        if !matched_members.is_subset(&external_members) {
-            continue;
-        }
-        let Some(proof) = matched_sources
+        let Some((matched, proof)) = matched_sources
             .iter()
             .filter_map(|matched| {
-                export_member_source_proof(matched, external, &matched_members, &external_members)
+                let proof = export_member_source_proof(
+                    matched,
+                    external,
+                    &matched_members,
+                    &external_members,
+                )?;
+                Some((*matched, proof))
             })
-            .max_by(|left, right| left.rank().cmp(&right.rank()))
+            .max_by(|left, right| left.1.rank().cmp(&right.1.rank()))
         else {
             continue;
         };
-        candidates.push((external, proof));
+        candidates.push(ExportMemberExternalCandidate {
+            external,
+            matched,
+            proof,
+        });
     }
     if candidates.is_empty() {
         return None;
     }
     candidates.sort_by(|left, right| {
         right
-            .1
+            .proof
             .rank()
-            .cmp(&left.1.rank())
+            .cmp(&left.proof.rank())
             .then_with(|| {
-                package_source_external_import_rank(left.0)
-                    .cmp(&package_source_external_import_rank(right.0))
+                package_source_external_import_rank(left.external)
+                    .cmp(&package_source_external_import_rank(right.external))
             })
-            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
-            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+            .then_with(|| {
+                left.external
+                    .export_specifier
+                    .cmp(&right.external.export_specifier)
+            })
+            .then_with(|| left.external.source_path.cmp(&right.external.source_path))
+            .then_with(|| left.matched.source_path.cmp(&right.matched.source_path))
     });
-    let best_proof = candidates.first()?.1;
-    let best_rank = package_source_external_import_rank(candidates.first()?.0);
+    let best_proof = candidates.first()?.proof;
+    let best_rank = package_source_external_import_rank(candidates.first()?.external);
     let best = candidates
         .into_iter()
-        .filter(|(source, proof)| {
-            *proof == best_proof && package_source_external_import_rank(source) == best_rank
+        .filter(|candidate| {
+            candidate.proof == best_proof
+                && package_source_external_import_rank(candidate.external) == best_rank
         })
-        .map(|(source, _proof)| source)
         .collect::<Vec<_>>();
     let export_specifiers = best
         .iter()
-        .map(|source| source.export_specifier.as_str())
+        .map(|candidate| candidate.external.export_specifier.as_str())
         .collect::<BTreeSet<_>>();
     if export_specifiers.len() != 1 {
         return None;
     }
     let export_specifier = export_specifiers.into_iter().next()?;
     let source = best.into_iter().min_by(|left, right| {
-        package_source_external_import_rank(left)
-            .cmp(&package_source_external_import_rank(right))
-            .then_with(|| left.source_path.cmp(&right.source_path))
+        package_source_external_import_rank(left.external)
+            .cmp(&package_source_external_import_rank(right.external))
+            .then_with(|| left.external.source_path.cmp(&right.external.source_path))
+            .then_with(|| left.matched.source_path.cmp(&right.matched.source_path))
     })?;
-    let external_members = external_source_index.export_members(source);
+    let alias_source = if best_proof.alias_source_is_matched() {
+        source.matched
+    } else {
+        source.external
+    };
+    let alias_members = if best_proof.alias_source_is_matched() {
+        matched_members.clone()
+    } else {
+        external_source_index.export_members(alias_source)
+    };
     let aliases =
-        export_member_alias_proof_map(module_source, source.source.as_str(), &external_members);
+        export_member_alias_proof_map(module_source, alias_source.source.as_str(), &alias_members);
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
         source_path: export_member_proof_source_path(
-            source,
+            source.external,
             best_proof,
             &matched_members,
             &aliases,
@@ -2089,8 +2125,13 @@ fn export_member_source_proof(
     {
         return Some(ExportMemberSourceProof::BuildVariantPeer);
     }
-    if external_source_references_matched_member_source(external, matched) {
+    if matched_members.is_subset(external_members)
+        && external_source_references_matched_member_source(external, matched)
+    {
         return Some(ExportMemberSourceProof::BarrelReference);
+    }
+    if external_source_commonjs_reexports_matched_source(external, matched) {
+        return Some(ExportMemberSourceProof::CommonJsReexport);
     }
     None
 }
@@ -2196,6 +2237,103 @@ fn external_source_contains_path_reference(source: &str, candidate: &str) -> boo
         || source.contains(format!("../{candidate}").as_str())
         || source.contains(format!("/{candidate}").as_str())
         || (candidate.contains('/') && source.contains(candidate))
+}
+
+fn external_source_commonjs_reexports_matched_source(
+    external: &PackageSource,
+    matched: &PackageSource,
+) -> bool {
+    commonjs_module_exports_require_targets(external.source.as_str())
+        .into_iter()
+        .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
+}
+
+fn commonjs_module_exports_require_targets(source: &str) -> BTreeSet<String> {
+    let compact = compact_ascii_ws(source);
+    let mut targets = BTreeSet::new();
+    let needle = "module.exports=";
+    let mut cursor = 0;
+    while let Some(relative) = compact[cursor..].find(needle) {
+        let rhs_start = cursor + relative + needle.len();
+        let statement_end = compact[rhs_start..]
+            .find(';')
+            .map(|offset| rhs_start + offset)
+            .unwrap_or(compact.len());
+        let rhs = &compact[rhs_start..statement_end];
+        if rhs.starts_with("require(") || (rhs.contains("?require(") && rhs.contains(":require(")) {
+            collect_require_targets_from_compact_slice(rhs, &mut targets);
+        }
+        cursor = statement_end.saturating_add(1).min(compact.len());
+    }
+    targets
+}
+
+fn collect_require_targets_from_compact_slice(source: &str, targets: &mut BTreeSet<String>) {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("require(") {
+        let start = cursor + relative + "require(".len();
+        let Some((target, end)) = read_quoted_string_at(source, start) else {
+            cursor = start;
+            continue;
+        };
+        if target.starts_with('.') {
+            targets.insert(target);
+        }
+        cursor = end;
+    }
+}
+
+fn relative_require_targets_package_source(
+    external: &PackageSource,
+    target: &str,
+    matched: &PackageSource,
+) -> bool {
+    let Some(resolved) =
+        resolve_package_relative_require(package_source_entry_path(external).as_str(), target)
+    else {
+        return false;
+    };
+    source_entry_paths_match(
+        resolved.as_str(),
+        package_source_entry_path(matched).as_str(),
+    )
+}
+
+fn resolve_package_relative_require(from_entry: &str, target: &str) -> Option<String> {
+    if !target.starts_with('.') {
+        return None;
+    }
+    let from = from_entry.replace('\\', "/");
+    let base = from
+        .rsplit_once('/')
+        .map(|(base, _file)| base)
+        .unwrap_or_default();
+    let joined = if base.is_empty() {
+        target.to_string()
+    } else {
+        format!("{base}/{target}")
+    };
+    let mut segments = Vec::<&str>::new();
+    for segment in joined.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            other => segments.push(other),
+        }
+    }
+    (!segments.is_empty()).then(|| segments.join("/"))
+}
+
+fn source_entry_paths_match(left: &str, right: &str) -> bool {
+    let left = strip_source_extension(left)
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    let right = strip_source_extension(right)
+        .trim_matches('/')
+        .to_ascii_lowercase();
+    left == right || format!("{left}/index") == right || left == format!("{right}/index")
 }
 
 fn export_member_proof_source_path(
@@ -6217,6 +6355,68 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn source_only_match_promotes_when_commonjs_root_reexports_matched_source() {
+        let source = r#"
+            function Widget() { return "widget-anchor"; }
+            function makeWidget() { return new Widget(); }
+            exports.Widget = Widget;
+            exports.makeWidget = makeWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/cjs/widget.development.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/cjs/widget.development.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/index.js",
+                r#"
+                'use strict';
+                if (process.env.NODE_ENV === 'production') {
+                    module.exports = require('./cjs/widget.production.js');
+                } else {
+                    module.exports = require('./cjs/widget.development.js');
+                }
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:commonjs-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+        assert!(
+            package_match.source_path.contains("Widget")
+                && package_match.source_path.contains("makeWidget"),
+            "{}",
+            package_match.source_path
+        );
+        assert_eq!(
+            report.package_report.attributions[0]
+                .resolved_file
+                .as_deref(),
+            Some(package_match.source_path.as_str())
+        );
+    }
+
+    #[test]
     fn export_member_adapter_proof_records_minified_member_aliases() {
         let module = ModuleInput::package(
             ModuleId(10),
@@ -6321,6 +6521,41 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 "pkg",
                 "pkg@1.0.0/dist-es/index.js",
                 "export { Widget, makeWidget } from './different.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn export_member_adapter_rejects_commonjs_reexport_to_different_source() {
+        let source = r#"
+            function Widget() { return "widget-anchor"; }
+            function makeWidget() { return new Widget(); }
+            exports.Widget = Widget;
+            exports.makeWidget = makeWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/cjs/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/cjs/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/index.js",
+                "module.exports = require('./cjs/different.js');",
             ),
         ];
 
