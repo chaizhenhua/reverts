@@ -8236,10 +8236,11 @@ fn identifier_is_declaration_name_after_keyword(source: &str, start: usize, keyw
 }
 
 fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
-    matches!(
-        keyword_before_paren(source, open_paren),
-        Some("if" | "while" | "switch" | "for" | "catch" | "with")
-    )
+    match keyword_before_paren(source, open_paren) {
+        Some("if" | "while" | "switch" | "for" | "catch" | "with") => true,
+        Some("await") => for_keyword_before_await(source, open_paren),
+        _ => false,
+    }
 }
 
 fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
@@ -8250,6 +8251,29 @@ fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
         start -= 1;
     }
     Some(&source[start..=before])
+}
+
+fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
+    let bytes = source.as_bytes();
+    let await_end = match previous_non_ws(bytes, open_paren) {
+        Some(index) => index,
+        None => return false,
+    };
+    let mut await_start = await_end;
+    while await_start > 0 && is_identifier_continue(bytes[await_start - 1]) {
+        await_start -= 1;
+    }
+    if &source[await_start..=await_end] != "await" {
+        return false;
+    }
+    let Some(for_end) = previous_non_ws(bytes, await_start) else {
+        return false;
+    };
+    let mut for_start = for_end;
+    while for_start > 0 && is_identifier_continue(bytes[for_start - 1]) {
+        for_start -= 1;
+    }
+    &source[for_start..=for_end] == "for"
 }
 
 fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
@@ -8629,6 +8653,47 @@ fn collect_local_variable_bindings(
 }
 
 fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
+    let mut segment_start = 0usize;
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b',' if depth == 0 => {
+                collect_binding_pattern_segment_identifiers(
+                    &source[segment_start..cursor],
+                    bindings,
+                );
+                cursor += 1;
+                segment_start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    collect_binding_pattern_segment_identifiers(&source[segment_start..], bindings);
+}
+
+fn collect_binding_pattern_segment_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
+    let pattern_end = top_level_binding_initializer_start(source).unwrap_or(source.len());
+    let source = &source[..pattern_end];
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
@@ -8639,6 +8704,23 @@ fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<Str
             }
             b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
                 cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'{' => {
+                let Some(end) = find_matching_brace(source, cursor) else {
+                    return;
+                };
+                collect_binding_pattern_identifiers(&source[cursor + 1..end], bindings);
+                cursor = end + 1;
+            }
+            b'[' => {
+                let Some(end) = find_matching_bracket(source, cursor) else {
+                    return;
+                };
+                collect_binding_pattern_identifiers(&source[cursor + 1..end], bindings);
+                cursor = end + 1;
             }
             byte if is_identifier_start(byte) => {
                 let start = cursor;
@@ -8654,6 +8736,45 @@ fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<Str
             _ => cursor += 1,
         }
     }
+}
+
+fn top_level_binding_initializer_start(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    let mut depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                cursor += 1;
+            }
+            b')' | b']' | b'}' => {
+                depth = depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'=' if depth == 0
+                && bytes.get(cursor + 1) != Some(&b'>')
+                && cursor
+                    .checked_sub(1)
+                    .and_then(|index| bytes.get(index))
+                    .is_none_or(|byte| !matches!(*byte, b'=' | b'!' | b'<' | b'>')) =>
+            {
+                return Some(cursor);
+            }
+            _ => cursor += 1,
+        }
+    }
+    None
 }
 
 fn keyword_starts_statement_declaration(source: &str, cursor: usize) -> bool {
@@ -13173,10 +13294,6 @@ fn strip_runtime_snippet_sources(
         }
     }
     stripped
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn find_runtime_source_chunk(source: &str, chunk: &str) -> Option<(usize, usize)> {
@@ -16532,6 +16649,50 @@ mod tests {
     }
 
     #[test]
+    fn strip_runtime_snippet_sources_preserves_template_blank_lines() {
+        let keep = "function keep() { return `alpha\n\n      IMPORTANT`; }";
+        let drop = "function drop() { return 1; }";
+        let tail = "function tail() { return keep(); }";
+        let source = format!("{keep}\n{drop}\n{tail}");
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.clone(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("keep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("drop"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([(
+                BindingName::new("drop"),
+                RuntimePreludeSnippet {
+                    source: drop.to_string(),
+                    byte_start: (keep.len() + 1) as u32,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let stripped = super::strip_runtime_snippet_sources(
+            source.as_str(),
+            &prelude,
+            &BTreeSet::from([BindingName::new("drop")]),
+        );
+
+        assert!(!stripped.contains("function drop()"));
+        assert!(
+            stripped.contains("`alpha\n\n      IMPORTANT`"),
+            "{stripped}"
+        );
+        assert!(stripped.contains("function tail()"));
+    }
+
+    #[test]
     fn entrypoint_runtime_imports_adapter_required_package_bindings() {
         let planner = ImportExportPlanner;
         let prelude = "function main() { return packageInit(); }\n";
@@ -16878,6 +17039,67 @@ mod tests {
         assert!(!identifiers.contains("R"));
         assert!(!identifiers.contains("x"));
         assert!(!identifiers.contains("y"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_keeps_default_parameter_initializer_reads() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "class Z96 extends Promise {\n\
+                 constructor(q, K, _ = e38) { this.parseResponse = _; }\n\
+                 method({ value = fallback }, [item = other] = input) { return value + item; }\n\
+             }",
+        );
+
+        assert!(identifiers.contains("e38"));
+        assert!(identifiers.contains("fallback"));
+        assert!(identifiers.contains("other"));
+        assert!(identifiers.contains("input"));
+        assert!(!identifiers.contains("q"));
+        assert!(!identifiers.contains("K"));
+        assert!(!identifiers.contains("_"));
+        assert!(!identifiers.contains("value"));
+        assert!(!identifiers.contains("item"));
+        assert!(!identifiers.contains("Z96"));
+        assert!(!identifiers.contains("constructor"));
+        assert!(!identifiers.contains("method"));
+        assert!(!identifiers.contains("Promise"));
+    }
+
+    #[test]
+    fn runtime_import_identifier_scan_keeps_for_await_source_reads() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "async function* stream(q, K) {\n\
+                 for await (let A of HY5(q, K)) {\n\
+                     yield A;\n\
+                 }\n\
+             }",
+        );
+
+        assert!(identifiers.contains("HY5"));
+        assert!(!identifiers.contains("stream"));
+        assert!(!identifiers.contains("q"));
+        assert!(!identifiers.contains("K"));
+        assert!(!identifiers.contains("A"));
+    }
+
+    #[test]
+    fn local_binding_scan_keeps_default_initializer_reads_out_of_locals() {
+        let locals = super::local_bindings_in_source(
+            "function reader(a = dep, { x: alias = fallback }, [item = other] = input) {\n\
+                 const local = alias + item;\n\
+                 return local;\n\
+             }",
+        );
+
+        assert!(locals.contains("reader"));
+        assert!(locals.contains("a"));
+        assert!(locals.contains("alias"));
+        assert!(locals.contains("item"));
+        assert!(locals.contains("local"));
+        assert!(!locals.contains("dep"));
+        assert!(!locals.contains("fallback"));
+        assert!(!locals.contains("other"));
+        assert!(!locals.contains("input"));
     }
 
     #[test]

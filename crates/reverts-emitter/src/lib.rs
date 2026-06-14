@@ -4,7 +4,8 @@ use std::fmt;
 use reverts_ir::BindingName;
 use reverts_js::{
     CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename,
-    format_source_with_module_items_and_renames, parse_error_message, sanitize_identifier,
+    format_source_with_module_items_and_renames, parse_error_message, parse_source,
+    sanitize_identifier,
 };
 use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
 
@@ -66,20 +67,40 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
             )
         })
         .collect::<Vec<_>>();
+    let lowering = compiler_lowering(file.compiler_recovery.action);
 
-    let formatted = format_source_with_module_items_and_renames(
-        &body_source,
+    let formatted = if should_preserve_raw_source_body(
+        body_source.as_str(),
         &generated_imports,
         &generated_exports,
         &generated_renames,
-        file.source_strategy().path_hint(file.path.as_str()),
-        file.source_strategy().parse_goal(),
-        compiler_lowering(file.compiler_recovery.action),
-    )
-    .map_err(|source_error| EmitError::UnparseableOutput {
-        path: file.path.clone(),
-        message: parse_error_message(&source_error, "output could not be parsed"),
-    })?;
+        lowering,
+    ) {
+        parse_source(
+            body_source.as_str(),
+            file.source_strategy().path_hint(file.path.as_str()),
+            file.source_strategy().parse_goal(),
+        )
+        .map_err(|source_error| EmitError::UnparseableOutput {
+            path: file.path.clone(),
+            message: parse_error_message(&source_error, "output could not be parsed"),
+        })?;
+        body_source
+    } else {
+        format_source_with_module_items_and_renames(
+            &body_source,
+            &generated_imports,
+            &generated_exports,
+            &generated_renames,
+            file.source_strategy().path_hint(file.path.as_str()),
+            file.source_strategy().parse_goal(),
+            lowering,
+        )
+        .map_err(|source_error| EmitError::UnparseableOutput {
+            path: file.path.clone(),
+            message: parse_error_message(&source_error, "output could not be parsed"),
+        })?
+    };
 
     Ok(EmittedFile {
         path: file.path.clone(),
@@ -88,6 +109,26 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
             file.compiler_recovery.action.recovery_banner(),
         ),
     })
+}
+
+fn should_preserve_raw_source_body(
+    body_source: &str,
+    generated_imports: &[GeneratedImport],
+    generated_exports: &[GeneratedExport],
+    generated_renames: &[GeneratedRename],
+    lowering: CompilerLowering,
+) -> bool {
+    // Template literal raw chunks are runtime-observable. OXC codegen
+    // reprints a parsed AST and can normalize whitespace-only template
+    // quasis, which changes strings such as prompt/system-message bodies.
+    // If the file is otherwise already source-backed (no synthetic module
+    // items, no explicit renames, no compiler lowering), validate that it
+    // parses but keep the original bytes for the body.
+    body_source.contains('`')
+        && generated_imports.is_empty()
+        && generated_exports.is_empty()
+        && generated_renames.is_empty()
+        && lowering == CompilerLowering::None
 }
 
 fn emit_binding_name(binding: &BindingName) -> String {
@@ -245,6 +286,24 @@ mod tests {
         assert_eq!(source.matches("from 'pkg'").count(), 1);
         assert_eq!(source.matches("export { answer };").count(), 1);
         assert!(!source.contains("import * as __pkg"));
+    }
+
+    #[test]
+    fn source_backed_template_literal_raw_whitespace_is_preserved() {
+        let mut file = PlannedFile::new("src/index.ts");
+        file.push_source(
+            "const prompt = `<system-reminder>\n${items.join(`\n`)}\n\n      IMPORTANT\n</system-reminder>\n`;\nexport { prompt };",
+        );
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let project = emit_project(&plan).expect("planned file should emit");
+
+        let source = project.files[0].source.as_str();
+        assert!(
+            source.contains("${items.join(`\n`)}\n\n      IMPORTANT"),
+            "{source}"
+        );
     }
 
     #[test]
