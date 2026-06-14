@@ -2956,6 +2956,12 @@ impl PackageVersionResolutionPlan {
                     .or(source_identity_version)
                     .or_else(|| {
                         best_matching_package_version_by_binary_search(package_version, versions)
+                    })
+                    .or_else(|| {
+                        self.best_project_exact_version_candidate(
+                            package_name.as_str(),
+                            Some(versions),
+                        )
                     }),
                 None => source_identity_version
                     .or_else(|| {
@@ -2984,6 +2990,18 @@ impl PackageVersionResolutionPlan {
         best_project_version_candidate(
             package_name,
             requested_version,
+            &self.project_exact_versions,
+            available_versions,
+        )
+    }
+
+    fn best_project_exact_version_candidate(
+        &self,
+        package_name: &str,
+        available_versions: Option<&BTreeSet<Version>>,
+    ) -> Option<Version> {
+        best_project_exact_version_candidate(
+            package_name,
             &self.project_exact_versions,
             available_versions,
         )
@@ -3029,9 +3047,18 @@ fn materialize_package_sources_from_hints(
                 hints.insert((package_name, resolved_version));
             }
             Ok(None) => {
-                eprintln!(
-                    "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
-                );
+                if let Some(resolved_version) =
+                    plan.best_project_exact_version_candidate(package_name.as_str(), None)
+                {
+                    eprintln!(
+                        "falling back to project exact package version for {package_name}@{requested_version}: {resolved_version}"
+                    );
+                    hints.insert((package_name, resolved_version.to_string()));
+                } else {
+                    eprintln!(
+                        "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
+                    );
+                }
             }
             Err(error) => {
                 eprintln!(
@@ -3447,6 +3474,35 @@ fn best_project_version_candidate(
         .into_iter()
         .map(|(version, _count)| version.clone())
         .next()
+}
+
+fn best_project_exact_version_candidate(
+    package_name: &str,
+    project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
+    available_versions: Option<&BTreeSet<Version>>,
+) -> Option<Version> {
+    let versions = project_exact_versions.get(package_name)?;
+    let mut candidates = versions
+        .iter()
+        .filter(|(version, _count)| {
+            available_versions.is_none_or(|available| available.contains(version))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.1
+            .cmp(right.1)
+            .then_with(|| left.0.cmp(right.0))
+            .reverse()
+    });
+    let (selected, selected_count) = candidates.first()?;
+    let selected_count = **selected_count;
+    if candidates
+        .get(1)
+        .is_some_and(|(_version, count)| **count == selected_count)
+    {
+        return None;
+    }
+    Some((*selected).clone())
 }
 
 fn version_hint_matches(requested_version: &str, version: &Version) -> bool {
@@ -5988,7 +6044,8 @@ mod tests {
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
         MatchPackagesArgs, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
         RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
-        collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
+        best_project_exact_version_candidate, collect_local_package_sources, dedup_audit_report,
+        exact_project_version_counts_by_package, extract_bun_embedded_asset_from_bytes,
         filter_package_sources_to_best_build_variants,
         filter_package_sources_to_relevant_path_hints, help_text, load_package_sources,
         local_package_metadata, match_packages_from_connection,
@@ -6423,6 +6480,136 @@ mod tests {
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.3.1"));
+    }
+
+    #[test]
+    fn impossible_non_exact_versions_resolve_to_best_project_exact_cached_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "otelImpossibleRange",
+            "node_modules/@opentelemetry/otlp-exporter-base/index.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("1.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "otelExactOlder",
+            "node_modules/@opentelemetry/otlp-exporter-base/old.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("0.208.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "otelExactCurrent",
+            "node_modules/@opentelemetry/otlp-exporter-base/current.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("0.211.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(13),
+            "otelExactCurrentAgain",
+            "node_modules/@opentelemetry/otlp-exporter-base/current-again.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("0.211.0".to_string()),
+        ));
+        let package_sources = [
+            PackageSource::source_only(
+                "@opentelemetry/otlp-exporter-base",
+                "0.208.0",
+                "@opentelemetry/otlp-exporter-base",
+                "@opentelemetry/otlp-exporter-base@0.208.0/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "@opentelemetry/otlp-exporter-base",
+                "0.211.0",
+                "@opentelemetry/otlp-exporter-base",
+                "@opentelemetry/otlp-exporter-base@0.211.0/index.js",
+                "export {};",
+            ),
+        ];
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("0.211.0"));
+    }
+
+    #[test]
+    fn impossible_non_exact_versions_do_not_resolve_when_project_exact_versions_tie() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "otelImpossibleRange",
+            "node_modules/@opentelemetry/otlp-exporter-base/index.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("1.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "otelExactOne",
+            "node_modules/@opentelemetry/otlp-exporter-base/one.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("0.208.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "otelExactTwo",
+            "node_modules/@opentelemetry/otlp-exporter-base/two.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("0.211.0".to_string()),
+        ));
+        let package_sources = [
+            PackageSource::source_only(
+                "@opentelemetry/otlp-exporter-base",
+                "0.208.0",
+                "@opentelemetry/otlp-exporter-base",
+                "@opentelemetry/otlp-exporter-base@0.208.0/index.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "@opentelemetry/otlp-exporter-base",
+                "0.211.0",
+                "@opentelemetry/otlp-exporter-base",
+                "@opentelemetry/otlp-exporter-base@0.211.0/index.js",
+                "export {};",
+            ),
+        ];
+        assert_eq!(
+            best_matching_package_version_by_binary_search(
+                "1.x",
+                &BTreeSet::from([
+                    semver::Version::parse("0.208.0").expect("fixture version should parse"),
+                    semver::Version::parse("0.211.0").expect("fixture version should parse"),
+                ]),
+            ),
+            None
+        );
+        let available_versions = BTreeSet::from([
+            semver::Version::parse("0.208.0").expect("fixture version should parse"),
+            semver::Version::parse("0.211.0").expect("fixture version should parse"),
+        ]);
+        assert_eq!(
+            best_project_exact_version_candidate(
+                "@opentelemetry/otlp-exporter-base",
+                &exact_project_version_counts_by_package(&rows, &BTreeSet::new()),
+                Some(&available_versions),
+            ),
+            None
+        );
+
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 0);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.x"));
     }
 
     #[test]
@@ -7290,6 +7477,10 @@ mod tests {
             fs::read_to_string(tempdir.path().join("package.json"))
                 .expect("package json")
                 .contains("\"@types/node\": \"*\"")
+        );
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(".npmrc")).expect("npmrc"),
+            "legacy-peer-deps=true\n"
         );
         assert!(
             fs::read_to_string(tempdir.path().join("tsconfig.json"))

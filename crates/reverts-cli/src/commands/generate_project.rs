@@ -133,6 +133,7 @@ fn write_typescript_project_scaffold(
     let package_json =
         typescript_package_json(runtime_dependencies, has_cli_entrypoint, !assets.is_empty());
     write_project_file(output, "package.json", package_json.as_str())?;
+    write_project_file(output, ".npmrc", TYPESCRIPT_NPMRC)?;
     write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
     write_project_file(
         output,
@@ -145,6 +146,13 @@ fn write_typescript_project_scaffold(
     }
     Ok(())
 }
+
+// Generated projects preserve the package versions proven from the bundled
+// source. Modern npm peer-dependency resolution can reject historical
+// lockfile combinations even though they are the versions that were bundled,
+// so install with legacy peer semantics by default.
+const TYPESCRIPT_NPMRC: &str = r"legacy-peer-deps=true
+";
 
 fn typescript_package_json(
     runtime_dependencies: &[RuntimeDependency],
