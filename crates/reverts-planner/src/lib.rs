@@ -939,6 +939,8 @@ impl ImportExportPlanner {
                 runtime_var_migrations.extra_runtime_deps_for_owner(module.id);
             let migrated_extra_source_deps =
                 runtime_var_migrations.extra_source_deps_for_owner(module.id);
+            let migrated_extra_noop_deps =
+                runtime_var_migrations.extra_noop_deps_for_owner(module.id);
             let migrated_local_bindings =
                 runtime_var_migrations.local_bindings_for_owner(module.id);
             let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
@@ -1646,6 +1648,9 @@ impl ImportExportPlanner {
                         file.push_source(source);
                     }
                 }
+                for binding in &migrated_extra_noop_deps {
+                    file.push_source(noop_function_statement(binding));
+                }
                 let normalized = normalize_source_for_emit(
                     module.id,
                     source_file_path,
@@ -2316,6 +2321,10 @@ struct RuntimeVarMigration {
     /// imports these from their source module instead of forcing the reader
     /// cluster to stay in runtime.
     extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    /// No-op package initializer shims referenced by moved readers. These
+    /// mirror the runtime helper's externalized-package init shims locally so
+    /// the reader can move without importing runtime only for a stub call.
+    extra_noop_deps: BTreeSet<BindingName>,
     /// Optional initializer expression preserved from the runtime
     /// declaration. `None` means the original `var X;` had no
     /// initializer; `Some(text)` carries a side-effect-free literal
@@ -2372,6 +2381,14 @@ impl RuntimeVarMigrationPlan {
             }
         }
         deps
+    }
+
+    fn extra_noop_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
+        self.migrations_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+            .flat_map(|migration| migration.extra_noop_deps.iter().cloned())
+            .collect()
     }
 
     fn source_dep_exports_for_module(&self, module_id: ModuleId) -> BTreeSet<BindingName> {
@@ -4408,6 +4425,7 @@ fn compute_runtime_var_migration_plan(
     let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
     let source_definition_modules =
         unique_source_definition_modules(program, externalized_packages);
+    let all_source_definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
     let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
     let runtime_source_consumers =
         runtime_prelude_direct_import_consumers(program, lowered_runtime_sources);
@@ -4500,6 +4518,8 @@ fn compute_runtime_var_migration_plan(
             ),
             source_consumers_by_runtime_binding: &runtime_source_consumers,
             source_definition_modules: &source_definition_modules,
+            all_source_definition_modules: &all_source_definition_modules,
+            externalized_packages,
             module_dependencies_by_owner: &module_dependencies_by_owner,
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_runtime_definitions,
@@ -4534,6 +4554,7 @@ fn compute_runtime_var_migration_plan(
                     extra_runtime_deps: BTreeSet::new(),
                     pinned_runtime_deps: BTreeSet::new(),
                     extra_source_deps: BTreeMap::new(),
+                    extra_noop_deps: BTreeSet::new(),
                 },
                 RuntimeBindingReadProfile::SnippetReaders(readers) => {
                     let Ok(migration) = migratable_runtime_reader_cluster_result(
@@ -4636,6 +4657,7 @@ fn compute_runtime_var_migration_plan(
                         extra_namespace_exports: migration.extra_namespace_exports.clone(),
                         extra_runtime_deps: migration.extra_runtime_deps.clone(),
                         extra_source_deps: migration.extra_source_deps.clone(),
+                        extra_noop_deps: migration.extra_noop_deps.clone(),
                         initializer: primary_initializer,
                     },
                 );
@@ -4671,6 +4693,7 @@ fn runtime_setter_migration_blocker_report(
     let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
     let source_definition_modules =
         unique_source_definition_modules(program, externalized_packages);
+    let all_source_definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
     let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
     let runtime_source_consumers =
         runtime_prelude_direct_import_consumers(program, lowered_runtime_sources);
@@ -4821,6 +4844,8 @@ fn runtime_setter_migration_blocker_report(
             ),
             source_consumers_by_runtime_binding: &runtime_source_consumers,
             source_definition_modules: &source_definition_modules,
+            all_source_definition_modules: &all_source_definition_modules,
+            externalized_packages,
             module_dependencies_by_owner: &module_dependencies_by_owner,
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_runtime_definitions,
@@ -5044,6 +5069,8 @@ struct RuntimeReaderClusterContext<'a> {
     owner_available_bindings: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     source_consumers_by_runtime_binding: &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
     source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
+    all_source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
+    externalized_packages: &'a BTreeSet<ModuleId>,
     module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
     folded_modules: &'a BTreeSet<ModuleId>,
     folded_runtime_definitions: &'a BTreeSet<BindingName>,
@@ -5093,6 +5120,7 @@ struct RuntimeReaderClusterMigration {
     /// migrated reader's owner->runtime import.
     pinned_runtime_deps: BTreeSet<BindingName>,
     extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    extra_noop_deps: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5206,6 +5234,7 @@ fn merge_reader_migration_component(
         extra_runtime_deps: BTreeSet::new(),
         pinned_runtime_deps: BTreeSet::new(),
         extra_source_deps: BTreeMap::new(),
+        extra_noop_deps: BTreeSet::new(),
     };
 
     for index in component {
@@ -5232,6 +5261,9 @@ fn merge_reader_migration_component(
                 .or_default()
                 .extend(bindings.iter().cloned());
         }
+        migration
+            .extra_noop_deps
+            .extend(proposal.migration.extra_noop_deps.iter().cloned());
     }
 
     let local_bindings = reader_migration_local_bindings(&migration);
@@ -5299,6 +5331,7 @@ fn migratable_runtime_reader_cluster_result(
             extra_runtime_deps: BTreeSet::new(),
             pinned_runtime_deps: BTreeSet::new(),
             extra_source_deps: BTreeMap::new(),
+            extra_noop_deps: BTreeSet::new(),
         });
     }
 
@@ -5310,6 +5343,7 @@ fn migratable_runtime_reader_cluster_result(
     let mut folded_non_snippet_snippets = BTreeSet::<BindingName>::new();
     let mut pinned_runtime_deps = BTreeSet::<BindingName>::new();
     let mut extra_source_deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    let mut extra_noop_deps = BTreeSet::<BindingName>::new();
     let mut queue = initial_readers.into_iter().collect::<Vec<_>>();
     while let Some(reader) = queue.pop() {
         if !moved_snippets.insert(reader.clone()) {
@@ -5454,6 +5488,14 @@ fn migratable_runtime_reader_cluster_result(
                         .insert(dep.clone());
                     continue;
                 }
+                if runtime_reader_externalized_package_init_dependency(
+                    ctx,
+                    snippet.source.as_str(),
+                    dep,
+                ) {
+                    extra_noop_deps.insert(dep.clone());
+                    continue;
+                }
                 return Err(RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding);
             }
             if let Some(closure) =
@@ -5528,6 +5570,7 @@ fn migratable_runtime_reader_cluster_result(
     if moved_snippets
         .iter()
         .chain(extra_runtime_deps.iter())
+        .chain(extra_noop_deps.iter())
         .chain(primary_bindings.iter())
         .any(|binding| owner_available_bindings.contains(binding))
     {
@@ -5584,6 +5627,7 @@ fn migratable_runtime_reader_cluster_result(
         extra_runtime_deps,
         pinned_runtime_deps,
         extra_source_deps,
+        extra_noop_deps,
     })
 }
 
@@ -5641,6 +5685,7 @@ fn migratable_folded_non_snippet_runtime_read_result(
         extra_runtime_deps: BTreeSet::new(),
         pinned_runtime_deps: BTreeSet::new(),
         extra_source_deps: BTreeMap::new(),
+        extra_noop_deps: BTreeSet::new(),
     })
 }
 
@@ -5720,6 +5765,28 @@ fn runtime_reader_source_dependency(
         return None;
     }
     Some(dep_module)
+}
+
+fn runtime_reader_externalized_package_init_dependency(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    snippet_source: &str,
+    binding: &BindingName,
+) -> bool {
+    let Some(dep_module) = ctx
+        .all_source_definition_modules
+        .get(binding)
+        .and_then(|module_id| *module_id)
+    else {
+        return false;
+    };
+    if !ctx.externalized_packages.contains(&dep_module) {
+        return false;
+    }
+    let reads = identifier_read_facts_in_source(snippet_source)
+        .into_iter()
+        .filter(|fact| fact.name == binding.as_str())
+        .collect::<Vec<_>>();
+    !reads.is_empty() && reads.iter().all(|fact| fact.is_call_callee)
 }
 
 fn runtime_reader_folded_runtime_dependency(
@@ -5838,11 +5905,11 @@ fn runtime_reader_folded_non_snippet_use_can_move(
             .read_index
             .entrypoint_non_snippet_runtime_reads
             .contains(binding)
-        && !ctx
+        && ctx
             .read_index
             .entrypoint_callee
             .as_ref()
-            .is_some_and(|entrypoint| entrypoint == binding)
+            .is_none_or(|entrypoint| entrypoint != binding)
         && !ctx.read_index.namespace_export_helpers.contains(binding)
         && !ctx
             .read_index
@@ -19039,6 +19106,76 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_emits_externalized_init_shim_locally() {
+        let prelude = "var shared;\nfunction readShared() { cNq(); return shared; }\n";
+        let package_body = "function cNq() {}\nexport { cNq };\n";
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let consumer_body = "var value = readShared();\nexport { value };\n";
+        let source = format!("{prelude}{package_body}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "open",
+                "modules/open.ts",
+                "open",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + package_body.len()) as u32,
+            )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + package_body.len()) as u32,
+                    (prelude.len() + package_body.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + package_body.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "open",
+                "1.0.0",
+                "open/index.js",
+            ));
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(
+            writer_source.contains("function readShared() { cNq(); return shared; }"),
+            "{writer_source}"
+        );
+        assert!(
+            writer_source.contains("function cNq() {}"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(consumer_source.contains("import { readShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn namespace_getter_runtime_var_migration_moves_namespace_with_writer() {
         let prelude = concat!(
             "var shared;\n",
@@ -19714,6 +19851,8 @@ mod tests {
         };
         let source_consumers = BTreeMap::new();
         let source_definition_modules = BTreeMap::new();
+        let all_source_definition_modules = BTreeMap::new();
+        let externalized_packages = BTreeSet::new();
         let module_dependencies = BTreeMap::new();
         let folded_modules = BTreeSet::new();
         let folded_definitions = BTreeSet::new();
@@ -19726,6 +19865,8 @@ mod tests {
             owner_available_bindings: BTreeMap::new(),
             source_consumers_by_runtime_binding: &source_consumers,
             source_definition_modules: &source_definition_modules,
+            all_source_definition_modules: &all_source_definition_modules,
+            externalized_packages: &externalized_packages,
             module_dependencies_by_owner: &module_dependencies,
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_definitions,
@@ -19750,6 +19891,7 @@ mod tests {
                     extra_runtime_deps: BTreeSet::from([BindingName::new("b")]),
                     pinned_runtime_deps: BTreeSet::new(),
                     extra_source_deps: BTreeMap::new(),
+                    extra_noop_deps: BTreeSet::new(),
                 },
             },
             RuntimeReaderClusterMigrationProposal {
@@ -19766,6 +19908,7 @@ mod tests {
                     extra_runtime_deps: BTreeSet::new(),
                     pinned_runtime_deps: BTreeSet::new(),
                     extra_source_deps: BTreeMap::new(),
+                    extra_noop_deps: BTreeSet::new(),
                 },
             },
             RuntimeReaderClusterMigrationProposal {
@@ -19782,6 +19925,7 @@ mod tests {
                     extra_runtime_deps: BTreeSet::new(),
                     pinned_runtime_deps: BTreeSet::new(),
                     extra_source_deps: BTreeMap::new(),
+                    extra_noop_deps: BTreeSet::new(),
                 },
             },
         ];
