@@ -283,6 +283,40 @@ pub fn package_source_entry_path(source: &PackageSource) -> String {
 }
 
 #[must_use]
+pub fn package_source_external_import_rank(source: &PackageSource) -> u8 {
+    let path = package_source_entry_path(source).to_ascii_lowercase();
+    let extension = Path::new(path.as_str())
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    if extension == "mjs" || path_has_any_segment(path.as_str(), &["esm", "es", "module"]) {
+        return 0;
+    }
+    if extension == "cjs" || path_has_any_segment(path.as_str(), &["cjs", "commonjs"]) {
+        return 1;
+    }
+    if path_has_any_segment(path.as_str(), &["node"]) {
+        return 2;
+    }
+    if path_has_any_segment(path.as_str(), &["umd", "bundles", "bundle"]) {
+        return 3;
+    }
+    if path_has_any_segment(path.as_str(), &["dist", "lib", "build"]) {
+        return 4;
+    }
+    if path_has_any_segment(path.as_str(), &["src", "source", "sources"]) {
+        return 6;
+    }
+    5
+}
+
+fn path_has_any_segment(path: &str, candidates: &[&str]) -> bool {
+    path.split('/')
+        .map(|segment| segment.trim())
+        .any(|segment| candidates.contains(&segment))
+}
+
+#[must_use]
 pub fn package_source_export_path(source: &PackageSource) -> String {
     let specifier = source.export_specifier.trim();
     match split_bare_specifier(specifier) {

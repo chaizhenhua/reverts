@@ -7,6 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use reverts_input::sqlite::load_project_bundle_from_sqlite;
 use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency, generate_project_from_input};
+use semver::{Version, VersionReq};
 
 use crate::errors::{CliError, CliRunError};
 use crate::{format_audit_findings, next_path, parse_project_id};
@@ -133,7 +134,9 @@ fn write_typescript_project_scaffold(
     let package_json =
         typescript_package_json(runtime_dependencies, has_cli_entrypoint, !assets.is_empty());
     write_project_file(output, "package.json", package_json.as_str())?;
-    write_project_file(output, ".npmrc", TYPESCRIPT_NPMRC)?;
+    if should_write_legacy_peer_deps_npmrc(runtime_dependencies) {
+        write_project_file(output, ".npmrc", TYPESCRIPT_NPMRC)?;
+    }
     write_project_file(output, "tsconfig.json", TYPESCRIPT_TSCONFIG_JSON)?;
     write_project_file(
         output,
@@ -150,9 +153,48 @@ fn write_typescript_project_scaffold(
 // Generated projects preserve the package versions proven from the bundled
 // source. Modern npm peer-dependency resolution can reject historical
 // lockfile combinations even though they are the versions that were bundled,
-// so install with legacy peer semantics by default.
+// so only known source-preservation conflicts opt into legacy peer semantics.
 const TYPESCRIPT_NPMRC: &str = r"legacy-peer-deps=true
 ";
+
+fn should_write_legacy_peer_deps_npmrc(runtime_dependencies: &[RuntimeDependency]) -> bool {
+    let dependency_versions = runtime_dependencies
+        .iter()
+        .map(|dependency| {
+            (
+                dependency.package_name.as_str(),
+                dependency.package_version.as_str(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    has_unsatisfied_ink_7_peer_dependency(&dependency_versions)
+}
+
+fn has_unsatisfied_ink_7_peer_dependency(
+    dependency_versions: &std::collections::BTreeMap<&str, &str>,
+) -> bool {
+    let Some(ink_version) = dependency_versions.get("ink").copied() else {
+        return false;
+    };
+    if !version_satisfies(ink_version, ">=7.0.0") {
+        return false;
+    }
+    dependency_versions
+        .get("react")
+        .copied()
+        .is_some_and(|version| !version_satisfies(version, ">=19.2.0"))
+        || dependency_versions
+            .get("react-devtools-core")
+            .copied()
+            .is_some_and(|version| !version_satisfies(version, ">=6.1.2"))
+}
+
+fn version_satisfies(version: &str, requirement: &str) -> bool {
+    let Ok(version) = Version::parse(version.trim()) else {
+        return false;
+    };
+    VersionReq::parse(requirement).is_ok_and(|requirement| requirement.matches(&version))
+}
 
 fn typescript_package_json(
     runtime_dependencies: &[RuntimeDependency],

@@ -1002,7 +1002,10 @@ pub fn match_packages_from_connection(
         args.apply,
     )?;
     mark_timing!("load_package_sources");
+    let package_versions_before_resolution = package_versions_by_module(&rows);
     resolve_package_version_hints_to_available_sources(&mut rows, &package_sources, &package_names);
+    let package_version_resolutions =
+        package_version_resolution_evidence(&package_versions_before_resolution, &rows);
     mark_timing!("resolve_versions");
     filter_package_sources_to_referenced_package_versions(&rows, &mut package_sources);
     mark_timing!("filter_referenced_versions");
@@ -1051,7 +1054,13 @@ pub fn match_packages_from_connection(
             .cloned()
             .collect::<Vec<_>>();
         (
-            persist_package_attributions(connection, &rows, &report, &package_names)?,
+            persist_package_attributions(
+                connection,
+                &rows,
+                &report,
+                &package_names,
+                &package_version_resolutions,
+            )?,
             persist_package_surfaces(connection, &rows, &report)?,
             persist_function_attributions(connection, &rows, &persistable_function_attributions)?,
         )
@@ -4703,11 +4712,89 @@ fn dedup_package_sources(package_sources: &mut Vec<PackageSource>) {
     });
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageVersionResolutionEvidence {
+    requested_version: Option<String>,
+    resolved_version: String,
+    reason: &'static str,
+}
+
+fn package_versions_by_module(rows: &InputRows) -> BTreeMap<ModuleId, Option<String>> {
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .map(|module| {
+            (
+                module.id,
+                module
+                    .package_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|version| !version.is_empty())
+                    .map(ToOwned::to_owned),
+            )
+        })
+        .collect()
+}
+
+fn package_version_resolution_evidence(
+    before: &BTreeMap<ModuleId, Option<String>>,
+    rows: &InputRows,
+) -> BTreeMap<ModuleId, PackageVersionResolutionEvidence> {
+    rows.modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            let requested_version = before.get(&module.id).cloned().flatten();
+            let resolved_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty())?;
+            if requested_version.as_deref() == Some(resolved_version) {
+                return None;
+            }
+            Some((
+                module.id,
+                PackageVersionResolutionEvidence {
+                    reason: package_version_resolution_reason(
+                        requested_version.as_deref(),
+                        resolved_version,
+                    ),
+                    requested_version,
+                    resolved_version: resolved_version.to_string(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn package_version_resolution_reason(
+    requested_version: Option<&str>,
+    resolved_version: &str,
+) -> &'static str {
+    let Some(requested_version) = requested_version else {
+        return "missing_hint_resolved_to_available_source";
+    };
+    if is_exact_package_version_hint(requested_version) {
+        return "unavailable_exact_resolved_to_nearest_or_source_identity";
+    }
+    if Version::parse(resolved_version)
+        .ok()
+        .is_some_and(|version| version_hint_matches(requested_version, &version))
+    {
+        "range_resolved_to_available_source"
+    } else {
+        "impossible_or_inconsistent_range_resolved_to_project_exact_source"
+    }
+}
+
 fn persist_package_attributions(
     connection: &mut Connection,
     rows: &InputRows,
     report: &VersionedPackageMatchReport,
     matched_package_names: &BTreeSet<String>,
+    version_resolutions: &BTreeMap<ModuleId, PackageVersionResolutionEvidence>,
 ) -> Result<usize, MatchPackagesError> {
     let rejected_attributions =
         rejected_package_attributions_for_unaccepted_modules(rows, report, matched_package_names)?;
@@ -4749,6 +4836,7 @@ fn persist_package_attributions(
             module.original_name.as_str(),
             attribution,
             module_match,
+            version_resolutions.get(&attribution.module_id),
         )?;
         written += 1;
     }
@@ -5396,6 +5484,7 @@ fn persist_package_attribution(
     module_original_name: &str,
     attribution: &PackageAttributionInput,
     module_match: &PackageMatch,
+    version_resolution: Option<&PackageVersionResolutionEvidence>,
 ) -> Result<(), MatchPackagesError> {
     let package_version =
         attribution
@@ -5414,6 +5503,13 @@ fn persist_package_attribution(
                 message: "accepted external package attribution has no export specifier"
                     .to_string(),
             })?;
+    let version_resolution = version_resolution.map(|resolution| {
+        serde_json::json!({
+            "requested_version": resolution.requested_version,
+            "resolved_version": resolution.resolved_version,
+            "reason": resolution.reason,
+        })
+    });
     let evidence = serde_json::json!({
         "matcher": "exact_normalized_source_binary_search",
         "package_name": module_match.package_name,
@@ -5422,6 +5518,8 @@ fn persist_package_attribution(
         "source_path": module_match.source_path,
         "normalized_source_hash": module_match.normalized_source_hash,
         "match_strategy": module_match.strategy.as_str(),
+        "external_import_proof": external_import_proof_kind(module_match.source_path.as_str()),
+        "version_resolution": version_resolution,
         "function_signature_matches": module_match.function_signature_matches,
         "string_anchor_matches": module_match.string_anchor_matches,
         "writes_package_version": true,
@@ -5553,6 +5651,26 @@ fn persist_rejected_package_attribution(
         )
         .map_err(MatchPackagesError::WriteAttribution)?;
     Ok(())
+}
+
+fn external_import_proof_kind(source_path: &str) -> &'static str {
+    if source_path.starts_with("export-specifier-source:") {
+        "export_specifier_source"
+    } else if source_path.starts_with("root-export-source:") {
+        "root_export_source"
+    } else if source_path.starts_with("forced-external:semantic-export:") {
+        "semantic_export"
+    } else if source_path.starts_with("forced-external:semantic-source:") {
+        "semantic_source"
+    } else if source_path.starts_with("forced-external:source-match:") {
+        "source_match_fallback"
+    } else if source_path.starts_with("forced-external:semantic-path:") {
+        "semantic_path_fallback"
+    } else if source_path.starts_with("forced-external:package-root:") {
+        "package_root_fallback"
+    } else {
+        "matched_package_source"
+    }
 }
 
 /// Persist bundle-extraction synthetic modules into the SQLite `modules`
@@ -6051,8 +6169,8 @@ mod tests {
         local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
         package_export_specifier, package_version_hints_for_materialization,
-        parse_npm_versions_json, persist_package_source_cache,
-        resolve_package_version_hints_to_available_sources, run,
+        package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
+        persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections,
         stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
         version_text,
@@ -6537,6 +6655,32 @@ mod tests {
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("0.211.0"));
+    }
+
+    #[test]
+    fn package_version_resolution_evidence_records_impossible_range_fallback() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "otelImpossibleRange",
+            "node_modules/@opentelemetry/otlp-exporter-base/index.js",
+            "@opentelemetry/otlp-exporter-base",
+            Some("1.x".to_string()),
+        ));
+        let before = package_versions_by_module(&rows);
+        rows.modules[0].package_version = Some("0.211.0".to_string());
+
+        let evidence = package_version_resolution_evidence(&before, &rows);
+        let evidence = evidence
+            .get(&ModuleId(10))
+            .expect("resolution should be recorded");
+
+        assert_eq!(evidence.requested_version.as_deref(), Some("1.x"));
+        assert_eq!(evidence.resolved_version.as_str(), "0.211.0");
+        assert_eq!(
+            evidence.reason,
+            "impossible_or_inconsistent_range_resolved_to_project_exact_source"
+        );
     }
 
     #[test]
@@ -7478,9 +7622,9 @@ mod tests {
                 .expect("package json")
                 .contains("\"@types/node\": \"*\"")
         );
-        assert_eq!(
-            fs::read_to_string(tempdir.path().join(".npmrc")).expect("npmrc"),
-            "legacy-peer-deps=true\n"
+        assert!(
+            !tempdir.path().join(".npmrc").exists(),
+            "npmrc should only be written for known peer conflicts"
         );
         assert!(
             fs::read_to_string(tempdir.path().join("tsconfig.json"))
@@ -7488,6 +7632,41 @@ mod tests {
                 .contains("\"modules/**/*.ts\"")
         );
         assert!(tempdir.path().join("tsconfig.runtime.json").exists());
+    }
+
+    #[test]
+    fn project_writer_emits_npmrc_for_source_preserved_peer_conflict() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let files = vec![EmittedFile {
+            path: "modules/1-entry.ts".to_string(),
+            source: "// @ts-nocheck\nconsole.log('ok');".to_string(),
+        }];
+
+        write_emitted_project(
+            &files,
+            &[],
+            tempdir.path(),
+            &[
+                RuntimeDependency {
+                    package_name: "ink".to_string(),
+                    package_version: "7.0.3".to_string(),
+                },
+                RuntimeDependency {
+                    package_name: "react".to_string(),
+                    package_version: "19.1.5".to_string(),
+                },
+                RuntimeDependency {
+                    package_name: "react-devtools-core".to_string(),
+                    package_version: "4.28.5".to_string(),
+                },
+            ],
+        )
+        .expect("project should be written");
+
+        assert_eq!(
+            fs::read_to_string(tempdir.path().join(".npmrc")).expect("npmrc"),
+            "legacy-peer-deps=true\n"
+        );
     }
 
     #[test]
