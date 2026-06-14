@@ -827,21 +827,75 @@ fn runtime_namespace_export_from_statement(
     let Expression::CallExpression(call) = &statement.expression else {
         return None;
     };
-    let Expression::Identifier(callee) = &call.callee else {
-        return None;
-    };
+    let kind = namespace_export_call_kind(call)?;
     let namespace = argument_identifier(call.arguments.first()?)?;
-    let object = argument_object_expression(call.arguments.get(1)?)?;
-    let exports = namespace_export_object_from_ast(object);
+    let exports = match kind {
+        RuntimeNamespaceExportCallKind::Helper(helper) => {
+            let object = argument_object_expression(call.arguments.get(1)?)?;
+            namespace_export_object_from_ast(object).map(|exports| (helper, exports))?
+        }
+        RuntimeNamespaceExportCallKind::ObjectDefineProperties => {
+            let object = argument_object_expression(call.arguments.get(1)?)?;
+            let exports = namespace_export_object_from_ast(object)?;
+            ("Object.defineProperties", exports)
+        }
+        RuntimeNamespaceExportCallKind::ObjectDefineProperty => {
+            let export_name = argument_string_literal(call.arguments.get(1)?)?;
+            let descriptor = argument_object_expression(call.arguments.get(2)?)?;
+            let target = namespace_property_descriptor_export_target(descriptor)?;
+            (
+                "Object.defineProperty",
+                BTreeMap::from([(export_name.to_string(), BindingName::new(target))]),
+            )
+        }
+    };
+    let (helper, exports) = exports;
     if exports.is_empty() {
         return None;
     }
     Some(RuntimeNamespaceExport {
         namespace: BindingName::new(namespace),
-        helper: BindingName::new(callee.name.as_str()),
+        helper: BindingName::new(helper),
         exports,
         byte_start: statement.span().start,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeNamespaceExportCallKind<'a> {
+    Helper(&'a str),
+    ObjectDefineProperties,
+    ObjectDefineProperty,
+}
+
+fn namespace_export_call_kind<'a>(
+    call: &'a CallExpression<'a>,
+) -> Option<RuntimeNamespaceExportCallKind<'a>> {
+    namespace_export_callee_kind(&call.callee)
+}
+
+fn namespace_export_callee_kind<'a>(
+    callee: &'a Expression<'a>,
+) -> Option<RuntimeNamespaceExportCallKind<'a>> {
+    match callee {
+        Expression::Identifier(callee) => {
+            Some(RuntimeNamespaceExportCallKind::Helper(callee.name.as_str()))
+        }
+        Expression::StaticMemberExpression(member) => {
+            if expression_identifier(&member.object) != Some("Object") {
+                return None;
+            }
+            match member.property.name.as_str() {
+                "defineProperties" => Some(RuntimeNamespaceExportCallKind::ObjectDefineProperties),
+                "defineProperty" => Some(RuntimeNamespaceExportCallKind::ObjectDefineProperty),
+                _ => None,
+            }
+        }
+        Expression::ParenthesizedExpression(parenthesized) => {
+            namespace_export_callee_kind(&parenthesized.expression)
+        }
+        _ => None,
+    }
 }
 
 fn argument_identifier<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
@@ -878,7 +932,7 @@ fn expression_object_expression<'a>(
 
 fn namespace_export_object_from_ast(
     object: &ObjectExpression<'_>,
-) -> BTreeMap<String, BindingName> {
+) -> Option<BTreeMap<String, BindingName>> {
     let mut exports = BTreeMap::new();
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
@@ -895,7 +949,7 @@ fn namespace_export_object_from_ast(
         };
         exports.insert(export_name.into_owned(), BindingName::new(target));
     }
-    exports
+    Some(exports)
 }
 
 fn namespace_export_target<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
@@ -905,11 +959,30 @@ fn namespace_export_target<'a>(expression: &'a Expression<'a>) -> Option<&'a str
             .body
             .as_ref()
             .and_then(|body| function_body_return_identifier(body)),
+        Expression::ObjectExpression(object) => namespace_property_descriptor_export_target(object),
         Expression::ParenthesizedExpression(parenthesized) => {
             namespace_export_target(&parenthesized.expression)
         }
         _ => expression_identifier(expression),
     }
+}
+
+fn namespace_property_descriptor_export_target<'a>(
+    object: &'a ObjectExpression<'a>,
+) -> Option<&'a str> {
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            continue;
+        };
+        if property.kind != PropertyKind::Init || property.computed {
+            continue;
+        }
+        let Some("get") = property.key.static_name().as_deref() else {
+            continue;
+        };
+        return namespace_export_target(&property.value);
+    }
+    None
 }
 
 fn function_body_return_identifier<'a>(
@@ -3332,6 +3405,58 @@ mod tests {
         assert!(source.contains("function other()"));
         assert!(!source.contains("function expose"));
         assert!(!source.contains("expose(ns"));
+    }
+
+    #[test]
+    fn graph_records_object_define_property_runtime_namespace_exports() {
+        let prelude = concat!(
+            "var ns = {};\n",
+            "var singleNs = {};\n",
+            "Object.defineProperties(ns, {\n",
+            "  ready: { enumerable: true, get: () => ready },\n",
+            "  'other-name': { enumerable: true, get: function() { return other; } }\n",
+            "});\n",
+            "Object.defineProperty(singleNs, 'single', { enumerable: true, get: () => single });\n",
+            "function ready() { return true; }\n",
+            "function other() { return false; }\n",
+            "function single() { return 1; }\n",
+        );
+        let body = "export const moduleValue = ns.ready + singleNs.single;\n";
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let prelude = graph
+            .runtime_prelude(1)
+            .expect("bundle prelude should be recovered");
+        let ns_export = prelude
+            .namespace_exports
+            .iter()
+            .find(|export| export.namespace.as_str() == "ns")
+            .expect("Object.defineProperties namespace export should be recovered");
+        let single_export = prelude
+            .namespace_exports
+            .iter()
+            .find(|export| export.namespace.as_str() == "singleNs")
+            .expect("Object.defineProperty namespace export should be recovered");
+
+        assert_eq!(ns_export.helper.as_str(), "Object.defineProperties");
+        assert_eq!(ns_export.exports["ready"].as_str(), "ready");
+        assert_eq!(ns_export.exports["other-name"].as_str(), "other");
+        assert_eq!(single_export.helper.as_str(), "Object.defineProperty");
+        assert_eq!(single_export.exports["single"].as_str(), "single");
+        assert!(
+            prelude.entrypoint.is_none(),
+            "Object.defineProperties calls must not become runtime entrypoints"
+        );
     }
 
     #[test]
