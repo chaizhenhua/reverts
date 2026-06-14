@@ -29,10 +29,10 @@ use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, ExternalizationPolicy, ModuleMatchStrategy, PackageMatch,
     PackageModuleSourceQuality, PackageSource, VersionMatchScore, VersionedPackageMatchReport,
-    has_accepted_external_attribution, is_exact_package_version_hint, is_json_source_path,
-    match_packages_with_pipeline_with_policy, ownership_by_module,
-    package_import_names_from_sources, package_module_source_quality,
-    package_semantic_path_prefixes, path_hint_tokens, strip_source_extension,
+    clean_package_semantic_path_hint, has_accepted_external_attribution,
+    is_exact_package_version_hint, is_json_source_path, match_packages_with_pipeline_with_policy,
+    ownership_by_module, package_import_names_from_sources, package_module_source_quality,
+    package_source_entry_path, package_source_semantic_hint_score, strip_source_extension,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -969,7 +969,7 @@ pub fn match_packages_from_connection(
     mark_timing!("bundle_extract_enrich");
 
     remove_package_attributions_for_revalidation(&mut rows, &args.package_names);
-    let package_names = package_source_filter(&rows, &args.package_names);
+    let package_names = package_source_load_scope(&rows, &args.package_names);
     repair_package_module_source_slices(
         &mut rows,
         (!args.package_names.is_empty()).then_some(&package_names),
@@ -2137,7 +2137,10 @@ fn set_materialized_executable_bit(_path: &Path, _executable: bool) -> io::Resul
     Ok(())
 }
 
-fn package_source_filter(rows: &InputRows, requested_package_names: &[String]) -> BTreeSet<String> {
+fn package_source_load_scope(
+    rows: &InputRows,
+    requested_package_names: &[String],
+) -> BTreeSet<String> {
     if !requested_package_names.is_empty() {
         return requested_package_names.iter().cloned().collect();
     }
@@ -2648,13 +2651,7 @@ fn migrate_package_source_cache_entry_path_primary_key(
 }
 
 fn package_source_cache_entry_path(source: &PackageSource) -> String {
-    let prefix = format!("{}@{}/", source.package_name, source.package_version);
-    source
-        .source_path
-        .strip_prefix(prefix.as_str())
-        .unwrap_or(source.source_path.as_str())
-        .trim_start_matches('/')
-        .to_string()
+    package_source_entry_path(source)
 }
 
 fn package_export_specifier(package_name: &str, entry_path: &str) -> String {
@@ -2695,23 +2692,318 @@ fn load_package_sources_from_roots(
     Ok(sources)
 }
 
+#[derive(Debug)]
+struct PackageVersionResolutionPlan {
+    available_versions: BTreeMap<String, BTreeSet<Version>>,
+    project_exact_versions: BTreeMap<String, BTreeMap<Version, usize>>,
+    source_identity_versions: BTreeMap<ModuleId, Version>,
+}
+
+impl PackageVersionResolutionPlan {
+    fn build(
+        rows: &InputRows,
+        package_names: &BTreeSet<String>,
+        existing_sources: &[PackageSource],
+    ) -> Self {
+        let available_versions = exact_package_source_versions_by_package(existing_sources);
+        let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+        let source_identity_versions = source_identity_versions_by_module(
+            rows,
+            existing_sources,
+            package_names,
+            &available_versions,
+            &project_exact_versions,
+        );
+        Self {
+            available_versions,
+            project_exact_versions,
+            source_identity_versions,
+        }
+    }
+
+    fn materialization_hints(
+        &self,
+        rows: &InputRows,
+        package_names: &BTreeSet<String>,
+    ) -> BTreeSet<(String, String)> {
+        rows.modules
+            .iter()
+            .filter(|module| module.kind == ModuleKind::Package)
+            .filter_map(|module| {
+                let package_name = scoped_package_name(module, package_names)?;
+                let package_version = module.package_version.as_deref().map(str::trim);
+                let Some(package_version) = package_version.filter(|version| !version.is_empty())
+                else {
+                    let resolved = self
+                        .best_project_version_candidate(package_name, "latest", None)
+                        .or_else(|| {
+                            self.available_versions
+                                .get(package_name)
+                                .and_then(|versions| {
+                                    best_matching_package_version_by_binary_search(
+                                        "latest", versions,
+                                    )
+                                })
+                        })?;
+                    return (!self.package_source_versions_contain(package_name, &resolved))
+                        .then(|| (package_name.to_string(), resolved.to_string()));
+                };
+                if is_exact_package_version_hint(package_version) {
+                    return (!package_source_versions_contain(
+                        &self.available_versions,
+                        package_name,
+                        package_version,
+                    ))
+                    .then(|| (package_name.to_string(), package_version.to_string()));
+                }
+                let resolved = self
+                    .best_project_version_candidate(package_name, package_version, None)
+                    .or_else(|| {
+                        self.available_versions
+                            .get(package_name)
+                            .and_then(|versions| {
+                                best_matching_package_version_by_binary_search(
+                                    package_version,
+                                    versions,
+                                )
+                            })
+                    })?;
+                (!self.package_source_versions_contain(package_name, &resolved))
+                    .then(|| (package_name.to_string(), resolved.to_string()))
+            })
+            .collect()
+    }
+
+    fn stale_cache_materialization_hints(
+        &self,
+        rows: &InputRows,
+        package_names: &BTreeSet<String>,
+        stale_cache_versions: &BTreeSet<(String, String)>,
+    ) -> BTreeSet<(String, String)> {
+        if stale_cache_versions.is_empty() {
+            return BTreeSet::new();
+        }
+        let project_resolved_versions = self.resolved_project_versions(rows, package_names);
+        stale_cache_versions
+            .iter()
+            .filter_map(|(package_name, stale_version)| {
+                let versions = self.available_versions.get(package_name)?;
+                let resolved = if is_exact_package_version_hint(stale_version) {
+                    Version::parse(stale_version).ok()
+                } else {
+                    self.best_project_version_candidate(package_name, stale_version, Some(versions))
+                        .or_else(|| {
+                            best_matching_package_version_by_binary_search(stale_version, versions)
+                        })
+                }?;
+                project_resolved_versions
+                    .get(package_name)
+                    .is_some_and(|needed| needed.contains(&resolved))
+                    .then(|| (package_name.clone(), resolved.to_string()))
+            })
+            .collect()
+    }
+
+    fn network_resolution_hints(
+        &self,
+        rows: &InputRows,
+        package_names: &BTreeSet<String>,
+    ) -> BTreeSet<(String, String)> {
+        rows.modules
+            .iter()
+            .filter(|module| module.kind == ModuleKind::Package)
+            .filter_map(|module| {
+                let package_name = scoped_package_name(module, package_names)?;
+                let requested_version = module
+                    .package_version
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|version| !version.is_empty());
+                let Some(package_version) = requested_version else {
+                    let has_project_candidate = self
+                        .best_project_version_candidate(package_name, "latest", None)
+                        .is_some();
+                    let has_available_candidate = self
+                        .available_versions
+                        .get(package_name)
+                        .is_some_and(|versions| {
+                            best_matching_package_version_by_binary_search("latest", versions)
+                                .is_some()
+                        });
+                    return (!has_project_candidate && !has_available_candidate)
+                        .then(|| (package_name.to_string(), "latest".to_string()));
+                };
+                if is_exact_package_version_hint(package_version) {
+                    return None;
+                }
+                let has_project_candidate = self
+                    .best_project_version_candidate(package_name, package_version, None)
+                    .is_some();
+                let has_available_candidate = self
+                    .available_versions
+                    .get(package_name)
+                    .is_some_and(|versions| {
+                        best_matching_package_version_by_binary_search(package_version, versions)
+                            .is_some()
+                    });
+                (!has_project_candidate && !has_available_candidate)
+                    .then(|| (package_name.to_string(), package_version.to_string()))
+            })
+            .collect()
+    }
+
+    fn resolved_project_versions(
+        &self,
+        rows: &InputRows,
+        package_names: &BTreeSet<String>,
+    ) -> BTreeMap<String, BTreeSet<Version>> {
+        let mut resolved = BTreeMap::<String, BTreeSet<Version>>::new();
+        for module in &rows.modules {
+            if module.kind != ModuleKind::Package {
+                continue;
+            }
+            let Some(package_name) = scoped_package_name(module, package_names) else {
+                continue;
+            };
+            let Some(versions) = self.available_versions.get(package_name) else {
+                continue;
+            };
+            let requested_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty())
+                .unwrap_or("latest");
+            let selected = if is_exact_package_version_hint(requested_version) {
+                Version::parse(requested_version)
+                    .ok()
+                    .filter(|version| versions.contains(version))
+                    .or_else(|| {
+                        nearest_package_version_by_binary_search(requested_version, versions)
+                    })
+            } else {
+                self.best_project_version_candidate(package_name, requested_version, Some(versions))
+                    .or_else(|| {
+                        best_matching_package_version_by_binary_search(requested_version, versions)
+                    })
+            };
+            if let Some(selected) = selected {
+                resolved
+                    .entry(package_name.to_string())
+                    .or_default()
+                    .insert(selected);
+            }
+        }
+        resolved
+    }
+
+    fn apply_to_rows(&self, rows: &mut InputRows, package_names: &BTreeSet<String>) -> usize {
+        let mut resolved = 0usize;
+        for module in &mut rows.modules {
+            if module.kind != ModuleKind::Package {
+                continue;
+            }
+            let Some(package_name) = scoped_package_name(module, package_names).map(str::to_string)
+            else {
+                continue;
+            };
+            let requested_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| !version.is_empty());
+            let Some(versions) = self.available_versions.get(package_name.as_str()) else {
+                continue;
+            };
+            let source_identity_version = self.source_identity_versions.get(&module.id).cloned();
+            let selected = match requested_version {
+                Some(package_version) if is_exact_package_version_hint(package_version) => {
+                    if package_source_versions_contain(
+                        &self.available_versions,
+                        package_name.as_str(),
+                        package_version,
+                    ) {
+                        None
+                    } else {
+                        source_identity_version.or_else(|| {
+                            nearest_package_version_by_binary_search(package_version, versions)
+                        })
+                    }
+                }
+                Some(package_version) => self
+                    .best_project_version_candidate(
+                        package_name.as_str(),
+                        package_version,
+                        Some(versions),
+                    )
+                    .or(source_identity_version)
+                    .or_else(|| {
+                        best_matching_package_version_by_binary_search(package_version, versions)
+                    }),
+                None => source_identity_version
+                    .or_else(|| {
+                        self.best_project_version_candidate(
+                            package_name.as_str(),
+                            "latest",
+                            Some(versions),
+                        )
+                    })
+                    .or_else(|| best_matching_package_version_by_binary_search("latest", versions)),
+            };
+            if let Some(selected) = selected {
+                module.package_version = Some(selected.to_string());
+                resolved += 1;
+            }
+        }
+        resolved
+    }
+
+    fn best_project_version_candidate(
+        &self,
+        package_name: &str,
+        requested_version: &str,
+        available_versions: Option<&BTreeSet<Version>>,
+    ) -> Option<Version> {
+        best_project_version_candidate(
+            package_name,
+            requested_version,
+            &self.project_exact_versions,
+            available_versions,
+        )
+    }
+
+    fn package_source_versions_contain(
+        &self,
+        package_name: &str,
+        package_version: &Version,
+    ) -> bool {
+        self.available_versions
+            .get(package_name)
+            .is_some_and(|versions| versions.contains(package_version))
+    }
+}
+
+fn scoped_package_name<'a>(
+    module: &'a ModuleInput,
+    package_names: &BTreeSet<String>,
+) -> Option<&'a str> {
+    let package_name = module.package_name.as_deref()?.trim();
+    (!package_name.is_empty()
+        && is_valid_package_name(package_name)
+        && (package_names.is_empty() || package_names.contains(package_name)))
+    .then_some(package_name)
+}
+
 fn materialize_package_sources_from_hints(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
     stale_cache_versions: &BTreeSet<(String, String)>,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
-    let mut hints =
-        package_version_hints_for_materialization(rows, package_names, existing_sources);
-    hints.extend(stale_cache_version_hints_for_materialization(
-        rows,
-        package_names,
-        existing_sources,
-        stale_cache_versions,
-    ));
-    for (package_name, requested_version) in
-        network_package_version_resolution_hints(rows, package_names, existing_sources)
-    {
+    let plan = PackageVersionResolutionPlan::build(rows, package_names, existing_sources);
+    let mut hints = plan.materialization_hints(rows, package_names);
+    hints.extend(plan.stale_cache_materialization_hints(rows, package_names, stale_cache_versions));
+    for (package_name, requested_version) in plan.network_resolution_hints(rows, package_names) {
         match resolve_package_version_hint_from_network(
             package_name.as_str(),
             requested_version.as_str(),
@@ -2780,93 +3072,15 @@ fn materialize_package_sources_from_hints(
     Ok(sources)
 }
 
+#[cfg(test)]
 fn stale_cache_version_hints_for_materialization(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
     stale_cache_versions: &BTreeSet<(String, String)>,
 ) -> BTreeSet<(String, String)> {
-    if stale_cache_versions.is_empty() {
-        return BTreeSet::new();
-    }
-    let available_versions = exact_package_source_versions_by_package(existing_sources);
-    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    let project_resolved_versions =
-        resolved_project_package_versions(rows, package_names, &available_versions);
-    stale_cache_versions
-        .iter()
-        .filter_map(|(package_name, stale_version)| {
-            let versions = available_versions.get(package_name)?;
-            let resolved = if is_exact_package_version_hint(stale_version) {
-                Version::parse(stale_version).ok()
-            } else {
-                best_project_version_candidate(
-                    package_name,
-                    stale_version,
-                    &project_exact_versions,
-                    Some(versions),
-                )
-                .or_else(|| best_matching_package_version_by_binary_search(stale_version, versions))
-            }?;
-            project_resolved_versions
-                .get(package_name)
-                .is_some_and(|needed| needed.contains(&resolved))
-                .then(|| (package_name.clone(), resolved.to_string()))
-        })
-        .collect()
-}
-
-fn resolved_project_package_versions(
-    rows: &InputRows,
-    package_names: &BTreeSet<String>,
-    available_versions: &BTreeMap<String, BTreeSet<Version>>,
-) -> BTreeMap<String, BTreeSet<Version>> {
-    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    let mut resolved = BTreeMap::<String, BTreeSet<Version>>::new();
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package {
-            continue;
-        }
-        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
-            continue;
-        };
-        if package_name.is_empty()
-            || !is_valid_package_name(package_name)
-            || (!package_names.is_empty() && !package_names.contains(package_name))
-        {
-            continue;
-        }
-        let Some(versions) = available_versions.get(package_name) else {
-            continue;
-        };
-        let requested_version = module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .unwrap_or("latest");
-        let selected = if is_exact_package_version_hint(requested_version) {
-            Version::parse(requested_version)
-                .ok()
-                .filter(|version| versions.contains(version))
-                .or_else(|| nearest_package_version_by_binary_search(requested_version, versions))
-        } else {
-            best_project_version_candidate(
-                package_name,
-                requested_version,
-                &project_exact_versions,
-                Some(versions),
-            )
-            .or_else(|| best_matching_package_version_by_binary_search(requested_version, versions))
-        };
-        if let Some(selected) = selected {
-            resolved
-                .entry(package_name.to_string())
-                .or_default()
-                .insert(selected);
-        }
-    }
-    resolved
+    PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .stale_cache_materialization_hints(rows, package_names, stale_cache_versions)
 }
 
 fn materialize_one_package_source(
@@ -2965,132 +3179,24 @@ fn materialize_package_source_with_nearest_fallback(
     }
 }
 
+#[cfg(test)]
 fn package_version_hints_for_materialization(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
 ) -> BTreeSet<(String, String)> {
-    let available_versions = exact_package_source_versions_by_package(existing_sources);
-    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    rows.modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Package)
-        .filter_map(|module| {
-            let package_name = module.package_name.as_deref()?.trim();
-            if package_name.is_empty()
-                || !is_valid_package_name(package_name)
-                || (!package_names.is_empty() && !package_names.contains(package_name))
-            {
-                return None;
-            }
-            let package_version = module.package_version.as_deref().map(str::trim);
-            let Some(package_version) = package_version.filter(|version| !version.is_empty())
-            else {
-                let resolved = best_project_version_candidate(
-                    package_name,
-                    "latest",
-                    &project_exact_versions,
-                    None,
-                )
-                .or_else(|| {
-                    available_versions.get(package_name).and_then(|versions| {
-                        best_matching_package_version_by_binary_search("latest", versions)
-                    })
-                })?;
-                return (!available_versions
-                    .get(package_name)
-                    .is_some_and(|versions| versions.contains(&resolved)))
-                .then(|| (package_name.to_string(), resolved.to_string()));
-            };
-            if is_exact_package_version_hint(package_version) {
-                return (!package_source_versions_contain(
-                    &available_versions,
-                    package_name,
-                    package_version,
-                ))
-                .then(|| (package_name.to_string(), package_version.to_string()));
-            }
-            let resolved = best_project_version_candidate(
-                package_name,
-                package_version,
-                &project_exact_versions,
-                None,
-            )
-            .or_else(|| {
-                available_versions.get(package_name).and_then(|versions| {
-                    best_matching_package_version_by_binary_search(package_version, versions)
-                })
-            })?;
-            (!available_versions
-                .get(package_name)
-                .is_some_and(|versions| versions.contains(&resolved)))
-            .then(|| (package_name.to_string(), resolved.to_string()))
-        })
-        .collect()
+    PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .materialization_hints(rows, package_names)
 }
 
+#[cfg(test)]
 fn network_package_version_resolution_hints(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
 ) -> BTreeSet<(String, String)> {
-    let available_versions = exact_package_source_versions_by_package(existing_sources);
-    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    rows.modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Package)
-        .filter_map(|module| {
-            let package_name = module.package_name.as_deref()?.trim();
-            if package_name.is_empty()
-                || !is_valid_package_name(package_name)
-                || (!package_names.is_empty() && !package_names.contains(package_name))
-            {
-                return None;
-            }
-            let requested_version = module
-                .package_version
-                .as_deref()
-                .map(str::trim)
-                .filter(|version| !version.is_empty());
-            let Some(package_version) = requested_version else {
-                let has_project_candidate = best_project_version_candidate(
-                    package_name,
-                    "latest",
-                    &project_exact_versions,
-                    None,
-                )
-                .is_some();
-                let has_available_candidate =
-                    available_versions
-                        .get(package_name)
-                        .is_some_and(|versions| {
-                            best_matching_package_version_by_binary_search("latest", versions)
-                                .is_some()
-                        });
-                return (!has_project_candidate && !has_available_candidate)
-                    .then(|| (package_name.to_string(), "latest".to_string()));
-            };
-            if is_exact_package_version_hint(package_version) {
-                return None;
-            }
-            let has_project_candidate = best_project_version_candidate(
-                package_name,
-                package_version,
-                &project_exact_versions,
-                None,
-            )
-            .is_some();
-            let has_available_candidate =
-                available_versions
-                    .get(package_name)
-                    .is_some_and(|versions| {
-                        best_matching_package_version_by_binary_search(package_version, versions)
-                            .is_some()
-                    });
-            (!has_project_candidate && !has_available_candidate)
-                .then(|| (package_name.to_string(), package_version.to_string()))
-        })
-        .collect()
+    PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .network_resolution_hints(rows, package_names)
 }
 
 fn resolve_package_version_hints_to_available_sources(
@@ -3098,77 +3204,8 @@ fn resolve_package_version_hints_to_available_sources(
     package_sources: &[PackageSource],
     package_names: &BTreeSet<String>,
 ) -> usize {
-    let available_versions = exact_package_source_versions_by_package(package_sources);
-    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    let source_identity_versions = source_identity_versions_by_module(
-        rows,
-        package_sources,
-        package_names,
-        &available_versions,
-        &project_exact_versions,
-    );
-    let mut resolved = 0usize;
-    for module in &mut rows.modules {
-        if module.kind != ModuleKind::Package {
-            continue;
-        }
-        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
-            continue;
-        };
-        if package_name.is_empty()
-            || !is_valid_package_name(package_name)
-            || (!package_names.is_empty() && !package_names.contains(package_name))
-        {
-            continue;
-        }
-        let requested_version = module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|version| !version.is_empty());
-        let Some(versions) = available_versions.get(package_name) else {
-            continue;
-        };
-        let source_identity_version = source_identity_versions.get(&module.id).cloned();
-        let selected = match requested_version {
-            Some(package_version) if is_exact_package_version_hint(package_version) => {
-                if package_source_versions_contain(
-                    &available_versions,
-                    package_name,
-                    package_version,
-                ) {
-                    None
-                } else {
-                    source_identity_version.or_else(|| {
-                        nearest_package_version_by_binary_search(package_version, versions)
-                    })
-                }
-            }
-            Some(package_version) => best_project_version_candidate(
-                package_name,
-                package_version,
-                &project_exact_versions,
-                Some(versions),
-            )
-            .or(source_identity_version)
-            .or_else(|| best_matching_package_version_by_binary_search(package_version, versions)),
-            None => source_identity_version
-                .or_else(|| {
-                    best_project_version_candidate(
-                        package_name,
-                        "latest",
-                        &project_exact_versions,
-                        Some(versions),
-                    )
-                })
-                .or_else(|| best_matching_package_version_by_binary_search("latest", versions)),
-        };
-        if let Some(selected) = selected {
-            module.package_version = Some(selected.to_string());
-            resolved += 1;
-        }
-    }
-    resolved
+    let plan = PackageVersionResolutionPlan::build(rows, package_names, package_sources);
+    plan.apply_to_rows(rows, package_names)
 }
 
 fn source_identity_versions_by_module(
@@ -4308,7 +4345,7 @@ fn filter_package_sources_to_best_build_variants(
                     .map(|hint| {
                         paths
                             .iter()
-                            .map(|path| package_source_path_hint_score(path, hint))
+                            .map(|path| package_source_semantic_hint_score(path, hint))
                             .max()
                             .unwrap_or(0)
                     })
@@ -4390,7 +4427,7 @@ fn filter_package_sources_to_relevant_path_hints(
         let rel_path = package_source_cache_entry_path(source);
         hints
             .iter()
-            .any(|hint| package_source_path_hint_score(rel_path.as_str(), hint.as_str()) > 0)
+            .any(|hint| package_source_semantic_hint_score(rel_path.as_str(), hint.as_str()) > 0)
     });
 }
 
@@ -4422,57 +4459,6 @@ fn package_path_hints_by_version(rows: &InputRows) -> BTreeMap<(String, String),
             .insert(hint);
     }
     hints
-}
-
-fn clean_package_semantic_path_hint(package_name: &str, semantic_path: &str) -> Option<String> {
-    let clean = semantic_path
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    if clean.is_empty() {
-        return None;
-    }
-    for prefix in package_semantic_path_prefixes(package_name) {
-        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
-        else {
-            continue;
-        };
-        let hint = strip_source_extension(rest)
-            .trim_matches('/')
-            .to_ascii_lowercase();
-        if is_useful_package_path_hint(hint.as_str()) {
-            return Some(hint);
-        }
-    }
-    None
-}
-
-fn strip_package_prefix_from_semantic_path<'a>(
-    semantic_path: &'a str,
-    prefix: &str,
-) -> Option<&'a str> {
-    if let Some(rest) = semantic_path.strip_prefix(format!("{prefix}/").as_str()) {
-        return Some(rest);
-    }
-    for marker in [format!("/{prefix}/"), format!("-{prefix}/")] {
-        if let Some(index) = semantic_path.find(marker.as_str()) {
-            return semantic_path.get(index + marker.len()..);
-        }
-    }
-    None
-}
-
-fn is_useful_package_path_hint(hint: &str) -> bool {
-    if hint.is_empty() {
-        return false;
-    }
-    let last_segment = hint.rsplit('/').next().unwrap_or(hint);
-    last_segment
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .count()
-        >= 4
 }
 
 fn build_variant_family_key(rel_path: &str) -> String {
@@ -4564,39 +4550,6 @@ fn build_variant_family_rank(family: &str) -> u8 {
         "src" => 7,
         _ => 8,
     }
-}
-
-fn package_source_path_hint_score(source_path: &str, hint: &str) -> usize {
-    let source_normalized = normalize_path_for_hint_match(source_path);
-    let hint_normalized = normalize_path_for_hint_match(hint);
-    if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
-        return 2;
-    }
-    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
-    let hint_last_normalized = normalize_path_for_hint_match(hint_last_segment);
-    if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
-    {
-        return 1;
-    }
-    let source_tokens = path_hint_tokens(source_path);
-    let hint_tokens = path_hint_tokens(hint_last_segment);
-    if !hint_tokens.is_empty()
-        && hint_tokens
-            .iter()
-            .all(|token| source_tokens.contains(token))
-    {
-        1
-    } else {
-        0
-    }
-}
-
-fn normalize_path_for_hint_match(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 fn is_local_package_source_candidate(rel_path: &str) -> bool {

@@ -6,13 +6,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use reverts_input::{
-    InputRows, ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode,
-};
+use reverts_input::{InputRows, ModuleDependencyTarget};
 use reverts_ir::ModuleId;
+use reverts_package::is_accepted_external_attribution;
 use semver::Version;
 
-use crate::VersionedPackageMatchReport;
+use crate::{PackageSource, VersionedPackageMatchReport};
 
 #[must_use]
 pub fn direct_module_dependencies(rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
@@ -42,10 +41,22 @@ pub fn direct_module_dependents(rows: &InputRows, module_id: ModuleId) -> Vec<Mo
 #[must_use]
 pub fn has_accepted_external_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     rows.package_attributions.iter().any(|attribution| {
-        attribution.module_id == module_id
-            && attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        attribution.module_id == module_id && is_accepted_external_attribution(attribution)
     })
+}
+
+#[must_use]
+pub fn accepted_external_modules(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeSet<ModuleId> {
+    report
+        .attributions
+        .iter()
+        .chain(rows.package_attributions.iter())
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect()
 }
 
 #[must_use]
@@ -71,8 +82,7 @@ pub fn ownership_by_module(
         .iter()
         .chain(report.attributions.iter())
     {
-        if attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        if is_accepted_external_attribution(attribution)
             && let Some(package_version) = attribution.package_version.as_deref()
         {
             ownership_by_module.insert(
@@ -159,6 +169,270 @@ pub fn path_hint_tokens(value: &str) -> BTreeSet<String> {
     tokens
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticPathHintMode {
+    /// Strict hints used to prove an import surface.
+    ImportProof,
+    /// Broader hints used only after ownership has already been accepted and
+    /// the pipeline must pick the least bad no-fallback import target.
+    ForcedExternal,
+}
+
+#[must_use]
+pub fn module_package_semantic_path_hints(
+    package_name: &str,
+    semantic_path: &str,
+    module_source: &str,
+    mode: SemanticPathHintMode,
+) -> Vec<String> {
+    let clean = semantic_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    if clean.is_empty() {
+        return Vec::new();
+    }
+    let mut prefixes = package_semantic_path_prefixes(package_name);
+    if mode == SemanticPathHintMode::ForcedExternal {
+        let normalized_package = normalize_hint_text(package_name);
+        if !normalized_package.is_empty() {
+            prefixes.push(normalized_package);
+        }
+        prefixes.sort();
+        prefixes.dedup();
+    }
+    let mut hints = Vec::new();
+    for prefix in prefixes {
+        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
+        else {
+            continue;
+        };
+        let hint = strip_source_extension(rest)
+            .trim_matches('/')
+            .to_ascii_lowercase();
+        if !hint.is_empty() {
+            hints.push(hint);
+        }
+    }
+    if let Some(hint) = module_semantic_filename_hint(clean.as_str(), module_source)
+        && (mode == SemanticPathHintMode::ForcedExternal
+            || semantic_filename_hint_is_package_export_like(hint.as_str()))
+    {
+        hints.push(hint);
+    }
+    hints.sort();
+    hints.dedup();
+    hints
+}
+
+#[must_use]
+pub fn clean_package_semantic_path_hint(package_name: &str, semantic_path: &str) -> Option<String> {
+    module_package_semantic_path_hints(
+        package_name,
+        semantic_path,
+        "",
+        SemanticPathHintMode::ImportProof,
+    )
+    .into_iter()
+    .find(|hint| is_useful_package_path_hint(hint.as_str()))
+}
+
+fn module_semantic_filename_hint(semantic_path: &str, module_source: &str) -> Option<String> {
+    let filename = semantic_path.rsplit('/').next().unwrap_or(semantic_path);
+    let stem = strip_source_extension(filename).trim();
+    let (prefix, rest) = stem.split_once('-')?;
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let hint = rest.trim_matches('/').to_ascii_lowercase();
+    if hint.is_empty() || !source_contains_semantic_hint(module_source, hint.as_str()) {
+        return None;
+    }
+    Some(hint)
+}
+
+fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
+    let trimmed = hint.trim();
+    trimmed.starts_with('_')
+        && trimmed
+            .chars()
+            .any(|character| character.is_ascii_alphabetic() && character.is_ascii_lowercase())
+}
+
+fn source_contains_semantic_hint(source: &str, hint: &str) -> bool {
+    let source_normalized = normalize_hint_text(source);
+    let hint_normalized = normalize_hint_text(hint);
+    hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str())
+}
+
+#[must_use]
+pub fn package_source_relative_path(source: &PackageSource) -> String {
+    package_source_entry_path(source).to_ascii_lowercase()
+}
+
+#[must_use]
+pub fn package_source_entry_path(source: &PackageSource) -> String {
+    let prefix = format!("{}@{}/", source.package_name, source.package_version);
+    source
+        .source_path
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(source.source_path.as_str())
+        .trim_start_matches('/')
+        .to_string()
+}
+
+#[must_use]
+pub fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
+    let source_segments = canonical_public_path_segments(source_path);
+    let hint_segments = canonical_public_path_segments(hint);
+    if !hint_segments.is_empty() && source_segments == hint_segments {
+        return 5;
+    }
+    if semantic_path_segments_are_root_like(&source_segments)
+        && semantic_path_segments_are_root_like(&hint_segments)
+    {
+        return 5;
+    }
+    if !hint_segments.is_empty()
+        && path_segments_end_with(&source_segments, &hint_segments)
+        && hint_segments.len() >= 2
+    {
+        return 4;
+    }
+
+    let source_normalized = normalize_hint_text(source_path);
+    let hint_normalized = normalize_hint_text(hint);
+    if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
+        return 3;
+    }
+
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_hint_text(hint_last_segment);
+    if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
+    {
+        return 2;
+    }
+
+    let source_tokens = path_hint_tokens(source_path);
+    let hint_tokens = path_hint_tokens(hint_last_segment);
+    if !hint_tokens.is_empty()
+        && hint_tokens
+            .iter()
+            .all(|token| source_tokens.contains(token))
+    {
+        1
+    } else {
+        0
+    }
+}
+
+#[must_use]
+pub fn strip_package_prefix_from_semantic_path<'a>(
+    semantic_path: &'a str,
+    prefix: &str,
+) -> Option<&'a str> {
+    if let Some(rest) = semantic_path.strip_prefix(format!("{prefix}/").as_str()) {
+        return Some(rest);
+    }
+    for marker in [format!("/{prefix}/"), format!("-{prefix}/")] {
+        if let Some(index) = semantic_path.find(marker.as_str()) {
+            return semantic_path.get(index + marker.len()..);
+        }
+    }
+    None
+}
+
+#[must_use]
+pub fn canonical_public_path_segments(value: &str) -> Vec<String> {
+    let clean = value
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
+    let mut segments = clean
+        .split('/')
+        .map(str::trim)
+        .map(normalize_hint_text)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    while segments.len() > 1
+        && segments
+            .first()
+            .is_some_and(|segment| is_build_path_segment(segment.as_str()))
+    {
+        segments.remove(0);
+    }
+    if segments.len() > 1 && segments.last().is_some_and(|segment| segment == "index") {
+        segments.pop();
+    }
+    segments
+}
+
+#[must_use]
+pub fn is_build_path_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "src"
+            | "source"
+            | "sources"
+            | "dist"
+            | "build"
+            | "lib"
+            | "libs"
+            | "esm"
+            | "es"
+            | "cjs"
+            | "commonjs"
+            | "module"
+            | "modules"
+            | "browser"
+            | "umd"
+    )
+}
+
+#[must_use]
+pub fn semantic_path_segments_are_root_like(segments: &[String]) -> bool {
+    segments.is_empty()
+        || (segments.len() == 1 && segments[0] == "index")
+        || (segments.last().is_some_and(|segment| segment == "index")
+            && segments[..segments.len().saturating_sub(1)]
+                .iter()
+                .all(|segment| is_build_path_segment(segment.as_str())))
+}
+
+#[must_use]
+pub fn path_segments_end_with(segments: &[String], suffix: &[String]) -> bool {
+    !suffix.is_empty()
+        && suffix.len() <= segments.len()
+        && segments[segments.len() - suffix.len()..] == suffix[..]
+}
+
+fn is_useful_package_path_hint(hint: &str) -> bool {
+    if hint.is_empty() {
+        return false;
+    }
+    let last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    last_segment
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .count()
+        >= 4
+}
+
+#[must_use]
+pub fn normalize_hint_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,5 +513,32 @@ mod tests {
             direct_module_dependents(&rows, ModuleId(2)),
             vec![ModuleId(1)]
         );
+    }
+
+    #[test]
+    fn semantic_path_hints_have_strict_and_forced_modes() {
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "pkg",
+                "modules/10-basekeys.ts",
+                "function basekeys() {}",
+                SemanticPathHintMode::ImportProof,
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "pkg",
+                "modules/10-basekeys.ts",
+                "function basekeys() {}",
+                SemanticPathHintMode::ForcedExternal,
+            ),
+            vec!["basekeys".to_string()]
+        );
+        assert_eq!(
+            clean_package_semantic_path_hint("pkg", "node_modules/pkg/lib/basekeys.js").as_deref(),
+            Some("lib/basekeys")
+        );
+        assert!(package_source_semantic_hint_score("dist/lib/basekeys.js", "lib/basekeys") > 0);
     }
 }

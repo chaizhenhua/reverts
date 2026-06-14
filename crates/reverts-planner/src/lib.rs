@@ -6,9 +6,7 @@ use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
     RuntimePreludeBindingKind, RuntimePreludeImport,
 };
-use reverts_input::{
-    ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-};
+use reverts_input::{ModuleDependencyTarget, PackageAttributionInput};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
@@ -18,7 +16,10 @@ use reverts_js::{
     verify_only_immediate_call_references,
 };
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
-use reverts_package::{PackageResolution, import_attributes_for_attribution};
+use reverts_package::{
+    PackageResolution, accepted_external_attribution_for_module, accepted_external_module_ids,
+    import_attributes_for_attribution,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmitPlan {
@@ -587,9 +588,8 @@ impl SourceModuleFacts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannerAnalysis {
-    adapter_required_packages: BTreeSet<ModuleId>,
+    external_package_adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     externalized_packages: BTreeSet<ModuleId>,
-    source_facts: SourceModuleFacts,
     source_module_wiring: SourceModuleWiring,
     lowered_runtime_sources: BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: RuntimeLazyFoldPlan,
@@ -598,12 +598,14 @@ struct PlannerAnalysis {
 impl PlannerAnalysis {
     fn from_program(program: &EnrichedProgram) -> Self {
         let source_facts = SourceModuleFacts::from_program(program);
-        let accepted_externalized_packages = externalized_package_modules(program);
-        let adapter_required_packages = adapter_required_package_modules(
-            program,
-            &accepted_externalized_packages,
-            &source_facts,
-        );
+        let accepted_externalized_packages =
+            accepted_external_module_ids(&program.model().input().package_attributions);
+        let external_package_adapters =
+            external_package_adapter_plans(program, &accepted_externalized_packages, &source_facts);
+        let adapter_required_packages = external_package_adapters
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
         let externalized_packages = accepted_externalized_packages
             .difference(&adapter_required_packages)
             .copied()
@@ -625,9 +627,8 @@ impl PlannerAnalysis {
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
 
         Self {
-            adapter_required_packages,
+            external_package_adapters,
             externalized_packages,
-            source_facts,
             source_module_wiring,
             lowered_runtime_sources,
             runtime_lazy_folds,
@@ -662,9 +663,8 @@ impl ImportExportPlanner {
         let mut exported_lazy_module = BTreeSet::<u32>::new();
         let mut exported_lazy_value = BTreeSet::<u32>::new();
         let analysis = PlannerAnalysis::from_program(program);
-        let adapter_required_packages = &analysis.adapter_required_packages;
+        let external_package_adapters = &analysis.external_package_adapters;
         let externalized_packages = &analysis.externalized_packages;
-        let source_facts = &analysis.source_facts;
         let source_module_wiring = &analysis.source_module_wiring;
         let lowered_runtime_sources = &analysis.lowered_runtime_sources;
         let runtime_lazy_folds = &analysis.runtime_lazy_folds;
@@ -719,20 +719,19 @@ impl ImportExportPlanner {
             let mut planned_bindings = BTreeSet::<BindingName>::new();
 
             if module.kind == ModuleKind::Package
-                && adapter_required_packages.contains(&module.id)
-                && let Some(attribution) = accepted_external_package_attribution(program, module.id)
+                && let Some(adapter_plan) = external_package_adapters.get(&module.id)
+                && let Some(attribution) = accepted_external_attribution_for_module(
+                    &program.model().input().package_attributions,
+                    module.id,
+                )
             {
-                let adapter_bindings =
-                    package_adapter_export_bindings(program, module.id, source_facts);
-                let adapter_kind =
-                    external_package_adapter_kind(program, module.id, &adapter_bindings);
                 populate_external_package_adapter_file(
                     &mut file,
                     program,
                     module.id,
                     attribution,
-                    &adapter_bindings,
-                    adapter_kind,
+                    &adapter_plan.bindings,
+                    adapter_plan.kind,
                 );
                 plan.push_file(file);
                 continue;
@@ -5748,32 +5747,6 @@ fn scan_runtime_externalized_bindings(
     }
 }
 
-#[cfg(test)]
-fn runtime_source_module_imports(
-    program: &EnrichedProgram,
-    source: &str,
-    satisfied_runtime_bindings: &BTreeSet<BindingName>,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    scan_runtime_externalized_bindings(
-        program,
-        source,
-        satisfied_runtime_bindings,
-        externalized_packages,
-    )
-    .source_module_imports
-}
-
-#[cfg(test)]
-fn externalized_package_init_shims(
-    program: &EnrichedProgram,
-    source: &str,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> BTreeSet<BindingName> {
-    scan_runtime_externalized_bindings(program, source, &BTreeSet::new(), externalized_packages)
-        .package_init_shims
-}
-
 fn noop_function_statement(binding: &BindingName) -> String {
     format!("function {}() {{}}", binding.as_str())
 }
@@ -6386,41 +6359,31 @@ fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
     Some(cursor)
 }
 
-fn externalized_package_modules(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
-    program
-        .model()
-        .input()
-        .package_attributions
-        .iter()
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
-        .map(|attribution| attribution.module_id)
-        .collect()
-}
-
-fn accepted_external_package_attribution(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-) -> Option<&PackageAttributionInput> {
-    program
-        .model()
-        .input()
-        .package_attributions
-        .iter()
-        .find(|attribution| {
-            attribution.module_id == module_id
-                && attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-                && attribution.export_specifier.is_some()
-        })
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExternalPackageAdapterKind {
     CommonJsWrapper,
     NamespaceReturn,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalPackageAdapterPlan {
+    bindings: BTreeSet<BindingName>,
+    kind: ExternalPackageAdapterKind,
+}
+
+fn external_package_adapter_plans(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+    source_facts: &SourceModuleFacts,
+) -> BTreeMap<ModuleId, ExternalPackageAdapterPlan> {
+    adapter_required_package_modules(program, externalized_packages, source_facts)
+        .into_iter()
+        .map(|module_id| {
+            let bindings = package_adapter_export_bindings(program, module_id, source_facts);
+            let kind = external_package_adapter_kind(program, module_id, &bindings);
+            (module_id, ExternalPackageAdapterPlan { bindings, kind })
+        })
+        .collect()
 }
 
 fn external_package_adapter_kind(
@@ -11098,6 +11061,7 @@ mod tests {
         CompilerEvidence, CompilerKind, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
         ProgramModel,
     };
+    use reverts_package::accepted_external_module_ids;
 
     use super::{
         CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile,
@@ -11135,7 +11099,7 @@ mod tests {
             ModuleInput::application(ModuleId(1), "ub6", "modules/ub6.ts").with_source_file(1),
         );
         let enriched = enriched_from_rows(rows);
-        let imports = super::runtime_source_module_imports(
+        let scan = super::scan_runtime_externalized_bindings(
             &enriched,
             "var ub6 = lazyValue(() => 1);\nub6();",
             &BTreeSet::new(),
@@ -11143,7 +11107,7 @@ mod tests {
         );
 
         assert!(
-            imports.is_empty(),
+            scan.source_module_imports.is_empty(),
             "helper-local folded bindings must not be imported from their omitted source module"
         );
     }
@@ -14620,22 +14584,25 @@ mod tests {
             reverts_ir::BindingShapeSolution::default(),
         );
 
-        let accepted_externalized_packages = super::externalized_package_modules(&enriched);
+        let accepted_externalized_packages =
+            accepted_external_module_ids(&enriched.model().input().package_attributions);
         let source_facts = super::SourceModuleFacts::from_program(&enriched);
-        let adapter_required_packages = super::adapter_required_package_modules(
+        let adapter_plans = super::external_package_adapter_plans(
             &enriched,
             &accepted_externalized_packages,
             &source_facts,
         );
         assert!(
-            adapter_required_packages.contains(&ModuleId(1)),
+            adapter_plans.contains_key(&ModuleId(1)),
             "package bindings read by source without an import edge must get an adapter"
         );
-        let init_shims = super::externalized_package_init_shims(
+        let scan = super::scan_runtime_externalized_bindings(
             &enriched,
             "await (cNq(), dNq).default();",
+            &BTreeSet::new(),
             &accepted_externalized_packages,
         );
+        let init_shims = scan.package_init_shims;
         assert!(init_shims.contains(&BindingName::new("cNq")));
         assert!(!init_shims.contains(&BindingName::new("dNq")));
 

@@ -5,17 +5,20 @@ pub mod hungarian;
 pub mod package_helpers;
 pub mod structural_bag;
 pub mod tier;
-pub mod variant;
-pub mod version;
 
 pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
 pub use package_helpers::{
-    direct_module_dependencies, direct_module_dependents, has_accepted_external_attribution,
-    is_exact_package_version_hint, is_json_source_path, ownership_by_module,
-    package_semantic_path_prefixes, path_hint_tokens, strip_source_extension,
+    SemanticPathHintMode, accepted_external_modules, canonical_public_path_segments,
+    clean_package_semantic_path_hint, direct_module_dependencies, direct_module_dependents,
+    has_accepted_external_attribution, is_build_path_segment, is_exact_package_version_hint,
+    is_json_source_path, module_package_semantic_path_hints, normalize_hint_text,
+    ownership_by_module, package_semantic_path_prefixes, package_source_entry_path,
+    package_source_relative_path, package_source_semantic_hint_score, path_hint_tokens,
+    path_segments_end_with, semantic_path_segments_are_root_like,
+    strip_package_prefix_from_semantic_path, strip_source_extension,
 };
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
@@ -23,10 +26,6 @@ pub use structural_bag::{
 pub use tier::{
     FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,
     try_feature_similarity, try_structural_anchored, try_structural_only,
-};
-pub use variant::{VariantSelection, pick_variants};
-pub use version::{
-    BestVersionDecision, VERSION_AMBIGUITY_EPSILON, VERSION_INSUFFICIENT_THRESHOLD, pick_versions,
 };
 
 use std::cmp::Ordering;
@@ -705,7 +704,7 @@ pub fn match_packages_with_pipeline_with_policy(
     if externalization_policy == ExternalizationPolicy::ForceNoFallback {
         let matched_package_names = package_filter
             .cloned()
-            .unwrap_or_else(|| package_source_filter(rows));
+            .unwrap_or_else(|| no_fallback_package_scope(rows));
         force_externalize_remaining_package_modules(
             rows,
             package_sources,
@@ -1440,14 +1439,6 @@ fn promote_importable_ownership_matches(
         ) else {
             continue;
         };
-        if semantic_import_proof_requires_source_anchor(package_match.strategy)
-            && !module_source_contains_import_surface_anchor(
-                slice.source,
-                import_target.export_specifier.as_str(),
-            )
-        {
-            continue;
-        }
         let mut attribution = PackageAttributionInput::accepted_external(
             module.id,
             package_match.package_name.as_str(),
@@ -1496,7 +1487,7 @@ fn semantic_import_proof_requires_source_anchor(strategy: ModuleMatchStrategy) -
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ImportablePackageSourceTarget {
+struct ExternalImportTarget {
     export_specifier: String,
     source_path: String,
 }
@@ -1506,79 +1497,16 @@ fn importable_package_source_for_module(
     package_match: &PackageMatch,
     package_sources: &[PackageSource],
     module_source: &str,
-) -> Option<ImportablePackageSourceTarget> {
-    if source_match_strategy_has_exact_import_proof(package_match.strategy)
-        && let Some(target) = exact_importable_package_match_source(package_match, package_sources)
-    {
-        return Some(target);
-    }
-
-    let hints = module_package_semantic_path_hints(
+) -> Option<ExternalImportTarget> {
+    resolve_external_import_target(
+        module,
         package_match.package_name.as_str(),
-        module.semantic_path.as_str(),
+        package_match.package_version.as_str(),
+        Some(package_match),
+        package_sources,
         module_source,
-    );
-    if hints.is_empty() {
-        return None;
-    }
-    let min_score = semantic_export_surface_min_score(package_match.strategy);
-    let mut scored = package_sources
-        .iter()
-        .filter(|source| {
-            source.external_importable
-                && source.package_name == package_match.package_name
-                && source.package_version == package_match.package_version
-        })
-        .filter_map(|source| {
-            let score = hints
-                .iter()
-                .map(|hint| {
-                    if min_score >= STRONG_SEMANTIC_EXPORT_SURFACE_SCORE {
-                        package_export_surface_semantic_score(
-                            package_match.package_name.as_str(),
-                            source.export_specifier.as_str(),
-                            hint.as_str(),
-                        )
-                    } else {
-                        package_source_semantic_export_surface_score(
-                            package_match.package_name.as_str(),
-                            source,
-                            hint.as_str(),
-                        )
-                    }
-                })
-                .max()
-                .unwrap_or(0);
-            (score >= min_score).then(|| (source, score))
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
-            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
-    });
-
-    let best_score = scored.first()?.1;
-    let best = scored
-        .into_iter()
-        .filter(|(_source, score)| *score == best_score)
-        .map(|(source, _score)| {
-            (
-                source.export_specifier.as_str(),
-                source.source_path.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    if best.len() != 1 {
-        return None;
-    }
-    let (export_specifier, source_path) = best.into_iter().next()?;
-    Some(ImportablePackageSourceTarget {
-        export_specifier: export_specifier.to_string(),
-        source_path: source_path.to_string(),
-    })
+        ExternalImportResolutionMode::RequireProof(package_match.strategy),
+    )
 }
 
 fn source_match_strategy_has_exact_import_proof(strategy: ModuleMatchStrategy) -> bool {
@@ -1601,6 +1529,179 @@ fn semantic_export_surface_min_score(strategy: ModuleMatchStrategy) -> usize {
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage => 1,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalImportResolutionMode {
+    RequireProof(ModuleMatchStrategy),
+    ForceNoFallback,
+}
+
+fn resolve_external_import_target(
+    module: &ModuleInput,
+    package_name: &str,
+    package_version: &str,
+    package_match: Option<&PackageMatch>,
+    package_sources: &[PackageSource],
+    module_source: &str,
+    mode: ExternalImportResolutionMode,
+) -> Option<ExternalImportTarget> {
+    if let (ExternalImportResolutionMode::RequireProof(strategy), Some(package_match)) =
+        (mode, package_match)
+        && source_match_strategy_has_exact_import_proof(strategy)
+        && let Some(target) = exact_importable_package_match_source(package_match, package_sources)
+    {
+        return Some(target);
+    }
+
+    let hint_mode = match mode {
+        ExternalImportResolutionMode::RequireProof(_) => SemanticPathHintMode::ImportProof,
+        ExternalImportResolutionMode::ForceNoFallback => SemanticPathHintMode::ForcedExternal,
+    };
+    let hints = module_package_semantic_path_hints(
+        package_name,
+        module.semantic_path.as_str(),
+        module_source,
+        hint_mode,
+    );
+    if let Some(target) = semantic_external_package_source(
+        package_name,
+        package_version,
+        package_sources,
+        hints.as_slice(),
+        mode,
+    ) {
+        if let ExternalImportResolutionMode::RequireProof(strategy) = mode
+            && semantic_import_proof_requires_source_anchor(strategy)
+            && !module_source_contains_import_surface_anchor(
+                module_source,
+                target.export_specifier.as_str(),
+            )
+        {
+            return None;
+        }
+        return Some(target);
+    }
+
+    if mode != ExternalImportResolutionMode::ForceNoFallback {
+        return None;
+    }
+    if let Some(package_match) = package_match
+        && usable_forced_export_specifier(package_name, package_match.export_specifier.as_str())
+    {
+        return Some(ExternalImportTarget {
+            export_specifier: package_match.export_specifier.clone(),
+            source_path: format!("forced-external:source-match:{}", package_match.source_path),
+        });
+    }
+    if let Some(export_specifier) =
+        forced_semantic_external_specifier_from_hints(package_name, hints.as_slice())
+    {
+        return Some(ExternalImportTarget {
+            source_path: format!(
+                "forced-external:semantic-path:{package_name}@{package_version}:{export_specifier}"
+            ),
+            export_specifier,
+        });
+    }
+    Some(ExternalImportTarget {
+        export_specifier: package_name.to_string(),
+        source_path: format!("forced-external:package-root:{package_name}@{package_version}"),
+    })
+}
+
+fn semantic_external_package_source(
+    package_name: &str,
+    package_version: &str,
+    package_sources: &[PackageSource],
+    hints: &[String],
+    mode: ExternalImportResolutionMode,
+) -> Option<ExternalImportTarget> {
+    if hints.is_empty() {
+        return (mode == ExternalImportResolutionMode::ForceNoFallback)
+            .then(|| unique_root_external_source(package_sources, package_name, package_version))
+            .flatten();
+    }
+    let mut scored = package_sources
+        .iter()
+        .filter(|source| {
+            source.external_importable
+                && source.package_name == package_name
+                && source.package_version == package_version
+        })
+        .filter_map(|source| {
+            let score = hints
+                .iter()
+                .map(|hint| semantic_external_source_score(package_name, source, hint, mode))
+                .max()
+                .unwrap_or_default();
+            (score >= external_source_min_score(mode)).then_some((source, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+    let best_score = scored.first()?.1;
+    let best = scored
+        .into_iter()
+        .filter(|(_source, score)| *score == best_score)
+        .map(|(source, _score)| {
+            (
+                source.export_specifier.as_str(),
+                source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if best.len() != 1 {
+        return None;
+    }
+    let (export_specifier, source_path) = best.into_iter().next()?;
+    let source_path = if mode == ExternalImportResolutionMode::ForceNoFallback {
+        format!("forced-external:semantic-source:{source_path}")
+    } else {
+        source_path.to_string()
+    };
+    Some(ExternalImportTarget {
+        export_specifier: export_specifier.to_string(),
+        source_path,
+    })
+}
+
+fn semantic_external_source_score(
+    package_name: &str,
+    source: &PackageSource,
+    hint: &str,
+    mode: ExternalImportResolutionMode,
+) -> usize {
+    match mode {
+        ExternalImportResolutionMode::ForceNoFallback => {
+            package_source_semantic_hint_score(package_source_relative_path(source).as_str(), hint)
+        }
+        ExternalImportResolutionMode::RequireProof(strategy) => {
+            if semantic_export_surface_min_score(strategy) >= STRONG_SEMANTIC_EXPORT_SURFACE_SCORE {
+                package_export_surface_semantic_score(
+                    package_name,
+                    source.export_specifier.as_str(),
+                    hint,
+                )
+            } else {
+                package_source_semantic_export_surface_score(package_name, source, hint)
+            }
+        }
+    }
+}
+
+fn external_source_min_score(mode: ExternalImportResolutionMode) -> usize {
+    match mode {
+        ExternalImportResolutionMode::ForceNoFallback => 1,
+        ExternalImportResolutionMode::RequireProof(strategy) => {
+            semantic_export_surface_min_score(strategy)
+        }
     }
 }
 
@@ -1672,7 +1773,7 @@ fn single_export_segment_matches_internal_hint(
 fn exact_importable_package_match_source(
     package_match: &PackageMatch,
     package_sources: &[PackageSource],
-) -> Option<ImportablePackageSourceTarget> {
+) -> Option<ExternalImportTarget> {
     let matched = package_sources
         .iter()
         .filter(|source| {
@@ -1694,104 +1795,10 @@ fn exact_importable_package_match_source(
         return None;
     }
     let (export_specifier, source_path) = matched.into_iter().next()?;
-    Some(ImportablePackageSourceTarget {
+    Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
         source_path: source_path.to_string(),
     })
-}
-
-fn module_package_semantic_path_hints(
-    package_name: &str,
-    semantic_path: &str,
-    module_source: &str,
-) -> Vec<String> {
-    module_package_semantic_path_hints_with_mode(
-        package_name,
-        semantic_path,
-        module_source,
-        SemanticPathHintMode::ImportProof,
-    )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SemanticPathHintMode {
-    ImportProof,
-    ForcedExternal,
-}
-
-fn module_package_semantic_path_hints_with_mode(
-    package_name: &str,
-    semantic_path: &str,
-    module_source: &str,
-    mode: SemanticPathHintMode,
-) -> Vec<String> {
-    let clean = semantic_path
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    if clean.is_empty() {
-        return Vec::new();
-    }
-    let mut prefixes = package_semantic_path_prefixes(package_name);
-    if mode == SemanticPathHintMode::ForcedExternal {
-        let normalized_package = normalize_hint_text(package_name);
-        if !normalized_package.is_empty() {
-            prefixes.push(normalized_package);
-        }
-        prefixes.sort();
-        prefixes.dedup();
-    }
-    let mut hints = Vec::new();
-    for prefix in prefixes {
-        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
-        else {
-            continue;
-        };
-        let hint = strip_source_extension(rest)
-            .trim_matches('/')
-            .to_ascii_lowercase();
-        if !hint.is_empty() {
-            hints.push(hint);
-        }
-    }
-    if let Some(hint) = module_semantic_filename_hint(clean.as_str(), module_source)
-        && (mode == SemanticPathHintMode::ForcedExternal
-            || semantic_filename_hint_is_package_export_like(hint.as_str()))
-    {
-        hints.push(hint);
-    }
-    hints.sort();
-    hints.dedup();
-    hints
-}
-
-fn module_semantic_filename_hint(semantic_path: &str, module_source: &str) -> Option<String> {
-    let filename = semantic_path.rsplit('/').next().unwrap_or(semantic_path);
-    let stem = strip_source_extension(filename).trim();
-    let (prefix, rest) = stem.split_once('-')?;
-    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let hint = rest.trim_matches('/').to_ascii_lowercase();
-    if hint.is_empty() || !source_contains_semantic_hint(module_source, hint.as_str()) {
-        return None;
-    }
-    Some(hint)
-}
-
-fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
-    let trimmed = hint.trim();
-    trimmed.starts_with('_')
-        && trimmed
-            .chars()
-            .any(|character| character.is_ascii_alphabetic() && character.is_ascii_lowercase())
-}
-
-fn source_contains_semantic_hint(source: &str, hint: &str) -> bool {
-    let source_normalized = normalize_hint_text(source);
-    let hint_normalized = normalize_hint_text(hint);
-    hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str())
 }
 
 fn module_source_contains_import_surface_anchor(source: &str, export_specifier: &str) -> bool {
@@ -1807,125 +1814,6 @@ fn module_source_contains_import_surface_anchor(source: &str, export_specifier: 
     };
     let source_normalized = normalize_hint_text(source);
     last_segment.len() >= 4 && source_normalized.contains(last_segment.as_str())
-}
-
-fn package_source_relative_path(source: &PackageSource) -> String {
-    let prefix = format!("{}@{}/", source.package_name, source.package_version);
-    source
-        .source_path
-        .strip_prefix(prefix.as_str())
-        .unwrap_or(source.source_path.as_str())
-        .trim_start_matches('/')
-        .to_ascii_lowercase()
-}
-
-fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
-    let source_segments = canonical_public_path_segments(source_path);
-    let hint_segments = canonical_public_path_segments(hint);
-    if !hint_segments.is_empty() && source_segments == hint_segments {
-        return 5;
-    }
-    if semantic_path_segments_are_root_like(&source_segments)
-        && semantic_path_segments_are_root_like(&hint_segments)
-    {
-        return 5;
-    }
-    if !hint_segments.is_empty()
-        && path_segments_end_with(&source_segments, &hint_segments)
-        && hint_segments.len() >= 2
-    {
-        return 4;
-    }
-
-    let source_normalized = normalize_hint_text(source_path);
-    let hint_normalized = normalize_hint_text(hint);
-    if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
-        return 3;
-    }
-
-    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
-    let hint_last_normalized = normalize_hint_text(hint_last_segment);
-    if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
-    {
-        return 2;
-    }
-
-    let source_tokens = path_hint_tokens(source_path);
-    let hint_tokens = path_hint_tokens(hint_last_segment);
-    if !hint_tokens.is_empty()
-        && hint_tokens
-            .iter()
-            .all(|token| source_tokens.contains(token))
-    {
-        1
-    } else {
-        0
-    }
-}
-
-fn canonical_public_path_segments(value: &str) -> Vec<String> {
-    let clean = value
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
-    let mut segments = clean
-        .split('/')
-        .map(str::trim)
-        .map(normalize_hint_text)
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    while segments.len() > 1
-        && segments
-            .first()
-            .is_some_and(|segment| is_build_path_segment(segment.as_str()))
-    {
-        segments.remove(0);
-    }
-    if segments.len() > 1 && segments.last().is_some_and(|segment| segment == "index") {
-        segments.pop();
-    }
-    segments
-}
-
-fn is_build_path_segment(segment: &str) -> bool {
-    matches!(
-        segment,
-        "src"
-            | "source"
-            | "sources"
-            | "dist"
-            | "build"
-            | "lib"
-            | "libs"
-            | "esm"
-            | "es"
-            | "cjs"
-            | "commonjs"
-            | "module"
-            | "modules"
-            | "browser"
-            | "umd"
-    )
-}
-
-fn semantic_path_segments_are_root_like(segments: &[String]) -> bool {
-    segments.is_empty()
-        || (segments.len() == 1 && segments[0] == "index")
-        || (segments.last().is_some_and(|segment| segment == "index")
-            && segments[..segments.len().saturating_sub(1)]
-                .iter()
-                .all(|segment| is_build_path_segment(segment.as_str())))
-}
-
-fn path_segments_end_with(segments: &[String], suffix: &[String]) -> bool {
-    !suffix.is_empty()
-        && suffix.len() <= segments.len()
-        && segments[segments.len() - suffix.len()..] == suffix[..]
 }
 
 fn module_file_order_key(module: &ModuleInput) -> (u32, u32) {
@@ -2070,23 +1958,7 @@ fn package_file_graph_module_has_usable_source(rows: &InputRows, module: &Module
         != PackageModuleSourceQuality::Invalid
 }
 
-fn accepted_external_modules(
-    rows: &InputRows,
-    report: &VersionedPackageMatchReport,
-) -> BTreeSet<ModuleId> {
-    report
-        .attributions
-        .iter()
-        .chain(rows.package_attributions.iter())
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
-        .map(|attribution| attribution.module_id)
-        .collect()
-}
-
-fn package_source_filter(rows: &InputRows) -> BTreeSet<String> {
+fn no_fallback_package_scope(rows: &InputRows) -> BTreeSet<String> {
     rows.modules
         .iter()
         .filter(|module| module.kind == ModuleKind::Package)
@@ -2197,12 +2069,6 @@ fn force_externalize_remaining_package_modules(
     forced
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ForcedExternalImportTarget {
-    export_specifier: String,
-    source_path: String,
-}
-
 fn forced_external_package_version(
     module: &ModuleInput,
     source_only_match: Option<&PackageMatch>,
@@ -2243,112 +2109,28 @@ fn forced_external_import_target(
     package_version: &str,
     source_only_match: Option<&PackageMatch>,
     package_sources: &[PackageSource],
-) -> ForcedExternalImportTarget {
-    if let Some(target) = best_semantic_external_package_source(
-        rows,
-        module,
-        package_name,
-        package_version,
-        package_sources,
-    ) {
-        return target;
-    }
-    if let Some(package_match) = source_only_match
-        && usable_forced_export_specifier(package_name, package_match.export_specifier.as_str())
-    {
-        return ForcedExternalImportTarget {
-            export_specifier: package_match.export_specifier.clone(),
-            source_path: format!("forced-external:source-match:{}", package_match.source_path),
-        };
-    }
-    if let Some(export_specifier) = forced_semantic_external_specifier(rows, module, package_name) {
-        return ForcedExternalImportTarget {
-            source_path: format!(
-                "forced-external:semantic-path:{package_name}@{package_version}:{export_specifier}"
-            ),
-            export_specifier,
-        };
-    }
-    ForcedExternalImportTarget {
-        export_specifier: package_name.to_string(),
-        source_path: format!("forced-external:package-root:{package_name}@{package_version}"),
-    }
-}
-
-fn best_semantic_external_package_source(
-    rows: &InputRows,
-    module: &ModuleInput,
-    package_name: &str,
-    package_version: &str,
-    package_sources: &[PackageSource],
-) -> Option<ForcedExternalImportTarget> {
+) -> ExternalImportTarget {
     let module_source = rows
         .module_source_slice(module.id)
         .map(|slice| slice.source)
         .unwrap_or_default();
-    let hints = module_package_semantic_path_hints_with_mode(
+    resolve_external_import_target(
+        module,
         package_name,
-        module.semantic_path.as_str(),
+        package_version,
+        source_only_match,
+        package_sources,
         module_source,
-        SemanticPathHintMode::ForcedExternal,
-    );
-    if hints.is_empty() {
-        return unique_root_external_source(package_sources, package_name, package_version);
-    }
-    let mut scored = package_sources
-        .iter()
-        .filter(|source| {
-            source.external_importable
-                && source.package_name == package_name
-                && source.package_version == package_version
-        })
-        .filter_map(|source| {
-            let score = hints
-                .iter()
-                .map(|hint| {
-                    package_source_semantic_hint_score(
-                        package_source_relative_path(source).as_str(),
-                        hint.as_str(),
-                    )
-                })
-                .max()
-                .unwrap_or_default();
-            (score > 0).then_some((source, score))
-        })
-        .collect::<Vec<_>>();
-    scored.sort_by(|left, right| {
-        right
-            .1
-            .cmp(&left.1)
-            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
-            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
-    });
-    let best_score = scored.first()?.1;
-    let best = scored
-        .into_iter()
-        .filter(|(_source, score)| *score == best_score)
-        .map(|(source, _score)| {
-            (
-                source.export_specifier.as_str(),
-                source.source_path.as_str(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    if best.len() != 1 {
-        return None;
-    }
-    let (export_specifier, source_path) = best.into_iter().next()?;
-    Some(ForcedExternalImportTarget {
-        export_specifier: export_specifier.to_string(),
-        source_path: format!("forced-external:semantic-source:{source_path}"),
-    })
+        ExternalImportResolutionMode::ForceNoFallback,
+    )
+    .expect("force no-fallback resolver always returns a package-root target")
 }
 
 fn unique_root_external_source(
     package_sources: &[PackageSource],
     package_name: &str,
     package_version: &str,
-) -> Option<ForcedExternalImportTarget> {
+) -> Option<ExternalImportTarget> {
     let roots = package_sources
         .iter()
         .filter(|source| {
@@ -2362,7 +2144,7 @@ fn unique_root_external_source(
     if roots.len() != 1 {
         return None;
     }
-    Some(ForcedExternalImportTarget {
+    Some(ExternalImportTarget {
         export_specifier: package_name.to_string(),
         source_path: format!(
             "forced-external:root-source:{}",
@@ -2378,21 +2160,10 @@ fn usable_forced_export_specifier(package_name: &str, export_specifier: &str) ->
     specifier_package == package_name && !export_specifier.trim().is_empty()
 }
 
-fn forced_semantic_external_specifier(
-    rows: &InputRows,
-    module: &ModuleInput,
+fn forced_semantic_external_specifier_from_hints(
     package_name: &str,
+    hints: &[String],
 ) -> Option<String> {
-    let module_source = rows
-        .module_source_slice(module.id)
-        .map(|slice| slice.source)
-        .unwrap_or_default();
-    let hints = module_package_semantic_path_hints_with_mode(
-        package_name,
-        module.semantic_path.as_str(),
-        module_source,
-        SemanticPathHintMode::ForcedExternal,
-    );
     let hint = hints.first()?.trim_matches('/');
     if hint.is_empty() {
         return None;
@@ -3200,21 +2971,6 @@ fn package_semantic_path_tokens(package_name: &str, semantic_path: &str) -> BTre
     tokens
 }
 
-fn strip_package_prefix_from_semantic_path<'a>(
-    semantic_path: &'a str,
-    prefix: &str,
-) -> Option<&'a str> {
-    if let Some(rest) = semantic_path.strip_prefix(format!("{prefix}/").as_str()) {
-        return Some(rest);
-    }
-    for marker in [format!("/{prefix}/"), format!("-{prefix}/")] {
-        if let Some(index) = semantic_path.find(marker.as_str()) {
-            return semantic_path.get(index + marker.len()..);
-        }
-    }
-    None
-}
-
 fn is_strong_path_hint_token(token: &str) -> bool {
     token.len() >= 4
         && !matches!(
@@ -3235,14 +2991,6 @@ fn is_strong_path_hint_token(token: &str) -> bool {
                 | "operators"
                 | "observable"
         )
-}
-
-fn normalize_hint_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
 }
 
 fn module_match_fingerprint(

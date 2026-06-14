@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{
     PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
 };
-use reverts_ir::{PackageSurface, is_valid_package_name, split_bare_specifier};
+use reverts_ir::{ModuleId, PackageSurface, is_valid_package_name, split_bare_specifier};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackageSurfaceIndex {
@@ -27,9 +27,7 @@ impl PackageSurfaceIndex {
         let mut import_attribute_conflicts = BTreeMap::<String, ()>::new();
 
         for attribution in attributions {
-            if attribution.status != PackageAttributionStatus::Accepted
-                || attribution.emission_mode != PackageEmissionMode::ExternalImport
-            {
+            if !is_accepted_external_attribution(attribution) {
                 continue;
             }
 
@@ -120,6 +118,35 @@ impl PackageSurfaceIndex {
             PackageResolution::rejected(specifier, "package surface does not accept subpath")
         }
     }
+}
+
+#[must_use]
+pub fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bool {
+    attribution.status == PackageAttributionStatus::Accepted
+        && attribution.emission_mode == PackageEmissionMode::ExternalImport
+}
+
+#[must_use]
+pub fn accepted_external_module_ids(
+    attributions: &[PackageAttributionInput],
+) -> BTreeSet<ModuleId> {
+    attributions
+        .iter()
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect()
+}
+
+#[must_use]
+pub fn accepted_external_attribution_for_module(
+    attributions: &[PackageAttributionInput],
+    module_id: ModuleId,
+) -> Option<&PackageAttributionInput> {
+    attributions.iter().find(|attribution| {
+        attribution.module_id == module_id
+            && is_accepted_external_attribution(attribution)
+            && attribution.export_specifier.is_some()
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,14 +360,17 @@ fn normalize_builtin(specifier: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use reverts_input::{
         PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
     };
     use reverts_ir::{ModuleId, PackageSurface};
 
-    use super::{PackageResolution, PackageSurfaceIndex, is_node_builtin};
+    use super::{
+        PackageResolution, PackageSurfaceIndex, accepted_external_attribution_for_module,
+        accepted_external_module_ids, is_accepted_external_attribution, is_node_builtin,
+    };
 
     #[test]
     fn from_attributions_builds_index_from_accepted_external_imports() {
@@ -553,5 +583,25 @@ mod tests {
         assert_eq!(accepted.specifier(), Some("pkg/sub"));
         assert!(!rejected.is_accepted());
         assert_eq!(rejected.specifier(), None);
+    }
+
+    #[test]
+    fn accepted_external_helpers_filter_attributions_consistently() {
+        let accepted =
+            PackageAttributionInput::accepted_external(ModuleId(1), "pkg", "1.0.0", "pkg");
+        let rejected = PackageAttributionInput::rejected_source(ModuleId(2), "pkg", "not matched");
+        let attributions = vec![accepted.clone(), rejected];
+
+        assert!(is_accepted_external_attribution(&accepted));
+        assert_eq!(
+            accepted_external_module_ids(&attributions),
+            BTreeSet::from([ModuleId(1)])
+        );
+        assert_eq!(
+            accepted_external_attribution_for_module(&attributions, ModuleId(1))
+                .map(|attribution| attribution.package_name.as_str()),
+            Some("pkg")
+        );
+        assert!(accepted_external_attribution_for_module(&attributions, ModuleId(2)).is_none());
     }
 }
