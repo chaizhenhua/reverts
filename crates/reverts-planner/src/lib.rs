@@ -7742,6 +7742,15 @@ fn runtime_proxy_function_declarations(source: &str) -> Vec<RuntimeProxyFunction
             cursor = next;
             continue;
         }
+        if paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+            && let Some((proxy, next)) = parse_runtime_proxy_arrow_var(source, cursor)
+        {
+            proxies.push(proxy);
+            cursor = next;
+            continue;
+        }
         match bytes[cursor] {
             b'(' => paren_depth += 1,
             b')' => paren_depth = paren_depth.saturating_sub(1),
@@ -7815,6 +7824,68 @@ fn parse_runtime_proxy_function(
         },
         span_end,
     ))
+}
+
+fn parse_runtime_proxy_arrow_var(
+    source: &str,
+    start: usize,
+) -> Option<(RuntimeProxyFunction, usize)> {
+    let bytes = source.as_bytes();
+    let (_keyword, keyword_len) = declaration_keyword_at(source, start)?;
+    let mut cursor = skip_ws(bytes, start + keyword_len);
+    let (binding, after_binding) = parse_identifier(source, cursor)?;
+    cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    cursor = skip_ws(bytes, cursor + 1);
+    let (params, after_params) = parse_arrow_proxy_params(source, cursor)?;
+    cursor = skip_ws(bytes, after_params);
+    cursor = expect_arrow(bytes, cursor)?;
+    cursor = skip_ws(bytes, cursor);
+    let (target, after_target) = parse_identifier(source, cursor)?;
+    if target == binding {
+        return None;
+    }
+    let open = skip_ws(bytes, after_target);
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = find_matching_paren(source, open)?;
+    let args = parse_simple_identifier_list(&source[open + 1..close])?;
+    if args != params {
+        return None;
+    }
+    cursor = skip_ws(bytes, close + 1);
+    if bytes.get(cursor) != Some(&b';') {
+        return None;
+    }
+    let mut span_end = cursor + 1;
+    if bytes.get(span_end) == Some(&b'\r') {
+        span_end += 1;
+    }
+    if bytes.get(span_end) == Some(&b'\n') {
+        span_end += 1;
+    }
+    Some((
+        RuntimeProxyFunction {
+            binding: BindingName::new(binding),
+            target: BindingName::new(target),
+            span: (start, span_end),
+        },
+        span_end,
+    ))
+}
+
+fn parse_arrow_proxy_params(source: &str, start: usize) -> Option<(Vec<String>, usize)> {
+    let bytes = source.as_bytes();
+    if bytes.get(start) == Some(&b'(') {
+        let close = find_matching_paren(source, start)?;
+        let params = parse_simple_identifier_list(&source[start + 1..close])?;
+        return Some((params, close + 1));
+    }
+    let (param, after_param) = parse_identifier(source, start)?;
+    Some((vec![param.to_string()], after_param))
 }
 
 fn parse_proxy_return_call(body: &str) -> Option<(&str, Vec<String>)> {
@@ -8227,7 +8298,10 @@ fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
     let mut cursor = 0usize;
     while cursor < bytes.len() {
         match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'`' => {
+                cursor = collect_template_expression_local_bindings(source, cursor, &mut bindings)
+            }
             b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
                 cursor = skip_line_comment(bytes, cursor + 2);
             }
@@ -8307,6 +8381,31 @@ fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
     bindings
 }
 
+fn collect_template_expression_local_bindings(
+    source: &str,
+    start: usize,
+    bindings: &mut BTreeSet<String>,
+) -> usize {
+    let bytes = source.as_bytes();
+    let mut cursor = start + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor = (cursor + 2).min(bytes.len()),
+            b'`' => return cursor + 1,
+            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
+                let open = cursor + 1;
+                let Some(close) = find_matching_brace(source, open) else {
+                    return skip_quoted(bytes, start, b'`');
+                };
+                bindings.extend(local_bindings_in_source(&source[open + 1..close]));
+                cursor = close + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    bytes.len()
+}
+
 fn collect_local_variable_bindings(
     source: &str,
     mut cursor: usize,
@@ -8335,7 +8434,10 @@ fn collect_local_variable_bindings(
         let mut nested = 0usize;
         while cursor < bytes.len() {
             match bytes[cursor] {
-                b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+                b'\'' | b'"' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+                b'`' => {
+                    cursor = collect_template_expression_local_bindings(source, cursor, bindings)
+                }
                 b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
                     cursor = skip_line_comment(bytes, cursor + 2);
                 }
@@ -16690,6 +16792,18 @@ mod tests {
     }
 
     #[test]
+    fn runtime_import_identifier_scan_ignores_template_expression_arrow_params() {
+        let identifiers = super::runtime_import_identifiers_in_source(
+            "function reader(K) { return Object.entries(K).map(([_, z]) => `# ${_}\n${z}`).join('\\n') + shared; }",
+        );
+
+        assert!(identifiers.contains("shared"));
+        assert!(!identifiers.contains("_"));
+        assert!(!identifiers.contains("z"));
+        assert!(!identifiers.contains("K"));
+    }
+
+    #[test]
     fn runtime_import_identifier_scan_ignores_web_platform_globals() {
         let identifiers = super::runtime_import_identifiers_in_source(
             "const response = Response.json({ ok: true });\n\
@@ -16762,6 +16876,20 @@ mod tests {
 
         assert!(!rewritten.contains("function proxy"));
         assert!(rewritten.contains("function use() { return target(1, 2); }"));
+    }
+
+    #[test]
+    fn runtime_proxy_arrow_single_use_inlines_when_private() {
+        let source = concat!(
+            "var proxy = (q, K) => target(q, K);\n",
+            "var unary = q => targetOne(q);\n",
+            "function use() { return proxy(1, 2) + unary(3); }\n",
+        );
+        let rewritten = super::inline_single_use_runtime_proxy_functions(source, &BTreeSet::new());
+
+        assert!(!rewritten.contains("var proxy"));
+        assert!(!rewritten.contains("var unary"));
+        assert!(rewritten.contains("function use() { return target(1, 2) + targetOne(3); }"));
     }
 
     #[test]
