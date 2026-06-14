@@ -2194,14 +2194,32 @@ fn load_package_sources(
         return Err(MatchPackagesError::MissingTable("package_source_cache"));
     }
 
+    let stale_cache_versions = if has_package_source_cache && materialize_package_sources {
+        stale_package_source_cache_versions(connection, package_names)?
+    } else {
+        BTreeSet::new()
+    };
+
     let mut package_sources = if has_package_source_cache {
         let has_external_importable_column =
             sqlite_table_has_column(connection, "package_source_cache", "external_importable")
                 .map_err(MatchPackagesError::QueryPackageSources)?;
+        let has_external_import_policy_version_column = sqlite_table_has_column(
+            connection,
+            "package_source_cache",
+            "external_import_policy_version",
+        )
+        .map_err(MatchPackagesError::QueryPackageSources)?;
         let external_importable_expr = if has_external_importable_column {
-            "external_importable"
+            if has_external_import_policy_version_column {
+                format!(
+                    "CASE WHEN external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} THEN external_importable ELSE 0 END"
+                )
+            } else {
+                "0".to_string()
+            }
         } else {
-            "1"
+            "0".to_string()
         };
         let mut sql = String::from(
             format!(
@@ -2252,8 +2270,12 @@ fn load_package_sources(
         package_source_roots,
     )?);
     if materialize_package_sources {
-        let materialized_sources =
-            materialize_package_sources_from_hints(rows, package_names, &package_sources)?;
+        let materialized_sources = materialize_package_sources_from_hints(
+            rows,
+            package_names,
+            &package_sources,
+            &stale_cache_versions,
+        )?;
         if persist_materialized_package_sources && !materialized_sources.is_empty() {
             persist_package_source_cache(connection, &materialized_sources)?;
         }
@@ -2262,6 +2284,61 @@ fn load_package_sources(
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
     Ok(package_sources)
+}
+
+fn stale_package_source_cache_versions(
+    connection: &Connection,
+    package_names: &BTreeSet<String>,
+) -> Result<BTreeSet<(String, String)>, MatchPackagesError> {
+    let has_external_import_policy_version_column = sqlite_table_has_column(
+        connection,
+        "package_source_cache",
+        "external_import_policy_version",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let stale_predicate = if has_external_import_policy_version_column {
+        format!(
+            "external_import_policy_version != {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION}"
+        )
+    } else {
+        "1".to_string()
+    };
+    let mut sql = format!(
+        r"
+        SELECT DISTINCT package_name, package_version
+          FROM package_source_cache
+         WHERE TRIM(COALESCE(package_name, '')) != ''
+           AND TRIM(COALESCE(package_version, '')) != ''
+           AND TRIM(COALESCE(source_content, '')) != ''
+           AND ({stale_predicate})
+        "
+    );
+    if !package_names.is_empty() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            sql,
+            " AND package_name IN ({})",
+            sqlite_placeholders(package_names.len())
+        );
+    }
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let rows = if package_names.is_empty() {
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(MatchPackagesError::QueryPackageSources)?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+    } else {
+        statement
+            .query_map(params_from_iter(package_names.iter()), |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(MatchPackagesError::QueryPackageSources)?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+    }
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    Ok(rows.into_iter().collect())
 }
 
 fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageSource> {
@@ -2308,12 +2385,14 @@ fn persist_package_source_cache(
                 r"
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
-                     content_hash, external_importable, fetched_at, expires_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now', '+30 days'))
+                     content_hash, external_importable, external_import_policy_version,
+                     fetched_at, expires_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'), datetime('now', '+30 days'))
                 ON CONFLICT(package_name, package_version, entry_path) DO UPDATE SET
                     source_content = excluded.source_content,
                     content_hash = excluded.content_hash,
                     external_importable = excluded.external_importable,
+                    external_import_policy_version = excluded.external_import_policy_version,
                     fetched_at = excluded.fetched_at,
                     expires_at = excluded.expires_at
                 ",
@@ -2328,6 +2407,7 @@ fn persist_package_source_cache(
                     } else {
                         0_i64
                     },
+                    PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
                 ],
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -2361,11 +2441,29 @@ fn ensure_package_source_cache_table(
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
     }
+    if !sqlite_table_has_column(
+        connection,
+        "package_source_cache",
+        "external_import_policy_version",
+    )
+    .map_err(MatchPackagesError::WritePackageSourceCache)?
+    {
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_source_cache
+                    ADD COLUMN external_import_policy_version INTEGER NOT NULL DEFAULT 0;
+                ",
+            )
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    }
     connection
         .execute_batch(PACKAGE_SOURCE_CACHE_INDEX_SQL)
         .map_err(MatchPackagesError::WritePackageSourceCache)?;
     Ok(())
 }
+
+const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 2;
 
 const PACKAGE_SOURCE_CACHE_CREATE_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS package_source_cache (
@@ -2375,6 +2473,7 @@ CREATE TABLE IF NOT EXISTS package_source_cache (
     source_content TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     external_importable INTEGER NOT NULL DEFAULT 1,
+    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
     fetched_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     PRIMARY KEY (package_name, package_version, entry_path)
@@ -2420,6 +2519,17 @@ fn migrate_package_source_cache_entry_path_primary_key(
     } else {
         "1"
     };
+    let has_external_import_policy_version = sqlite_table_has_column(
+        connection,
+        "package_source_cache",
+        "external_import_policy_version",
+    )
+    .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    let external_import_policy_version_expr = if has_external_import_policy_version {
+        "external_import_policy_version"
+    } else {
+        "0"
+    };
     let transaction = connection
         .transaction()
         .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -2444,6 +2554,7 @@ fn migrate_package_source_cache_entry_path_primary_key(
                 source_content,
                 content_hash,
                 external_importable,
+                external_import_policy_version,
                 fetched_at,
                 expires_at
             )
@@ -2454,6 +2565,7 @@ fn migrate_package_source_cache_entry_path_primary_key(
                 source_content,
                 content_hash,
                 {external_importable_expr},
+                {external_import_policy_version_expr},
                 fetched_at,
                 expires_at
               FROM package_source_cache__reverts_old
@@ -2525,9 +2637,11 @@ fn materialize_package_sources_from_hints(
     rows: &InputRows,
     package_names: &BTreeSet<String>,
     existing_sources: &[PackageSource],
+    stale_cache_versions: &BTreeSet<(String, String)>,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
     let mut hints =
         package_version_hints_for_materialization(rows, package_names, existing_sources);
+    hints.extend(stale_cache_versions.iter().cloned());
     for (package_name, requested_version) in
         network_package_version_resolution_hints(rows, package_names, existing_sources)
     {
@@ -3269,29 +3383,80 @@ struct LocalPackageMetadata {
 }
 
 impl LocalPackageMetadata {
-    fn importable_specifier_for(&self, rel_path: &str) -> Option<String> {
-        if let Some(specifier) = self.import_surface.paths.get(rel_path) {
-            return Some(specifier.clone());
+    fn importable_target_for(&self, rel_path: &str) -> Option<LocalPackageImportTarget> {
+        if let Some(target) = self.import_surface.paths.get(rel_path) {
+            return Some(target.clone());
         }
-        let pattern_specifiers = self
+        let mut pattern_targets = BTreeMap::<String, LocalPackageImportKind>::new();
+        for target in self
             .import_surface
             .patterns
             .iter()
-            .filter_map(|pattern| pattern.specifier_for_target(rel_path))
-            .collect::<BTreeSet<_>>();
-        (pattern_specifiers.len() == 1).then(|| {
-            pattern_specifiers
+            .filter_map(|pattern| pattern.target_for_path(rel_path))
+        {
+            pattern_targets
+                .entry(target.specifier)
+                .and_modify(|kind| *kind = kind.merge(target.kind))
+                .or_insert(target.kind);
+        }
+        (pattern_targets.len() == 1).then(|| {
+            let (specifier, kind) = pattern_targets
                 .into_iter()
                 .next()
-                .expect("one pattern specifier")
+                .expect("one pattern target");
+            LocalPackageImportTarget { specifier, kind }
         })
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LocalPackageImportSurface {
-    paths: BTreeMap<String, String>,
+    paths: BTreeMap<String, LocalPackageImportTarget>,
     patterns: Vec<LocalPackageImportPattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocalPackageImportTarget {
+    specifier: String,
+    kind: LocalPackageImportKind,
+}
+
+impl LocalPackageImportTarget {
+    const fn esm_external_importable(&self) -> bool {
+        self.kind.esm_external_importable()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalPackageImportKind {
+    Esm,
+    CommonJs,
+    Universal,
+}
+
+impl LocalPackageImportKind {
+    const fn esm_external_importable(self) -> bool {
+        matches!(self, Self::Esm | Self::Universal)
+    }
+
+    const fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Universal, _) | (_, Self::Universal) => Self::Universal,
+            (Self::Esm, Self::CommonJs) | (Self::CommonJs, Self::Esm) => Self::Universal,
+            (Self::Esm, Self::Esm) => Self::Esm,
+            (Self::CommonJs, Self::CommonJs) => Self::CommonJs,
+        }
+    }
+
+    const fn and_condition(self, condition: Self) -> Option<Self> {
+        match (self, condition) {
+            (Self::Universal, nested) => Some(nested),
+            (parent, Self::Universal) => Some(parent),
+            (Self::Esm, Self::Esm) => Some(Self::Esm),
+            (Self::CommonJs, Self::CommonJs) => Some(Self::CommonJs),
+            (Self::Esm, Self::CommonJs) | (Self::CommonJs, Self::Esm) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -3300,10 +3465,11 @@ struct LocalPackageImportPattern {
     target_suffix: String,
     specifier_prefix: String,
     specifier_suffix: String,
+    kind: LocalPackageImportKind,
 }
 
 impl LocalPackageImportPattern {
-    fn specifier_for_target(&self, target_path: &str) -> Option<String> {
+    fn target_for_path(&self, target_path: &str) -> Option<LocalPackageImportTarget> {
         if !target_path.starts_with(self.target_prefix.as_str())
             || !target_path.ends_with(self.target_suffix.as_str())
         {
@@ -3317,10 +3483,13 @@ impl LocalPackageImportPattern {
         if wildcard.is_empty() {
             return None;
         }
-        Some(format!(
-            "{}{}{}",
-            self.specifier_prefix, wildcard, self.specifier_suffix
-        ))
+        Some(LocalPackageImportTarget {
+            specifier: format!(
+                "{}{}{}",
+                self.specifier_prefix, wildcard, self.specifier_suffix
+            ),
+            kind: self.kind,
+        })
     }
 }
 
@@ -3375,26 +3544,31 @@ fn collect_local_package_sources(
                 source,
             }
         })?;
-        let importable_specifier = metadata.importable_specifier_for(rel_path.as_str());
-        if is_json_source_path(rel_path.as_str()) && importable_specifier.is_none() {
+        let importable_target = metadata.importable_target_for(rel_path.as_str());
+        if is_json_source_path(rel_path.as_str()) && importable_target.is_none() {
             continue;
         }
         let source = package_source_body_for_local_file(rel_path.as_str(), source.as_str())
             .unwrap_or(source);
         let source_path = format!("{}@{}/{}", metadata.name, metadata.version, rel_path);
-        if let Some(export_specifier) =
-            importable_specifier.filter(|_| !is_json_source_path(rel_path.as_str()))
-        {
+        if let Some(export_target) = importable_target.as_ref().filter(|target| {
+            target.esm_external_importable() && !is_json_source_path(rel_path.as_str())
+        }) {
             sources.push(PackageSource::external(
                 metadata.name.as_str(),
                 metadata.version.as_str(),
-                export_specifier,
+                export_target.specifier.as_str(),
                 source_path,
                 source,
             ));
         } else {
-            let export_specifier =
-                package_export_specifier(metadata.name.as_str(), rel_path.as_str());
+            let export_specifier = importable_target
+                .as_ref()
+                .map(|target| target.specifier.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    package_export_specifier(metadata.name.as_str(), rel_path.as_str())
+                });
             sources.push(PackageSource::source_only(
                 metadata.name.as_str(),
                 metadata.version.as_str(),
@@ -3482,17 +3656,53 @@ fn package_importable_surface(
     };
 
     if let Some(exports) = package_json.get("exports") {
-        collect_exports_importable_paths(exports, package_name, ".", &mut import_surface);
+        collect_exports_importable_paths(
+            exports,
+            package_name,
+            ".",
+            LocalPackageImportKind::Universal,
+            &mut import_surface,
+        );
         dedup_import_patterns(&mut import_surface.patterns);
         return import_surface;
     }
 
-    for field in ["module", "main", "browser"] {
-        if let Some(target) = package_json.get(field).and_then(serde_json::Value::as_str) {
-            insert_importable_exact_target(&mut import_surface.paths, target, package_name);
-        }
+    if let Some(target) = package_json
+        .get("module")
+        .and_then(serde_json::Value::as_str)
+    {
+        insert_importable_exact_target(
+            &mut import_surface.paths,
+            target,
+            package_name,
+            LocalPackageImportKind::Esm,
+        );
     }
-    insert_importable_exact_target(&mut import_surface.paths, "index.js", package_name);
+    if let Some(target) = package_json
+        .get("browser")
+        .and_then(serde_json::Value::as_str)
+    {
+        insert_importable_exact_target(
+            &mut import_surface.paths,
+            target,
+            package_name,
+            LocalPackageImportKind::Esm,
+        );
+    }
+    if let Some(target) = package_json.get("main").and_then(serde_json::Value::as_str) {
+        insert_importable_exact_target(
+            &mut import_surface.paths,
+            target,
+            package_name,
+            LocalPackageImportKind::Universal,
+        );
+    }
+    insert_importable_exact_target(
+        &mut import_surface.paths,
+        "index.js",
+        package_name,
+        LocalPackageImportKind::Universal,
+    );
     import_surface
 }
 
@@ -3500,15 +3710,22 @@ fn collect_exports_importable_paths(
     value: &serde_json::Value,
     package_name: &str,
     export_key: &str,
+    kind: LocalPackageImportKind,
     import_surface: &mut LocalPackageImportSurface,
 ) {
     match value {
         serde_json::Value::String(target) => {
-            insert_export_target(import_surface, target, package_name, export_key);
+            insert_export_target(import_surface, target, package_name, export_key, kind);
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_exports_importable_paths(item, package_name, export_key, import_surface);
+                collect_exports_importable_paths(
+                    item,
+                    package_name,
+                    export_key,
+                    kind,
+                    import_surface,
+                );
             }
         }
         serde_json::Value::Object(object) => {
@@ -3518,18 +3735,28 @@ fn collect_exports_importable_paths(
                         nested_value,
                         package_name,
                         nested_export_key,
+                        kind,
                         import_surface,
                     );
                 }
             } else {
-                for condition in ["import", "require", "default", "node", "browser"] {
+                for (condition, nested_kind) in [
+                    ("import", LocalPackageImportKind::Esm),
+                    ("require", LocalPackageImportKind::CommonJs),
+                    ("default", LocalPackageImportKind::Universal),
+                    ("node", LocalPackageImportKind::Universal),
+                    ("browser", LocalPackageImportKind::Esm),
+                ] {
                     if let Some(nested_value) = object.get(condition) {
-                        collect_exports_importable_paths(
-                            nested_value,
-                            package_name,
-                            export_key,
-                            import_surface,
-                        );
+                        if let Some(kind) = kind.and_condition(nested_kind) {
+                            collect_exports_importable_paths(
+                                nested_value,
+                                package_name,
+                                export_key,
+                                kind,
+                                import_surface,
+                            );
+                        }
                     }
                 }
             }
@@ -3543,6 +3770,7 @@ fn insert_export_target(
     target: &str,
     package_name: &str,
     export_key: &str,
+    kind: LocalPackageImportKind,
 ) {
     if export_key.contains('*') || target.contains('*') {
         insert_importable_pattern(
@@ -3550,13 +3778,19 @@ fn insert_export_target(
             target,
             package_name,
             export_key,
+            kind,
         );
         return;
     }
     let Some(export_specifier) = export_key_to_specifier(package_name, export_key) else {
         return;
     };
-    insert_importable_exact_target(&mut import_surface.paths, target, export_specifier.as_str());
+    insert_importable_exact_target(
+        &mut import_surface.paths,
+        target,
+        export_specifier.as_str(),
+        kind,
+    );
 }
 
 fn export_key_to_specifier(package_name: &str, export_key: &str) -> Option<String> {
@@ -3588,17 +3822,30 @@ fn export_pattern_to_specifier_parts(
 }
 
 fn insert_importable_exact_target(
-    importable_paths: &mut BTreeMap<String, String>,
+    importable_paths: &mut BTreeMap<String, LocalPackageImportTarget>,
     target: &str,
     export_specifier: &str,
+    kind: LocalPackageImportKind,
 ) {
     let Some(clean_target) = clean_export_target(target) else {
         return;
     };
     for candidate in importable_target_candidates(clean_target.as_str()) {
-        importable_paths
-            .entry(candidate)
-            .or_insert_with(|| export_specifier.to_string());
+        match importable_paths.get_mut(candidate.as_str()) {
+            Some(existing) if existing.specifier == export_specifier => {
+                existing.kind = existing.kind.merge(kind);
+            }
+            Some(_) => {}
+            None => {
+                importable_paths.insert(
+                    candidate,
+                    LocalPackageImportTarget {
+                        specifier: export_specifier.to_string(),
+                        kind,
+                    },
+                );
+            }
+        }
     }
 }
 
@@ -3607,6 +3854,7 @@ fn insert_importable_pattern(
     target: &str,
     package_name: &str,
     export_key: &str,
+    kind: LocalPackageImportKind,
 ) {
     let Some((specifier_prefix, specifier_suffix)) =
         export_pattern_to_specifier_parts(package_name, export_key)
@@ -3624,6 +3872,7 @@ fn insert_importable_pattern(
         target_suffix: target_suffix.to_string(),
         specifier_prefix,
         specifier_suffix,
+        kind,
     });
 }
 
@@ -5388,13 +5637,15 @@ mod tests {
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
+        MatchPackagesArgs, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+        RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
         collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
         help_text, load_package_sources, local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
         package_version_hints_for_materialization, parse_npm_versions_json,
         persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
-        runtime_inventory_counts_from_files, runtime_inventory_project_selections, version_text,
+        runtime_inventory_counts_from_files, runtime_inventory_project_selections,
+        stale_package_source_cache_versions, version_text,
     };
 
     #[test]
@@ -6099,6 +6350,94 @@ mod tests {
                 .expect("empty package scope should be accepted");
 
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn package_source_cache_without_import_policy_version_is_source_only() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, external_importable, fetched_at, expires_at)
+                VALUES
+                    ('pkg', '1.2.3', 'public.js', 'export const publicValue = 1;',
+                     'hash', 1, 'now', 'later');
+                ",
+            )
+            .expect("create stale package source cache");
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+
+        let loaded = load_package_sources(
+            &mut connection,
+            &rows,
+            &BTreeSet::from(["pkg".to_string()]),
+            &[],
+            false,
+            false,
+        )
+        .expect("load cache");
+
+        assert_eq!(loaded.len(), 1);
+        assert!(
+            !loaded[0].external_importable,
+            "stale cache rows must be revalidated/materialized before external import emission"
+        );
+    }
+
+    #[test]
+    fn package_source_cache_stale_policy_versions_are_materialization_hints() {
+        let connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, external_importable, external_import_policy_version,
+                     fetched_at, expires_at)
+                VALUES
+                    ('pkg', '1.2.3', 'index.js', 'export const oldValue = 1;',
+                     'hash-a', 1, 0, 'now', 'later'),
+                    ('pkg', '1.2.4', 'index.js', 'export const newValue = 1;',
+                     'hash-b', 1, 2, 'now', 'later'),
+                    ('other', '9.9.9', 'index.js', 'export const other = 1;',
+                     'hash-c', 1, 0, 'now', 'later');
+                ",
+            )
+            .expect("create mixed policy package source cache");
+
+        let stale =
+            stale_package_source_cache_versions(&connection, &BTreeSet::from(["pkg".to_string()]))
+                .expect("query stale cache versions");
+
+        assert_eq!(
+            stale,
+            BTreeSet::from([("pkg".to_string(), "1.2.3".to_string())])
+        );
     }
 
     #[test]
@@ -6833,9 +7172,68 @@ mod tests {
         let package_dir = tempdir.path().join("project/node_modules/pkg");
         fs::create_dir_all(package_dir.join("cjs/features").as_path())
             .expect("create package cjs feature dir");
+        fs::create_dir_all(package_dir.join("esm/features").as_path())
+            .expect("create package esm feature dir");
         fs::write(
             package_dir.join("package.json"),
             r#"{"name":"pkg","version":"1.2.3","exports":{"./features/*":{"require":"./cjs/features/*.cjs","import":"./esm/features/*.js"}}}"#,
+        )
+        .expect("write package json");
+        fs::write(
+            package_dir.join("cjs/features/add.cjs"),
+            "exports.add = function add(a, b) {\n  return a + b;\n};",
+        )
+        .expect("write package cjs source");
+        fs::write(
+            package_dir.join("esm/features/add.js"),
+            "export function add(a, b) {\n  return a + b;\n}",
+        )
+        .expect("write package esm source");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "export function add(a,b){return a+b}",
+            &[],
+        );
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: vec![tempdir.path().join("project")],
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(outcome.loaded_package_sources, 2);
+        assert_eq!(outcome.matched_modules, 1);
+        let export_specifier: String = connection
+            .query_row(
+                r"
+                SELECT export_specifier
+                  FROM package_attributions
+                 WHERE module_id = 10
+                   AND status = 'accepted'
+                   AND emission_mode = 'external_import'
+                ",
+                [],
+                |row| row.get(0),
+            )
+            .expect("conditional wildcard export should be externalized");
+        assert_eq!(export_specifier, "pkg/features/add");
+    }
+
+    #[test]
+    fn match_packages_keeps_require_only_conditional_export_source_only() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("project/node_modules/pkg");
+        fs::create_dir_all(package_dir.join("cjs/features").as_path())
+            .expect("create package cjs feature dir");
+        fs::write(
+            package_dir.join("package.json"),
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./features/*":{"require":"./cjs/features/*.cjs"}}}"#,
         )
         .expect("write package json");
         fs::write(
@@ -6863,20 +7261,44 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
-        let export_specifier: String = connection
+        assert_eq!(
+            outcome.cascade_attributions, 0,
+            "require-only conditional exports must not produce ESM external attributions"
+        );
+        let (status, emission_mode, package_version, export_specifier, rejection_reason): (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+        ) = connection
             .query_row(
                 r"
-                SELECT export_specifier
+                SELECT status, emission_mode, package_version, export_specifier, rejection_reason
                   FROM package_attributions
                  WHERE module_id = 10
-                   AND status = 'accepted'
-                   AND emission_mode = 'external_import'
                 ",
                 [],
-                |row| row.get(0),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
-            .expect("conditional wildcard export should be externalized");
-        assert_eq!(export_specifier, "pkg/features/add");
+            .expect("require-only export should write a rejected attribution");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(package_version.as_deref(), Some("1.2.3"));
+        assert_eq!(export_specifier, None);
+        assert!(
+            rejection_reason.contains("safe single external import")
+                || rejection_reason.contains("source-only"),
+            "{rejection_reason}"
+        );
     }
 
     #[test]
@@ -8330,6 +8752,8 @@ mod tests {
                     entry_path TEXT NOT NULL,
                     source_content TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -8386,10 +8810,17 @@ mod tests {
                     r"
                     INSERT INTO package_source_cache
                         (package_name, package_version, entry_path, source_content,
-                         content_hash, fetched_at, expires_at)
-                    VALUES (?1, ?2, ?3, ?4, 'hash', 'now', 'later')
+                         content_hash, external_importable, external_import_policy_version,
+                         fetched_at, expires_at)
+                    VALUES (?1, ?2, ?3, ?4, 'hash', 1, ?5, 'now', 'later')
                     ",
-                    params![package_name, package_version, entry_path, source],
+                    params![
+                        package_name,
+                        package_version,
+                        entry_path,
+                        source,
+                        PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION
+                    ],
                 )
                 .expect("insert package source");
         }
@@ -8456,6 +8887,8 @@ mod tests {
                     entry_path TEXT NOT NULL,
                     source_content TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -8515,12 +8948,13 @@ mod tests {
                 r"
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
-                     content_hash, fetched_at, expires_at)
+                     content_hash, external_importable, external_import_policy_version,
+                     fetched_at, expires_at)
                 VALUES
                     ('undici', '2.2.1', 'wrapper.mjs', 'export default {};',
-                     'hash', 'now', 'later')
+                     'hash', 1, ?1, 'now', 'later')
                 ",
-                [],
+                [PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION],
             )
             .expect("insert package source");
     }
@@ -8569,6 +9003,8 @@ mod tests {
                     entry_path TEXT NOT NULL,
                     source_content TEXT NOT NULL,
                     content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
                     fetched_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     PRIMARY KEY (package_name, package_version, entry_path)
@@ -8635,12 +9071,13 @@ mod tests {
                 r"
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
-                     content_hash, fetched_at, expires_at)
+                     content_hash, external_importable, external_import_policy_version,
+                     fetched_at, expires_at)
                 VALUES
                     ('pkg', '1.2.3', 'add', 'export function add(a, b) { return a + b; }',
-                     'hash', 'now', 'later')
+                     'hash', 1, ?1, 'now', 'later')
                 ",
-                [],
+                [PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION],
             )
             .expect("insert package source");
     }
