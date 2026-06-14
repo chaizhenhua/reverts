@@ -40,11 +40,13 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let package_imports = resolve_package_imports(&model, &package_index, &mut audit);
 
     let mut function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>> = BTreeMap::new();
-    for module in model.modules() {
-        if let Some(slice) = model.input().module_source_slice(module.id) {
-            let fps = FunctionExtractor::fingerprint(module.id, slice.source);
-            if !fps.is_empty() {
-                function_fingerprints.insert(module.id, fps);
+    if should_collect_enrichment_function_fingerprints(&model) {
+        for module in model.modules() {
+            if let Some(slice) = model.input().module_source_slice(module.id) {
+                let fps = FunctionExtractor::fingerprint(module.id, slice.source);
+                if !fps.is_empty() {
+                    function_fingerprints.insert(module.id, fps);
+                }
             }
         }
     }
@@ -55,6 +57,13 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
             .with_function_fingerprints(function_fingerprints),
         audit,
     }
+}
+
+const ENRICHMENT_FUNCTION_FINGERPRINT_MODULE_LIMIT: usize = 1024;
+
+fn should_collect_enrichment_function_fingerprints(model: &ProgramModel) -> bool {
+    model.modules().len() <= ENRICHMENT_FUNCTION_FINGERPRINT_MODULE_LIMIT
+        || std::env::var_os("REVERTS_COLLECT_FUNCTION_FINGERPRINTS").is_some()
 }
 
 fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {

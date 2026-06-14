@@ -547,9 +547,49 @@ impl RuntimeSetterMigrationBlockerReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceModuleFacts {
+    candidate_reads_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    exportable_bindings_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    definition_modules_all: BTreeMap<BindingName, Option<ModuleId>>,
+}
+
+impl SourceModuleFacts {
+    fn from_program(program: &EnrichedProgram) -> Self {
+        let mut definition_bindings_by_module = BTreeMap::new();
+        let mut exportable_bindings_by_module = BTreeMap::new();
+        for module in program.model().modules() {
+            let definitions = source_definition_bindings(program, module.id);
+            let mut exportable = definitions.clone();
+            exportable.extend(program.model().graph().ast_imports_for(module.id));
+            if let Some(source) = program.model().input().module_source_slice(module.id) {
+                exportable.extend(named_reexported_bindings(source.source));
+            }
+            definition_bindings_by_module.insert(module.id, definitions);
+            exportable_bindings_by_module.insert(module.id, exportable);
+        }
+        let candidate_reads_by_module = candidate_source_reads_by_module_with_exportable(
+            program,
+            &exportable_bindings_by_module,
+        );
+        let definition_modules_all = unique_source_definition_modules_from_bindings(
+            program,
+            &BTreeSet::new(),
+            &definition_bindings_by_module,
+        );
+
+        Self {
+            candidate_reads_by_module,
+            exportable_bindings_by_module,
+            definition_modules_all,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannerAnalysis {
     source_required_packages: BTreeSet<ModuleId>,
     externalized_packages: BTreeSet<ModuleId>,
+    source_facts: SourceModuleFacts,
     source_module_wiring: SourceModuleWiring,
     lowered_runtime_sources: BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: RuntimeLazyFoldPlan,
@@ -557,23 +597,37 @@ struct PlannerAnalysis {
 
 impl PlannerAnalysis {
     fn from_program(program: &EnrichedProgram) -> Self {
+        let source_facts = SourceModuleFacts::from_program(program);
         let accepted_externalized_packages = externalized_package_modules(program);
-        let source_required_packages =
-            source_required_package_modules(program, &accepted_externalized_packages);
+        let source_required_packages = source_required_package_modules(
+            program,
+            &accepted_externalized_packages,
+            &source_facts,
+        );
         let externalized_packages = accepted_externalized_packages
             .difference(&source_required_packages)
             .copied()
             .collect::<BTreeSet<_>>();
-        let source_module_wiring = source_module_wiring(program, &externalized_packages);
-        let eager_safe_analysis = compute_eager_safe_analysis(program, &source_module_wiring);
-        let lowered_runtime_sources =
-            lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
+        let source_module_wiring =
+            source_module_wiring(program, &externalized_packages, &source_facts);
+        let eager_safe_analysis = if should_compute_cross_module_eager_safe_analysis(program) {
+            compute_eager_safe_analysis(program, &source_module_wiring)
+        } else {
+            EagerSafeAnalysis::default()
+        };
+        let lowered_runtime_sources = lowered_runtime_sources(
+            program,
+            &source_module_wiring,
+            &eager_safe_analysis,
+            &externalized_packages,
+        );
         let runtime_lazy_folds =
             runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
 
         Self {
             source_required_packages,
             externalized_packages,
+            source_facts,
             source_module_wiring,
             lowered_runtime_sources,
             runtime_lazy_folds,
@@ -610,6 +664,7 @@ impl ImportExportPlanner {
         let analysis = PlannerAnalysis::from_program(program);
         let source_required_packages = &analysis.source_required_packages;
         let externalized_packages = &analysis.externalized_packages;
+        let source_facts = &analysis.source_facts;
         let source_module_wiring = &analysis.source_module_wiring;
         let lowered_runtime_sources = &analysis.lowered_runtime_sources;
         let runtime_lazy_folds = &analysis.runtime_lazy_folds;
@@ -667,14 +722,17 @@ impl ImportExportPlanner {
                 && source_required_packages.contains(&module.id)
                 && let Some(attribution) = accepted_external_package_attribution(program, module.id)
             {
-                let adapter_bindings = package_adapter_export_bindings(program, module.id);
+                let adapter_bindings =
+                    package_adapter_export_bindings(program, module.id, source_facts);
                 if !adapter_bindings.is_empty()
-                    && can_emit_external_package_adapter(program, module.id, &adapter_bindings)
+                    && let Some(adapter_kind) =
+                        external_package_adapter_kind(program, module.id, &adapter_bindings)
                 {
                     populate_external_package_adapter_file(
                         &mut file,
                         attribution,
                         &adapter_bindings,
+                        adapter_kind,
                     );
                     plan.push_file(file);
                     continue;
@@ -4213,9 +4271,13 @@ fn lowered_runtime_sources(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     eager_safe_analysis: &EagerSafeAnalysis,
+    externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<ModuleId, LoweredRuntimeModuleSource> {
     let mut sources = BTreeMap::new();
     for module in program.model().modules() {
+        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+            continue;
+        }
         let runtime_imports = program.model().graph().runtime_imports_for(module.id);
         let Some(source) = program.model().input().module_source_slice(module.id) else {
             continue;
@@ -6323,30 +6385,40 @@ fn accepted_external_package_attribution(
         })
 }
 
-fn can_emit_external_package_adapter(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternalPackageAdapterKind {
+    CommonJsWrapper,
+    NamespaceReturn,
+}
+
+fn external_package_adapter_kind(
     program: &EnrichedProgram,
     module_id: ModuleId,
     adapter_bindings: &BTreeSet<BindingName>,
-) -> bool {
+) -> Option<ExternalPackageAdapterKind> {
     let Some(source) = program.model().input().module_source_slice(module_id) else {
-        return false;
+        return None;
     };
     let compact = compact_js_source(source.source);
     if compact.contains("let_$cached;")
         && compact.contains("return_$module.exports;")
         && compact.contains("export{")
     {
-        return true;
+        return Some(ExternalPackageAdapterKind::CommonJsWrapper);
     }
     if adapter_bindings
         .iter()
         .any(|binding| compact.contains(format!("var{}=p(", binding.as_str()).as_str()))
     {
-        return true;
+        return Some(ExternalPackageAdapterKind::CommonJsWrapper);
     }
-    adapter_bindings
+    if adapter_bindings
         .iter()
         .all(|binding| !compact_source_defines_binding(compact.as_str(), binding.as_str()))
+    {
+        return Some(ExternalPackageAdapterKind::NamespaceReturn);
+    }
+    None
 }
 
 fn compact_source_defines_binding(compact_source: &str, binding: &str) -> bool {
@@ -6365,6 +6437,7 @@ fn populate_external_package_adapter_file(
     file: &mut PlannedFile,
     attribution: &PackageAttributionInput,
     exportable_bindings: &BTreeSet<BindingName>,
+    adapter_kind: ExternalPackageAdapterKind,
 ) {
     let Some(specifier) = attribution.export_specifier.as_deref() else {
         return;
@@ -6379,11 +6452,13 @@ fn populate_external_package_adapter_file(
         },
         source_backed: false,
     });
+    let return_expression =
+        external_package_adapter_return_expression(namespace.as_str(), adapter_kind);
     for binding in exportable_bindings {
         file.push_source(format!(
             "function {}() {{ return {}; }}",
             binding.as_str(),
-            namespace.as_str()
+            return_expression
         ));
         file.add_binding(PlannedBinding::new(
             binding.clone(),
@@ -6398,9 +6473,22 @@ fn populate_external_package_adapter_file(
     }
 }
 
+fn external_package_adapter_return_expression(
+    namespace: &str,
+    adapter_kind: ExternalPackageAdapterKind,
+) -> String {
+    match adapter_kind {
+        ExternalPackageAdapterKind::CommonJsWrapper => format!(
+            "Object.prototype.hasOwnProperty.call({namespace}, \"default\") ? {namespace}.default : {namespace}"
+        ),
+        ExternalPackageAdapterKind::NamespaceReturn => namespace.to_string(),
+    }
+}
+
 fn package_adapter_export_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
+    source_facts: &SourceModuleFacts,
 ) -> BTreeSet<BindingName> {
     let mut bindings: BTreeSet<BindingName> = program
         .model()
@@ -6409,8 +6497,11 @@ fn package_adapter_export_bindings(
         .exports_for(module_id)
         .into_iter()
         .collect();
-    let target_bindings = source_exportable_bindings(program, module_id);
-    let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    let target_bindings = source_facts
+        .exportable_bindings_by_module
+        .get(&module_id)
+        .cloned()
+        .unwrap_or_else(|| source_exportable_bindings(program, module_id));
     for dependency in &program.model().input().dependencies {
         let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
             continue;
@@ -6418,7 +6509,9 @@ fn package_adapter_export_bindings(
         if target_module_id != module_id {
             continue;
         }
-        let Some(candidate_reads) = candidate_reads_by_module.get(&dependency.from_module_id)
+        let Some(candidate_reads) = source_facts
+            .candidate_reads_by_module
+            .get(&dependency.from_module_id)
         else {
             continue;
         };
@@ -6472,16 +6565,17 @@ fn is_json_resolved_file(resolved_file: &str) -> bool {
 fn source_required_package_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
+    source_facts: &SourceModuleFacts,
 ) -> BTreeSet<ModuleId> {
-    let candidate_reads_by_module = candidate_source_reads_by_module(program);
-    let definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
+    let candidate_reads_by_module = &source_facts.candidate_reads_by_module;
+    let definition_modules = &source_facts.definition_modules_all;
     let modules_by_id = program
         .model()
         .modules()
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
-    let exportable_bindings_by_module = source_exportable_bindings_by_module(program);
+    let exportable_bindings_by_module = &source_facts.exportable_bindings_by_module;
     let mut required = BTreeSet::new();
 
     loop {
@@ -6517,7 +6611,7 @@ fn source_required_package_modules(
             required.insert(target_module_id);
             changed = true;
         }
-        for (from_module_id, candidate_reads) in &candidate_reads_by_module {
+        for (from_module_id, candidate_reads) in candidate_reads_by_module {
             let Some(from_module) = modules_by_id.get(from_module_id) else {
                 continue;
             };
@@ -6552,16 +6646,17 @@ fn source_required_package_modules(
 fn source_module_wiring(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
+    source_facts: &SourceModuleFacts,
 ) -> SourceModuleWiring {
     let mut wiring = SourceModuleWiring::default();
-    let candidate_reads_by_module = candidate_source_reads_by_module(program);
+    let candidate_reads_by_module = &source_facts.candidate_reads_by_module;
     let modules_by_id = program
         .model()
         .modules()
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
-    let exportable_bindings_by_module = source_exportable_bindings_by_module(program);
+    let exportable_bindings_by_module = &source_facts.exportable_bindings_by_module;
 
     for dependency in &program.model().input().dependencies {
         let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
@@ -6640,6 +6735,13 @@ struct EagerSafeAnalysis {
     /// (zero-arg calls to imported thunks) can extract their value
     /// when every dep would itself have been eagerified.
     safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>>,
+}
+
+const CROSS_MODULE_EAGER_SAFE_ANALYSIS_MODULE_LIMIT: usize = 1024;
+
+fn should_compute_cross_module_eager_safe_analysis(program: &EnrichedProgram) -> bool {
+    program.model().modules().len() <= CROSS_MODULE_EAGER_SAFE_ANALYSIS_MODULE_LIMIT
+        || std::env::var_os("REVERTS_CROSS_MODULE_EAGER_SAFE").is_some()
 }
 
 fn compute_eager_safe_analysis(
@@ -7379,18 +7481,22 @@ fn rewrite_eagerified_call_sites(
     output
 }
 
-fn candidate_source_reads_by_module(
+fn candidate_source_reads_by_module_with_exportable(
     program: &EnrichedProgram,
+    exportable_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut reads = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     for (module_id, binding) in program.model().graph().def_use().unresolved_reads() {
         reads.entry(module_id).or_default().insert(binding);
     }
+    let empty_bindings = BTreeSet::<BindingName>::new();
     for module in program.model().modules() {
         let Some(source) = program.model().input().module_source_slice(module.id) else {
             continue;
         };
-        let local_bindings = source_exportable_bindings(program, module.id);
+        let local_bindings = exportable_bindings_by_module
+            .get(&module.id)
+            .unwrap_or(&empty_bindings);
         reads.entry(module.id).or_default().extend(
             identifiers_in_source(source.source)
                 .into_iter()
@@ -7411,17 +7517,6 @@ fn source_exportable_bindings(
         bindings.extend(named_reexported_bindings(source.source));
     }
     bindings
-}
-
-fn source_exportable_bindings_by_module(
-    program: &EnrichedProgram,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, source_exportable_bindings(program, module.id)))
-        .collect()
 }
 
 fn source_definition_bindings(
@@ -7615,15 +7710,41 @@ fn unique_source_definition_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
+    let definition_bindings_by_module = source_definition_bindings_by_module(program);
+    unique_source_definition_modules_from_bindings(
+        program,
+        externalized_packages,
+        &definition_bindings_by_module,
+    )
+}
+
+fn source_definition_bindings_by_module(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, source_definition_bindings(program, module.id)))
+        .collect()
+}
+
+fn unique_source_definition_modules_from_bindings(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+    definition_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) -> BTreeMap<BindingName, Option<ModuleId>> {
     let mut definitions = BTreeMap::<BindingName, Option<ModuleId>>::new();
     for module in program.model().modules() {
         if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
             continue;
         }
-        let source_definitions = source_definition_bindings(program, module.id);
+        let Some(source_definitions) = definition_bindings_by_module.get(&module.id) else {
+            continue;
+        };
         for binding in source_definitions {
             definitions
-                .entry(binding)
+                .entry(binding.clone())
                 .and_modify(|module_id| *module_id = None)
                 .or_insert(Some(module.id));
         }
@@ -13866,7 +13987,9 @@ mod tests {
             package_file.imports[0].resolution.specifier(),
             Some("fixture-package")
         );
-        assert!(source.contains("function packageInit() { return external_fixture_package; }"));
+        assert!(source.contains(
+            "function packageInit() { return Object.prototype.hasOwnProperty.call(external_fixture_package, \"default\") ? external_fixture_package.default : external_fixture_package; }"
+        ));
         assert!(source.contains("export { packageInit };"));
         assert!(!source.contains("_$cached"));
     }
@@ -14362,8 +14485,12 @@ mod tests {
         );
 
         let accepted_externalized_packages = super::externalized_package_modules(&enriched);
-        let source_required_packages =
-            super::source_required_package_modules(&enriched, &accepted_externalized_packages);
+        let source_facts = super::SourceModuleFacts::from_program(&enriched);
+        let source_required_packages = super::source_required_package_modules(
+            &enriched,
+            &accepted_externalized_packages,
+            &source_facts,
+        );
         assert!(
             source_required_packages.contains(&ModuleId(1)),
             "package bindings read by source without an import edge must stay local"

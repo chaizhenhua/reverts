@@ -1367,6 +1367,8 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
             | ModuleMatchStrategy::CascadeFunctionCoverage
+            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            | ModuleMatchStrategy::DependencyClosureOwnership
     )
 }
 
@@ -1381,7 +1383,9 @@ fn importable_package_source_for_module(
     package_match: &PackageMatch,
     package_sources: &[PackageSource],
 ) -> Option<ImportablePackageSourceTarget> {
-    if let Some(target) = exact_importable_package_match_source(package_match, package_sources) {
+    if source_match_strategy_has_exact_import_proof(package_match.strategy)
+        && let Some(target) = exact_importable_package_match_source(package_match, package_sources)
+    {
         return Some(target);
     }
 
@@ -1389,6 +1393,7 @@ fn importable_package_source_for_module(
         package_match.package_name.as_str(),
         module.semantic_path.as_str(),
     )?;
+    let min_score = semantic_export_surface_min_score(package_match.strategy);
     let mut scored = package_sources
         .iter()
         .filter(|source| {
@@ -1397,9 +1402,20 @@ fn importable_package_source_for_module(
                 && source.package_version == package_match.package_version
         })
         .filter_map(|source| {
-            let rel_path = package_source_relative_path(source);
-            let score = package_source_semantic_hint_score(rel_path.as_str(), hint.as_str());
-            (score > 0).then(|| (source, score))
+            let score = if min_score >= STRONG_SEMANTIC_EXPORT_SURFACE_SCORE {
+                package_export_surface_semantic_score(
+                    package_match.package_name.as_str(),
+                    source.export_specifier.as_str(),
+                    hint.as_str(),
+                )
+            } else {
+                package_source_semantic_export_surface_score(
+                    package_match.package_name.as_str(),
+                    source,
+                    hint.as_str(),
+                )
+            };
+            (score >= min_score).then(|| (source, score))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -1429,6 +1445,76 @@ fn importable_package_source_for_module(
         export_specifier: export_specifier.to_string(),
         source_path: source_path.to_string(),
     })
+}
+
+fn source_match_strategy_has_exact_import_proof(strategy: ModuleMatchStrategy) -> bool {
+    matches!(
+        strategy,
+        ModuleMatchStrategy::NormalizedSourceHash
+            | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+            | ModuleMatchStrategy::CascadeFunctionCoverage
+    )
+}
+
+const STRONG_SEMANTIC_EXPORT_SURFACE_SCORE: usize = 5;
+
+fn semantic_export_surface_min_score(strategy: ModuleMatchStrategy) -> usize {
+    match strategy {
+        ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership => STRONG_SEMANTIC_EXPORT_SURFACE_SCORE,
+        ModuleMatchStrategy::NormalizedSourceHash
+        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadePartialFunctionCoverage => 1,
+    }
+}
+
+fn package_source_semantic_export_surface_score(
+    package_name: &str,
+    source: &PackageSource,
+    hint: &str,
+) -> usize {
+    let export_score =
+        package_export_surface_semantic_score(package_name, source.export_specifier.as_str(), hint);
+    let rel_path = package_source_relative_path(source);
+    let source_score = package_source_semantic_hint_score(rel_path.as_str(), hint);
+    export_score.max(source_score)
+}
+
+fn package_export_surface_semantic_score(
+    package_name: &str,
+    export_specifier: &str,
+    hint: &str,
+) -> usize {
+    let Some((export_package_name, export_subpath)) = split_bare_specifier(export_specifier) else {
+        return 0;
+    };
+    if export_package_name != package_name {
+        return 0;
+    }
+    let hint_segments = canonical_public_path_segments(hint);
+    let export_segments = export_subpath
+        .as_deref()
+        .map(canonical_public_path_segments)
+        .unwrap_or_default();
+    if export_segments.is_empty() {
+        return if semantic_path_segments_are_root_like(&hint_segments) {
+            6
+        } else {
+            0
+        };
+    }
+    if hint_segments == export_segments {
+        return 6;
+    }
+    if path_segments_end_with(&hint_segments, &export_segments) && export_segments.len() >= 2 {
+        return 5;
+    }
+    if path_segments_end_with(&export_segments, &hint_segments) && hint_segments.len() >= 2 {
+        return 5;
+    }
+    0
 }
 
 fn exact_importable_package_match_source(
@@ -1497,6 +1583,23 @@ fn package_source_relative_path(source: &PackageSource) -> String {
 }
 
 fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
+    let source_segments = canonical_public_path_segments(source_path);
+    let hint_segments = canonical_public_path_segments(hint);
+    if !hint_segments.is_empty() && source_segments == hint_segments {
+        return 5;
+    }
+    if semantic_path_segments_are_root_like(&source_segments)
+        && semantic_path_segments_are_root_like(&hint_segments)
+    {
+        return 5;
+    }
+    if !hint_segments.is_empty()
+        && path_segments_end_with(&source_segments, &hint_segments)
+        && hint_segments.len() >= 2
+    {
+        return 4;
+    }
+
     let source_normalized = normalize_hint_text(source_path);
     let hint_normalized = normalize_hint_text(hint);
     if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
@@ -1521,6 +1624,71 @@ fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
     } else {
         0
     }
+}
+
+fn canonical_public_path_segments(value: &str) -> Vec<String> {
+    let clean = value
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
+    let mut segments = clean
+        .split('/')
+        .map(str::trim)
+        .map(normalize_hint_text)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    while segments.len() > 1
+        && segments
+            .first()
+            .is_some_and(|segment| is_build_path_segment(segment.as_str()))
+    {
+        segments.remove(0);
+    }
+    if segments.len() > 1 && segments.last().is_some_and(|segment| segment == "index") {
+        segments.pop();
+    }
+    segments
+}
+
+fn is_build_path_segment(segment: &str) -> bool {
+    matches!(
+        segment,
+        "src"
+            | "source"
+            | "sources"
+            | "dist"
+            | "build"
+            | "lib"
+            | "libs"
+            | "esm"
+            | "es"
+            | "cjs"
+            | "commonjs"
+            | "module"
+            | "modules"
+            | "browser"
+            | "umd"
+    )
+}
+
+fn semantic_path_segments_are_root_like(segments: &[String]) -> bool {
+    segments.is_empty()
+        || (segments.len() == 1 && segments[0] == "index")
+        || (segments.last().is_some_and(|segment| segment == "index")
+            && segments[..segments.len().saturating_sub(1)]
+                .iter()
+                .all(|segment| is_build_path_segment(segment.as_str())))
+}
+
+fn path_segments_end_with(segments: &[String], suffix: &[String]) -> bool {
+    !suffix.is_empty()
+        && suffix.len() <= segments.len()
+        && segments[segments.len() - suffix.len()..] == suffix[..]
 }
 
 fn module_file_order_key(module: &ModuleInput) -> (u32, u32) {
@@ -3589,6 +3757,102 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn pipeline_promotes_structural_bag_with_unique_export_surface_to_external_import() {
+        let mut rows = rows_with_package_source(
+            r#"
+            function firstAlpha(x){if(x){return true;}return false;}
+            function firstBeta(y){if(y){return true;}return false;}
+            "#,
+        );
+        rows.modules[0].semantic_path = "pkg/first.js".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/first",
+                "dist/first.js",
+                "function one(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/second",
+                "dist/second.js",
+                "function two(input){if(input){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let package_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| {
+                package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            })
+            .expect("structural ownership should be present");
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg/first");
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg/first")
+        );
+    }
+
+    #[test]
+    fn pipeline_keeps_structural_non_root_hint_source_only_when_only_root_surface_exists() {
+        let mut rows = rows_with_package_source(
+            r#"
+            function firstAlpha(x){if(x){return true;}return false;}
+            function firstBeta(y){if(y){return true;}return false;}
+            "#,
+        );
+        rows.modules[0].semantic_path = "pkg/first.js".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg",
+                "dist/index.js",
+                "export const root = 1;",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/internal-first",
+                "dist/first.js",
+                "function one(value){if(value){return true;}return false;}",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/internal-second",
+                "dist/second.js",
+                "function two(input){if(input){return true;}return false;}",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let package_match = report
+            .package_report
+            .matches
+            .iter()
+            .find(|package_match| {
+                package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            })
+            .expect("structural ownership should be present");
+        assert!(!package_match.external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
     fn pipeline_promotes_trusted_exact_hint_as_source_only_ownership() {
         let mut rows =
             rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
@@ -3613,6 +3877,75 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             report.package_report.matches[0]
                 .source_path
                 .contains("exact-hint:pkg@1.2.3:quality=trusted")
+        );
+        assert!(!report.package_report.matches[0].external_importable);
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_promotes_dependency_hint_with_unique_subpath_surface_to_external_import() {
+        let mut rows =
+            rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/sample",
+            "dist/sample.js",
+            "export const unrelated = 'public-subpath-surface';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/sample"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg/sample")
+        );
+    }
+
+    #[test]
+    fn pipeline_keeps_dependency_hint_source_only_when_export_surface_is_ambiguous() {
+        let mut rows =
+            rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/sample.js".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/sample",
+                "dist/sample.js",
+                "export const first = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/sample",
+                "esm/sample.js",
+                "export const second = 2;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
         );
         assert!(!report.package_report.matches[0].external_importable);
         assert!(report.package_report.attributions.is_empty());
