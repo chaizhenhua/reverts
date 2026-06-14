@@ -259,6 +259,49 @@ fn build_index(
                 },
                 struct_cand,
             );
+
+            // Alternate normalization passes can shift CFG/feature/structural
+            // axes without changing the package source identity. Index those
+            // alternate axes as lower-priority candidates so the cascade can
+            // recover ownership in minified bundles while the tier weights keep
+            // primary-axis matches preferred during global assignment.
+            for alt in &fp.alternates {
+                let mut cfg_cand = base_candidate.clone();
+                cfg_cand.matched_axis = AxisKind::Cfg;
+                cfg_cand.matched_alternate = Some(alt.pass);
+                index.insert_cfg(
+                    CfgKey {
+                        param_count: fp.param_count,
+                        cfg_hash: alt.axes.cfg,
+                    },
+                    cfg_cand,
+                );
+
+                for (axis, hash) in axes_to_feature_keys(&alt.axes) {
+                    let mut feat_cand = base_candidate.clone();
+                    feat_cand.matched_axis = axis;
+                    feat_cand.matched_alternate = Some(alt.pass);
+                    index.insert_feature(
+                        FeatureKey {
+                            param_count: fp.param_count,
+                            kind: axis,
+                            hash,
+                        },
+                        feat_cand,
+                    );
+                }
+
+                let mut struct_cand = base_candidate.clone();
+                struct_cand.matched_axis = AxisKind::StructuralAnchor;
+                struct_cand.matched_alternate = Some(alt.pass);
+                index.insert_structural(
+                    StructuralKey {
+                        param_count: fp.param_count,
+                        structural_anchor: alt.axes.structural_anchor,
+                    },
+                    struct_cand,
+                );
+            }
         }
     }
     index

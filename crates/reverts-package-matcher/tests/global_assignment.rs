@@ -186,9 +186,9 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
     );
 }
 
-/// Verify that reused exact candidate columns are assigned only once. With
-/// strict primary exact matching, alternates do not add extra columns, so only
-/// the five unique pkg_x functions can be chosen.
+/// Verify that reused primary-exact candidate columns are assigned only once
+/// while exact-alternate candidates can safely fill the remaining rows at a
+/// lower tier weight.
 #[test]
 fn hungarian_assigns_reused_exact_columns_once() {
     let mut idx = InMemoryFingerprintIndex::new();
@@ -225,8 +225,9 @@ fn hungarian_assigns_reused_exact_columns_once() {
                 external_importable: true,
             },
         );
-        // Slot's alternate hash → pkg_y candidate. It must not affect the
-        // strict primary exact candidate set.
+        // Slot's alternate hash → pkg_y candidate. It is available as a lower
+        // exact-alternate tier, so it can fill rows whose reused primary pkg_x
+        // column has already been consumed.
         idx.insert_exact(
             ExactKey {
                 param_count: 1,
@@ -278,7 +279,7 @@ fn hungarian_assigns_reused_exact_columns_once() {
         .iter()
         .filter(|a| a.chosen_package_name() == Some("y"))
         .count();
-    assert_eq!(chosen_count, 5);
+    assert_eq!(chosen_count, 10);
     assert_eq!(count_a, 5);
-    assert_eq!(count_b, 0);
+    assert_eq!(count_b, 5);
 }

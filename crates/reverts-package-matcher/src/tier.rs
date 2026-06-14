@@ -131,6 +131,10 @@ fn structural_anchored_for_axes(
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
+    let cfg_frequency = index.corpus_stats().frequency(AxisKind::Cfg, axes.cfg);
+    if cfg_frequency > STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT {
+        return None;
+    }
     let cfg_key = CfgKey {
         param_count,
         cfg_hash: axes.cfg,
@@ -252,13 +256,17 @@ fn feature_similarity_for_axes(
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
     let (primary_axis, primary_hash) = priority_axis(axes)?;
+    let primary_frequency = index.corpus_stats().frequency(primary_axis, primary_hash);
+    if primary_frequency > FEATURE_SIMILARITY_PRIMARY_FREQUENCY_LIMIT {
+        return None;
+    }
 
     let cands = index.query_feature(FeatureKey {
         param_count,
         kind: primary_axis,
         hash: primary_hash,
     });
-    if cands.is_empty() {
+    if cands.is_empty() || cands.len() > FEATURE_SIMILARITY_CANDIDATE_LIMIT {
         return None;
     }
 
@@ -396,6 +404,9 @@ fn collect_remaining_axes(axes: &AxisHashes, exclude: AxisKind) -> Vec<(AxisKind
 /// corpus exceeds STRUCTURAL_FREQUENCY_LIMIT — common shapes are
 /// uninformative. Requires unique winner with margin ≥ 0.3 over runner-up.
 pub const STRUCTURAL_FREQUENCY_LIMIT: u32 = 50;
+const STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT: u32 = 250;
+const FEATURE_SIMILARITY_PRIMARY_FREQUENCY_LIMIT: u32 = 250;
+const FEATURE_SIMILARITY_CANDIDATE_LIMIT: usize = 250;
 
 /// Higher frequency ceiling for the alt-source structural-only tier.
 /// Strategically loosened because the alt-tier weight (5) is already

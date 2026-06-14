@@ -2,7 +2,11 @@ use reverts_ir::{FunctionFingerprint, FunctionId};
 use reverts_package_index::PackageFingerprintIndex;
 
 use crate::hungarian::assign_max_weight;
-use crate::tier::{FunctionMatch, try_exact};
+use crate::tier::{
+    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity,
+    try_feature_similarity_alternate, try_structural_anchored, try_structural_anchored_alternate,
+    try_structural_only, try_structural_only_alternate,
+};
 
 #[must_use]
 pub fn match_function(
@@ -12,11 +16,17 @@ pub fn match_function(
     try_exact(fp, index)
 }
 
-/// Strict per-function candidate collection.
+/// Per-function candidate collection ordered from strongest to weakest
+/// evidence.
 ///
-/// The pipeline accepts only exact primary AST matches. Lower-strength tier
-/// functions remain available as explicit APIs in [`crate::tier`], but this
-/// orchestration layer no longer chains them implicitly.
+/// Exact tiers can prove a public import directly. Lower-strength tiers are
+/// deliberately still included here because real minified bundles often lose
+/// AST identity while preserving control-flow, literal/callee anchors, or
+/// structural shape. Those candidates are safe only after the caller applies
+/// global assignment, margin checks, package-hint scoping, and module-level
+/// coverage gates; ownership-only promotion keeps weak evidence from becoming
+/// an external import unless the matched package source was already proven
+/// importable.
 #[must_use]
 pub fn cascade_candidates(
     fp: &FunctionFingerprint,
@@ -24,6 +34,30 @@ pub fn cascade_candidates(
 ) -> Vec<FunctionMatch> {
     let mut all = Vec::new();
     if let Some(m) = try_exact(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_exact_alternate(fp, index) {
+        all.push(m);
+    }
+    if !all.is_empty() {
+        return all;
+    }
+    if let Some(m) = try_structural_anchored(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_anchored_alternate(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_feature_similarity(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_feature_similarity_alternate(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_only(fp, index) {
+        all.push(m);
+    }
+    if let Some(m) = try_structural_only_alternate(fp, index) {
         all.push(m);
     }
     all
@@ -668,15 +702,12 @@ mod tests {
             .expect("Hungarian must pick a winner");
         assert_eq!(chosen.tier, MatchTier::Exact);
         assert_eq!(chosen.candidate.package.name, "exactpkg");
-        assert_eq!(out[0].candidates.len(), 1);
-        assert!(
-            !out[0]
-                .candidates
-                .iter()
-                .any(|m| m.tier == MatchTier::StructuralAnchored
-                    && m.candidate.package.name == "structpkg"),
-            "structural-anchored tier must stay outside implicit pipeline",
+        assert_eq!(
+            out[0].candidates.len(),
+            1,
+            "lower tiers are only consulted after exact tiers miss",
         );
+        assert_eq!(out[0].candidates[0].tier, MatchTier::Exact);
     }
 
     #[test]

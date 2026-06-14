@@ -2226,6 +2226,7 @@ fn load_package_sources(
         package_sources.extend(materialized_sources);
     }
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
+    filter_package_sources_to_relevant_path_hints(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
     Ok(package_sources)
 }
@@ -2615,7 +2616,12 @@ fn materialize_package_sources_from_hints(
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
     let mut hints =
         package_version_hints_for_materialization(rows, package_names, existing_sources);
-    hints.extend(stale_cache_versions.iter().cloned());
+    hints.extend(stale_cache_version_hints_for_materialization(
+        rows,
+        package_names,
+        existing_sources,
+        stale_cache_versions,
+    ));
     for (package_name, requested_version) in
         network_package_version_resolution_hints(rows, package_names, existing_sources)
     {
@@ -2685,6 +2691,95 @@ fn materialize_package_sources_from_hints(
         }
     }
     Ok(sources)
+}
+
+fn stale_cache_version_hints_for_materialization(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+    existing_sources: &[PackageSource],
+    stale_cache_versions: &BTreeSet<(String, String)>,
+) -> BTreeSet<(String, String)> {
+    if stale_cache_versions.is_empty() {
+        return BTreeSet::new();
+    }
+    let available_versions = exact_package_source_versions_by_package(existing_sources);
+    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+    let project_resolved_versions =
+        resolved_project_package_versions(rows, package_names, &available_versions);
+    stale_cache_versions
+        .iter()
+        .filter_map(|(package_name, stale_version)| {
+            let versions = available_versions.get(package_name)?;
+            let resolved = if is_exact_package_version_hint(stale_version) {
+                Version::parse(stale_version).ok()
+            } else {
+                best_project_version_candidate(
+                    package_name,
+                    stale_version,
+                    &project_exact_versions,
+                    Some(versions),
+                )
+                .or_else(|| best_matching_package_version_by_binary_search(stale_version, versions))
+            }?;
+            project_resolved_versions
+                .get(package_name)
+                .is_some_and(|needed| needed.contains(&resolved))
+                .then(|| (package_name.clone(), resolved.to_string()))
+        })
+        .collect()
+}
+
+fn resolved_project_package_versions(
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+    available_versions: &BTreeMap<String, BTreeSet<Version>>,
+) -> BTreeMap<String, BTreeSet<Version>> {
+    let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
+    let mut resolved = BTreeMap::<String, BTreeSet<Version>>::new();
+    for module in &rows.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        if package_name.is_empty()
+            || !is_valid_package_name(package_name)
+            || (!package_names.is_empty() && !package_names.contains(package_name))
+        {
+            continue;
+        }
+        let Some(versions) = available_versions.get(package_name) else {
+            continue;
+        };
+        let requested_version = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .unwrap_or("latest");
+        let selected = if is_exact_package_version_hint(requested_version) {
+            Version::parse(requested_version)
+                .ok()
+                .filter(|version| versions.contains(version))
+                .or_else(|| nearest_package_version_by_binary_search(requested_version, versions))
+        } else {
+            best_project_version_candidate(
+                package_name,
+                requested_version,
+                &project_exact_versions,
+                Some(versions),
+            )
+            .or_else(|| best_matching_package_version_by_binary_search(requested_version, versions))
+        };
+        if let Some(selected) = selected {
+            resolved
+                .entry(package_name.to_string())
+                .or_default()
+                .insert(selected);
+        }
+    }
+    resolved
 }
 
 fn materialize_one_package_source(
@@ -3369,13 +3464,18 @@ impl LocalPackageMetadata {
                 .and_modify(|kind| *kind = kind.merge(target.kind))
                 .or_insert(target.kind);
         }
-        (pattern_targets.len() == 1).then(|| {
+        if pattern_targets.len() == 1 {
             let (specifier, kind) = pattern_targets
                 .into_iter()
                 .next()
                 .expect("one pattern target");
-            LocalPackageImportTarget { specifier, kind }
-        })
+            return Some(LocalPackageImportTarget { specifier, kind });
+        }
+        if self.import_surface.unrestricted_subpath_imports {
+            unrestricted_subpath_import_target(self.name.as_str(), rel_path)
+        } else {
+            None
+        }
     }
 }
 
@@ -3383,6 +3483,7 @@ impl LocalPackageMetadata {
 struct LocalPackageImportSurface {
     paths: BTreeMap<String, LocalPackageImportTarget>,
     patterns: Vec<LocalPackageImportPattern>,
+    unrestricted_subpath_imports: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3638,6 +3739,12 @@ fn package_importable_surface(
         return import_surface;
     }
 
+    // Packages without an `exports` map do not hide their files behind an
+    // export whitelist in Node's package resolution. Treat collected runtime
+    // files as importable subpaths (`pkg/lib/file.js`) so exact package-source
+    // matches can be externalized instead of vendoring the recovered code.
+    import_surface.unrestricted_subpath_imports = true;
+
     if let Some(target) = package_json
         .get("module")
         .and_then(serde_json::Value::as_str)
@@ -3675,6 +3782,35 @@ fn package_importable_surface(
         LocalPackageImportKind::Universal,
     );
     import_surface
+}
+
+fn unrestricted_subpath_import_target(
+    package_name: &str,
+    rel_path: &str,
+) -> Option<LocalPackageImportTarget> {
+    let clean = clean_package_entry_path(rel_path);
+    if clean.is_empty()
+        || clean == "."
+        || clean.starts_with("../")
+        || clean.contains("/../")
+        || clean.ends_with(".d.ts")
+    {
+        return None;
+    }
+    let kind = unrestricted_subpath_import_kind(clean.as_str())?;
+    Some(LocalPackageImportTarget {
+        specifier: package_export_specifier(package_name, clean.as_str()),
+        kind,
+    })
+}
+
+fn unrestricted_subpath_import_kind(rel_path: &str) -> Option<LocalPackageImportKind> {
+    match Path::new(rel_path).extension().and_then(|ext| ext.to_str()) {
+        Some("mjs" | "ts" | "tsx") => Some(LocalPackageImportKind::Esm),
+        Some("cjs") => Some(LocalPackageImportKind::CommonJs),
+        Some("js") => Some(LocalPackageImportKind::Universal),
+        _ => None,
+    }
 }
 
 fn collect_exports_importable_paths(
@@ -3908,6 +4044,7 @@ fn should_descend_package_source_dir(path: &Path) -> bool {
 }
 
 const RUNTIME_BUILD_FAMILY_MAX_SCORE: u8 = 3;
+const PACKAGE_SOURCE_PATH_HINT_FILTER_MIN_SOURCES: usize = 256;
 
 fn runtime_build_family_score(rel_path: &str) -> Option<u8> {
     let lower = rel_path.to_ascii_lowercase();
@@ -4044,6 +4181,43 @@ fn filter_package_sources_to_best_build_variants(
         };
         let rel_path = package_source_cache_entry_path(source);
         selected_families.contains(build_variant_family_key(rel_path.as_str()).as_str())
+    });
+}
+
+fn filter_package_sources_to_relevant_path_hints(
+    rows: &InputRows,
+    package_sources: &mut Vec<PackageSource>,
+) {
+    let hints_by_version = package_path_hints_by_version(rows);
+    if hints_by_version.is_empty() {
+        return;
+    }
+    let counts_by_version = package_sources.iter().fold(
+        BTreeMap::<(String, String), usize>::new(),
+        |mut counts, source| {
+            *counts
+                .entry((source.package_name.clone(), source.package_version.clone()))
+                .or_default() += 1;
+            counts
+        },
+    );
+    package_sources.retain(|source| {
+        let key = (source.package_name.clone(), source.package_version.clone());
+        if counts_by_version.get(&key).copied().unwrap_or_default()
+            <= PACKAGE_SOURCE_PATH_HINT_FILTER_MIN_SOURCES
+        {
+            return true;
+        }
+        let Some(hints) = hints_by_version.get(&key) else {
+            return true;
+        };
+        if source.external_importable && source.export_specifier == source.package_name {
+            return true;
+        }
+        let rel_path = package_source_cache_entry_path(source);
+        hints
+            .iter()
+            .any(|hint| package_source_path_hint_score(rel_path.as_str(), hint.as_str()) > 0)
     });
 }
 
@@ -5557,7 +5731,8 @@ mod tests {
         parse_npm_versions_json, persist_package_source_cache,
         resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections,
-        stale_package_source_cache_versions, version_text,
+        stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
+        version_text,
     };
 
     #[test]
@@ -6358,6 +6533,58 @@ mod tests {
     }
 
     #[test]
+    fn stale_cache_materialization_hints_resolve_ranges_to_project_versions() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(1),
+            "m1",
+            "lodash/add.js",
+            "lodash",
+            Some("4.2.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "m2",
+            "lodash/map.js",
+            "lodash",
+            Some("4.x".to_string()),
+        ));
+        let existing_sources = [
+            PackageSource::source_only(
+                "lodash",
+                "4.2.0",
+                "lodash/add",
+                "lodash@4.2.0/add.js",
+                "export {};",
+            ),
+            PackageSource::source_only(
+                "lodash",
+                "4.17.21",
+                "lodash/add",
+                "lodash@4.17.21/add.js",
+                "export {};",
+            ),
+        ];
+        let stale = BTreeSet::from([
+            ("lodash".to_string(), "4.x".to_string()),
+            ("lodash".to_string(), "4.17.21".to_string()),
+        ]);
+
+        let hints = stale_cache_version_hints_for_materialization(
+            &rows,
+            &BTreeSet::from(["lodash".to_string()]),
+            &existing_sources,
+            &stale,
+        );
+
+        assert_eq!(
+            hints,
+            BTreeSet::from([("lodash".to_string(), "4.2.0".to_string())]),
+            "stale range cache rows must materialize the resolved project version, not raw 4.x or unrelated cached versions"
+        );
+    }
+
+    #[test]
     fn local_package_source_collection_prefers_compiled_runtime_family_over_src_ts() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let package_dir = tempdir.path().join("node_modules/pkg");
@@ -6881,7 +7108,7 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_loads_source_only_files_from_package_source_root() {
+    fn match_packages_externalizes_unrestricted_subpath_from_package_source_root() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let package_dir = tempdir.path().join("project/node_modules/pkg");
         fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
@@ -6932,18 +7159,18 @@ mod tests {
         assert_eq!(outcome.matched_modules, 1);
         assert!(
             outcome.function_ownership_matches >= 1,
-            "source-only roots should still produce ownership evidence"
+            "unrestricted subpath roots should still produce ownership evidence"
         );
         assert_eq!(
             outcome.written_attributions, 1,
-            "source-only ownership matches are persisted as application_source decisions"
+            "unrestricted package subpaths should be persisted as external imports"
         );
-        assert_eq!(
-            outcome.function_attributions, 0,
-            "source-only roots must not feed external function attribution"
+        assert!(
+            outcome.function_attributions >= 1,
+            "importable unrestricted package subpaths should feed external function attribution"
         );
-        assert_eq!(outcome.written_function_attributions, 0);
-        let (status, emission_mode, rejection_reason, package_version): (
+        assert!(outcome.written_function_attributions >= 1);
+        let (status, emission_mode, export_specifier, package_version): (
             String,
             String,
             String,
@@ -6951,18 +7178,18 @@ mod tests {
         ) = connection
             .query_row(
                 r"
-                SELECT status, emission_mode, rejection_reason, package_version
+                SELECT status, emission_mode, export_specifier, package_version
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .expect("source-only match should leave a rejected attribution");
-        assert_eq!(status, "rejected");
-        assert_eq!(emission_mode, "application_source");
+            .expect("unrestricted subpath match should write an external attribution");
+        assert_eq!(status, "accepted");
+        assert_eq!(emission_mode, "external_import");
+        assert_eq!(export_specifier, "pkg/lib/add.js");
         assert_eq!(package_version.as_deref(), Some("1.2.3"));
-        assert!(rejection_reason.contains("source-only"));
     }
 
     #[test]
@@ -7317,7 +7544,10 @@ mod tests {
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.loaded_package_sources, 1);
         assert_eq!(outcome.matched_modules, 1);
-        assert_eq!(outcome.function_attributions, 0);
+        assert!(
+            outcome.function_attributions >= 1,
+            "unrestricted subpath package source should be importable even in dry-run"
+        );
         assert_eq!(package_attribution_count(&connection), 0);
     }
 
@@ -7378,7 +7608,7 @@ mod tests {
         fs::create_dir_all(package_dir.join("lib").as_path()).expect("create package lib dir");
         fs::write(
             package_dir.join("package.json"),
-            r#"{"name":"pkg","version":"1.2.3"}"#,
+            r#"{"name":"pkg","version":"1.2.3","exports":{"./add":{"require":"./lib/add.js"}}}"#,
         )
         .expect("write package json");
         fs::write(

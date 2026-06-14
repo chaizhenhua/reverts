@@ -584,7 +584,17 @@ pub fn match_packages_with_pipeline(
         VersionedPackageMatcher::default().match_rows(rows, package_sources)
     };
 
-    let fingerprints_by_module = fingerprints_from_rows(rows, package_filter);
+    let package_matched_modules = if package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT {
+        package_report
+            .matches
+            .iter()
+            .map(|package_match| package_match.module_id)
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    let fingerprints_by_module =
+        fingerprints_from_rows(rows, package_filter, &package_matched_modules);
     let cascade_report =
         match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources);
     promote_cascade_function_coverage_to_module_attributions(
@@ -618,6 +628,7 @@ pub fn match_packages_with_pipeline(
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
     promote_package_file_graph_ownership_matches(rows, &mut package_report);
+    promote_importable_ownership_matches(rows, package_sources, &mut package_report);
 
     PackageMatchingPipelineReport {
         package_report,
@@ -631,9 +642,13 @@ pub fn match_packages_with_pipeline(
 fn fingerprints_from_rows(
     rows: &InputRows,
     package_filter: Option<&BTreeSet<String>>,
+    excluded_modules: &BTreeSet<ModuleId>,
 ) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
     let mut out = BTreeMap::new();
     for module in &rows.modules {
+        if excluded_modules.contains(&module.id) {
+            continue;
+        }
         if let Some(package_filter) = package_filter
             && (module.kind != ModuleKind::Package
                 || !module
@@ -1268,6 +1283,243 @@ fn promote_package_file_graph_ownership_matches(
                 report,
             );
         }
+    }
+}
+
+fn promote_importable_ownership_matches(
+    rows: &InputRows,
+    package_sources: &[PackageSource],
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = accepted_external_modules(rows, report);
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut promotions = Vec::<(usize, PackageAttributionInput, String, String)>::new();
+
+    for (idx, package_match) in report.matches.iter().enumerate() {
+        if package_match.external_importable || already_accepted.contains(&package_match.module_id)
+        {
+            continue;
+        }
+        if !source_only_match_can_be_promoted_to_import(package_match.strategy) {
+            continue;
+        }
+        let Some(module) = modules_by_id.get(&package_match.module_id).copied() else {
+            continue;
+        };
+        if module.kind != ModuleKind::Package
+            || module.package_name.as_deref() != Some(package_match.package_name.as_str())
+            || module.package_version.as_deref().is_some_and(|expected| {
+                let expected = expected.trim();
+                !expected.is_empty() && expected != package_match.package_version
+            })
+        {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            continue;
+        };
+        if package_module_source_quality(module, slice.source_file_path, slice.source)
+            != PackageModuleSourceQuality::Trusted
+        {
+            continue;
+        }
+        let Some(import_target) =
+            importable_package_source_for_module(module, package_match, package_sources)
+        else {
+            continue;
+        };
+        let mut attribution = PackageAttributionInput::accepted_external(
+            module.id,
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+            import_target.export_specifier.as_str(),
+        );
+        if let Some((_package_name, Some(subpath))) =
+            split_bare_specifier(import_target.export_specifier.as_str())
+        {
+            attribution = attribution.with_subpath(subpath);
+        }
+        promotions.push((
+            idx,
+            attribution,
+            import_target.export_specifier,
+            import_target.source_path,
+        ));
+    }
+
+    for (idx, attribution, export_specifier, source_path) in promotions {
+        if let Some(package_match) = report.matches.get_mut(idx) {
+            package_match.external_importable = true;
+            package_match.export_specifier = export_specifier;
+            package_match.source_path = source_path;
+        }
+        report.attributions.push(attribution);
+    }
+}
+
+fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) -> bool {
+    matches!(
+        strategy,
+        ModuleMatchStrategy::NormalizedSourceHash
+            | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+            | ModuleMatchStrategy::CascadeFunctionCoverage
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportablePackageSourceTarget {
+    export_specifier: String,
+    source_path: String,
+}
+
+fn importable_package_source_for_module(
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    package_sources: &[PackageSource],
+) -> Option<ImportablePackageSourceTarget> {
+    if let Some(target) = exact_importable_package_match_source(package_match, package_sources) {
+        return Some(target);
+    }
+
+    let hint = module_package_semantic_path_hint(
+        package_match.package_name.as_str(),
+        module.semantic_path.as_str(),
+    )?;
+    let mut scored = package_sources
+        .iter()
+        .filter(|source| {
+            source.external_importable
+                && source.package_name == package_match.package_name
+                && source.package_version == package_match.package_version
+        })
+        .filter_map(|source| {
+            let rel_path = package_source_relative_path(source);
+            let score = package_source_semantic_hint_score(rel_path.as_str(), hint.as_str());
+            (score > 0).then(|| (source, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+    });
+
+    let best_score = scored.first()?.1;
+    let best = scored
+        .into_iter()
+        .filter(|(_source, score)| *score == best_score)
+        .map(|(source, _score)| {
+            (
+                source.export_specifier.as_str(),
+                source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if best.len() != 1 {
+        return None;
+    }
+    let (export_specifier, source_path) = best.into_iter().next()?;
+    Some(ImportablePackageSourceTarget {
+        export_specifier: export_specifier.to_string(),
+        source_path: source_path.to_string(),
+    })
+}
+
+fn exact_importable_package_match_source(
+    package_match: &PackageMatch,
+    package_sources: &[PackageSource],
+) -> Option<ImportablePackageSourceTarget> {
+    let matched = package_sources
+        .iter()
+        .filter(|source| {
+            source.external_importable
+                && source.package_name == package_match.package_name
+                && source.package_version == package_match.package_version
+                && (source.source_path == package_match.source_path
+                    || (!package_match.export_specifier.trim().is_empty()
+                        && source.export_specifier == package_match.export_specifier))
+        })
+        .map(|source| {
+            (
+                source.export_specifier.as_str(),
+                source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if matched.len() != 1 {
+        return None;
+    }
+    let (export_specifier, source_path) = matched.into_iter().next()?;
+    Some(ImportablePackageSourceTarget {
+        export_specifier: export_specifier.to_string(),
+        source_path: source_path.to_string(),
+    })
+}
+
+fn module_package_semantic_path_hint(package_name: &str, semantic_path: &str) -> Option<String> {
+    let clean = semantic_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    if clean.is_empty() {
+        return None;
+    }
+    for prefix in package_semantic_path_prefixes(package_name) {
+        let Some(rest) = strip_package_prefix_from_semantic_path(clean.as_str(), prefix.as_str())
+        else {
+            continue;
+        };
+        let hint = strip_source_extension(rest)
+            .trim_matches('/')
+            .to_ascii_lowercase();
+        if !hint.is_empty() {
+            return Some(hint);
+        }
+    }
+    None
+}
+
+fn package_source_relative_path(source: &PackageSource) -> String {
+    let prefix = format!("{}@{}/", source.package_name, source.package_version);
+    source
+        .source_path
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(source.source_path.as_str())
+        .trim_start_matches('/')
+        .to_ascii_lowercase()
+}
+
+fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
+    let source_normalized = normalize_hint_text(source_path);
+    let hint_normalized = normalize_hint_text(hint);
+    if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
+        return 3;
+    }
+
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_hint_text(hint_last_segment);
+    if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
+    {
+        return 2;
+    }
+
+    let source_tokens = path_hint_tokens(source_path);
+    let hint_tokens = path_hint_tokens(hint_last_segment);
+    if !hint_tokens.is_empty()
+        && hint_tokens
+            .iter()
+            .all(|token| source_tokens.contains(token))
+    {
+        1
+    } else {
+        0
     }
 }
 
@@ -2768,6 +3020,7 @@ const MODULE_MATCH_WEIGHT: u32 = 1_000;
 const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
 const STRING_ANCHOR_WEIGHT: u32 = 1;
 const MODULE_SOURCE_HASH_ALTERNATE_MAX_BYTES: usize = 64 * 1024;
+const CASCADE_MATCHED_MODULE_SOURCE_LIMIT: usize = 8;
 
 fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool {
     matches!(
