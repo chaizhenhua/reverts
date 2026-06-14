@@ -6,7 +6,10 @@ use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
     RuntimePreludeBindingKind, RuntimePreludeImport,
 };
-use reverts_input::{ModuleDependencyTarget, PackageAttributionInput};
+use reverts_input::{
+    ModuleDependencyTarget, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
+    PackageEmissionMode,
+};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
@@ -679,6 +682,15 @@ impl ImportExportPlanner {
             runtime_lazy_folds,
             externalized_packages,
         );
+        let package_runtime_islands = package_runtime_island_plan(
+            program,
+            lowered_runtime_sources,
+            runtime_lazy_folds,
+            &runtime_var_migrations,
+            externalized_packages,
+        );
+        let mut used_package_runtime_helper_files =
+            BTreeMap::<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>::new();
         let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
         let runtime_edge_direct_prelude_imports = runtime_edge_direct_prelude_imports(
             program,
@@ -712,6 +724,8 @@ impl ImportExportPlanner {
                 .semantic_names()
                 .module_path(module.id)
                 .unwrap_or(module.semantic_path.as_str());
+            let package_runtime_owner =
+                package_runtime_owner_for_module(module, externalized_packages);
             let mut file = PlannedFile::new(path);
             let compiler_profile = program.compiler_profile().module(module.id);
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
@@ -1200,7 +1214,39 @@ impl ImportExportPlanner {
                     &mut planned_bindings,
                     &lowered_import_partition.direct_prelude_imports,
                 );
-                let remaining_runtime_helpers = lowered_import_partition.runtime_bindings.clone();
+                let (package_remaining_helpers, remaining_runtime_helpers) =
+                    partition_package_runtime_bindings(
+                        &package_runtime_islands,
+                        package_runtime_owner.as_ref(),
+                        lowered_source.source_file_id,
+                        &lowered_import_partition.runtime_bindings,
+                    );
+                let (package_written_helpers, written_runtime_helpers) =
+                    partition_package_runtime_bindings(
+                        &package_runtime_islands,
+                        package_runtime_owner.as_ref(),
+                        lowered_source.source_file_id,
+                        &written_runtime_helpers,
+                    );
+                if !package_remaining_helpers.is_empty() || !package_written_helpers.is_empty() {
+                    let mut package_import = PackageRuntimeImportEmitter {
+                        program,
+                        used_package_runtime_helper_files: &mut used_package_runtime_helper_files,
+                        file: &mut file,
+                        planned_bindings: &mut planned_bindings,
+                        module_id: module.id,
+                        module_path: path,
+                        owner: package_runtime_owner
+                            .as_ref()
+                            .expect("partition only returns package bindings with an owner"),
+                        source_file_id: lowered_source.source_file_id,
+                    };
+                    emit_package_runtime_helper_import(
+                        &mut package_import,
+                        &package_remaining_helpers,
+                        &package_written_helpers,
+                    );
+                }
                 if !remaining_runtime_helpers.is_empty()
                     || !written_runtime_helpers.is_empty()
                     || !lazy_helper_names.is_empty()
@@ -1286,7 +1332,31 @@ impl ImportExportPlanner {
                     &mut planned_bindings,
                     &import_partition.direct_prelude_imports,
                 );
-                let bindings = import_partition.runtime_bindings;
+                let (package_bindings, bindings) = partition_package_runtime_bindings(
+                    &package_runtime_islands,
+                    package_runtime_owner.as_ref(),
+                    source_file_id,
+                    &import_partition.runtime_bindings,
+                );
+                if !package_bindings.is_empty() {
+                    let mut package_import = PackageRuntimeImportEmitter {
+                        program,
+                        used_package_runtime_helper_files: &mut used_package_runtime_helper_files,
+                        file: &mut file,
+                        planned_bindings: &mut planned_bindings,
+                        module_id: module.id,
+                        module_path: path,
+                        owner: package_runtime_owner
+                            .as_ref()
+                            .expect("partition only returns package bindings with an owner"),
+                        source_file_id,
+                    };
+                    emit_package_runtime_helper_import(
+                        &mut package_import,
+                        &package_bindings,
+                        &BTreeSet::new(),
+                    );
+                }
                 if bindings.is_empty() {
                     continue;
                 }
@@ -1606,6 +1676,14 @@ impl ImportExportPlanner {
 
             plan.push_file(file);
         }
+
+        emit_package_runtime_helper_files(
+            program,
+            &mut plan,
+            &used_package_runtime_helper_files,
+            externalized_packages,
+        )?;
+
         if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
             used_runtime_helper_files
                 .entry(entrypoint.source_file_id)
@@ -2288,6 +2366,573 @@ impl RuntimeVarMigrationPlan {
         }
         None
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PackageRuntimeOwner {
+    name: String,
+    version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PackageRuntimeHelperKey {
+    owner: PackageRuntimeOwner,
+    source_file_id: u32,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PackageRuntimeHelperUsage {
+    public_bindings: BTreeSet<BindingName>,
+    required_bindings: BTreeSet<BindingName>,
+    setter_bindings: BTreeSet<BindingName>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PackageRuntimeIslandPlan {
+    owners_by_binding: BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
+}
+
+impl PackageRuntimeIslandPlan {
+    fn owner_for(
+        &self,
+        source_file_id: u32,
+        binding: &BindingName,
+    ) -> Option<&PackageRuntimeOwner> {
+        self.owners_by_binding
+            .get(&(source_file_id, binding.clone()))
+    }
+}
+
+fn package_runtime_owner_for_module(
+    module: &ModuleInput,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> Option<PackageRuntimeOwner> {
+    if module.kind != ModuleKind::Package || externalized_packages.contains(&module.id) {
+        return None;
+    }
+    Some(PackageRuntimeOwner {
+        name: module.package_name.clone()?,
+        version: module.package_version.clone()?,
+    })
+}
+
+fn package_runtime_helpers_path(owner: &PackageRuntimeOwner, source_file_id: u32) -> String {
+    let package = sanitize_package_runtime_path_segment(owner.name.as_str());
+    let version = sanitize_package_runtime_path_segment(owner.version.as_str());
+    format!("modules/package-runtime/{package}-{version}/source-{source_file_id}-helpers.ts")
+}
+
+fn sanitize_package_runtime_path_segment(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "unknown".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn package_runtime_island_plan(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> PackageRuntimeIslandPlan {
+    let module_owners = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| {
+            (
+                module.id,
+                package_runtime_owner_for_module(module, externalized_packages),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut owners_by_binding = BTreeMap::<(u32, BindingName), PackageRuntimeOwner>::new();
+    let mut consumers_by_binding = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
+    let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
+
+    for module in program.model().modules() {
+        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
+            continue;
+        }
+        let owner = module_owners.get(&module.id).and_then(Option::as_ref);
+        let mut used_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        for import in program.model().graph().runtime_imports_for(module.id) {
+            used_by_source
+                .entry(import.source_file_id)
+                .or_default()
+                .insert(import.binding);
+        }
+        if let Some(source) = lowered_runtime_sources.get(&module.id) {
+            used_by_source
+                .entry(source.source_file_id)
+                .or_default()
+                .extend(source.remaining_helpers.iter().cloned());
+            used_by_source
+                .entry(source.source_file_id)
+                .or_default()
+                .extend(source.written_helpers.iter().cloned());
+        }
+
+        for (source_file_id, bindings) in used_by_source {
+            for binding in bindings {
+                let key = (source_file_id, binding.clone());
+                if is_package_runtime_excluded_binding(&binding)
+                    || runtime_var_migrations
+                        .reexport_owner(source_file_id, &binding)
+                        .is_some()
+                {
+                    blocked_bindings.insert(key);
+                    continue;
+                }
+                let Some(owner) = owner else {
+                    blocked_bindings.insert(key);
+                    continue;
+                };
+                consumers_by_binding
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(module.id);
+                match owners_by_binding.get(&key) {
+                    Some(existing_owner) if existing_owner != owner => {
+                        blocked_bindings.insert(key);
+                    }
+                    Some(_) => {}
+                    None => {
+                        owners_by_binding.insert(key, owner.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    for key in &blocked_bindings {
+        owners_by_binding.remove(key);
+    }
+
+    let mut roots_by_key = BTreeMap::<PackageRuntimeHelperKey, BTreeSet<BindingName>>::new();
+    for ((source_file_id, binding), owner) in &owners_by_binding {
+        if blocked_bindings.contains(&(*source_file_id, binding.clone())) {
+            continue;
+        }
+        if let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id)
+            && prelude.defines(binding)
+        {
+            roots_by_key
+                .entry(PackageRuntimeHelperKey {
+                    owner: owner.clone(),
+                    source_file_id: *source_file_id,
+                })
+                .or_default()
+                .insert(binding.clone());
+        }
+    }
+
+    let mut plan = PackageRuntimeIslandPlan::default();
+    for (key, mut root_bindings) in roots_by_key {
+        let Some(prelude) = program.model().graph().runtime_prelude(key.source_file_id) else {
+            continue;
+        };
+        root_bindings.retain(|binding| {
+            !is_package_runtime_excluded_binding(binding)
+                && runtime_var_migrations
+                    .reexport_owner(key.source_file_id, binding)
+                    .is_none()
+                && prelude.defines(binding)
+        });
+        if root_bindings.is_empty() {
+            continue;
+        }
+        let folded_chunks = runtime_lazy_folds
+            .chunks_by_source_file
+            .get(&key.source_file_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let read_index = runtime_source_read_index(prelude, folded_chunks);
+        let mut helper_closure = close_runtime_helper_source(prelude, &root_bindings, None, &[]);
+        helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
+        helper_closure.source = purify_private_runtime_lazy_initializers(
+            helper_closure.source.as_str(),
+            &helper_closure.emitted_bindings,
+        );
+        let gate = PackageRuntimeClosureGate {
+            prelude,
+            read_index: &read_index,
+            source_file_id: key.source_file_id,
+            owner: &key.owner,
+            owners_by_binding: &owners_by_binding,
+            blocked_bindings: &blocked_bindings,
+            runtime_var_migrations,
+        };
+        if helper_closure.emitted_bindings.is_empty()
+            || !package_runtime_closure_is_safe(&gate, &helper_closure)
+        {
+            continue;
+        }
+        let helper_imports = runtime_source_module_imports(
+            program,
+            helper_closure.source.as_str(),
+            &helper_closure.emitted_bindings,
+            externalized_packages,
+        );
+        let consumers = root_bindings
+            .iter()
+            .flat_map(|binding| {
+                consumers_by_binding
+                    .get(&(key.source_file_id, binding.clone()))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+            })
+            .collect::<BTreeSet<_>>();
+        if !package_runtime_helper_imports_are_safe(
+            program,
+            externalized_packages,
+            &modules_by_id,
+            &key.owner,
+            &consumers,
+            &helper_imports,
+        ) {
+            continue;
+        }
+        let unresolved = unresolved_runtime_helper_references(
+            prelude,
+            helper_closure.source.as_str(),
+            &helper_closure.emitted_bindings,
+            &helper_imports,
+        );
+        if !unresolved.is_empty() {
+            continue;
+        }
+        for binding in &helper_closure.emitted_bindings {
+            plan.owners_by_binding
+                .insert((key.source_file_id, binding.clone()), key.owner.clone());
+        }
+    }
+
+    plan
+}
+
+fn is_package_runtime_excluded_binding(binding: &BindingName) -> bool {
+    let name = binding.as_str();
+    name == "lazyModule"
+        || name == "lazyValue"
+        || name.starts_with("__reverts_set_")
+        || is_planner_synthetic_binding(name)
+}
+
+struct PackageRuntimeClosureGate<'a> {
+    prelude: &'a RuntimePrelude,
+    read_index: &'a RuntimeSourceReadIndex,
+    source_file_id: u32,
+    owner: &'a PackageRuntimeOwner,
+    owners_by_binding: &'a BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
+    blocked_bindings: &'a BTreeSet<(u32, BindingName)>,
+    runtime_var_migrations: &'a RuntimeVarMigrationPlan,
+}
+
+fn package_runtime_closure_is_safe(
+    gate: &PackageRuntimeClosureGate<'_>,
+    helper_closure: &ClosedRuntimeHelperSource,
+) -> bool {
+    for binding in &helper_closure.emitted_bindings {
+        if !gate.prelude.defines(binding)
+            || is_package_runtime_excluded_binding(binding)
+            || gate
+                .runtime_var_migrations
+                .reexport_owner(gate.source_file_id, binding)
+                .is_some()
+            || runtime_binding_has_blocking_non_snippet_use(gate.read_index, binding)
+            || gate
+                .blocked_bindings
+                .contains(&(gate.source_file_id, binding.clone()))
+        {
+            return false;
+        }
+        if let Some(existing_owner) = gate
+            .owners_by_binding
+            .get(&(gate.source_file_id, binding.clone()))
+            && existing_owner != gate.owner
+        {
+            return false;
+        }
+        if runtime_readers_for_binding(gate.read_index, binding)
+            .into_iter()
+            .any(|reader| !helper_closure.emitted_bindings.contains(&reader))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn package_runtime_helper_imports_are_safe(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    owner: &PackageRuntimeOwner,
+    consumers: &BTreeSet<ModuleId>,
+    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) -> bool {
+    for module_id in helper_imports.keys() {
+        let Some(module) = modules_by_id.get(module_id).copied() else {
+            return false;
+        };
+        if package_runtime_owner_for_module(module, externalized_packages).as_ref() != Some(owner) {
+            return false;
+        }
+        if consumers.contains(module_id)
+            || module_dependency_reaches_any(program, *module_id, consumers)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn module_dependency_reaches_any(
+    program: &EnrichedProgram,
+    start: ModuleId,
+    targets: &BTreeSet<ModuleId>,
+) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    let dependencies = module_dependency_modules_by_owner(program);
+    let mut seen = BTreeSet::<ModuleId>::new();
+    let mut stack = dependencies
+        .get(&start)
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    while let Some(module_id) = stack.pop() {
+        if targets.contains(&module_id) {
+            return true;
+        }
+        if !seen.insert(module_id) {
+            continue;
+        }
+        if let Some(next) = dependencies.get(&module_id) {
+            stack.extend(next.iter().copied());
+        }
+    }
+    false
+}
+
+fn partition_package_runtime_bindings(
+    package_runtime_islands: &PackageRuntimeIslandPlan,
+    package_runtime_owner: Option<&PackageRuntimeOwner>,
+    source_file_id: u32,
+    bindings: &BTreeSet<BindingName>,
+) -> (BTreeSet<BindingName>, BTreeSet<BindingName>) {
+    let mut package_bindings = BTreeSet::<BindingName>::new();
+    let mut runtime_bindings = BTreeSet::<BindingName>::new();
+    for binding in bindings {
+        if let Some(owner) = package_runtime_owner
+            && package_runtime_islands
+                .owner_for(source_file_id, binding)
+                .is_some_and(|candidate| candidate == owner)
+        {
+            package_bindings.insert(binding.clone());
+            continue;
+        }
+        runtime_bindings.insert(binding.clone());
+    }
+    (package_bindings, runtime_bindings)
+}
+
+struct PackageRuntimeImportEmitter<'a> {
+    program: &'a EnrichedProgram,
+    used_package_runtime_helper_files:
+        &'a mut BTreeMap<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>,
+    file: &'a mut PlannedFile,
+    planned_bindings: &'a mut BTreeSet<BindingName>,
+    module_id: ModuleId,
+    module_path: &'a str,
+    owner: &'a PackageRuntimeOwner,
+    source_file_id: u32,
+}
+
+fn emit_package_runtime_helper_import(
+    emitter: &mut PackageRuntimeImportEmitter<'_>,
+    bindings: &BTreeSet<BindingName>,
+    setter_bindings: &BTreeSet<BindingName>,
+) {
+    let key = PackageRuntimeHelperKey {
+        owner: emitter.owner.clone(),
+        source_file_id: emitter.source_file_id,
+    };
+    let usage = emitter
+        .used_package_runtime_helper_files
+        .entry(key.clone())
+        .or_default();
+    usage.public_bindings.extend(bindings.iter().cloned());
+    usage.required_bindings.extend(bindings.iter().cloned());
+    usage
+        .required_bindings
+        .extend(setter_bindings.iter().cloned());
+    usage
+        .setter_bindings
+        .extend(setter_bindings.iter().cloned());
+
+    let helper_path = package_runtime_helpers_path(emitter.owner, emitter.source_file_id);
+    let specifier = relative_import_specifier(emitter.module_path, helper_path.as_str());
+    emitter.file.push_source(runtime_helper_import_statement(
+        bindings,
+        setter_bindings,
+        &[],
+        specifier.as_str(),
+    ));
+    for binding in bindings {
+        if emitter.planned_bindings.contains(binding) {
+            continue;
+        }
+        emitter.planned_bindings.insert(binding.clone());
+        emitter.file.add_binding(plan_binding_from_program(
+            emitter.program,
+            emitter.module_id,
+            binding.clone(),
+            binding.clone(),
+            true,
+            None,
+        ));
+    }
+}
+
+fn emit_package_runtime_helper_files(
+    program: &EnrichedProgram,
+    plan: &mut EmitPlan,
+    used_package_runtime_helper_files: &BTreeMap<
+        PackageRuntimeHelperKey,
+        PackageRuntimeHelperUsage,
+    >,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> Result<(), PlanError> {
+    for (key, usage) in used_package_runtime_helper_files {
+        let Some(prelude) = program.model().graph().runtime_prelude(key.source_file_id) else {
+            continue;
+        };
+        let mut root_bindings = usage.required_bindings.clone();
+        root_bindings.extend(usage.setter_bindings.iter().cloned());
+        if root_bindings.is_empty() {
+            continue;
+        }
+        let mut helper_closure = close_runtime_helper_source(prelude, &root_bindings, None, &[]);
+        helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
+        helper_closure.source = purify_private_runtime_lazy_initializers(
+            helper_closure.source.as_str(),
+            &helper_closure.emitted_bindings,
+        );
+        let helper_path = package_runtime_helpers_path(&key.owner, key.source_file_id);
+        let helper_imports = runtime_source_module_imports(
+            program,
+            helper_closure.source.as_str(),
+            &helper_closure.emitted_bindings,
+            externalized_packages,
+        );
+        let package_init_shims = externalized_package_init_shims(
+            program,
+            helper_closure.source.as_str(),
+            externalized_packages,
+        );
+        let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
+        emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
+        let unresolved = unresolved_runtime_helper_references(
+            prelude,
+            helper_closure.source.as_str(),
+            &emitted_runtime_bindings,
+            &helper_imports,
+        );
+        if !unresolved.is_empty() {
+            return Err(PlanError::UnresolvedRuntimeHelperReferences {
+                path: helper_path,
+                bindings: unresolved.into_iter().collect(),
+            });
+        }
+
+        let mut file = PlannedFile::new(helper_path.clone());
+        for (module_id, bindings) in &helper_imports {
+            ensure_planned_module_exports(plan, program, *module_id, bindings);
+            let Some(module_path) = module_output_path(program, *module_id) else {
+                continue;
+            };
+            let specifier = relative_import_specifier(helper_path.as_str(), module_path.as_str());
+            file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+        }
+        for binding in &package_init_shims {
+            file.push_source(noop_function_statement(binding));
+        }
+        let emits_lazy_module = helper_closure.source.contains("lazyModule(");
+        let emits_lazy_value = helper_closure.source.contains("lazyValue(");
+        if !helper_closure.source.trim().is_empty() {
+            file.push_source(helper_closure.source);
+        }
+        for binding in &usage.setter_bindings {
+            file.push_source(runtime_helper_setter_declaration(binding));
+        }
+        if emits_lazy_module {
+            file.push_source(lazy_module_helper_source());
+        }
+        if emits_lazy_value {
+            file.push_source(lazy_value_helper_source());
+        }
+
+        let mut exported_bindings = usage.public_bindings.clone();
+        exported_bindings.extend(
+            usage
+                .setter_bindings
+                .iter()
+                .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
+        );
+        if !exported_bindings.is_empty() {
+            file.push_source(named_export_statement(exported_bindings.iter()));
+        }
+        for binding in &usage.public_bindings {
+            file.add_binding(PlannedBinding::new(
+                binding.clone(),
+                binding.clone(),
+                BindingShape::Unknown,
+                true,
+            ));
+            file.add_export_with_source_backed(binding.clone(), true);
+        }
+        for setter in usage
+            .setter_bindings
+            .iter()
+            .map(|binding| BindingName::new(runtime_helper_setter_name(binding)))
+        {
+            file.add_binding(PlannedBinding::new(
+                setter.clone(),
+                setter.clone(),
+                BindingShape::Callable,
+                true,
+            ));
+            file.add_export_with_source_backed(setter, true);
+        }
+        if file.body.is_empty() {
+            continue;
+        }
+        plan.push_file(file);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -14625,6 +15270,119 @@ mod tests {
         assert!(package_source.contains("const dNq = external_open;"));
         assert!(package_source.contains("export { cNq, dNq };"));
         assert!(!package_source.contains("lazyValue"));
+    }
+
+    #[test]
+    fn package_only_runtime_helper_moves_to_package_runtime_island() {
+        let prelude = "function packageHelper() { return 1; }\n";
+        let package_body = "var value = packageHelper();\nexport { value };\n";
+        let source = format!("{prelude}{package_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::rejected_source(
+                ModuleId(1),
+                "fixture-package",
+                "fixture package stays source-backed in planner fixture",
+            ));
+
+        let plan = plan_from_rows(rows);
+        let package_source = planned_source(&plan, "modules/package.ts");
+        let island_source = planned_source(
+            &plan,
+            "modules/package-runtime/fixture-package-1.0.0/source-1-helpers.ts",
+        );
+
+        assert!(
+            package_source.contains(
+                "import { packageHelper } from './package-runtime/fixture-package-1.0.0/source-1-helpers.js';"
+            ),
+            "{package_source}"
+        );
+        assert!(
+            island_source.contains("function packageHelper() { return 1; }"),
+            "{island_source}"
+        );
+        assert!(island_source.contains("export { packageHelper };"));
+        assert!(
+            planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+            "central runtime helper should not be emitted for package-only helper"
+        );
+    }
+
+    #[test]
+    fn app_runtime_consumer_blocks_package_runtime_island() {
+        let prelude = "function sharedHelper() { return 1; }\n";
+        let package_body = "var packageValue = sharedHelper();\nexport { packageValue };\n";
+        let app_body = "var appValue = sharedHelper();\nexport { appValue };\n";
+        let source = format!("{prelude}{package_body}{app_body}");
+        let package_start = prelude.len() as u32;
+        let package_end = package_start + package_body.len() as u32;
+        let app_end = source.len() as u32;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "package",
+                "modules/package.ts",
+                "fixture-package",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(package_start, package_end)),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::rejected_source(
+                ModuleId(1),
+                "fixture-package",
+                "fixture package stays source-backed in planner fixture",
+            ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(package_end, app_end)),
+        );
+
+        let plan = plan_from_rows(rows);
+        let package_source = planned_source(&plan, "modules/package.ts");
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            package_source
+                .contains("import { sharedHelper } from './runtime/source-1-helpers.js';"),
+            "{package_source}"
+        );
+        assert!(
+            entry_source.contains("import { sharedHelper } from './runtime/source-1-helpers.js';"),
+            "{entry_source}"
+        );
+        assert!(
+            helper_source.contains("function sharedHelper() { return 1; }"),
+            "{helper_source}"
+        );
+        assert!(
+            planned_source_opt(
+                &plan,
+                "modules/package-runtime/fixture-package-1.0.0/source-1-helpers.ts"
+            )
+            .is_none(),
+            "application use must keep shared helper in central runtime"
+        );
     }
 
     #[test]
