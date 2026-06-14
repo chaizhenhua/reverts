@@ -1500,10 +1500,12 @@ struct ExternalImportTarget {
 struct ExternalImportSourceIndex<'a> {
     all_by_version_path:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
+    all_by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
     by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
     normalized_by_version_hash:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
     export_members_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
+    fingerprints_by_source_path: RefCell<BTreeMap<String, Option<SourceFingerprint>>>,
 }
 
 impl<'a> ExternalImportSourceIndex<'a> {
@@ -1517,6 +1519,13 @@ impl<'a> ExternalImportSourceIndex<'a> {
                 .entry(source.package_version.clone())
                 .or_default()
                 .entry(source.source_path.clone())
+                .or_default()
+                .push(source);
+            index
+                .all_by_version
+                .entry(source.package_name.clone())
+                .or_default()
+                .entry(source.package_version.clone())
                 .or_default()
                 .push(source);
             if !source.external_importable {
@@ -1551,6 +1560,11 @@ impl<'a> ExternalImportSourceIndex<'a> {
                 }
             }
         }
+        for versions in index.all_by_version.values_mut() {
+            for sources in versions.values_mut() {
+                sort_external_sources(sources);
+            }
+        }
         for versions in index.by_version.values_mut() {
             for sources in versions.values_mut() {
                 sort_external_sources(sources);
@@ -1576,6 +1590,14 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .get(package_name)
             .and_then(|versions| versions.get(package_version))
             .and_then(|paths| paths.get(source_path))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    fn all_sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
+        self.all_by_version
+            .get(package_name)
+            .and_then(|versions| versions.get(package_version))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -1616,6 +1638,27 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .borrow_mut()
             .insert(key, members.clone());
         members
+    }
+
+    fn source_fingerprint(
+        &self,
+        source: &'a PackageSource,
+    ) -> Option<PackageSourceFingerprint<'a>> {
+        let key = format!(
+            "{}@{}:{}",
+            source.package_name, source.package_version, source.source_path
+        );
+        if let Some(fingerprint) = self.fingerprints_by_source_path.borrow().get(&key) {
+            return fingerprint
+                .clone()
+                .map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint));
+        }
+        let fingerprint =
+            fingerprint_source(source.source_path.as_str(), source.source.as_str()).ok();
+        self.fingerprints_by_source_path
+            .borrow_mut()
+            .insert(key, fingerprint.clone());
+        fingerprint.map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint))
     }
 }
 
@@ -1692,6 +1735,17 @@ fn resolve_external_import_target_with_index(
     }
 
     if let Some(package_match) = package_match
+        && let Some(target) = dependency_exact_hint_source_match_external_package_source(
+            module,
+            package_match,
+            external_source_index,
+            module_source,
+        )
+    {
+        return Some(target);
+    }
+
+    if let Some(package_match) = package_match
         && let Some(target) = export_member_external_package_source(
             package_match,
             external_source_index,
@@ -1724,8 +1778,81 @@ fn resolve_external_import_target_with_index(
         ) {
             return Some(target);
         }
+        if let Some(package_match) = package_match
+            && let Some(target) = semantic_source_only_export_member_package_source(
+                package_match,
+                external_source_index,
+                hints.as_slice(),
+                semantic_policy.min_score,
+                module_source,
+            )
+        {
+            return Some(target);
+        }
     }
     None
+}
+
+fn dependency_exact_hint_source_match_external_package_source(
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+) -> Option<ExternalImportTarget> {
+    if package_match.strategy != ModuleMatchStrategy::DependencyClosureOwnership
+        || !package_match.source_path.starts_with("exact-hint:")
+        || !package_match.source_path.contains(":quality=trusted:")
+        || module_source.trim().is_empty()
+    {
+        return None;
+    }
+    let module_fingerprint =
+        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+    let sources = external_source_index
+        .all_sources(
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+        )
+        .iter()
+        .filter(|source| source.is_within_fingerprint_budget())
+        .filter_map(|source| external_source_index.source_fingerprint(source))
+        .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return None;
+    }
+    let version = PackageVersionCandidate {
+        package_name: package_match.package_name.clone(),
+        package_version: package_match.package_version.clone(),
+        sources,
+    };
+    let source_match = best_source_match(
+        &version,
+        &module_fingerprint,
+        &VersionedPackageMatcherConfig::default(),
+    )?;
+    match source_match.strategy {
+        ModuleMatchStrategy::NormalizedSourceHash
+        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors => {}
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadeFunctionOwnership
+        | ModuleMatchStrategy::CascadePartialFunctionCoverage
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership => return None,
+    }
+    if source_match.external_importable {
+        return Some(ExternalImportTarget {
+            export_specifier: source_match.export_specifier,
+            source_path: format!("forced-external:source-match:{}", source_match.source_path),
+        });
+    }
+    export_member_external_package_source_for_source_path(
+        source_match.package_name.as_str(),
+        source_match.package_version.as_str(),
+        source_match.source_path.as_str(),
+        external_source_index,
+        module_source,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1847,6 +1974,94 @@ fn semantic_external_package_source(
             source.source_path
         ),
     })
+}
+
+fn semantic_source_only_export_member_package_source(
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    hints: &[String],
+    min_score: usize,
+    module_source: &str,
+) -> Option<ExternalImportTarget> {
+    if hints.is_empty()
+        || !semantic_source_only_export_member_policy_allows(package_match)
+        || module_source.trim().is_empty()
+    {
+        return None;
+    }
+    // Importable sources were already handled by semantic_external_package_source.
+    // For source-only package files, require at least a structured suffix/path
+    // match and then separately prove that a public import surface re-exports
+    // the matched members.
+    let min_score = min_score.max(4);
+    let mut scored = external_source_index
+        .all_sources(
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+        )
+        .iter()
+        .copied()
+        .filter(|source| !source.external_importable)
+        .filter_map(|source| {
+            let (score, proof) = hints
+                .iter()
+                .map(|hint| semantic_external_source_score(source, hint))
+                .max_by(|left, right| {
+                    left.0
+                        .cmp(&right.0)
+                        .then_with(|| left.1.rank().cmp(&right.1.rank()))
+                })
+                .unwrap_or((0, SemanticExternalSourceProof::SourcePath));
+            (score >= min_score).then_some((source, score, proof))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.rank().cmp(&left.2.rank()))
+            .then_with(|| left.0.source_path.cmp(&right.0.source_path))
+            .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
+    });
+    let best_score = scored.first()?.1;
+    let best_proof = scored.first()?.2;
+    let best = scored
+        .into_iter()
+        .filter(|(_source, score, proof)| *score == best_score && *proof == best_proof)
+        .map(|(source, _score, _proof)| source)
+        .collect::<Vec<_>>();
+    let source_paths = best
+        .iter()
+        .map(|source| source.source_path.as_str())
+        .collect::<BTreeSet<_>>();
+    if source_paths.len() != 1 {
+        return None;
+    }
+    let matched_source_path = source_paths.into_iter().next()?;
+    export_member_external_package_source_for_source_path(
+        package_match.package_name.as_str(),
+        package_match.package_version.as_str(),
+        matched_source_path,
+        external_source_index,
+        module_source,
+    )
+}
+
+fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch) -> bool {
+    match package_match.strategy {
+        ModuleMatchStrategy::DependencyClosureOwnership => {
+            package_match.source_path.starts_with("exact-hint:")
+                && (package_match.source_path.contains(":quality=trusted:")
+                    || package_match.source_path.contains(":quality=weak:"))
+        }
+        ModuleMatchStrategy::NormalizedSourceHash
+        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadeFunctionOwnership
+        | ModuleMatchStrategy::CascadePartialFunctionCoverage
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1999,10 +2214,26 @@ fn export_member_external_package_source(
     if !source_only_match_can_be_promoted_to_import(package_match.strategy) {
         return None;
     }
-    let matched_sources = external_source_index.all_sources_by_path(
+    export_member_external_package_source_for_source_path(
         package_match.package_name.as_str(),
         package_match.package_version.as_str(),
         package_match.source_path.as_str(),
+        external_source_index,
+        module_source,
+    )
+}
+
+fn export_member_external_package_source_for_source_path(
+    package_name: &str,
+    package_version: &str,
+    matched_source_path: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+) -> Option<ExternalImportTarget> {
+    let matched_sources = external_source_index.all_sources_by_path(
+        package_name,
+        package_version,
+        matched_source_path,
     );
     if matched_sources.is_empty() {
         return None;
@@ -2018,10 +2249,7 @@ fn export_member_external_package_source(
     }
 
     let mut candidates = Vec::<ExportMemberExternalCandidate<'_>>::new();
-    for external in external_source_index.sources(
-        package_match.package_name.as_str(),
-        package_match.package_version.as_str(),
-    ) {
+    for external in external_source_index.sources(package_name, package_version) {
         let external_members = external_source_index.export_members(external);
         let Some((matched, proof)) = matched_sources
             .iter()
@@ -4303,16 +4531,23 @@ fn package_source_fingerprint<'a>(
     source: &'a PackageSource,
 ) -> Result<PackageSourceFingerprint<'a>, String> {
     let fingerprint = fingerprint_source(source.source_path.as_str(), source.source.as_str())?;
-    Ok(PackageSourceFingerprint {
+    Ok(package_source_fingerprint_from_source(source, fingerprint))
+}
+
+fn package_source_fingerprint_from_source<'a>(
+    source: &'a PackageSource,
+    fingerprint: SourceFingerprint,
+) -> PackageSourceFingerprint<'a> {
+    PackageSourceFingerprint {
         source,
         normalized_source_hash: fingerprint.normalized_source_hash,
         normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
         string_anchors: fingerprint.string_anchors,
-    })
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SourceFingerprint {
     normalized_source_hash: String,
     normalized_source_hashes: BTreeSet<String>,
@@ -6004,6 +6239,198 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             target.source_path.as_str(),
             "normalized-source-export:pkg@1.2.3/dist/esm/submodule.js"
         );
+    }
+
+    #[test]
+    fn resolver_promotes_trusted_exact_hint_by_unique_source_fingerprint_match() {
+        let module_source = r#"
+            function publicOne(value) {
+                if (value) return "stable-source-anchor-one";
+                return "stable-source-anchor-two";
+            }
+            function publicTwo(input) {
+                return input.map((item) => `${item}:stable-source-anchor-three`);
+            }
+        "#;
+        let package_source = r#"
+            function publicOne(value) {
+                if (value) return "stable-source-anchor-one";
+                return "stable-source-anchor-two";
+            }
+            function publicTwo(input) {
+                return input.map((item) => `${item}:stable-source-anchor-three`);
+            }
+            exports.publicOne = publicOne;
+            exports.publicTwo = publicTwo;
+        "#;
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "pkgModule",
+            "modules/10-minified.ts",
+            "pkg",
+            Some("1.2.3".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path:
+                "exact-hint:pkg@1.2.3:quality=trusted:semantic_path=modules/10-minified.ts"
+                    .to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/public",
+            "pkg@1.2.3/dist/public.js",
+            package_source,
+        )];
+
+        let target = resolve_external_import_target(
+            &module,
+            "pkg",
+            "1.2.3",
+            Some(&package_match),
+            &package_sources,
+            module_source,
+        )
+        .expect("trusted exact hint should resolve through unique source fingerprint evidence");
+
+        assert_eq!(target.export_specifier.as_str(), "pkg/public");
+        assert_eq!(
+            target.source_path.as_str(),
+            "forced-external:source-match:pkg@1.2.3/dist/public.js"
+        );
+    }
+
+    #[test]
+    fn resolver_promotes_semantic_source_only_match_through_export_member_bridge() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "pkgWidget",
+            "modules/10-pkg/internal/widget.ts",
+            "pkg",
+            Some("1.2.3".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path: "exact-hint:pkg@1.2.3:quality=trusted:semantic_path=modules/10-pkg/internal/widget.ts".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let module_source = r#"
+            function runtimeWidget(value) {
+                return value ? "widget-runtime-anchor" : "widget-runtime-fallback";
+            }
+        "#;
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/internal/widget",
+                "pkg@1.2.3/dist/internal/widget.js",
+                r#"
+                function Widget(value) {
+                    return value ? "package-widget-anchor" : "package-widget-fallback";
+                }
+                function makeWidget(input) {
+                    return new Widget(input);
+                }
+                exports.Widget = Widget;
+                exports.makeWidget = makeWidget;
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg",
+                "pkg@1.2.3/dist/index.js",
+                r#"export { Widget, makeWidget } from "./internal/widget.js";"#,
+            ),
+        ];
+
+        let target = resolve_external_import_target(
+            &module,
+            "pkg",
+            "1.2.3",
+            Some(&package_match),
+            &package_sources,
+            module_source,
+        )
+        .expect("semantic internal source should be wired through a proven public barrel");
+
+        assert_eq!(target.export_specifier.as_str(), "pkg");
+        assert!(
+            target
+                .source_path
+                .contains("forced-external:export-members:barrel-reference:Widget,makeWidget:")
+        );
+        assert!(
+            target.source_path.ends_with("pkg@1.2.3/dist/index.js"),
+            "target should point at the importable public barrel"
+        );
+    }
+
+    #[test]
+    fn resolver_rejects_semantic_source_only_match_without_export_member_bridge() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "pkgWidget",
+            "modules/10-pkg/internal/widget.ts",
+            "pkg",
+            Some("1.2.3".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.2.3".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path: "exact-hint:pkg@1.2.3:quality=trusted:semantic_path=modules/10-pkg/internal/widget.ts".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.2.3",
+                "pkg/internal/widget",
+                "pkg@1.2.3/dist/internal/widget.js",
+                "function Widget(){} exports.Widget = Widget;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg",
+                "pkg@1.2.3/dist/index.js",
+                "export const Widget = 1;",
+            ),
+        ];
+
+        let target = resolve_external_import_target(
+            &module,
+            "pkg",
+            "1.2.3",
+            Some(&package_match),
+            &package_sources,
+            "const localWidget = 'widget-runtime-anchor';",
+        );
+
+        assert_eq!(target, None);
     }
 
     #[test]

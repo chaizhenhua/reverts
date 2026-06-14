@@ -308,9 +308,12 @@ fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
 fn relaxed_semantic_hint_is_import_proof(hint: &str) -> bool {
     let trimmed = hint.trim().trim_matches('/');
     if trimmed.is_empty()
-        || trimmed
-            .split('/')
-            .any(|segment| matches!(segment, "_init" | "init" | "init-wrapper"))
+        || trimmed.split('/').any(|segment| {
+            matches!(
+                segment,
+                "_init" | "init" | "init-wrapper" | "_internal" | "internal" | "internals"
+            )
+        })
     {
         return false;
     }
@@ -464,14 +467,22 @@ pub fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usiz
         return 4;
     }
 
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_hint_text(hint_last_segment);
+    if hint_last_normalized.len() >= 4
+        && source_segments
+            .last()
+            .is_some_and(|segment| normalize_hint_text(segment) == hint_last_normalized)
+    {
+        return 3;
+    }
+
     let source_normalized = normalize_hint_text(source_path);
     let hint_normalized = normalize_hint_text(hint);
     if hint_normalized.len() >= 4 && source_normalized.contains(hint_normalized.as_str()) {
         return 3;
     }
 
-    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
-    let hint_last_normalized = normalize_hint_text(hint_last_segment);
     if hint_last_normalized.len() >= 4 && source_normalized.contains(hint_last_normalized.as_str())
     {
         return 2;
@@ -738,6 +749,16 @@ mod tests {
         );
         assert_eq!(
             module_package_semantic_path_hints(
+                "rxjs",
+                "modules/10-rxjs/_internal/is-array-like.ts",
+                "function a(){return 1;}",
+                SemanticPathHintMode::RelaxedImportProof,
+            ),
+            Vec::<String>::new(),
+            "weak relaxed hints must not externalize private/internal paths without a source anchor"
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
                 "form-data",
                 "modules/12-lib/form_data.ts",
                 "function a(){return 1;}",
@@ -774,6 +795,22 @@ mod tests {
         assert_eq!(
             package_source_semantic_surface_hint_score(&source, "public/api"),
             5
+        );
+    }
+
+    #[test]
+    fn package_source_semantic_hint_score_prefers_exact_leaf_over_contains() {
+        assert_eq!(
+            package_source_semantic_hint_score("lib/languages/python.js", "highlightjs/python"),
+            3
+        );
+        assert_eq!(
+            package_source_semantic_hint_score(
+                "lib/languages/python-profiler.js",
+                "highlightjs/python"
+            ),
+            2,
+            "prefix-containing siblings must rank below the exact leaf"
         );
     }
 
