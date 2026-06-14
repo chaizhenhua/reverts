@@ -1637,43 +1637,86 @@ fn resolve_external_import_target_with_index(
         return Some(target);
     }
 
-    if !package_match.is_some_and(package_match_can_use_semantic_external_target) {
+    let semantic_policies = package_match
+        .map(semantic_external_target_policies)
+        .unwrap_or_default();
+    if semantic_policies.is_empty() {
         return None;
     }
 
-    let hints = module_package_semantic_path_hints(
-        package_name,
-        module.semantic_path.as_str(),
-        module_source,
-        SemanticPathHintMode::ImportProof,
-    );
-    if let Some(target) = semantic_external_package_source(
-        package_name,
-        package_version,
-        external_source_index,
-        hints.as_slice(),
-    ) {
-        return Some(target);
+    for semantic_policy in semantic_policies {
+        let hints = module_package_semantic_path_hints(
+            package_name,
+            module.semantic_path.as_str(),
+            module_source,
+            semantic_policy.hint_mode,
+        );
+        if let Some(target) = semantic_external_package_source(
+            package_name,
+            package_version,
+            external_source_index,
+            hints.as_slice(),
+            semantic_policy.min_score,
+        ) {
+            return Some(target);
+        }
     }
-
     None
 }
 
-fn package_match_can_use_semantic_external_target(package_match: &PackageMatch) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticExternalTargetPolicy {
+    hint_mode: SemanticPathHintMode,
+    min_score: usize,
+}
+
+fn semantic_external_target_policies(
+    package_match: &PackageMatch,
+) -> Vec<SemanticExternalTargetPolicy> {
     match package_match.strategy {
-        ModuleMatchStrategy::NormalizedSourceHash => true,
-        ModuleMatchStrategy::FunctionSignatureAndStringAnchors => {
-            package_match.function_signature_matches > 0 && package_match.string_anchor_matches > 0
+        ModuleMatchStrategy::NormalizedSourceHash => vec![SemanticExternalTargetPolicy {
+            hint_mode: SemanticPathHintMode::ImportProof,
+            min_score: 1,
+        }],
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+            if package_match.function_signature_matches > 0
+                && package_match.string_anchor_matches > 0 =>
+        {
+            vec![SemanticExternalTargetPolicy {
+                hint_mode: SemanticPathHintMode::ImportProof,
+                min_score: 1,
+            }]
         }
         ModuleMatchStrategy::DependencyClosureOwnership => {
-            package_match.source_path.starts_with("exact-hint:")
-                && package_match.source_path.contains(":quality=trusted:")
+            if !package_match.source_path.starts_with("exact-hint:") {
+                return Vec::new();
+            }
+            if package_match.source_path.contains(":quality=trusted:") {
+                return vec![
+                    SemanticExternalTargetPolicy {
+                        hint_mode: SemanticPathHintMode::ImportProof,
+                        min_score: 1,
+                    },
+                    SemanticExternalTargetPolicy {
+                        hint_mode: SemanticPathHintMode::RelaxedImportProof,
+                        min_score: 4,
+                    },
+                ];
+            }
+            if package_match.source_path.contains(":quality=weak:") {
+                return vec![SemanticExternalTargetPolicy {
+                    hint_mode: SemanticPathHintMode::RelaxedImportProof,
+                    min_score: 4,
+                }];
+            }
+            Vec::new()
         }
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors => Vec::new(),
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => false,
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => Vec::new(),
     }
 }
 
@@ -1682,6 +1725,7 @@ fn semantic_external_package_source(
     package_version: &str,
     external_source_index: &ExternalImportSourceIndex<'_>,
     hints: &[String],
+    min_score: usize,
 ) -> Option<ExternalImportTarget> {
     if hints.is_empty() {
         return None;
@@ -1700,7 +1744,7 @@ fn semantic_external_package_source(
                         .then_with(|| left.1.rank().cmp(&right.1.rank()))
                 })
                 .unwrap_or((0, SemanticExternalSourceProof::SourcePath));
-            (score >= 1).then_some((source, score, proof))
+            (score >= min_score).then_some((source, score, proof))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -4261,6 +4305,117 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert_eq!(
             report.package_report.matches[0].export_specifier.as_str(),
             "pkg/sample"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_promotes_weak_structured_semantic_hint_to_unique_external_import() {
+        let mut rows = rows_with_package_source_at_version("function q(a){return a;}", "7.8.2");
+        rows.modules[0].package_name = Some("rxjs".to_string());
+        rows.modules[0].semantic_path = "modules/10-rxjs/operators/sample.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "rxjs",
+            "7.8.2",
+            "rxjs/internal/operators/sample",
+            "rxjs@7.8.2/dist/cjs/internal/operators/sample.js",
+            "export function sample(){return 'surface';}",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "rxjs/internal/operators/sample"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_keeps_weak_plain_semantic_hint_source_only() {
+        let mut rows = rows_with_package_source_at_version("function q(a){return a;}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-sample.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/sample",
+            "pkg@1.2.3/dist/sample.js",
+            "export function sample(){return 'surface';}",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(
+            !report.package_report.matches[0].external_importable,
+            "single-segment weak hints are not enough to wire an import"
+        );
+        assert!(report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_promotes_weak_package_prefixed_leaf_hint_to_unique_external_import() {
+        let mut rows = rows_with_package_source_at_version("function q(a){return a;}", "2.0.1");
+        rows.modules[0].package_name = Some("color-convert".to_string());
+        rows.modules[0].semantic_path = "modules/10-color-convert/conversions.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "color-convert",
+            "2.0.1",
+            "color-convert/conversions.js",
+            "color-convert@2.0.1/conversions.js",
+            "export const conversions = {};",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "color-convert/conversions.js"
+        );
+        assert_eq!(report.package_report.attributions.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_promotes_build_segment_leaf_hint_to_unique_external_import() {
+        let mut rows =
+            rows_with_package_source_at_version("function FormData(){return 42;}", "4.0.5");
+        rows.modules[0].package_name = Some("form-data".to_string());
+        rows.modules[0].semantic_path = "modules/10-lib/form_data.ts".to_string();
+        let package_sources = [PackageSource::external(
+            "form-data",
+            "4.0.5",
+            "form-data",
+            "form-data@4.0.5/lib/form_data.js",
+            "export const unrelatedSurface = 1;",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(
+            report.package_report.matches[0].strategy,
+            ModuleMatchStrategy::DependencyClosureOwnership
+        );
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "form-data"
         );
         assert_eq!(report.package_report.attributions.len(), 1);
     }

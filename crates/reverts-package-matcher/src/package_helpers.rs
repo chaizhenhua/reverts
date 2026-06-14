@@ -173,6 +173,12 @@ pub fn path_hint_tokens(value: &str) -> BTreeSet<String> {
 pub enum SemanticPathHintMode {
     /// Strict hints used to prove an import surface.
     ImportProof,
+    /// Relaxed, still structured hints used only when the caller already has
+    /// package ownership evidence and also requires a high-confidence export
+    /// surface match. Unlike [`ImportProof`], this may trust a structured
+    /// module semantic path even when the minified source body no longer
+    /// contains the path token.
+    RelaxedImportProof,
     /// Broader hints used only after ownership has already been accepted and
     /// the pipeline must pick the least bad no-fallback import target.
     ForcedExternal,
@@ -219,6 +225,8 @@ pub fn module_package_semantic_path_hints(
                     .rsplit('/')
                     .next()
                     .is_some_and(|segment| source_contains_semantic_hint(module_source, segment))
+                || (mode == SemanticPathHintMode::RelaxedImportProof
+                    && relaxed_semantic_hint_is_import_proof(hint.as_str()))
                 || semantic_filename_hint_is_package_root(package_name, hint.as_str()))
         {
             hints.push(hint);
@@ -227,8 +235,10 @@ pub fn module_package_semantic_path_hints(
     let clean_hint = strip_source_extension(clean.as_str())
         .trim_matches('/')
         .to_ascii_lowercase();
-    if mode == SemanticPathHintMode::ImportProof
-        && !clean_hint.is_empty()
+    if matches!(
+        mode,
+        SemanticPathHintMode::ImportProof | SemanticPathHintMode::RelaxedImportProof
+    ) && !clean_hint.is_empty()
         && !clean_hint.starts_with("modules/")
         && !package_semantic_path_prefixes(package_name)
             .iter()
@@ -295,16 +305,35 @@ fn semantic_filename_hint_is_package_export_like(hint: &str) -> bool {
             .any(|character| character.is_ascii_alphabetic() && character.is_ascii_lowercase())
 }
 
+fn relaxed_semantic_hint_is_import_proof(hint: &str) -> bool {
+    let trimmed = hint.trim().trim_matches('/');
+    if trimmed.is_empty()
+        || trimmed
+            .split('/')
+            .any(|segment| matches!(segment, "_init" | "init" | "init-wrapper"))
+    {
+        return false;
+    }
+    semantic_filename_hint_is_structured_export_path(trimmed)
+        || (is_useful_package_path_hint(trimmed)
+            && !is_build_path_segment(normalize_hint_text(trimmed).as_str()))
+}
+
 fn semantic_filename_hint_is_structured_export_path(hint: &str) -> bool {
     let trimmed = hint.trim().trim_matches('/');
-    let segments = canonical_public_path_segments(trimmed);
-    segments.len() >= 2
-        && !segments
-            .iter()
-            .all(|segment| is_build_path_segment(segment.as_str()))
-        && segments
-            .last()
-            .is_some_and(|segment| normalize_hint_text(segment).len() >= 4)
+    let canonical_segments = canonical_public_path_segments(trimmed);
+    let raw_segments = public_path_segments_without_build_stripping(trimmed);
+    [canonical_segments, raw_segments]
+        .into_iter()
+        .any(|segments| {
+            segments.len() >= 2
+                && !segments
+                    .iter()
+                    .all(|segment| is_build_path_segment(segment.as_str()))
+                && segments
+                    .last()
+                    .is_some_and(|segment| normalize_hint_text(segment).len() >= 4)
+        })
 }
 
 fn semantic_filename_hint_is_package_root(package_name: &str, hint: &str) -> bool {
@@ -479,21 +508,7 @@ pub fn strip_package_prefix_from_semantic_path<'a>(
 
 #[must_use]
 pub fn canonical_public_path_segments(value: &str) -> Vec<String> {
-    let clean = value
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(value)
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
-    let mut segments = clean
-        .split('/')
-        .map(str::trim)
-        .map(normalize_hint_text)
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
+    let mut segments = public_path_segments_without_build_stripping(value);
     while segments.len() > 1
         && segments
             .first()
@@ -504,6 +519,25 @@ pub fn canonical_public_path_segments(value: &str) -> Vec<String> {
     if segments.len() > 1 && segments.last().is_some_and(|segment| segment == "index") {
         segments.pop();
     }
+    segments
+}
+
+fn public_path_segments_without_build_stripping(value: &str) -> Vec<String> {
+    let clean = value
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .replace('\\', "/");
+    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
+    let segments = clean
+        .split('/')
+        .map(str::trim)
+        .map(normalize_hint_text)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
     segments
 }
 
@@ -668,6 +702,48 @@ mod tests {
                 SemanticPathHintMode::ForcedExternal,
             ),
             vec!["basekeys".to_string()]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "rxjs",
+                "modules/10-rxjs/operators/sample.ts",
+                "function a(){return 1;}",
+                SemanticPathHintMode::ImportProof,
+            ),
+            vec!["rxjs/operators/sample".to_string()]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "rxjs",
+                "modules/10-rxjs/operators/sample.ts",
+                "function a(){return 1;}",
+                SemanticPathHintMode::RelaxedImportProof,
+            ),
+            vec![
+                "operators/sample".to_string(),
+                "rxjs/operators/sample".to_string(),
+            ]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "color-convert",
+                "modules/11-color-convert/conversions.ts",
+                "function a(){return 1;}",
+                SemanticPathHintMode::RelaxedImportProof,
+            ),
+            vec![
+                "color-convert/conversions".to_string(),
+                "conversions".to_string(),
+            ]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "form-data",
+                "modules/12-lib/form_data.ts",
+                "function a(){return 1;}",
+                SemanticPathHintMode::ImportProof,
+            ),
+            vec!["lib/form_data".to_string()]
         );
         assert_eq!(
             clean_package_semantic_path_hint("pkg", "node_modules/pkg/lib/basekeys.js").as_deref(),

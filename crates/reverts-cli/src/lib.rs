@@ -4453,9 +4453,12 @@ fn filter_package_sources_to_best_build_variants(
                             .unwrap_or(0)
                     })
                     .sum::<usize>();
-                (family, matched_hints)
+                let has_external_importable = paths
+                    .iter()
+                    .any(|index| package_sources[*index].external_importable);
+                (family, matched_hints, has_external_importable)
             })
-            .filter(|(_family, matched_hints)| *matched_hints > 0)
+            .filter(|(_family, matched_hints, _has_external_importable)| *matched_hints > 0)
             .collect::<Vec<_>>();
         if scored.is_empty() {
             continue;
@@ -4472,13 +4475,29 @@ fn filter_package_sources_to_best_build_variants(
         });
         let best_score = scored[0].1;
         let best_rank = build_variant_family_rank(scored[0].0.as_str());
+        let best_external_rank = scored
+            .iter()
+            .filter(|(_family, score, has_external_importable)| {
+                *score == best_score && *has_external_importable
+            })
+            .map(|(family, _score, _has_external_importable)| {
+                build_variant_family_rank(family.as_str())
+            })
+            .min();
         let selected = scored
             .into_iter()
-            .take_while(|(family, score)| {
-                *score == best_score
-                    && (best_score < 2 || build_variant_family_rank(family.as_str()) == best_rank)
+            .filter(|(family, score, has_external_importable)| {
+                if *score != best_score {
+                    return false;
+                }
+                let rank = build_variant_family_rank(family.as_str());
+                if best_score < 2 || rank == best_rank {
+                    return true;
+                }
+                best_external_rank
+                    .is_some_and(|external_rank| *has_external_importable && rank == external_rank)
             })
-            .map(|(family, _score)| family)
+            .map(|(family, _score, _has_external_importable)| family)
             .collect::<BTreeSet<_>>();
         selected_families_by_version.insert(key, selected);
     }
@@ -7481,6 +7500,52 @@ mod tests {
 
         assert_eq!(sources.len(), 1);
         assert!(sources[0].source_path.contains("/dist/esm/"));
+    }
+
+    #[test]
+    fn package_source_build_variant_selection_keeps_equal_score_importable_family() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-rxjs/operators/sample.ts",
+            "rxjs",
+            Some("7.8.2".to_string()),
+        ));
+        let mut sources = vec![
+            PackageSource::external(
+                "rxjs",
+                "7.8.2",
+                "rxjs/internal/operators/sample",
+                "rxjs@7.8.2/dist/cjs/internal/operators/sample.js",
+                "exports.sample = sample;",
+            ),
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                "rxjs/dist/esm/internal/operators/sample.js",
+                "rxjs@7.8.2/dist/esm/internal/operators/sample.js",
+                "export function sample() {}",
+            ),
+        ];
+
+        super::filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+        assert_eq!(sources.len(), 2);
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.source_path.contains("/dist/esm/")
+                    && !source.external_importable),
+            "{sources:?}"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.source_path.contains("/dist/cjs/")
+                    && source.external_importable),
+            "{sources:?}"
+        );
     }
 
     #[test]
