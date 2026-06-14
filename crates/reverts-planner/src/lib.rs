@@ -3694,7 +3694,8 @@ fn is_migratable_reader_function_snippet(binding: &BindingName, source: &str) ->
         let rest = rest.trim_start();
         return function_declaration_names_binding(rest, binding);
     }
-    function_declaration_names_binding(source, binding)
+    class_declaration_names_binding(source, binding)
+        || function_declaration_names_binding(source, binding)
         || variable_declaration_names_function_like_binding(source, binding)
 }
 
@@ -3734,6 +3735,59 @@ fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bo
     }
     parse_identifier_after_keyword(source, 0, "function")
         .is_some_and(|(name, _)| name == binding.as_str())
+}
+
+fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
+    if !keyword_at(source, 0, "class") {
+        return false;
+    }
+    parse_identifier_after_keyword(source, 0, "class")
+        .is_some_and(|(name, _)| name == binding.as_str())
+        && is_migratable_reader_class(source)
+}
+
+fn is_migratable_reader_class(source: &str) -> bool {
+    if !pure_class_expression(source) {
+        return false;
+    }
+    !class_body_has_top_level_computed_key(source)
+}
+
+fn class_body_has_top_level_computed_key(source: &str) -> bool {
+    let Some(open) = find_top_level_byte(source, b'{') else {
+        return true;
+    };
+    let Some(close) = find_matching_brace(source, open) else {
+        return true;
+    };
+    let bytes = source.as_bytes();
+    let mut cursor = open + 1;
+    while cursor < close {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'[' => return true,
+            b'(' => {
+                let Some(end) = find_matching_paren(source, cursor) else {
+                    return true;
+                };
+                cursor = end + 1;
+            }
+            b'{' => {
+                let Some(end) = find_matching_brace(source, cursor) else {
+                    return true;
+                };
+                cursor = end + 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    false
 }
 
 fn variable_declaration_names_function_like_binding(source: &str, binding: &BindingName) -> bool {
@@ -13961,6 +14015,135 @@ mod tests {
         assert!(writer_source.contains("export { getShared };"));
         assert!(consumer_source.contains("import { getShared } from './writer.js';"));
         assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_moves_class_reader_with_writer() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { value() { return shared; } }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = new ReadsShared().value();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("class ReadsShared { value() { return shared; } }"));
+        assert!(writer_source.contains("shared = 1;"));
+        assert!(writer_source.contains("export { ReadsShared };"));
+        assert!(consumer_source.contains("import { ReadsShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_rejects_static_class_reader() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { static value = shared; }\n",
+        );
+        let writer_body = "shared = 1;\nexport { shared };\n";
+        let consumer_body = "var value = ReadsShared.value;\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(writer_source.contains("__reverts_set_shared(1);"));
+        assert!(!writer_source.contains("class ReadsShared"));
+        assert!(helper_source.contains("class ReadsShared { static value = shared; }"));
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { shared = value; return value; }")
+        );
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_rejects_computed_class_reader_key() {
+        let prelude = concat!(
+            "var shared;\n",
+            "class ReadsShared { [shared]() { return 1; } }\n",
+        );
+        let writer_body = "shared = 'value';\nexport { shared };\n";
+        let consumer_body = "var value = new ReadsShared()[shared]();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(writer_source.contains("__reverts_set_shared('value');"));
+        assert!(!writer_source.contains("class ReadsShared"));
+        assert!(helper_source.contains("class ReadsShared { [shared]() { return 1; } }"));
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { shared = value; return value; }")
+        );
     }
 
     #[test]
