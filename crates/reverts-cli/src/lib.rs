@@ -21,7 +21,7 @@ use reverts_input::{
     PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
-use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
+use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, CascadeMatchReport, ModuleMatchStrategy, PackageMatch,
@@ -30,8 +30,10 @@ use reverts_package_matcher::{
     package_module_source_quality,
 };
 use reverts_pipeline::{
-    AssetReference, EmittedFile, collect_required_asset_references_from_rows,
-    generate_project_from_input,
+    AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
+    RuntimeSetterMigrationBindingStatus, RuntimeSetterMigrationBlockerReason,
+    RuntimeSetterMigrationBlockerReport, collect_required_asset_references_from_rows,
+    generate_project_from_input, runtime_setter_migration_blocker_report_from_input,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
@@ -147,6 +149,7 @@ pub struct RuntimeInventoryArgs {
     pub limit: Option<u32>,
     pub newest: bool,
     pub max_source_bytes: Option<u64>,
+    pub setter_blockers: bool,
 }
 
 impl RuntimeInventoryArgs {
@@ -157,6 +160,7 @@ impl RuntimeInventoryArgs {
         let mut limit = None;
         let mut newest = false;
         let mut max_source_bytes = None;
+        let mut setter_blockers = false;
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -175,6 +179,7 @@ impl RuntimeInventoryArgs {
                 "--all-projects" => all_projects = true,
                 "--limit" => limit = Some(parse_limit(next_value(&mut args, "--limit")?)?),
                 "--newest" => newest = true,
+                "--setter-blockers" => setter_blockers = true,
                 "--max-source-bytes" => {
                     max_source_bytes = Some(parse_byte_limit(next_value(
                         &mut args,
@@ -195,6 +200,7 @@ impl RuntimeInventoryArgs {
                 limit,
                 newest,
                 max_source_bytes,
+                setter_blockers,
             }),
         }
     }
@@ -423,6 +429,12 @@ fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> 
             project.counts.named_export_statements,
             project.audit_findings,
         );
+        if let Some(report) = &project.setter_blockers {
+            print_runtime_setter_blocker_report("  setter_blockers", report);
+        }
+        if let Some(report) = &project.emitted_setter_blockers {
+            print_runtime_setter_blocker_report("  emitted_setter_blockers", report);
+        }
     }
     println!(
         "total: files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}, skipped_source_bytes={}",
@@ -442,7 +454,33 @@ fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> 
         outcome.audit_findings,
         outcome.skipped_source_bytes,
     );
+    if let Some(report) = &outcome.setter_blockers {
+        print_runtime_setter_blocker_report("total setter_blockers", report);
+    }
+    if let Some(report) = &outcome.emitted_setter_blockers {
+        print_runtime_setter_blocker_report("total emitted_setter_blockers", report);
+    }
     Ok(())
+}
+
+fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrationBlockerReport) {
+    println!(
+        "{label}: total={}, accepted={}, blocked={}",
+        report.total_bindings, report.accepted_bindings, report.blocked_bindings
+    );
+    let mut reasons = report
+        .reasons
+        .iter()
+        .map(|(reason, count)| (*reason, *count))
+        .collect::<Vec<_>>();
+    reasons.sort_by(|(left_reason, left_count), (right_reason, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_reason.as_str().cmp(right_reason.as_str()))
+    });
+    for (reason, count) in reasons {
+        println!("  {}={}", reason.as_str(), count);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +540,8 @@ pub struct RuntimeInventoryOutcome {
     pub audit_findings: usize,
     pub skipped_projects: usize,
     pub skipped_source_bytes: u64,
+    pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
+    pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,6 +551,8 @@ pub struct RuntimeInventoryProject {
     pub skipped: bool,
     pub counts: RuntimeInventoryCounts,
     pub audit_findings: usize,
+    pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
+    pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -560,6 +602,12 @@ pub fn runtime_inventory_from_sqlite(
     let mut audit_findings = 0usize;
     let mut skipped_projects = 0usize;
     let mut skipped_source_bytes = 0u64;
+    let mut setter_blockers = args
+        .setter_blockers
+        .then(RuntimeSetterMigrationBlockerReport::default);
+    let mut emitted_setter_blockers = args
+        .setter_blockers
+        .then(RuntimeSetterMigrationBlockerReport::default);
 
     for selection in selections {
         if args
@@ -574,14 +622,37 @@ pub fn runtime_inventory_from_sqlite(
                 skipped: true,
                 counts: RuntimeInventoryCounts::default(),
                 audit_findings: 0,
+                setter_blockers: None,
+                emitted_setter_blockers: None,
             });
             continue;
         }
 
         let input = load_project_bundle_from_sqlite(args.input.as_path(), selection.project_id)
             .map_err(RuntimeInventoryError::LoadInput)?;
+        let project_setter_blockers = if args.setter_blockers {
+            Some(runtime_setter_migration_blocker_report_from_input(
+                input.clone(),
+            ))
+        } else {
+            None
+        };
+        if let (Some(total), Some(project_report)) =
+            (setter_blockers.as_mut(), project_setter_blockers.as_ref())
+        {
+            total.add(project_report);
+        }
         let run = generate_project_from_input(input).map_err(RuntimeInventoryError::Pipeline)?;
         let counts = runtime_inventory_counts_from_files(&run.project.files);
+        let project_emitted_setter_blockers = project_setter_blockers
+            .as_ref()
+            .map(|report| runtime_emitted_setter_blockers_from_files(&run.project.files, report));
+        if let (Some(total), Some(project_report)) = (
+            emitted_setter_blockers.as_mut(),
+            project_emitted_setter_blockers.as_ref(),
+        ) {
+            total.add(project_report);
+        }
         let project_audit_findings = run.audit.findings().len();
         totals.add(counts);
         audit_findings += project_audit_findings;
@@ -591,6 +662,8 @@ pub fn runtime_inventory_from_sqlite(
             skipped: false,
             counts,
             audit_findings: project_audit_findings,
+            setter_blockers: project_setter_blockers,
+            emitted_setter_blockers: project_emitted_setter_blockers,
         });
     }
 
@@ -600,7 +673,61 @@ pub fn runtime_inventory_from_sqlite(
         audit_findings,
         skipped_projects,
         skipped_source_bytes,
+        setter_blockers,
+        emitted_setter_blockers,
     })
+}
+
+fn runtime_emitted_setter_blockers_from_files(
+    files: &[EmittedFile],
+    report: &RuntimeSetterMigrationBlockerReport,
+) -> RuntimeSetterMigrationBlockerReport {
+    let mut emitted = RuntimeSetterMigrationBlockerReport::default();
+    for file in files {
+        let Some(source_file_id) = runtime_helper_source_file_id(file.path.as_str()) else {
+            continue;
+        };
+        for line in file.source.lines() {
+            let Some(binding) = runtime_setter_target_from_line(line.trim_start()) else {
+                continue;
+            };
+            emitted.total_bindings += 1;
+            let key = RuntimeSetterMigrationBindingKey {
+                source_file_id,
+                binding: binding.clone(),
+            };
+            match report.binding_statuses.get(&key).copied() {
+                Some(RuntimeSetterMigrationBindingStatus::Accepted) => {
+                    emitted.add_accepted(source_file_id, binding);
+                }
+                Some(RuntimeSetterMigrationBindingStatus::Blocked(reason)) => {
+                    emitted.add_reason(source_file_id, binding, reason);
+                }
+                None => emitted.add_reason(
+                    source_file_id,
+                    binding,
+                    RuntimeSetterMigrationBlockerReason::NoDiagnosticStatus,
+                ),
+            }
+        }
+    }
+    emitted
+}
+
+fn runtime_helper_source_file_id(path: &str) -> Option<u32> {
+    let filename = Path::new(path).file_name()?.to_str()?;
+    let rest = filename.strip_prefix("source-")?;
+    let source_id = rest.strip_suffix("-helpers.ts")?;
+    source_id.parse().ok()
+}
+
+fn runtime_setter_target_from_line(line: &str) -> Option<BindingName> {
+    let rest = line.strip_prefix("function __reverts_set_")?;
+    let (binding, _tail) = rest.split_once("(value)")?;
+    if binding.is_empty() {
+        return None;
+    }
+    Some(BindingName::new(binding))
 }
 
 fn runtime_inventory_project_selections(
@@ -4294,6 +4421,7 @@ mod tests {
             "--newest".to_string(),
             "--max-source-bytes".to_string(),
             "1000000".to_string(),
+            "--setter-blockers".to_string(),
         ])
         .expect("args should parse");
 
@@ -4303,6 +4431,7 @@ mod tests {
         assert_eq!(args.limit, Some(25));
         assert!(args.newest);
         assert_eq!(args.max_source_bytes, Some(1_000_000));
+        assert!(args.setter_blockers);
 
         let command = CliCommand::parse([
             "runtime-inventory".to_string(),
@@ -4453,6 +4582,7 @@ mod tests {
             limit: Some(2),
             newest: true,
             max_source_bytes: Some(10),
+            setter_blockers: false,
         };
         let selections =
             runtime_inventory_project_selections(&newest_args).expect("select newest projects");
@@ -4470,6 +4600,7 @@ mod tests {
             limit: None,
             newest: false,
             max_source_bytes: None,
+            setter_blockers: false,
         };
         let selections = runtime_inventory_project_selections(&single_project_args)
             .expect("select single project");

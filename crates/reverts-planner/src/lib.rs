@@ -390,7 +390,154 @@ impl SourceCompilerStrategy {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ImportExportPlanner;
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RuntimeSetterMigrationBlockerReport {
+    pub total_bindings: usize,
+    pub accepted_bindings: usize,
+    pub blocked_bindings: usize,
+    pub reasons: BTreeMap<RuntimeSetterMigrationBlockerReason, usize>,
+    pub binding_statuses:
+        BTreeMap<RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus>,
+}
+
+impl RuntimeSetterMigrationBlockerReport {
+    pub fn add_accepted(&mut self, source_file_id: u32, binding: BindingName) {
+        self.accepted_bindings += 1;
+        self.binding_statuses.insert(
+            RuntimeSetterMigrationBindingKey {
+                source_file_id,
+                binding,
+            },
+            RuntimeSetterMigrationBindingStatus::Accepted,
+        );
+    }
+
+    pub fn add_reason(
+        &mut self,
+        source_file_id: u32,
+        binding: BindingName,
+        reason: RuntimeSetterMigrationBlockerReason,
+    ) {
+        self.blocked_bindings += 1;
+        *self.reasons.entry(reason).or_default() += 1;
+        self.binding_statuses.insert(
+            RuntimeSetterMigrationBindingKey {
+                source_file_id,
+                binding,
+            },
+            RuntimeSetterMigrationBindingStatus::Blocked(reason),
+        );
+    }
+
+    pub fn add(&mut self, other: &Self) {
+        self.total_bindings += other.total_bindings;
+        self.accepted_bindings += other.accepted_bindings;
+        self.blocked_bindings += other.blocked_bindings;
+        self.binding_statuses.extend(
+            other
+                .binding_statuses
+                .iter()
+                .map(|(key, status)| (key.clone(), *status)),
+        );
+        for (reason, count) in &other.reasons {
+            *self.reasons.entry(*reason).or_default() += count;
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RuntimeSetterMigrationBindingKey {
+    pub source_file_id: u32,
+    pub binding: BindingName,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeSetterMigrationBindingStatus {
+    Accepted,
+    Blocked(RuntimeSetterMigrationBlockerReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeSetterMigrationBlockerReason {
+    MultipleEligibleWriters,
+    FoldedWriterOnly,
+    ExternalizedPackageWriterOnly,
+    NoEligibleWriter,
+    MissingRuntimePrelude,
+    InitializerNotMigratable,
+    RuntimeNonSnippetRead,
+    RuntimeNamespaceExportHelper,
+    RuntimeNamespaceObjectBinding,
+    ReaderNonSnippetUse,
+    ReaderSnippetMissing,
+    ReaderNotMovableShape,
+    ReaderWritesRuntimeBinding,
+    ReaderClosureEscapes,
+    ReaderFreeBindingIndexMissing,
+    ReaderReadsOtherMovableBinding,
+    ReaderReadsNonRuntimeBinding,
+    NamespaceTargetDifferentWriter,
+    OwnerSourceMissing,
+    OwnerNameConflict,
+    NoDiagnosticStatus,
+}
+
+impl RuntimeSetterMigrationBlockerReason {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MultipleEligibleWriters => "multiple_eligible_writers",
+            Self::FoldedWriterOnly => "folded_writer_only",
+            Self::ExternalizedPackageWriterOnly => "externalized_package_writer_only",
+            Self::NoEligibleWriter => "no_eligible_writer",
+            Self::MissingRuntimePrelude => "missing_runtime_prelude",
+            Self::InitializerNotMigratable => "initializer_not_migratable",
+            Self::RuntimeNonSnippetRead => "runtime_non_snippet_read",
+            Self::RuntimeNamespaceExportHelper => "runtime_namespace_export_helper",
+            Self::RuntimeNamespaceObjectBinding => "runtime_namespace_object_binding",
+            Self::ReaderNonSnippetUse => "reader_non_snippet_use",
+            Self::ReaderSnippetMissing => "reader_snippet_missing",
+            Self::ReaderNotMovableShape => "reader_not_movable_shape",
+            Self::ReaderWritesRuntimeBinding => "reader_writes_runtime_binding",
+            Self::ReaderClosureEscapes => "reader_closure_escapes",
+            Self::ReaderFreeBindingIndexMissing => "reader_free_binding_index_missing",
+            Self::ReaderReadsOtherMovableBinding => "reader_reads_other_movable_binding",
+            Self::ReaderReadsNonRuntimeBinding => "reader_reads_non_runtime_binding",
+            Self::NamespaceTargetDifferentWriter => "namespace_target_different_writer",
+            Self::OwnerSourceMissing => "owner_source_missing",
+            Self::OwnerNameConflict => "owner_name_conflict",
+            Self::NoDiagnosticStatus => "no_diagnostic_status",
+        }
+    }
+}
+
 impl ImportExportPlanner {
+    #[must_use]
+    pub fn runtime_setter_migration_blocker_report(
+        self,
+        program: &EnrichedProgram,
+    ) -> RuntimeSetterMigrationBlockerReport {
+        let accepted_externalized_packages = externalized_package_modules(program);
+        let source_required_packages =
+            source_required_package_modules(program, &accepted_externalized_packages);
+        let externalized_packages = accepted_externalized_packages
+            .difference(&source_required_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let source_module_wiring = source_module_wiring(program, &externalized_packages);
+        let eager_safe_analysis = compute_eager_safe_analysis(program, &source_module_wiring);
+        let lowered_runtime_sources =
+            lowered_runtime_sources(program, &source_module_wiring, &eager_safe_analysis);
+        let runtime_lazy_folds =
+            runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+        runtime_setter_migration_blocker_report(
+            program,
+            &lowered_runtime_sources,
+            &runtime_lazy_folds,
+            &externalized_packages,
+        )
+    }
+
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
         let mut plan = EmitPlan::default();
         let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
@@ -2874,6 +3021,177 @@ fn compute_runtime_var_migration_plan(
     plan
 }
 
+fn runtime_setter_migration_blocker_report(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> RuntimeSetterMigrationBlockerReport {
+    let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut eligible_writers = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
+    let mut excluded_folded = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
+    let mut excluded_externalized = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
+
+    for (module_id, source) in lowered_runtime_sources {
+        for binding in &source.written_helpers {
+            let key = (source.source_file_id, binding.clone());
+            if folded_modules.contains(module_id) {
+                excluded_folded.entry(key).or_default().insert(*module_id);
+                continue;
+            }
+            if modules_by_id.get(module_id).is_some_and(|module| {
+                module.kind == ModuleKind::Package && externalized_packages.contains(module_id)
+            }) {
+                excluded_externalized
+                    .entry(key)
+                    .or_default()
+                    .insert(*module_id);
+                continue;
+            }
+            eligible_writers.entry(key).or_default().insert(*module_id);
+        }
+    }
+
+    let all_keys = eligible_writers
+        .keys()
+        .chain(excluded_folded.keys())
+        .chain(excluded_externalized.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut report = RuntimeSetterMigrationBlockerReport {
+        total_bindings: all_keys.len(),
+        ..Default::default()
+    };
+
+    let mut by_source = BTreeMap::<u32, Vec<(BindingName, ModuleId)>>::new();
+    for (source_id, binding) in &all_keys {
+        let eligible = eligible_writers
+            .get(&(*source_id, binding.clone()))
+            .cloned()
+            .unwrap_or_default();
+        if eligible.is_empty() {
+            if excluded_folded.contains_key(&(*source_id, binding.clone())) {
+                report.add_reason(
+                    *source_id,
+                    binding.clone(),
+                    RuntimeSetterMigrationBlockerReason::FoldedWriterOnly,
+                );
+            } else if excluded_externalized.contains_key(&(*source_id, binding.clone())) {
+                report.add_reason(
+                    *source_id,
+                    binding.clone(),
+                    RuntimeSetterMigrationBlockerReason::ExternalizedPackageWriterOnly,
+                );
+            } else {
+                report.add_reason(
+                    *source_id,
+                    binding.clone(),
+                    RuntimeSetterMigrationBlockerReason::NoEligibleWriter,
+                );
+            }
+            continue;
+        }
+        if eligible.len() > 1 {
+            report.add_reason(
+                *source_id,
+                binding.clone(),
+                RuntimeSetterMigrationBlockerReason::MultipleEligibleWriters,
+            );
+            continue;
+        }
+        let owner_module = *eligible
+            .iter()
+            .next()
+            .expect("single eligible writer must be present");
+        by_source
+            .entry(*source_id)
+            .or_default()
+            .push((binding.clone(), owner_module));
+    }
+
+    for (source_id, candidates) in by_source {
+        let Some(prelude) = program.model().graph().runtime_prelude(source_id) else {
+            for (binding, _owner_module) in candidates {
+                report.add_reason(
+                    source_id,
+                    binding,
+                    RuntimeSetterMigrationBlockerReason::MissingRuntimePrelude,
+                );
+            }
+            continue;
+        };
+        let mut initialized_candidates = Vec::<(BindingName, ModuleId)>::new();
+        for (binding, owner_module) in candidates {
+            if migratable_runtime_var_initializer(prelude, &binding).is_none() {
+                report.add_reason(
+                    source_id,
+                    binding,
+                    RuntimeSetterMigrationBlockerReason::InitializerNotMigratable,
+                );
+                continue;
+            }
+            initialized_candidates.push((binding, owner_module));
+        }
+        let movable_bindings = initialized_candidates
+            .iter()
+            .map(|(binding, _)| binding.clone())
+            .collect::<BTreeSet<_>>();
+        let candidate_owners = initialized_candidates
+            .iter()
+            .map(|(binding, owner_module)| (binding.clone(), *owner_module))
+            .collect::<BTreeMap<_, _>>();
+        let folded_chunks = runtime_lazy_folds
+            .chunks_by_source_file
+            .get(&source_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let read_index = runtime_source_read_index(prelude, folded_chunks);
+        let reader_cluster_context = RuntimeReaderClusterContext {
+            program,
+            lowered_runtime_sources,
+            prelude,
+            read_index: &read_index,
+            movable_bindings: &movable_bindings,
+            candidate_owners: &candidate_owners,
+        };
+        for (binding, owner_module) in initialized_candidates {
+            match runtime_binding_read_profile_diagnostic(&read_index, &binding) {
+                Ok(RuntimeBindingReadProfile::NoReads) => {
+                    report.add_accepted(source_id, binding.clone());
+                }
+                Ok(RuntimeBindingReadProfile::SnippetReaders(readers)) => {
+                    let cluster_result = migratable_runtime_reader_cluster_result(
+                        &reader_cluster_context,
+                        owner_module,
+                        &binding,
+                        readers,
+                    );
+                    match cluster_result {
+                        Ok(_) => report.add_accepted(source_id, binding.clone()),
+                        Err(reason) => report.add_reason(source_id, binding, reason.into()),
+                    }
+                }
+                Ok(RuntimeBindingReadProfile::Rejected) => {
+                    unreachable!("diagnostic read profile returns Err for rejected bindings");
+                }
+                Err(reason) => report.add_reason(source_id, binding, reason),
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        report.total_bindings,
+        report.accepted_bindings + report.blocked_bindings
+    );
+    report
+}
+
 fn migratable_runtime_var_initializer(
     prelude: &RuntimePrelude,
     binding: &BindingName,
@@ -2970,12 +3288,7 @@ fn runtime_binding_read_profile(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
 ) -> RuntimeBindingReadProfile {
-    if read_index.non_snippet_runtime_reads.contains(binding)
-        || read_index.namespace_export_helpers.contains(binding)
-        || read_index
-            .namespace_exports_by_namespace
-            .contains_key(binding)
-    {
+    if runtime_binding_read_profile_diagnostic(read_index, binding).is_err() {
         return RuntimeBindingReadProfile::Rejected;
     }
 
@@ -2984,6 +3297,31 @@ fn runtime_binding_read_profile(
         RuntimeBindingReadProfile::NoReads
     } else {
         RuntimeBindingReadProfile::SnippetReaders(readers)
+    }
+}
+
+fn runtime_binding_read_profile_diagnostic(
+    read_index: &RuntimeSourceReadIndex,
+    binding: &BindingName,
+) -> Result<RuntimeBindingReadProfile, RuntimeSetterMigrationBlockerReason> {
+    if read_index.non_snippet_runtime_reads.contains(binding) {
+        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNonSnippetRead);
+    }
+    if read_index.namespace_export_helpers.contains(binding) {
+        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNamespaceExportHelper);
+    }
+    if read_index
+        .namespace_exports_by_namespace
+        .contains_key(binding)
+    {
+        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNamespaceObjectBinding);
+    }
+
+    let readers = runtime_readers_for_binding(read_index, binding);
+    if readers.is_empty() {
+        Ok(RuntimeBindingReadProfile::NoReads)
+    } else {
+        Ok(RuntimeBindingReadProfile::SnippetReaders(readers))
     }
 }
 
@@ -3016,6 +3354,60 @@ struct RuntimeReaderClusterContext<'a> {
     candidate_owners: &'a BTreeMap<BindingName, ModuleId>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimeReaderClusterBlocker {
+    NonSnippetUse,
+    MissingSnippet,
+    InvalidNamespaceSnippet,
+    InvalidReaderFunctionSnippet,
+    RuntimeGlobalWrite,
+    ClosureEscapes,
+    MissingFreeBindingIndex,
+    ReadsOtherMovableBinding,
+    ReadsNonRuntimeBinding,
+    NamespaceTargetDifferentWriter,
+    OwnerSourceMissing,
+    OwnerNameConflict,
+}
+
+type RuntimeReaderClusterResult = Result<
+    (
+        BTreeSet<BindingName>,
+        BTreeSet<BindingName>,
+        BTreeSet<BindingName>,
+    ),
+    RuntimeReaderClusterBlocker,
+>;
+
+impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
+    fn from(reason: RuntimeReaderClusterBlocker) -> Self {
+        match reason {
+            RuntimeReaderClusterBlocker::NonSnippetUse => Self::ReaderNonSnippetUse,
+            RuntimeReaderClusterBlocker::MissingSnippet => Self::ReaderSnippetMissing,
+            RuntimeReaderClusterBlocker::InvalidNamespaceSnippet
+            | RuntimeReaderClusterBlocker::InvalidReaderFunctionSnippet => {
+                Self::ReaderNotMovableShape
+            }
+            RuntimeReaderClusterBlocker::RuntimeGlobalWrite => Self::ReaderWritesRuntimeBinding,
+            RuntimeReaderClusterBlocker::ClosureEscapes => Self::ReaderClosureEscapes,
+            RuntimeReaderClusterBlocker::MissingFreeBindingIndex => {
+                Self::ReaderFreeBindingIndexMissing
+            }
+            RuntimeReaderClusterBlocker::ReadsOtherMovableBinding => {
+                Self::ReaderReadsOtherMovableBinding
+            }
+            RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding => {
+                Self::ReaderReadsNonRuntimeBinding
+            }
+            RuntimeReaderClusterBlocker::NamespaceTargetDifferentWriter => {
+                Self::NamespaceTargetDifferentWriter
+            }
+            RuntimeReaderClusterBlocker::OwnerSourceMissing => Self::OwnerSourceMissing,
+            RuntimeReaderClusterBlocker::OwnerNameConflict => Self::OwnerNameConflict,
+        }
+    }
+}
+
 fn migratable_runtime_reader_cluster(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
@@ -3026,8 +3418,17 @@ fn migratable_runtime_reader_cluster(
     BTreeSet<BindingName>,
     BTreeSet<BindingName>,
 )> {
+    migratable_runtime_reader_cluster_result(ctx, owner_module, binding, initial_readers).ok()
+}
+
+fn migratable_runtime_reader_cluster_result(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    binding: &BindingName,
+    initial_readers: BTreeSet<BindingName>,
+) -> RuntimeReaderClusterResult {
     if initial_readers.is_empty() {
-        return Some((BTreeSet::new(), BTreeSet::new(), BTreeSet::new()));
+        return Ok((BTreeSet::new(), BTreeSet::new(), BTreeSet::new()));
     }
 
     let mut moved_snippets = BTreeSet::<BindingName>::new();
@@ -3038,20 +3439,24 @@ fn migratable_runtime_reader_cluster(
             continue;
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
-            return None;
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
         }
-        let snippet = ctx.prelude.snippets.get(&reader)?;
+        let snippet = ctx
+            .prelude
+            .snippets
+            .get(&reader)
+            .ok_or(RuntimeReaderClusterBlocker::MissingSnippet)?;
         let is_namespace_reader = ctx
             .read_index
             .namespace_exports_by_namespace
             .contains_key(&reader);
         if is_namespace_reader {
             if !is_migratable_namespace_reader_snippet(&reader, snippet.source.as_str()) {
-                return None;
+                return Err(RuntimeReaderClusterBlocker::InvalidNamespaceSnippet);
             }
             moved_namespace_exports.insert(reader.clone());
         } else if !is_migratable_reader_function_snippet(&reader, snippet.source.as_str()) {
-            return None;
+            return Err(RuntimeReaderClusterBlocker::InvalidReaderFunctionSnippet);
         }
         // Moving a function that mutates runtime globals would either try to
         // assign to an imported binding in the writer module or silently split
@@ -3060,7 +3465,7 @@ fn migratable_runtime_reader_cluster(
             .into_iter()
             .any(|write| ctx.prelude.defines(&write) || write == *binding)
         {
-            return None;
+            return Err(RuntimeReaderClusterBlocker::RuntimeGlobalWrite);
         }
 
         // Any runtime snippet that still reads this newly moved function would
@@ -3079,21 +3484,25 @@ fn migratable_runtime_reader_cluster(
             .into_iter()
             .all(|reader| reader == *snippet || moved_snippets.contains(&reader))
     }) {
-        return None;
+        return Err(RuntimeReaderClusterBlocker::ClosureEscapes);
     }
 
     let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
     for snippet in &moved_snippets {
-        let free_runtime_bindings = ctx.read_index.free_bindings_by_snippet.get(snippet)?;
+        let free_runtime_bindings = ctx
+            .read_index
+            .free_bindings_by_snippet
+            .get(snippet)
+            .ok_or(RuntimeReaderClusterBlocker::MissingFreeBindingIndex)?;
         for dep in free_runtime_bindings {
             if dep == binding || moved_snippets.contains(dep) {
                 continue;
             }
             if ctx.movable_bindings.contains(dep) {
-                return None;
+                return Err(RuntimeReaderClusterBlocker::ReadsOtherMovableBinding);
             }
             if !ctx.prelude.defines(dep) {
-                return None;
+                return Err(RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding);
             }
             extra_runtime_deps.insert(dep.clone());
         }
@@ -3102,26 +3511,30 @@ fn migratable_runtime_reader_cluster(
         let namespace_export = ctx
             .read_index
             .namespace_exports_by_namespace
-            .get(namespace)?;
+            .get(namespace)
+            .ok_or(RuntimeReaderClusterBlocker::MissingSnippet)?;
         for dep in namespace_export.exports.values() {
             if dep == binding || moved_snippets.contains(dep) {
                 continue;
             }
             if let Some(dep_owner) = ctx.candidate_owners.get(dep) {
                 if *dep_owner != owner_module {
-                    return None;
+                    return Err(RuntimeReaderClusterBlocker::NamespaceTargetDifferentWriter);
                 }
                 extra_runtime_deps.insert(dep.clone());
                 continue;
             }
             if !ctx.prelude.defines(dep) {
-                return None;
+                return Err(RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding);
             }
             extra_runtime_deps.insert(dep.clone());
         }
     }
 
-    let owner_source = ctx.lowered_runtime_sources.get(&owner_module)?;
+    let owner_source = ctx
+        .lowered_runtime_sources
+        .get(&owner_module)
+        .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)?;
     let source_imports = ctx.program.model().graph().ast_imports_for(owner_module);
     let mut owner_conflicts = owner_source.local_definitions.clone();
     owner_conflicts.extend(source_imports);
@@ -3130,10 +3543,10 @@ fn migratable_runtime_reader_cluster(
         .chain(extra_runtime_deps.iter())
         .any(|binding| owner_conflicts.contains(binding))
     {
-        return None;
+        return Err(RuntimeReaderClusterBlocker::OwnerNameConflict);
     }
 
-    Some((moved_snippets, moved_namespace_exports, extra_runtime_deps))
+    Ok((moved_snippets, moved_namespace_exports, extra_runtime_deps))
 }
 
 fn runtime_binding_has_blocking_non_snippet_use(
@@ -9765,10 +10178,10 @@ mod tests {
     };
 
     use super::{
-        CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, SourceCompilerStrategy,
-        inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
-        lower_runtime_helpers, parse_generated_named_export_statement,
-        purify_private_runtime_lazy_initializers,
+        CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile,
+        RuntimeSetterMigrationBlockerReason, SourceCompilerStrategy, inline_internal_setter_calls,
+        inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
+        parse_generated_named_export_statement, purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -13536,6 +13949,104 @@ mod tests {
         assert!(
             helper_source
                 .contains("function __reverts_set_right(value) { right = value; return value; }")
+        );
+    }
+
+    #[test]
+    fn runtime_setter_migration_blocker_report_counts_gate_reasons_without_changing_gate() {
+        let prelude = concat!(
+            "var accepted;\n",
+            "var left;\n",
+            "var right;\n",
+            "function pair() { return [left, right]; }\n",
+            "var complex = makeValue();\n",
+            "var multi;\n",
+        );
+        let writer_body = concat!(
+            "accepted = 1;\n",
+            "left = 2;\n",
+            "right = 3;\n",
+            "complex = 4;\n",
+            "multi = 5;\n",
+            "export { accepted, left, right, complex, multi };\n",
+        );
+        let second_writer_body = "multi = 6;\nexport { multi };\n";
+        let consumer_body = "var value = pair();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{second_writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "second-writer", "modules/second-writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + second_writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + second_writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+
+        let enriched = enriched_from_rows(rows);
+        let report = ImportExportPlanner.runtime_setter_migration_blocker_report(&enriched);
+        let plan = ImportExportPlanner
+            .plan_enriched_program(&enriched)
+            .expect("plan should still be valid");
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert_eq!(report.total_bindings, 5);
+        assert_eq!(report.accepted_bindings, 1);
+        assert_eq!(report.blocked_bindings, 4);
+        assert_eq!(
+            report
+                .reasons
+                .get(&RuntimeSetterMigrationBlockerReason::ReaderReadsOtherMovableBinding),
+            Some(&2)
+        );
+        assert_eq!(
+            report
+                .reasons
+                .get(&RuntimeSetterMigrationBlockerReason::InitializerNotMigratable),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .reasons
+                .get(&RuntimeSetterMigrationBlockerReason::MultipleEligibleWriters),
+            Some(&1)
+        );
+        assert!(writer_source.contains("var accepted;"), "{writer_source}");
+        assert!(writer_source.contains("accepted = 1;"), "{writer_source}");
+        assert!(
+            helper_source
+                .contains("function __reverts_set_left(value) { left = value; return value; }"),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source.contains(
+                "function __reverts_set_complex(value) { complex = value; return value; }"
+            ),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source
+                .contains("function __reverts_set_multi(value) { multi = value; return value; }"),
+            "{helper_source}"
         );
     }
 

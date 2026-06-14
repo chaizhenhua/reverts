@@ -19,6 +19,10 @@ use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::{EmitPlan, ImportExportPlanner, PlanError, PlannedFile};
 
 pub use reverts_emitter::{EmittedFile, EmittedProject};
+pub use reverts_planner::{
+    RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
+    RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputRun {
@@ -45,6 +49,15 @@ pub struct EmittedAsset {
 pub struct AssetReference {
     pub module_id: ModuleId,
     pub logical_path: String,
+}
+
+#[must_use]
+pub fn runtime_setter_migration_blocker_report_from_input(
+    input: InputBundle,
+) -> RuntimeSetterMigrationBlockerReport {
+    let model = ProgramModel::from_input(input);
+    let enrichment = enrich_program(model);
+    ImportExportPlanner.runtime_setter_migration_blocker_report(&enrichment.program)
 }
 
 pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, PipelineError> {
