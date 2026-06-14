@@ -159,26 +159,23 @@ fn build_index(
             continue;
         }
         let synthetic_module_id = ModuleId(u32::MAX - idx as u32);
-        let alloc = Allocator::default();
-        let source_type = SourceType::default().with_typescript(true).with_jsx(true);
-        let parsed = Parser::new(&alloc, source.source.as_str(), source_type)
-            .with_options(parse_options_for(source_type))
-            .parse();
-        if parsed.panicked || !parsed.errors.is_empty() {
-            audit.push(
-                AuditFinding::error(
-                    FindingCode::UnparseablePackageSource,
-                    "package source failed to parse for cascade index",
-                )
-                .with_module(source.source_path.clone())
-                .with_binding(format!(
-                    "{}@{}",
-                    source.package_name, source.package_version
-                )),
-            );
+        let pkg_fps = FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str());
+        if pkg_fps.is_empty() {
+            if !cascade_source_parses(source.source.as_str()) {
+                audit.push(
+                    AuditFinding::error(
+                        FindingCode::UnparseablePackageSource,
+                        "package source failed to parse for cascade index",
+                    )
+                    .with_module(source.source_path.clone())
+                    .with_binding(format!(
+                        "{}@{}",
+                        source.package_name, source.package_version
+                    )),
+                );
+            }
             continue;
         }
-        let pkg_fps = FunctionExtractor::fingerprint(synthetic_module_id, source.source.as_str());
         let pkg_id = PackageId {
             name: source.package_name.clone(),
             version: source.package_version.clone(),
@@ -305,6 +302,15 @@ fn build_index(
         }
     }
     index
+}
+
+fn cascade_source_parses(source: &str) -> bool {
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    !parsed.panicked && parsed.errors.is_empty()
 }
 
 fn build_ownership_match(

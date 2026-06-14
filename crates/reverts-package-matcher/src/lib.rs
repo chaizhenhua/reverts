@@ -32,6 +32,7 @@ pub use version::{
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Instant;
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
@@ -576,6 +577,23 @@ pub fn match_packages_with_pipeline(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> PackageMatchingPipelineReport {
+    let timing_enabled = std::env::var_os("REVERTS_MATCH_TIMING").is_some();
+    let timing_started = Instant::now();
+    let mut timing_last = timing_started;
+    macro_rules! mark_timing {
+        ($stage:literal) => {
+            if timing_enabled {
+                let now = Instant::now();
+                eprintln!(
+                    "package-pipeline timing: {} stage={:.3}s total={:.3}s",
+                    $stage,
+                    now.duration_since(timing_last).as_secs_f64(),
+                    now.duration_since(timing_started).as_secs_f64()
+                );
+                timing_last = now;
+            }
+        };
+    }
     if package_sources.is_empty() && package_filter.is_none_or(BTreeSet::is_empty) {
         return PackageMatchingPipelineReport::empty();
     }
@@ -589,6 +607,7 @@ pub fn match_packages_with_pipeline(
     } else {
         VersionedPackageMatcher::default().match_rows(rows, package_sources)
     };
+    mark_timing!("versioned_matcher");
 
     let package_matched_modules = if package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT {
         package_report
@@ -599,16 +618,23 @@ pub fn match_packages_with_pipeline(
     } else {
         BTreeSet::new()
     };
-    let fingerprints_by_module =
-        fingerprints_from_rows(rows, package_filter, &package_matched_modules);
+    let fingerprints_by_module = fingerprints_from_rows(
+        rows,
+        package_filter,
+        &package_matched_modules,
+        package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT,
+    );
+    mark_timing!("module_function_fingerprints");
     let cascade_report =
         match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources);
+    mark_timing!("cascade_match");
     promote_cascade_function_coverage_to_module_attributions(
         rows,
         &fingerprints_by_module,
         &cascade_report,
         &mut package_report,
     );
+    mark_timing!("cascade_promote");
     let function_attributions = cascade_report.attributions;
     let function_ownership_matches = cascade_report.ownership_matches.len();
     package_report.audit.extend(cascade_report.audit);
@@ -624,17 +650,27 @@ pub fn match_packages_with_pipeline(
         package_filter,
         &structural_bag_excluded_modules,
     );
+    mark_timing!("structural_bag");
     promote_structural_bag_ownership_matches(
         rows,
         structural_bag_report.matches.as_slice(),
         &mut package_report,
     );
+    mark_timing!("structural_promote");
     package_report.audit.extend(structural_bag_report.audit);
     promote_exact_hint_ownership_matches(rows, package_sources, &mut package_report);
+    mark_timing!("exact_hint_promote");
     promote_dependency_closure_ownership_matches(rows, &mut package_report);
+    mark_timing!("dependency_closure");
     promote_dependency_cluster_ownership_matches(rows, &mut package_report);
+    mark_timing!("dependency_cluster");
     promote_package_file_graph_ownership_matches(rows, &mut package_report);
+    mark_timing!("package_file_graph");
     promote_importable_ownership_matches(rows, package_sources, &mut package_report);
+    mark_timing!("importable_promote");
+    if timing_enabled {
+        let _ = timing_last;
+    }
 
     PackageMatchingPipelineReport {
         package_report,
@@ -649,25 +685,29 @@ fn fingerprints_from_rows(
     rows: &InputRows,
     package_filter: Option<&BTreeSet<String>>,
     excluded_modules: &BTreeSet<ModuleId>,
+    only_weak_package_sources: bool,
 ) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
     let mut out = BTreeMap::new();
     for module in &rows.modules {
         if excluded_modules.contains(&module.id) {
             continue;
         }
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
         if let Some(package_filter) = package_filter
-            && (module.kind != ModuleKind::Package
-                || !module
-                    .package_name
-                    .as_deref()
-                    .is_some_and(|package_name| package_filter.contains(package_name)))
+            && !module
+                .package_name
+                .as_deref()
+                .is_some_and(|package_name| package_filter.contains(package_name))
         {
             continue;
         }
         if let Some(slice) = rows.module_source_slice(module.id) {
-            if module.kind == ModuleKind::Package
-                && package_module_source_quality(module, slice.source_file_path, slice.source)
-                    == PackageModuleSourceQuality::Invalid
+            let quality =
+                package_module_source_quality(module, slice.source_file_path, slice.source);
+            if quality == PackageModuleSourceQuality::Invalid
+                || (only_weak_package_sources && quality != PackageModuleSourceQuality::Weak)
             {
                 continue;
             }

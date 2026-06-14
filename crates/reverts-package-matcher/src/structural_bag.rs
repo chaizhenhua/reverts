@@ -60,8 +60,9 @@ pub fn match_structural_bags_with_excluded_modules(
     excluded_modules: &BTreeSet<ModuleId>,
 ) -> StructuralBagMatchReport {
     let mut audit = AuditReport::default();
+    let only_weak_package_sources = package_sources.len() > STRUCTURAL_BAG_WEAK_ONLY_SOURCE_LIMIT;
     let module_bags = candidate_modules(rows, package_filter, excluded_modules)
-        .filter_map(|module| build_module_bag(rows, module))
+        .filter_map(|module| build_module_bag(rows, module, only_weak_package_sources))
         .collect::<Vec<_>>();
     let needed_packages = module_bags
         .iter()
@@ -214,11 +215,17 @@ struct PackageScore<'a> {
     matched_functions: usize,
 }
 
-fn build_module_bag(rows: &InputRows, module: &ModuleInput) -> Option<ModuleStructuralBag> {
+fn build_module_bag(
+    rows: &InputRows,
+    module: &ModuleInput,
+    only_weak_package_sources: bool,
+) -> Option<ModuleStructuralBag> {
     let slice = rows.module_source_slice(module.id)?;
-    match package_module_source_quality(module, slice.source_file_path, slice.source) {
-        PackageModuleSourceQuality::Trusted | PackageModuleSourceQuality::Weak => {}
-        PackageModuleSourceQuality::Invalid => return None,
+    let quality = package_module_source_quality(module, slice.source_file_path, slice.source);
+    match quality {
+        PackageModuleSourceQuality::Weak => {}
+        PackageModuleSourceQuality::Trusted if !only_weak_package_sources => {}
+        PackageModuleSourceQuality::Trusted | PackageModuleSourceQuality::Invalid => return None,
     }
     let fingerprints = FunctionExtractor::fingerprint(module.id, slice.source);
     if fingerprints.is_empty() {
@@ -247,6 +254,8 @@ fn build_module_bag(rows: &InputRows, module: &ModuleInput) -> Option<ModuleStru
         functions,
     })
 }
+
+const STRUCTURAL_BAG_WEAK_ONLY_SOURCE_LIMIT: usize = 8;
 
 fn build_package_bags(
     package_sources: &[PackageSource],

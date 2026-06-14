@@ -66,6 +66,25 @@ impl<'a> Visit<'a> for FunctionExtractor {
 }
 
 impl FunctionExtractor {
+    /// Counts functions with the primary parser/extractor path only.
+    ///
+    /// This is intended for diagnostics where only a count is needed; unlike
+    /// [`Self::fingerprint`], it does not run alternate normalization passes or
+    /// compute per-axis hashes.
+    #[must_use]
+    pub fn function_count(module_id: ModuleId, source: &str) -> usize {
+        let source = strip_outer_block_braces(source);
+        let alloc = Allocator::default();
+        let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+        let parsed = Parser::new(&alloc, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.panicked || !parsed.errors.is_empty() {
+            return 0;
+        }
+        Self::new(module_id).extract(&parsed.program).len()
+    }
+
     /// Computes per-function fingerprints with primary axes plus one alternate
     /// per normalization pass. Returns empty if the source fails to parse.
     ///

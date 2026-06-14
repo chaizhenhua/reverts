@@ -13,14 +13,14 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
-    AssetKind, InputRows, ModuleInput, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
-    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
-    SourceSpan,
+    AssetKind, InputRows, ModuleDependencyTarget, ModuleInput,
+    PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput,
+    PackageAttributionStatus, PackageEmissionMode, SourceFileInput, SourceSpan,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
@@ -28,10 +28,9 @@ use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
-    VersionMatchScore, VersionedPackageMatchReport, direct_module_dependencies,
-    direct_module_dependents, has_accepted_external_attribution, is_exact_package_version_hint,
-    is_json_source_path, match_packages_with_pipeline, ownership_by_module,
-    package_import_names_from_sources, package_module_source_quality,
+    VersionMatchScore, VersionedPackageMatchReport, has_accepted_external_attribution,
+    is_exact_package_version_hint, is_json_source_path, match_packages_with_pipeline,
+    ownership_by_module, package_import_names_from_sources, package_module_source_quality,
     package_semantic_path_prefixes, path_hint_tokens, strip_source_extension,
 };
 use reverts_pipeline::{
@@ -925,13 +924,32 @@ pub fn match_packages_from_connection(
     connection: &mut Connection,
     args: &MatchPackagesArgs,
 ) -> Result<MatchPackagesOutcome, MatchPackagesError> {
+    let timing_enabled = std::env::var_os("REVERTS_MATCH_TIMING").is_some();
+    let timing_started = Instant::now();
+    let mut timing_last = timing_started;
+    macro_rules! mark_timing {
+        ($stage:literal) => {
+            if timing_enabled {
+                let now = Instant::now();
+                eprintln!(
+                    "match-packages timing: {} stage={:.3}s total={:.3}s",
+                    $stage,
+                    now.duration_since(timing_last).as_secs_f64(),
+                    now.duration_since(timing_started).as_secs_f64()
+                );
+                timing_last = now;
+            }
+        };
+    }
     let mut rows = load_project_rows_from_connection(connection, args.project_id)
         .map_err(MatchPackagesError::LoadInput)?;
+    mark_timing!("load_project_rows");
 
     let requested_package_filter = (!args.package_names.is_empty())
         .then(|| args.package_names.iter().cloned().collect::<BTreeSet<_>>());
     let repaired_single_module_source_files =
         repair_package_module_source_slices(&mut rows, requested_package_filter.as_ref());
+    mark_timing!("repair_initial_slices");
 
     // Bundle-aware module extraction (Phase α): split recognised bundle
     // wrappers into per-module rows before the matcher sees them. Source files
@@ -947,14 +965,16 @@ pub fn match_packages_from_connection(
     let synthetic_modules: Vec<reverts_input::ModuleInput> = extraction.new_modules.clone();
     extraction.merge_into(&mut rows);
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
+    mark_timing!("bundle_extract_enrich");
 
+    remove_package_attributions_for_revalidation(&mut rows, &args.package_names);
     let package_names = package_source_filter(&rows, &args.package_names);
-    remove_requested_package_attributions_for_revalidation(&mut rows, &args.package_names);
     repair_package_module_source_slices(
         &mut rows,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
-    let package_sources = load_package_sources(
+    mark_timing!("scope_revalidation_repair");
+    let mut package_sources = load_package_sources(
         connection,
         &rows,
         &package_names,
@@ -962,16 +982,22 @@ pub fn match_packages_from_connection(
         args.materialize_package_sources,
         args.apply,
     )?;
+    mark_timing!("load_package_sources");
     resolve_package_version_hints_to_available_sources(&mut rows, &package_sources, &package_names);
+    mark_timing!("resolve_versions");
+    filter_package_sources_to_referenced_package_versions(&rows, &mut package_sources);
+    mark_timing!("filter_referenced_versions");
     let source_quality_counts = package_module_source_quality_counts(
         &rows,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
+    mark_timing!("source_quality_counts");
     let pipeline_report = match_packages_with_pipeline(
         &rows,
         &package_sources,
         (!args.package_names.is_empty()).then_some(&package_names),
     );
+    mark_timing!("match_pipeline");
     let report = pipeline_report.package_report;
     let function_attributions = pipeline_report.function_attributions;
     let function_ownership_matches = pipeline_report.function_ownership_matches;
@@ -1013,6 +1039,10 @@ pub fn match_packages_from_connection(
     } else {
         (0, 0, 0)
     };
+    mark_timing!("persist");
+    if timing_enabled {
+        let _ = timing_last;
+    }
 
     let matched_modules = report.matches.len();
     let matched_package_surfaces = report.surfaces.len();
@@ -1043,17 +1073,14 @@ pub fn match_packages_from_connection(
     })
 }
 
-fn remove_requested_package_attributions_for_revalidation(
+fn remove_package_attributions_for_revalidation(
     rows: &mut InputRows,
     requested_package_names: &[String],
 ) -> usize {
-    if requested_package_names.is_empty() {
-        return 0;
-    }
     let requested = requested_package_names.iter().collect::<BTreeSet<_>>();
     let before = rows.package_attributions.len();
     rows.package_attributions.retain(|attribution| {
-        !requested.contains(&attribution.package_name)
+        (!requested.is_empty() && !requested.contains(&attribution.package_name))
             || attribution.emission_mode != PackageEmissionMode::ExternalImport
     });
     before.saturating_sub(rows.package_attributions.len())
@@ -2336,6 +2363,46 @@ fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageS
     }
 }
 
+fn filter_package_sources_to_referenced_package_versions(
+    rows: &InputRows,
+    package_sources: &mut Vec<PackageSource>,
+) -> usize {
+    let referenced_versions = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            let package_name = module.package_name.as_deref()?.trim();
+            let package_version = module
+                .package_version
+                .as_deref()
+                .map(str::trim)
+                .filter(|version| Version::parse(version).is_ok())?;
+            Some((package_name.to_string(), package_version.to_string()))
+        })
+        .fold(
+            BTreeMap::<String, BTreeSet<String>>::new(),
+            |mut versions, (package_name, package_version)| {
+                versions
+                    .entry(package_name)
+                    .or_default()
+                    .insert(package_version);
+                versions
+            },
+        );
+    if referenced_versions.is_empty() {
+        return 0;
+    }
+
+    let before = package_sources.len();
+    package_sources.retain(|source| {
+        referenced_versions
+            .get(source.package_name.as_str())
+            .is_none_or(|versions| versions.contains(source.package_version.as_str()))
+    });
+    before.saturating_sub(package_sources.len())
+}
+
 fn persist_package_source_cache(
     connection: &mut Connection,
     package_sources: &[PackageSource],
@@ -3031,18 +3098,13 @@ fn resolve_package_version_hints_to_available_sources(
 ) -> usize {
     let available_versions = exact_package_source_versions_by_package(package_sources);
     let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
-    let module_source_slices = rows
-        .modules
-        .iter()
-        .filter_map(|module| {
-            rows.module_source_slice(module.id).map(|slice| {
-                (
-                    module.id,
-                    (slice.source_file_path.to_string(), slice.source.to_string()),
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
+    let source_identity_versions = source_identity_versions_by_module(
+        rows,
+        package_sources,
+        package_names,
+        &available_versions,
+        &project_exact_versions,
+    );
     let mut resolved = 0usize;
     for module in &mut rows.modules {
         if module.kind != ModuleKind::Package {
@@ -3065,11 +3127,7 @@ fn resolve_package_version_hints_to_available_sources(
         let Some(versions) = available_versions.get(package_name) else {
             continue;
         };
-        let source_identity_version = best_source_identity_version_for_module(
-            module,
-            module_source_slices.get(&module.id),
-            package_sources,
-        );
+        let source_identity_version = source_identity_versions.get(&module.id).cloned();
         let selected = match requested_version {
             Some(package_version) if is_exact_package_version_hint(package_version) => {
                 if package_source_versions_contain(
@@ -3111,37 +3169,132 @@ fn resolve_package_version_hints_to_available_sources(
     resolved
 }
 
-fn best_source_identity_version_for_module(
-    module: &ModuleInput,
-    source_slice: Option<&(String, String)>,
+fn source_identity_versions_by_module(
+    rows: &InputRows,
     package_sources: &[PackageSource],
-) -> Option<Version> {
-    let package_name = module.package_name.as_deref()?.trim();
-    let (source_file_path, source) = source_slice?;
-    let module_normalized =
-        normalize_source_for_pipeline(source, Some(Path::new(source_file_path))).ok()?;
-    let mut matches_by_version = BTreeMap::<Version, usize>::new();
-    for package_source in package_sources
+    package_names: &BTreeSet<String>,
+    available_versions: &BTreeMap<String, BTreeSet<Version>>,
+    project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
+) -> BTreeMap<ModuleId, Version> {
+    let index = PackageSourceIdentityIndex::build(package_sources);
+    if index.is_empty() {
+        return BTreeMap::new();
+    }
+    rows.modules
         .iter()
-        .filter(|source| source.package_name == package_name)
-    {
-        let Ok(package_version) = Version::parse(package_source.package_version.as_str()) else {
-            continue;
-        };
-        let Ok(package_normalized) = normalize_source_for_pipeline(
-            package_source.source.as_str(),
-            Some(Path::new(package_source.source_path.as_str())),
-        ) else {
-            continue;
-        };
-        if package_normalized == module_normalized {
-            *matches_by_version.entry(package_version).or_default() += 1;
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            let package_name = module.package_name.as_deref()?.trim();
+            if package_name.is_empty()
+                || !is_valid_package_name(package_name)
+                || (!package_names.is_empty() && !package_names.contains(package_name))
+                || !index.contains_package(package_name)
+            {
+                return None;
+            }
+            let versions = available_versions.get(package_name)?;
+            if !module_needs_source_identity_version(
+                module,
+                package_name,
+                versions,
+                available_versions,
+                project_exact_versions,
+            ) {
+                return None;
+            }
+            let slice = rows.module_source_slice(module.id)?;
+            index
+                .best_version_for_source(package_name, slice.source_file_path, slice.source)
+                .map(|version| (module.id, version))
+        })
+        .collect()
+}
+
+fn module_needs_source_identity_version(
+    module: &ModuleInput,
+    package_name: &str,
+    versions: &BTreeSet<Version>,
+    available_versions: &BTreeMap<String, BTreeSet<Version>>,
+    project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
+) -> bool {
+    let requested_version = module
+        .package_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|version| !version.is_empty());
+    match requested_version {
+        Some(package_version) if is_exact_package_version_hint(package_version) => {
+            !package_source_versions_contain(available_versions, package_name, package_version)
+        }
+        Some(package_version) => best_project_version_candidate(
+            package_name,
+            package_version,
+            project_exact_versions,
+            Some(versions),
+        )
+        .is_none(),
+        None => true,
+    }
+}
+
+#[derive(Debug, Default)]
+struct PackageSourceIdentityIndex {
+    versions_by_package_hash: BTreeMap<String, BTreeMap<String, BTreeMap<Version, usize>>>,
+}
+
+impl PackageSourceIdentityIndex {
+    fn build(package_sources: &[PackageSource]) -> Self {
+        let mut versions_by_package_hash =
+            BTreeMap::<String, BTreeMap<String, BTreeMap<Version, usize>>>::new();
+        for package_source in package_sources {
+            let Ok(package_version) = Version::parse(package_source.package_version.as_str())
+            else {
+                continue;
+            };
+            let Ok(normalized) = normalize_source_for_pipeline(
+                package_source.source.as_str(),
+                Some(Path::new(package_source.source_path.as_str())),
+            ) else {
+                continue;
+            };
+            let normalized_source_hash = stable_hash(normalized.as_bytes());
+            *versions_by_package_hash
+                .entry(package_source.package_name.clone())
+                .or_default()
+                .entry(normalized_source_hash)
+                .or_default()
+                .entry(package_version)
+                .or_default() += 1;
+        }
+        Self {
+            versions_by_package_hash,
         }
     }
-    matches_by_version
-        .into_iter()
-        .max_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)))
-        .map(|(version, _count)| version)
+
+    fn is_empty(&self) -> bool {
+        self.versions_by_package_hash.is_empty()
+    }
+
+    fn contains_package(&self, package_name: &str) -> bool {
+        self.versions_by_package_hash.contains_key(package_name)
+    }
+
+    fn best_version_for_source(
+        &self,
+        package_name: &str,
+        source_file_path: &str,
+        source: &str,
+    ) -> Option<Version> {
+        let normalized =
+            normalize_source_for_pipeline(source, Some(Path::new(source_file_path))).ok()?;
+        let normalized_source_hash = stable_hash(normalized.as_bytes());
+        self.versions_by_package_hash
+            .get(package_name)?
+            .get(normalized_source_hash.as_str())?
+            .iter()
+            .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
+            .map(|(version, _count)| version.clone())
+    }
 }
 
 fn exact_package_source_versions_by_package(
@@ -4521,6 +4674,7 @@ fn persist_package_attributions(
         .iter()
         .map(|module_match| (module_match.module_id, module_match))
         .collect::<BTreeMap<_, _>>();
+    let diagnostics_context = PackageDiagnosticsContext::new(rows, report);
     let modules_by_id = rows
         .modules
         .iter()
@@ -4561,7 +4715,7 @@ fn persist_package_attributions(
             module.original_name.as_str(),
             attribution,
             matches_by_module.get(&attribution.module_id).copied(),
-            unmatched_package_diagnostics(rows, report, module),
+            unmatched_package_diagnostics(rows, &diagnostics_context, module),
         )?;
         written += 1;
     }
@@ -4778,6 +4932,12 @@ fn rejected_package_attributions_for_unaccepted_modules(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let (outgoing_dependencies, _incoming_dependencies) = dependency_indexes(rows);
 
     let mut rejected = Vec::new();
     for module in &rows.modules {
@@ -4814,7 +4974,15 @@ fn rejected_package_attributions_for_unaccepted_modules(
             .map(|_| {
                 "matched package ownership, but the evidence does not prove a safe single external import"
             })
-            .or_else(|| package_source_quality_rejection_reason(rows, module, package_name))
+            .or_else(|| {
+                package_source_quality_rejection_reason(
+                    rows,
+                    module,
+                    package_name,
+                    &modules_by_id,
+                    &outgoing_dependencies,
+                )
+            })
             .or_else(|| decision_reasons.get(package_name).map(String::as_str))
             .unwrap_or("package matcher did not produce an accepted attribution for this package");
         let mut attribution =
@@ -4831,6 +4999,8 @@ fn package_source_quality_rejection_reason(
     rows: &InputRows,
     module: &ModuleInput,
     package_name: &str,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    outgoing_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
 ) -> Option<&'static str> {
     let Some(slice) = rows.module_source_slice(module.id) else {
         return Some(
@@ -4846,14 +5016,14 @@ fn package_source_quality_rejection_reason(
     if quality != PackageModuleSourceQuality::Weak {
         return None;
     }
-    let modules_by_id = rows
-        .modules
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
     let mut same_package_dependencies = 0usize;
     let mut other_package_dependencies = 0usize;
-    for dependency_id in direct_module_dependencies(rows, module.id) {
+    for dependency_id in outgoing_dependencies
+        .get(&module.id)
+        .into_iter()
+        .flatten()
+        .copied()
+    {
         let Some(dependency) = modules_by_id.get(&dependency_id) else {
             continue;
         };
@@ -4914,9 +5084,64 @@ fn rejection_reason_from_decision(decision: &BestVersionMatch) -> String {
     }
 }
 
+struct PackageDiagnosticsContext<'a> {
+    modules_by_id: BTreeMap<ModuleId, &'a ModuleInput>,
+    ownership_by_module: BTreeMap<ModuleId, (String, String)>,
+    outgoing_dependencies: BTreeMap<ModuleId, Vec<ModuleId>>,
+    incoming_dependencies: BTreeMap<ModuleId, Vec<ModuleId>>,
+    version_decisions_by_package: BTreeMap<String, &'a BestVersionMatch>,
+}
+
+impl<'a> PackageDiagnosticsContext<'a> {
+    fn new(rows: &'a InputRows, report: &'a VersionedPackageMatchReport) -> Self {
+        let modules_by_id = rows
+            .modules
+            .iter()
+            .map(|module| (module.id, module))
+            .collect::<BTreeMap<_, _>>();
+        let (outgoing_dependencies, incoming_dependencies) = dependency_indexes(rows);
+        let version_decisions_by_package = report
+            .version_matches
+            .iter()
+            .map(|decision| (decision_package_name(decision).to_string(), decision))
+            .collect::<BTreeMap<_, _>>();
+        Self {
+            modules_by_id,
+            ownership_by_module: ownership_by_module(rows, report),
+            outgoing_dependencies,
+            incoming_dependencies,
+            version_decisions_by_package,
+        }
+    }
+}
+
+fn dependency_indexes(
+    rows: &InputRows,
+) -> (
+    BTreeMap<ModuleId, Vec<ModuleId>>,
+    BTreeMap<ModuleId, Vec<ModuleId>>,
+) {
+    let mut outgoing = BTreeMap::<ModuleId, Vec<ModuleId>>::new();
+    let mut incoming = BTreeMap::<ModuleId, Vec<ModuleId>>::new();
+    for dependency in &rows.dependencies {
+        let ModuleDependencyTarget::Module(target) = dependency.target else {
+            continue;
+        };
+        outgoing
+            .entry(dependency.from_module_id)
+            .or_default()
+            .push(target);
+        incoming
+            .entry(target)
+            .or_default()
+            .push(dependency.from_module_id);
+    }
+    (outgoing, incoming)
+}
+
 fn unmatched_package_diagnostics(
     rows: &InputRows,
-    report: &VersionedPackageMatchReport,
+    context: &PackageDiagnosticsContext<'_>,
     module: &ModuleInput,
 ) -> serde_json::Value {
     let package_name = module.package_name.as_deref().unwrap_or_default();
@@ -4929,8 +5154,8 @@ fn unmatched_package_diagnostics(
             "package_version": module.package_version,
         },
         "source_slice": source_slice_diagnostics(rows, module),
-        "dependency_neighborhood": dependency_neighborhood_diagnostics(rows, report, module.id),
-        "version_decision": version_decision_diagnostics(report, package_name),
+        "dependency_neighborhood": dependency_neighborhood_diagnostics(context, module.id),
+        "version_decision": version_decision_diagnostics(context, package_name),
     })
 }
 
@@ -4953,7 +5178,7 @@ fn source_slice_diagnostics(rows: &InputRows, module: &ModuleInput) -> serde_jso
         "byte_end": slice.span.map(|span| span.byte_end),
         "source_len": slice.source.len(),
         "quality": package_source_quality_label(quality),
-        "function_count": FunctionExtractor::fingerprint(module.id, slice.source).len(),
+        "function_count": FunctionExtractor::function_count(module.id, slice.source),
     })
 }
 
@@ -4966,20 +5191,29 @@ fn package_source_quality_label(quality: PackageModuleSourceQuality) -> &'static
 }
 
 fn dependency_neighborhood_diagnostics(
-    rows: &InputRows,
-    report: &VersionedPackageMatchReport,
+    context: &PackageDiagnosticsContext<'_>,
     module_id: ModuleId,
 ) -> serde_json::Value {
-    let modules_by_id = rows
-        .modules
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    let ownership_by_module = ownership_by_module(rows, report);
-    let outgoing_ids = direct_module_dependencies(rows, module_id);
-    let incoming_ids = direct_module_dependents(rows, module_id);
-    let outgoing = dependency_package_summary(&outgoing_ids, &modules_by_id, &ownership_by_module);
-    let incoming = dependency_package_summary(&incoming_ids, &modules_by_id, &ownership_by_module);
+    let outgoing_ids = context
+        .outgoing_dependencies
+        .get(&module_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let incoming_ids = context
+        .incoming_dependencies
+        .get(&module_id)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let outgoing = dependency_package_summary(
+        outgoing_ids,
+        &context.modules_by_id,
+        &context.ownership_by_module,
+    );
+    let incoming = dependency_package_summary(
+        incoming_ids,
+        &context.modules_by_id,
+        &context.ownership_by_module,
+    );
     serde_json::json!({
         "outgoing_package_counts": outgoing.package_counts.clone(),
         "incoming_package_counts": incoming.package_counts.clone(),
@@ -5053,14 +5287,10 @@ fn dependency_package_summary_json(summary: &DependencyPackageSummary) -> serde_
 }
 
 fn version_decision_diagnostics(
-    report: &VersionedPackageMatchReport,
+    context: &PackageDiagnosticsContext<'_>,
     package_name: &str,
 ) -> serde_json::Value {
-    let Some(decision) = report
-        .version_matches
-        .iter()
-        .find(|decision| decision_package_name(decision) == package_name)
-    else {
+    let Some(decision) = context.version_decisions_by_package.get(package_name) else {
         return serde_json::json!({
             "kind": "not_evaluated",
             "top_scores": [],
@@ -6297,6 +6527,94 @@ mod tests {
     }
 
     #[test]
+    fn missing_package_versions_prefer_source_identity_over_latest_cached_version() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let bundled_source = "export function add(a,b){return a+b}";
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(bundled_source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(10),
+                "pkgNoVersion",
+                "node_modules/pkg/add.js",
+                "pkg",
+                None,
+            )
+            .with_source_file(1),
+        );
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/add.js",
+                "pkg@1.0.0/add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "2.0.0",
+                "pkg/add.js",
+                "pkg@2.0.0/add.js",
+                "export function sub(a,b){return a-b}",
+            ),
+        ];
+
+        let resolved = resolve_package_version_hints_to_available_sources(
+            &mut rows,
+            &package_sources,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(resolved, 1);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn package_sources_filter_to_versions_referenced_after_resolution() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "pkgOne",
+            "node_modules/pkg/index.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut package_sources = vec![
+            PackageSource::source_only("pkg", "1.0.0", "pkg", "pkg@1.0.0/index.js", "export {};"),
+            PackageSource::source_only("pkg", "2.0.0", "pkg", "pkg@2.0.0/index.js", "export {};"),
+            PackageSource::source_only(
+                "import-only",
+                "3.0.0",
+                "import-only",
+                "import-only@3.0.0/index.js",
+                "export {};",
+            ),
+        ];
+
+        let removed = super::filter_package_sources_to_referenced_package_versions(
+            &rows,
+            &mut package_sources,
+        );
+
+        assert_eq!(removed, 1);
+        assert_eq!(
+            package_sources
+                .iter()
+                .map(|source| {
+                    (
+                        source.package_name.as_str(),
+                        source.package_version.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![("pkg", "1.0.0"), ("import-only", "3.0.0")]
+        );
+    }
+
+    #[test]
     fn missing_package_versions_resolve_to_latest_cached_version() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
@@ -7160,6 +7478,74 @@ mod tests {
         assert_eq!(export_specifier, None);
         assert_eq!(external_import_policy_version, 0);
         assert!(rejection_reason.contains("matched package ownership"));
+    }
+
+    #[test]
+    fn match_packages_without_filter_revalidates_existing_accepted_attribution() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            "function localOnly(){return 1;}",
+            &[(
+                "pkg",
+                "1.2.3",
+                "add.js",
+                "export function add(a, b) {\n  return a + b;\n}",
+            )],
+        );
+        connection
+            .execute(
+                r"
+                INSERT INTO package_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     package_subpath, resolved_file, export_specifier, emission_mode,
+                     status, evidence_json, rejection_reason, created_at, updated_at)
+                VALUES (10, 'm10', 'pkg', '1.2.3',
+                        'add.js', 'pkg@1.2.3/add.js', 'pkg/add.js',
+                        'external_import', 'accepted', '{}', NULL, 'old', 'old')
+                ",
+                [],
+            )
+            .expect("seed accepted attribution");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: Vec::new(),
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+        assert_eq!(
+            package_attribution_count(&connection),
+            1,
+            "full revalidation should overwrite the stale row instead of adding a duplicate"
+        );
+        let (status, emission_mode, export_specifier, external_import_policy_version): (
+            String,
+            String,
+            Option<String>,
+            i64,
+        ) = connection
+            .query_row(
+                r"
+                SELECT status, emission_mode, export_specifier,
+                       external_import_policy_version
+                  FROM package_attributions
+                 WHERE module_id = 10
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("accepted attribution should be rewritten");
+        assert_eq!(status, "rejected");
+        assert_eq!(emission_mode, "application_source");
+        assert_eq!(export_specifier, None);
+        assert_eq!(external_import_policy_version, 0);
     }
 
     #[test]
