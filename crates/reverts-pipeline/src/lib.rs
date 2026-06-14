@@ -17,6 +17,7 @@ use reverts_js::{
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_planner::{EmitPlan, ImportExportPlanner, PlanError, PlannedFile};
+use semver::Version;
 
 pub use reverts_emitter::{EmittedFile, EmittedProject};
 pub use reverts_planner::{
@@ -122,9 +123,11 @@ fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
         let Some(package_version) = attribution.package_version.as_deref() else {
             continue;
         };
-        dependencies
-            .entry(attribution.package_name.clone())
-            .or_insert_with(|| package_version.to_string());
+        insert_runtime_dependency_version(
+            &mut dependencies,
+            attribution.package_name.as_str(),
+            package_version,
+        );
     }
 
     for package_surface in &input.package_surfaces {
@@ -134,9 +137,11 @@ fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
         let Some(package_version) = package_surface.package_version.as_deref() else {
             continue;
         };
-        dependencies
-            .entry(package_surface.package_name.clone())
-            .or_insert_with(|| package_version.to_string());
+        insert_runtime_dependency_version(
+            &mut dependencies,
+            package_surface.package_name.as_str(),
+            package_version,
+        );
     }
 
     dependencies
@@ -146,6 +151,34 @@ fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
             package_version,
         })
         .collect()
+}
+
+fn insert_runtime_dependency_version(
+    dependencies: &mut BTreeMap<String, String>,
+    package_name: &str,
+    package_version: &str,
+) {
+    use std::collections::btree_map::Entry;
+
+    match dependencies.entry(package_name.to_string()) {
+        Entry::Vacant(entry) => {
+            entry.insert(package_version.to_string());
+        }
+        Entry::Occupied(mut entry) => {
+            if runtime_dependency_version_prefer(package_version, entry.get().as_str()) {
+                entry.insert(package_version.to_string());
+            }
+        }
+    }
+}
+
+fn runtime_dependency_version_prefer(candidate: &str, existing: &str) -> bool {
+    match (Version::parse(candidate), Version::parse(existing)) {
+        (Ok(candidate), Ok(existing)) => candidate > existing,
+        (Ok(_), Err(_)) => true,
+        (Err(_), Ok(_)) => false,
+        (Err(_), Err(_)) => false,
+    }
 }
 
 fn collect_emitted_assets(input: &InputBundle, references: &[AssetReference]) -> Vec<EmittedAsset> {
@@ -1029,6 +1062,83 @@ mod tests {
         assert_eq!(run.runtime_dependencies[0].package_name, "undici");
         assert_eq!(run.runtime_dependencies[0].package_version, "2.2.1");
         assert!(run.project.files[0].source.contains("require('undici')"));
+    }
+
+    #[test]
+    fn runtime_dependencies_prefer_highest_exact_package_version() {
+        let mut rows = rows_with_application_source("export const value = 1;");
+        rows.modules.push(ModuleInput::package(
+            ModuleId(2),
+            "otelCoreOld",
+            "node_modules/@opentelemetry/core/old.js",
+            "@opentelemetry/core",
+            Some("1.0.1".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(3),
+            "otelCoreNew",
+            "node_modules/@opentelemetry/core/new.js",
+            "@opentelemetry/core",
+            Some("1.30.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(4),
+            "pkgRange",
+            "node_modules/pkg/range.js",
+            "pkg",
+            Some("1.x".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(5),
+            "pkgExact",
+            "node_modules/pkg/exact.js",
+            "pkg",
+            Some("1.2.3".to_string()),
+        ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "@opentelemetry/core",
+                "1.0.1",
+                "@opentelemetry/core",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(3),
+                "@opentelemetry/core",
+                "1.30.0",
+                "@opentelemetry/core",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(4),
+                "pkg",
+                "1.x",
+                "pkg",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(5),
+                "pkg",
+                "1.2.3",
+                "pkg",
+            ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        let dependencies = run
+            .runtime_dependencies
+            .iter()
+            .map(|dependency| {
+                (
+                    dependency.package_name.as_str(),
+                    dependency.package_version.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(dependencies.contains(&("@opentelemetry/core", "1.30.0")));
+        assert!(dependencies.contains(&("pkg", "1.2.3")));
     }
 
     #[test]

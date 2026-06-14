@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use reverts_input::{InputRows, ModuleDependencyTarget};
-use reverts_ir::ModuleId;
+use reverts_ir::{ModuleId, split_bare_specifier};
 use reverts_package::is_accepted_external_attribution;
 use semver::Version;
 
@@ -283,6 +283,28 @@ pub fn package_source_entry_path(source: &PackageSource) -> String {
 }
 
 #[must_use]
+pub fn package_source_export_path(source: &PackageSource) -> String {
+    let specifier = source.export_specifier.trim();
+    match split_bare_specifier(specifier) {
+        Some((package_name, None)) if package_name == source.package_name => String::new(),
+        Some((package_name, Some(subpath))) if package_name == source.package_name => {
+            subpath.to_ascii_lowercase()
+        }
+        _ => specifier
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_ascii_lowercase(),
+    }
+}
+
+#[must_use]
+pub fn package_source_semantic_surface_hint_score(source: &PackageSource, hint: &str) -> usize {
+    package_source_semantic_hint_score(package_source_relative_path(source).as_str(), hint).max(
+        package_source_semantic_hint_score(package_source_export_path(source).as_str(), hint),
+    )
+}
+
+#[must_use]
 pub fn package_source_semantic_hint_score(source_path: &str, hint: &str) -> usize {
     let source_segments = canonical_public_path_segments(source_path);
     let hint_segments = canonical_public_path_segments(hint);
@@ -540,5 +562,30 @@ mod tests {
             Some("lib/basekeys")
         );
         assert!(package_source_semantic_hint_score("dist/lib/basekeys.js", "lib/basekeys") > 0);
+    }
+
+    #[test]
+    fn package_source_surface_hint_score_uses_export_specifier() {
+        let source = PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/public/api",
+            "pkg@1.2.3/dist/index.js",
+            "export const api = 1;",
+        );
+
+        assert_eq!(
+            package_source_semantic_hint_score(
+                package_source_relative_path(&source).as_str(),
+                "public/api"
+            ),
+            0,
+            "the concrete build target is too generic to prove the public export"
+        );
+        assert_eq!(package_source_export_path(&source), "public/api");
+        assert_eq!(
+            package_source_semantic_surface_hint_score(&source, "public/api"),
+            5
+        );
     }
 }

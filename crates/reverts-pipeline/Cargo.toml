@@ -17,6 +17,7 @@ reverts-js = { path = "../reverts-js" }
 reverts-model = { path = "../reverts-model" }
 reverts-observe = { path = "../reverts-observe" }
 reverts-planner = { path = "../reverts-planner" }
+semver = "1"
 
 [dev-dependencies]
 reverts-fixtures = { path = "../reverts-fixtures" }

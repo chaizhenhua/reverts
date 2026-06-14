@@ -1076,6 +1076,7 @@ dependencies = [
  "reverts-model",
  "reverts-observe",
  "reverts-planner",
+ "semver",
 ]
 
 [[package]]

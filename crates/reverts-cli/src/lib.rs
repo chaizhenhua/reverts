@@ -31,8 +31,8 @@ use reverts_package_matcher::{
     VersionMatchScore, VersionedPackageMatchReport, clean_package_semantic_path_hint,
     has_accepted_external_attribution, is_exact_package_version_hint, is_json_source_path,
     match_packages_with_pipeline, ownership_by_module, package_import_names_from_sources,
-    package_module_source_quality, package_source_entry_path, package_source_semantic_hint_score,
-    strip_source_extension,
+    package_module_source_quality, package_source_entry_path,
+    package_source_semantic_surface_hint_score, strip_source_extension,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -3065,7 +3065,7 @@ fn materialize_package_sources_from_hints(
             }
         })?;
 
-        let result = materialize_one_package_source(
+        let result = materialize_one_package_source_with_nearest_fallback(
             temp_root.as_path(),
             package_name.as_str(),
             package_version.as_str(),
@@ -3085,6 +3085,57 @@ fn materialize_package_sources_from_hints(
         }
     }
     Ok(sources)
+}
+
+fn materialize_one_package_source_with_nearest_fallback(
+    temp_root: &Path,
+    package_name: &str,
+    package_version: &str,
+    sources: &mut Vec<PackageSource>,
+) -> Result<(), MatchPackagesError> {
+    let source_len_before = sources.len();
+    match materialize_one_package_source(temp_root, package_name, package_version, sources) {
+        Ok(()) => Ok(()),
+        Err(primary_error) => {
+            sources.truncate(source_len_before);
+            if !is_exact_package_version_hint(package_version) {
+                return Err(primary_error);
+            }
+            let Some(nearest_version) =
+                nearest_package_version_hint_from_network(package_name, package_version)?
+            else {
+                return Err(primary_error);
+            };
+            if nearest_version == package_version {
+                return Err(primary_error);
+            }
+            reset_package_materialization_root(temp_root)?;
+            eprintln!(
+                "falling back to nearest available package source for {package_name}@{package_version}: {nearest_version}"
+            );
+            materialize_one_package_source(
+                temp_root,
+                package_name,
+                nearest_version.as_str(),
+                sources,
+            )
+        }
+    }
+}
+
+fn reset_package_materialization_root(temp_root: &Path) -> Result<(), MatchPackagesError> {
+    if temp_root.exists() {
+        fs::remove_dir_all(temp_root).map_err(|source| {
+            MatchPackagesError::ReadPackageSourceRoot {
+                path: temp_root.to_path_buf(),
+                source,
+            }
+        })?;
+    }
+    fs::create_dir_all(temp_root).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+        path: temp_root.to_path_buf(),
+        source,
+    })
 }
 
 #[cfg(test)]
@@ -3529,7 +3580,29 @@ fn resolve_package_version_hint_from_network(
 ) -> Result<Option<String>, MatchPackagesError> {
     let versions = npm_package_versions(package_name, requested_version)?;
     Ok(
-        best_matching_package_version_by_binary_search(requested_version, &versions)
+        resolve_package_version_hint_from_versions(requested_version, &versions)
+            .map(|version| version.to_string()),
+    )
+}
+
+fn resolve_package_version_hint_from_versions(
+    requested_version: &str,
+    versions: &BTreeSet<Version>,
+) -> Option<Version> {
+    best_matching_package_version_by_binary_search(requested_version, versions).or_else(|| {
+        is_exact_package_version_hint(requested_version)
+            .then(|| nearest_package_version_by_binary_search(requested_version, versions))
+            .flatten()
+    })
+}
+
+fn nearest_package_version_hint_from_network(
+    package_name: &str,
+    requested_version: &str,
+) -> Result<Option<String>, MatchPackagesError> {
+    let versions = npm_package_versions(package_name, requested_version)?;
+    Ok(
+        nearest_package_version_by_binary_search(requested_version, &versions)
             .map(|version| version.to_string()),
     )
 }
@@ -4280,8 +4353,8 @@ fn filter_package_sources_to_best_build_variants(
     }
 
     let mut source_families_by_version =
-        BTreeMap::<(String, String), BTreeMap<String, BTreeSet<String>>>::new();
-    for source in package_sources.iter() {
+        BTreeMap::<(String, String), BTreeMap<String, Vec<usize>>>::new();
+    for (index, source) in package_sources.iter().enumerate() {
         let key = (source.package_name.clone(), source.package_version.clone());
         let rel_path = package_source_cache_entry_path(source);
         source_families_by_version
@@ -4289,7 +4362,7 @@ fn filter_package_sources_to_best_build_variants(
             .or_default()
             .entry(build_variant_family_key(rel_path.as_str()))
             .or_default()
-            .insert(rel_path);
+            .push(index);
     }
 
     let mut selected_families_by_version = BTreeMap::<(String, String), BTreeSet<String>>::new();
@@ -4305,7 +4378,12 @@ fn filter_package_sources_to_best_build_variants(
                     .map(|hint| {
                         paths
                             .iter()
-                            .map(|path| package_source_semantic_hint_score(path, hint))
+                            .map(|index| {
+                                package_source_semantic_surface_hint_score(
+                                    &package_sources[*index],
+                                    hint,
+                                )
+                            })
                             .max()
                             .unwrap_or(0)
                     })
@@ -4384,10 +4462,9 @@ fn filter_package_sources_to_relevant_path_hints(
         if source.external_importable && source.export_specifier == source.package_name {
             return true;
         }
-        let rel_path = package_source_cache_entry_path(source);
         hints
             .iter()
-            .any(|hint| package_source_semantic_hint_score(rel_path.as_str(), hint.as_str()) > 0)
+            .any(|hint| package_source_semantic_surface_hint_score(source, hint.as_str()) > 0)
     });
 }
 
@@ -5912,7 +5989,9 @@ mod tests {
         MatchPackagesArgs, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
         RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
         collect_local_package_sources, dedup_audit_report, extract_bun_embedded_asset_from_bytes,
-        help_text, load_package_sources, local_package_metadata, match_packages_from_connection,
+        filter_package_sources_to_best_build_variants,
+        filter_package_sources_to_relevant_path_hints, help_text, load_package_sources,
+        local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
         package_export_specifier, package_version_hints_for_materialization,
         parse_npm_versions_json, persist_package_source_cache,
@@ -6584,6 +6663,22 @@ mod tests {
     }
 
     #[test]
+    fn network_version_resolution_falls_back_to_nearest_for_missing_exact() {
+        let versions = BTreeSet::from([
+            semver::Version::parse("3.354.0").expect("fixture version should parse"),
+            semver::Version::parse("3.370.0").expect("fixture version should parse"),
+            semver::Version::parse("3.374.0").expect("fixture version should parse"),
+        ]);
+
+        let selected = super::resolve_package_version_hint_from_versions("3.712.0", &versions);
+
+        assert_eq!(
+            selected.as_ref().map(ToString::to_string).as_deref(),
+            Some("3.374.0")
+        );
+    }
+
+    #[test]
     fn network_resolution_hints_include_missing_versions() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
@@ -7024,6 +7119,82 @@ mod tests {
 
         assert_eq!(sources.len(), 1);
         assert!(sources[0].source_path.contains("/dist/esm/"));
+    }
+
+    #[test]
+    fn package_source_build_variant_selection_scores_export_surface_hints() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "pkg/public/client.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut sources = vec![
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/public/client",
+                "pkg@1.0.0/dist/index.js",
+                "export const client = 1;",
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/public/client",
+                "pkg@1.0.0/src/public/client.ts",
+                "export const client = 1;",
+            ),
+        ];
+
+        filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].export_specifier, "pkg/public/client");
+        assert!(sources[0].source_path.contains("/dist/index.js"));
+        assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn package_source_path_hint_filter_keeps_export_surface_match() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "pkg/public/client.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut sources = (0..300)
+            .map(|index| {
+                PackageSource::source_only(
+                    "pkg",
+                    "1.0.0",
+                    format!("pkg/private-{index}"),
+                    format!("pkg@1.0.0/dist/chunk-{index}.js"),
+                    "export const privateValue = 1;",
+                )
+            })
+            .collect::<Vec<_>>();
+        sources.push(PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/public/client",
+            "pkg@1.0.0/dist/index.js",
+            "export const client = 1;",
+        ));
+
+        filter_package_sources_to_relevant_path_hints(&rows, &mut sources);
+
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.export_specifier == "pkg/public/client"
+                    && source.source_path.ends_with("dist/index.js")
+                    && source.external_importable),
+            "{sources:?}"
+        );
     }
 
     #[test]

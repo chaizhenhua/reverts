@@ -15,9 +15,10 @@ pub use package_helpers::{
     direct_module_dependencies, direct_module_dependents, has_accepted_external_attribution,
     is_build_path_segment, is_exact_package_version_hint, is_json_source_path,
     module_package_semantic_path_hints, normalize_hint_text, ownership_by_module,
-    package_semantic_path_prefixes, package_source_entry_path, package_source_relative_path,
-    package_source_semantic_hint_score, path_hint_tokens, strip_package_prefix_from_semantic_path,
-    strip_source_extension,
+    package_semantic_path_prefixes, package_source_entry_path, package_source_export_path,
+    package_source_relative_path, package_source_semantic_hint_score,
+    package_source_semantic_surface_hint_score, path_hint_tokens,
+    strip_package_prefix_from_semantic_path, strip_source_extension,
 };
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
@@ -1512,31 +1513,32 @@ fn semantic_external_package_source(
                 && source.package_version == package_version
         })
         .filter_map(|source| {
-            let score = hints
+            let (score, proof) = hints
                 .iter()
-                .map(|hint| {
-                    package_source_semantic_hint_score(
-                        package_source_relative_path(source).as_str(),
-                        hint,
-                    )
+                .map(|hint| semantic_external_source_score(source, hint))
+                .max_by(|left, right| {
+                    left.0
+                        .cmp(&right.0)
+                        .then_with(|| left.1.rank().cmp(&right.1.rank()))
                 })
-                .max()
-                .unwrap_or_default();
-            (score >= 1).then_some((source, score))
+                .unwrap_or((0, SemanticExternalSourceProof::SourcePath));
+            (score >= 1).then_some((source, score, proof))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
         right
             .1
             .cmp(&left.1)
+            .then_with(|| right.2.rank().cmp(&left.2.rank()))
             .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
             .then_with(|| left.0.source_path.cmp(&right.0.source_path))
     });
     let best_score = scored.first()?.1;
+    let best_proof = scored.first()?.2;
     let best = scored
         .into_iter()
-        .filter(|(_source, score)| *score == best_score)
-        .map(|(source, _score)| {
+        .filter(|(_source, score, proof)| *score == best_score && *proof == best_proof)
+        .map(|(source, _score, _proof)| {
             (
                 source.export_specifier.as_str(),
                 source.source_path.as_str(),
@@ -1549,8 +1551,45 @@ fn semantic_external_package_source(
     let (export_specifier, source_path) = best.into_iter().next()?;
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: format!("forced-external:semantic-source:{source_path}"),
+        source_path: format!("forced-external:{}:{source_path}", best_proof.label()),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum SemanticExternalSourceProof {
+    SourcePath,
+    ExportSurface,
+}
+
+impl SemanticExternalSourceProof {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SourcePath => "semantic-source",
+            Self::ExportSurface => "semantic-export",
+        }
+    }
+
+    const fn rank(self) -> u8 {
+        match self {
+            Self::SourcePath => 0,
+            Self::ExportSurface => 1,
+        }
+    }
+}
+
+fn semantic_external_source_score(
+    source: &PackageSource,
+    hint: &str,
+) -> (usize, SemanticExternalSourceProof) {
+    let source_score =
+        package_source_semantic_hint_score(package_source_relative_path(source).as_str(), hint);
+    let export_score =
+        package_source_semantic_hint_score(package_source_export_path(source).as_str(), hint);
+    if export_score > source_score {
+        (export_score, SemanticExternalSourceProof::ExportSurface)
+    } else {
+        (source_score, SemanticExternalSourceProof::SourcePath)
+    }
 }
 
 fn exact_importable_package_match_source(
@@ -4240,6 +4279,43 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert_eq!(
             report.package_report.attributions[0].subpath.as_deref(),
             Some("basekeys.js")
+        );
+    }
+
+    #[test]
+    fn pipeline_resolves_forced_external_target_by_export_surface() {
+        let mut rows =
+            rows_with_package_source_at_version("function publicApi(){return 42;}", "1.2.3");
+        rows.modules[0].semantic_path = "pkg/public/api.js".to_string();
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/public/api",
+            "pkg@1.2.3/dist/index.js",
+            "export const unrelated = 'generic-build-entry';",
+        )];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.matches.len(), 1);
+        assert!(report.package_report.matches[0].external_importable);
+        assert_eq!(
+            report.package_report.matches[0].export_specifier.as_str(),
+            "pkg/public/api"
+        );
+        assert!(
+            report.package_report.matches[0]
+                .source_path
+                .starts_with("forced-external:semantic-export:"),
+            "{}",
+            report.package_report.matches[0].source_path
+        );
+        assert_eq!(
+            report.package_report.attributions[0]
+                .export_specifier
+                .as_deref(),
+            Some("pkg/public/api")
         );
     }
 
