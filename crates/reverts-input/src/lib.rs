@@ -10,6 +10,14 @@ use reverts_ir::{
 
 pub mod sqlite;
 
+/// Current safety policy version for accepted external package imports.
+///
+/// Consumers should ignore accepted `external_import` attributions that either
+/// predate this column or carry an older policy version. This prevents stale
+/// rows from keeping unsafe external wiring alive after the matcher tightens
+/// its proof requirements.
+pub const PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectInput {
     pub id: u32,

@@ -7,8 +7,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
     AssetRow, DatabaseRows, InputBundle, InputBundleError, InputRows, ModuleDependencyRow,
-    ModuleDependencyRowTarget, ModuleRow, PackageAttributionRow, PackageAttributionStatus,
-    PackageEmissionMode, PackageSurfaceRow, ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
+    ModuleDependencyRowTarget, ModuleRow, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
+    PackageAttributionRow, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceRow,
+    ProjectRow, SourceFileRow, StoredModuleKind, SymbolRow,
 };
 
 pub fn load_project_bundle_from_sqlite(
@@ -237,6 +238,16 @@ fn load_package_attributions(
         } else {
             "NULL AS resolved_file"
         };
+    let has_external_import_policy_version = table_column_exists(
+        connection,
+        "package_attributions",
+        "external_import_policy_version",
+    )?;
+    let external_import_policy_version_expr = if has_external_import_policy_version {
+        "pa.external_import_policy_version"
+    } else {
+        "NULL AS external_import_policy_version"
+    };
     let sql = format!(
         r"
         SELECT
@@ -248,7 +259,8 @@ fn load_package_attributions(
             pa.export_specifier,
             pa.emission_mode,
             pa.status,
-            pa.rejection_reason
+            pa.rejection_reason,
+            {external_import_policy_version_expr}
         FROM package_attributions pa
         JOIN modules m ON m.id = pa.module_id
         JOIN project_files pf ON pf.file_id = m.file_id
@@ -258,18 +270,38 @@ fn load_package_attributions(
     );
     let mut statement = connection.prepare(sql.as_str())?;
     let rows = statement.query_map(params![i64::from(project_id)], |row| {
-        let emission_mode = emission_mode_from_database(row.get::<_, String>(6)?.as_str())?;
-        let status = attribution_status_from_database(row.get::<_, String>(7)?.as_str())?;
+        let mut emission_mode = emission_mode_from_database(row.get::<_, String>(6)?.as_str())?;
+        let mut status = attribution_status_from_database(row.get::<_, String>(7)?.as_str())?;
+        let external_import_policy_version = row.get::<_, Option<i64>>(9)?;
+        let mut subpath = row.get(3)?;
+        let mut resolved_file = row.get(4)?;
+        let mut export_specifier = row.get(5)?;
+        let mut rejection_reason = row.get(8)?;
+        if status == PackageAttributionStatus::Accepted
+            && emission_mode == PackageEmissionMode::ExternalImport
+            && external_import_policy_version
+                != Some(PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION)
+        {
+            status = PackageAttributionStatus::Rejected;
+            emission_mode = PackageEmissionMode::ApplicationSource;
+            subpath = None;
+            resolved_file = None;
+            export_specifier = None;
+            rejection_reason = Some(
+                "accepted external package attribution was written without the current import-safety policy; rerun match-packages to revalidate"
+                    .to_string(),
+            );
+        }
         Ok(PackageAttributionRow {
             module_id: row.get(0)?,
             package_name: row.get(1)?,
             package_version: row.get(2)?,
-            subpath: row.get(3)?,
-            resolved_file: row.get(4)?,
-            export_specifier: row.get(5)?,
+            subpath,
+            resolved_file,
+            export_specifier,
             emission_mode,
             status,
-            rejection_reason: row.get(8)?,
+            rejection_reason,
         })
     })?;
 
@@ -555,7 +587,11 @@ mod tests {
     use reverts_ir::{ModuleId, ModuleKind};
 
     use crate::sqlite::{load_project_bundle_from_connection, load_project_rows_from_connection};
-    use crate::{AssetKind, InputBundleError, ModuleDependencyTarget, PackageAttributionStatus};
+    use crate::{
+        AssetKind, InputBundleError, ModuleDependencyTarget,
+        PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionStatus,
+        PackageEmissionMode,
+    };
 
     #[test]
     fn sqlite_project_loader_builds_valid_bundle_without_live_database() {
@@ -602,7 +638,11 @@ mod tests {
         ));
         assert_eq!(
             bundle.package_attributions[0].status,
-            PackageAttributionStatus::Accepted
+            PackageAttributionStatus::Rejected
+        );
+        assert_eq!(
+            bundle.package_attributions[0].emission_mode,
+            PackageEmissionMode::ApplicationSource
         );
         assert_eq!(bundle.package_surfaces.len(), 1);
         assert_eq!(bundle.package_surfaces[0].package_name, "undici");
@@ -638,6 +678,65 @@ mod tests {
         let error = load_project_bundle_from_connection(&connection, 404);
 
         assert!(error.is_err());
+    }
+
+    #[test]
+    fn sqlite_loader_downgrades_stale_or_missing_external_import_policy_rows() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+
+        let rows =
+            load_project_rows_from_connection(&connection, 7).expect("fixture rows should load");
+        assert_eq!(rows.package_attributions.len(), 1);
+        assert_eq!(
+            rows.package_attributions[0].status,
+            PackageAttributionStatus::Rejected
+        );
+        assert_eq!(
+            rows.package_attributions[0].emission_mode,
+            PackageEmissionMode::ApplicationSource
+        );
+        assert!(
+            rows.package_attributions[0]
+                .rejection_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("current import-safety policy")),
+            "missing-policy accepted external attribution must be downgraded before generation"
+        );
+
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_attributions
+                    ADD COLUMN external_import_policy_version INTEGER NOT NULL DEFAULT 0;
+                ",
+            )
+            .expect("add policy column");
+        let rows =
+            load_project_rows_from_connection(&connection, 7).expect("fixture rows should load");
+        assert_eq!(
+            rows.package_attributions[0].status,
+            PackageAttributionStatus::Rejected
+        );
+
+        connection
+            .execute(
+                "UPDATE package_attributions SET external_import_policy_version = ?1",
+                [PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION],
+            )
+            .expect("mark attribution current");
+        let rows =
+            load_project_rows_from_connection(&connection, 7).expect("fixture rows should load");
+        assert_eq!(rows.package_attributions.len(), 1);
+        assert_eq!(
+            rows.package_attributions[0].status,
+            PackageAttributionStatus::Accepted
+        );
     }
 
     #[test]

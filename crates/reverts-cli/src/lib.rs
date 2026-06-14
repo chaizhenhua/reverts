@@ -18,8 +18,9 @@ use std::time::Duration;
 use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
-    AssetKind, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode, SourceFileInput, SourceSpan,
+    AssetKind, InputRows, ModuleInput, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
+    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
+    SourceSpan,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
@@ -4582,6 +4583,22 @@ fn ensure_package_attributions_table(
     {
         migrate_package_attributions_nullable_version(connection)?;
     }
+    if !sqlite_table_has_column(
+        connection,
+        "package_attributions",
+        "external_import_policy_version",
+    )
+    .map_err(MatchPackagesError::WriteAttribution)?
+    {
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_attributions
+                    ADD COLUMN external_import_policy_version INTEGER NOT NULL DEFAULT 0;
+                ",
+            )
+            .map_err(MatchPackagesError::WriteAttribution)?;
+    }
     connection
         .execute_batch(PACKAGE_ATTRIBUTIONS_INDEX_SQL)
         .map_err(MatchPackagesError::WriteAttribution)?;
@@ -4602,6 +4619,7 @@ CREATE TABLE IF NOT EXISTS package_attributions (
     status TEXT NOT NULL,
     evidence_json TEXT,
     rejection_reason TEXT,
+    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (module_id),
@@ -4696,6 +4714,7 @@ fn migrate_package_attributions_nullable_version(
                 status,
                 evidence_json,
                 rejection_reason,
+                external_import_policy_version,
                 created_at,
                 updated_at
             )
@@ -4712,6 +4731,7 @@ fn migrate_package_attributions_nullable_version(
                 status,
                 evidence_json,
                 rejection_reason,
+                0,
                 created_at,
                 updated_at
               FROM package_attributions__reverts_old;
@@ -5132,6 +5152,7 @@ fn persist_package_attribution(
         "function_signature_matches": module_match.function_signature_matches,
         "string_anchor_matches": module_match.string_anchor_matches,
         "writes_package_version": true,
+        "external_import_policy_version": PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
     })
     .to_string();
     connection
@@ -5140,9 +5161,10 @@ fn persist_package_attribution(
             INSERT INTO package_attributions
                 (module_id, module_original_name, package_name, package_version,
                  package_subpath, resolved_file, export_specifier, emission_mode,
-                 status, evidence_json, rejection_reason, created_at, updated_at)
+                 status, evidence_json, rejection_reason, external_import_policy_version,
+                 created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'external_import',
-                    'accepted', ?8, NULL, datetime('now'), datetime('now'))
+                    'accepted', ?8, NULL, ?9, datetime('now'), datetime('now'))
             ON CONFLICT(module_id) DO UPDATE SET
                 module_original_name = excluded.module_original_name,
                 package_name = excluded.package_name,
@@ -5154,6 +5176,7 @@ fn persist_package_attribution(
                 status = excluded.status,
                 evidence_json = excluded.evidence_json,
                 rejection_reason = excluded.rejection_reason,
+                external_import_policy_version = excluded.external_import_policy_version,
                 updated_at = datetime('now')
             ",
             params![
@@ -5165,6 +5188,7 @@ fn persist_package_attribution(
                 module_match.source_path.as_str(),
                 export_specifier,
                 evidence,
+                PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
             ],
         )
         .map_err(MatchPackagesError::WriteAttribution)?;
@@ -5224,9 +5248,10 @@ fn persist_rejected_package_attribution(
             INSERT INTO package_attributions
                 (module_id, module_original_name, package_name, package_version,
                  package_subpath, resolved_file, export_specifier, emission_mode,
-                 status, evidence_json, rejection_reason, created_at, updated_at)
+                 status, evidence_json, rejection_reason, external_import_policy_version,
+                 created_at, updated_at)
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'application_source',
-                    'rejected', ?8, ?9, datetime('now'), datetime('now'))
+                    'rejected', ?8, ?9, 0, datetime('now'), datetime('now'))
             ON CONFLICT(module_id) DO UPDATE SET
                 module_original_name = excluded.module_original_name,
                 package_name = excluded.package_name,
@@ -5238,6 +5263,7 @@ fn persist_rejected_package_attribution(
                 status = excluded.status,
                 evidence_json = excluded.evidence_json,
                 rejection_reason = excluded.rejection_reason,
+                external_import_policy_version = excluded.external_import_policy_version,
                 updated_at = datetime('now')
             ",
             params![
@@ -5730,7 +5756,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use reverts_input::{InputRows, ModuleInput, ProjectInput, SourceFileInput};
+    use reverts_input::{
+        InputRows, ModuleInput, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, ProjectInput,
+        SourceFileInput,
+    };
     use reverts_ir::ModuleId;
     use reverts_observe::{AuditFinding, AuditReport, FindingCode};
     use reverts_package_matcher::PackageSource;
@@ -7100,25 +7129,36 @@ mod tests {
             1,
             "revalidation should overwrite the stale row instead of adding a duplicate"
         );
-        let (status, emission_mode, export_specifier, rejection_reason): (
-            String,
-            String,
-            Option<String>,
-            String,
-        ) = connection
+        let (
+            status,
+            emission_mode,
+            export_specifier,
+            external_import_policy_version,
+            rejection_reason,
+        ): (String, String, Option<String>, i64, String) = connection
             .query_row(
                 r"
-                SELECT status, emission_mode, export_specifier, rejection_reason
+                SELECT status, emission_mode, export_specifier,
+                       external_import_policy_version, rejection_reason
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .expect("stale accepted attribution should be rewritten");
         assert_eq!(status, "rejected");
         assert_eq!(emission_mode, "application_source");
         assert_eq!(export_specifier, None);
+        assert_eq!(external_import_policy_version, 0);
         assert!(rejection_reason.contains("matched package ownership"));
     }
 
@@ -8441,20 +8481,30 @@ mod tests {
 
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
-        let (status, rejection_reason, package_version, emission_mode): (
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-        ) = connection
+        let (
+            status,
+            rejection_reason,
+            package_version,
+            emission_mode,
+            external_import_policy_version,
+        ): (String, Option<String>, Option<String>, String, i64) = connection
             .query_row(
                 r"
-                SELECT status, rejection_reason, package_version, emission_mode
+                SELECT status, rejection_reason, package_version, emission_mode,
+                       external_import_policy_version
                   FROM package_attributions
                  WHERE module_id = 10
                 ",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .expect("resolved attribution should be written");
         let package_version_not_null: i64 = connection
@@ -8479,6 +8529,10 @@ mod tests {
         assert_eq!(rejection_reason, None);
         assert_eq!(package_version.as_deref(), Some("2.0.0"));
         assert_eq!(emission_mode, "external_import");
+        assert_eq!(
+            external_import_policy_version,
+            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
+        );
         assert_eq!(package_version_not_null, 0);
     }
 
