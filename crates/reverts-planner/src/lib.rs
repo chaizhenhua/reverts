@@ -6957,7 +6957,11 @@ fn close_runtime_helper_source(
                 folded_chunks,
             );
             return ClosedRuntimeHelperSource {
-                emitted_bindings: emitted_runtime_helper_bindings(prelude, &next_source_bindings),
+                emitted_bindings: emitted_runtime_helper_bindings(
+                    prelude,
+                    &next_source_bindings,
+                    folded_chunks,
+                ),
                 source,
             };
         }
@@ -6969,12 +6973,19 @@ fn close_runtime_helper_source(
 fn emitted_runtime_helper_bindings(
     prelude: &RuntimePrelude,
     bindings: &BTreeSet<BindingName>,
+    folded_chunks: &[RuntimeFoldedSourceChunk],
 ) -> BTreeSet<BindingName> {
-    bindings
+    let mut emitted = bindings
         .iter()
         .filter(|binding| prelude.snippets.contains_key(*binding))
         .cloned()
-        .collect()
+        .collect::<BTreeSet<_>>();
+    for folded_chunk in folded_chunks {
+        emitted.extend(top_level_definitions_in_source(
+            folded_chunk.source.as_str(),
+        ));
+    }
+    emitted
 }
 
 fn runtime_helper_source(
@@ -16007,6 +16018,10 @@ mod tests {
         assert!(helper_source.contains("var initShared = lazyValue(() => {"));
         assert!(helper_source.contains("function lazyValue(factory) {"));
         assert!(helper_source.contains("export { initShared, shared };"));
+        assert!(
+            !helper_source.contains("import { initShared }"),
+            "folded chunk definitions are local to the runtime helper and must not be re-imported"
+        );
     }
 
     #[test]
