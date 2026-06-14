@@ -1506,6 +1506,7 @@ struct ExternalImportSourceIndex<'a> {
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
     export_members_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
     fingerprints_by_source_path: RefCell<BTreeMap<String, Option<SourceFingerprint>>>,
+    dependency_entries_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
 }
 
 impl<'a> ExternalImportSourceIndex<'a> {
@@ -1659,6 +1660,45 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .borrow_mut()
             .insert(key, fingerprint.clone());
         fingerprint.map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint))
+    }
+
+    fn dependency_entries(&self, source: &PackageSource) -> BTreeSet<String> {
+        let key = format!(
+            "{}@{}:{}",
+            source.package_name, source.package_version, source.source_path
+        );
+        if let Some(entries) = self.dependency_entries_by_source_path.borrow().get(&key) {
+            return entries.clone();
+        }
+        let entries = package_source_dependency_entries(source);
+        self.dependency_entries_by_source_path
+            .borrow_mut()
+            .insert(key, entries.clone());
+        entries
+    }
+
+    fn sources_matching_concrete_path(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        source_path: &str,
+    ) -> Vec<&'a PackageSource> {
+        let exact = self.all_sources_by_path(package_name, package_version, source_path);
+        if !exact.is_empty() {
+            return exact.to_vec();
+        }
+        let source_entry =
+            package_source_entry_path_from_source_path(package_name, package_version, source_path);
+        self.all_sources(package_name, package_version)
+            .iter()
+            .copied()
+            .filter(|source| {
+                source_entry_paths_match(
+                    package_source_entry_path(source).as_str(),
+                    source_entry.as_str(),
+                )
+            })
+            .collect()
     }
 }
 
@@ -2581,6 +2621,62 @@ fn external_source_export_all_reexports_matched_source(
         .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
 }
 
+fn package_source_dependency_entries(source: &PackageSource) -> BTreeSet<String> {
+    relative_module_specifier_targets(source.source.as_str())
+        .into_iter()
+        .filter_map(|target| {
+            resolve_package_relative_require(package_source_entry_path(source).as_str(), &target)
+        })
+        .map(|entry| {
+            strip_source_extension(entry.as_str())
+                .trim_matches('/')
+                .to_ascii_lowercase()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn relative_module_specifier_targets(source: &str) -> BTreeSet<String> {
+    let compact = compact_ascii_ws(source);
+    let mut targets = BTreeSet::new();
+    collect_require_targets_from_compact_slice(compact.as_str(), &mut targets);
+    collect_static_import_export_targets(compact.as_str(), &mut targets);
+    targets
+}
+
+fn collect_static_import_export_targets(source: &str, targets: &mut BTreeSet<String>) {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("from") {
+        let start = cursor + relative + "from".len();
+        let Some((target, end)) = read_quoted_string_at(source, start) else {
+            cursor = start;
+            continue;
+        };
+        if target.starts_with('.') {
+            targets.insert(target);
+        }
+        cursor = end;
+    }
+
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("import") {
+        let start = cursor + relative + "import".len();
+        let start = if source.as_bytes().get(start) == Some(&b'(') {
+            start + 1
+        } else {
+            start
+        };
+        let Some((target, end)) = read_quoted_string_at(source, start) else {
+            cursor = start;
+            continue;
+        };
+        if target.starts_with('.') {
+            targets.insert(target);
+        }
+        cursor = end;
+    }
+}
+
 fn export_all_reexport_targets(source: &str) -> BTreeSet<String> {
     let compact = compact_ascii_ws(source);
     let mut targets = BTreeSet::new();
@@ -2713,6 +2809,19 @@ fn source_entry_paths_match(left: &str, right: &str) -> bool {
         .trim_matches('/')
         .to_ascii_lowercase();
     left == right || format!("{left}/index") == right || left == format!("{right}/index")
+}
+
+fn package_source_entry_path_from_source_path(
+    package_name: &str,
+    package_version: &str,
+    source_path: &str,
+) -> String {
+    let prefix = format!("{package_name}@{package_version}/");
+    source_path
+        .strip_prefix(prefix.as_str())
+        .unwrap_or(source_path)
+        .trim_start_matches('/')
+        .to_ascii_lowercase()
 }
 
 fn export_member_proof_source_path(
@@ -3712,6 +3821,7 @@ fn force_externalize_remaining_package_modules(
         .map(|(index, package_match)| (package_match.module_id, index))
         .collect::<BTreeMap<_, _>>();
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
+    let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
     let mut forced = 0usize;
 
     for module in &rows.modules {
@@ -3733,16 +3843,34 @@ fn force_externalize_remaining_package_modules(
         let package_version =
             forced_external_package_version(module, source_only_match, package_sources)
                 .unwrap_or_else(|| "*".to_string());
-        let Some(target) = forced_external_import_target(
+        let module_source = rows
+            .module_source_slice(module.id)
+            .map(|slice| slice.source)
+            .unwrap_or_default();
+        let standard_target = forced_external_import_target(
             rows,
             module,
             package_name,
             package_version.as_str(),
             source_only_match,
             &external_source_index,
-        ) else {
+        );
+        let Some(target) = standard_target.or_else(|| {
+            source_only_match.and_then(|package_match| {
+                dependency_graph_source_fingerprint_external_import_target(
+                    rows,
+                    module,
+                    package_match,
+                    &external_source_index,
+                    module_source,
+                    &concrete_sources_by_module,
+                )
+            })
+        }) else {
             continue;
         };
+        let target_source_path = target.source_path.clone();
+        let accepted_package_version = package_version.clone();
         let mut attribution = PackageAttributionInput::accepted_external(
             module.id,
             package_name,
@@ -3759,7 +3887,7 @@ fn force_externalize_remaining_package_modules(
         if let Some(index) = source_only_match_indices.get(&module.id).copied() {
             let package_match = &mut report.matches[index];
             package_match.package_name = package_name.to_string();
-            package_match.package_version = package_version;
+            package_match.package_version = package_version.clone();
             package_match.export_specifier = target.export_specifier;
             package_match.source_path = target.source_path;
             package_match.external_importable = true;
@@ -3767,7 +3895,7 @@ fn force_externalize_remaining_package_modules(
             report.matches.push(PackageMatch {
                 module_id: module.id,
                 package_name: package_name.to_string(),
-                package_version,
+                package_version: package_version.clone(),
                 export_specifier: target.export_specifier,
                 source_path: target.source_path,
                 normalized_source_hash: String::new(),
@@ -3782,9 +3910,388 @@ fn force_externalize_remaining_package_modules(
             });
         }
         accepted_modules.insert(module.id);
+        if let Some(concrete) = concrete_package_source_from_parts(
+            module.id,
+            package_name,
+            report
+                .matches
+                .iter()
+                .find(|package_match| package_match.module_id == module.id)
+                .map(|package_match| package_match.package_version.as_str())
+                .unwrap_or(accepted_package_version.as_str()),
+            target_source_path.as_str(),
+        ) {
+            concrete_sources_by_module.insert(module.id, concrete);
+        }
         forced += 1;
     }
     forced
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConcretePackageSourcePath {
+    package_name: String,
+    package_version: String,
+    source_path: String,
+}
+
+fn concrete_package_sources_by_module(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeMap<ModuleId, ConcretePackageSourcePath> {
+    let mut sources = BTreeMap::new();
+    for attribution in rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+    {
+        if attribution.status != PackageAttributionStatus::Accepted
+            || attribution.emission_mode != PackageEmissionMode::ExternalImport
+        {
+            continue;
+        }
+        let Some(package_version) = attribution.package_version.as_deref() else {
+            continue;
+        };
+        let Some(resolved_file) = attribution.resolved_file.as_deref() else {
+            continue;
+        };
+        if let Some(concrete) = concrete_package_source_from_parts(
+            attribution.module_id,
+            attribution.package_name.as_str(),
+            package_version,
+            resolved_file,
+        ) {
+            sources.insert(attribution.module_id, concrete);
+        }
+    }
+    for package_match in &report.matches {
+        if let Some(concrete) = concrete_package_source_from_parts(
+            package_match.module_id,
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+            package_match.source_path.as_str(),
+        ) {
+            sources.entry(package_match.module_id).or_insert(concrete);
+        }
+    }
+    sources
+}
+
+fn concrete_package_source_from_parts(
+    _module_id: ModuleId,
+    package_name: &str,
+    package_version: &str,
+    proof_path: &str,
+) -> Option<ConcretePackageSourcePath> {
+    let source_path = concrete_package_source_path_from_proof(proof_path)?;
+    Some(ConcretePackageSourcePath {
+        package_name: package_name.to_string(),
+        package_version: package_version.to_string(),
+        source_path,
+    })
+}
+
+fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
+    let proof_path = proof_path.trim();
+    if proof_path.is_empty()
+        || proof_path.starts_with("exact-hint:")
+        || proof_path.starts_with("dependency-closure:")
+        || proof_path.starts_with("dependency-cluster:")
+        || proof_path.starts_with("package-file-graph:")
+        || proof_path.starts_with("aggregate:")
+        || proof_path.starts_with("cascade:")
+        || proof_path.starts_with("structural-bag:")
+    {
+        return None;
+    }
+    if let Some(rest) = proof_path.strip_prefix("normalized-source-export:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:source-match:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-source:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-export:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-graph-source:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    Some(proof_path.to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DependencyGraphSourceProof {
+    ExactSourceHash,
+    FunctionStringFingerprint,
+    StringFingerprintWithGraph,
+}
+
+impl DependencyGraphSourceProof {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::ExactSourceHash => "source-hash",
+            Self::FunctionStringFingerprint => "function-string",
+            Self::StringFingerprintWithGraph => "string-graph",
+        }
+    }
+
+    const fn rank(self) -> usize {
+        match self {
+            Self::ExactSourceHash => 300,
+            Self::FunctionStringFingerprint => 200,
+            Self::StringFingerprintWithGraph => 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DependencyGraphEvidence {
+    matched_edges: usize,
+    known_edges: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DependencyGraphSourceCandidate<'a> {
+    source: &'a PackageSource,
+    proof: DependencyGraphSourceProof,
+    graph: DependencyGraphEvidence,
+    function_matches: usize,
+    string_matches: usize,
+}
+
+fn dependency_graph_source_fingerprint_external_import_target(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> Option<ExternalImportTarget> {
+    if !dependency_graph_source_fingerprint_policy_allows(package_match.strategy)
+        || module_source.trim().is_empty()
+    {
+        return None;
+    }
+    let module_fingerprint =
+        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+    let mut candidates = external_source_index
+        .all_sources(
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+        )
+        .iter()
+        .copied()
+        .filter(|source| source.is_within_fingerprint_budget())
+        .filter_map(|source| {
+            let source_fingerprint = external_source_index.source_fingerprint(source)?;
+            let graph = dependency_graph_source_evidence(
+                rows,
+                module.id,
+                source,
+                external_source_index,
+                concrete_sources_by_module,
+            );
+            let function_matches = source_fingerprint
+                .function_signature_hashes
+                .intersection(&module_fingerprint.function_signature_hashes)
+                .count();
+            let string_matches = source_fingerprint
+                .string_anchors
+                .intersection(&module_fingerprint.string_anchors)
+                .count();
+            let proof = dependency_graph_source_proof(
+                &module_fingerprint,
+                &source_fingerprint,
+                graph,
+                function_matches,
+                string_matches,
+            )?;
+            Some(DependencyGraphSourceCandidate {
+                source,
+                proof,
+                graph,
+                function_matches,
+                string_matches,
+            })
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        dependency_graph_source_candidate_score(right)
+            .cmp(&dependency_graph_source_candidate_score(left))
+            .then_with(|| {
+                package_source_external_import_rank(left.source)
+                    .cmp(&package_source_external_import_rank(right.source))
+            })
+            .then_with(|| {
+                left.source
+                    .export_specifier
+                    .cmp(&right.source.export_specifier)
+            })
+            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+    });
+    let best_score = dependency_graph_source_candidate_score(candidates.first()?);
+    let best = candidates
+        .into_iter()
+        .filter(|candidate| dependency_graph_source_candidate_score(candidate) == best_score)
+        .collect::<Vec<_>>();
+    let export_specifiers = best
+        .iter()
+        .map(|candidate| candidate.source.export_specifier.as_str())
+        .collect::<BTreeSet<_>>();
+    if export_specifiers.len() != 1 {
+        return None;
+    }
+    let selected = best.into_iter().min_by(|left, right| {
+        package_source_external_import_rank(left.source)
+            .cmp(&package_source_external_import_rank(right.source))
+            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+    })?;
+    if selected.source.external_importable {
+        return Some(ExternalImportTarget {
+            export_specifier: selected.source.export_specifier.clone(),
+            source_path: format!(
+                "forced-external:dependency-graph-source:{}:graph={}/{}:functions={}:strings={}:{}",
+                selected.proof.label(),
+                selected.graph.matched_edges,
+                selected.graph.known_edges,
+                selected.function_matches,
+                selected.string_matches,
+                selected.source.source_path,
+            ),
+        });
+    }
+    export_member_external_package_source_for_source_path(
+        selected.source.package_name.as_str(),
+        selected.source.package_version.as_str(),
+        selected.source.source_path.as_str(),
+        external_source_index,
+        module_source,
+    )
+}
+
+fn dependency_graph_source_fingerprint_policy_allows(strategy: ModuleMatchStrategy) -> bool {
+    matches!(
+        strategy,
+        ModuleMatchStrategy::DependencyClosureOwnership
+            | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+            | ModuleMatchStrategy::CascadeFunctionCoverage
+            | ModuleMatchStrategy::CascadeFunctionOwnership
+            | ModuleMatchStrategy::CascadePartialFunctionCoverage
+            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+    )
+}
+
+fn dependency_graph_source_candidate_score(
+    candidate: &DependencyGraphSourceCandidate<'_>,
+) -> usize {
+    candidate.proof.rank()
+        + candidate.graph.matched_edges * 20
+        + candidate.function_matches * 3
+        + candidate.string_matches
+}
+
+fn dependency_graph_source_proof(
+    module_fingerprint: &ModuleMatchFingerprint,
+    source_fingerprint: &PackageSourceFingerprint<'_>,
+    graph: DependencyGraphEvidence,
+    function_matches: usize,
+    string_matches: usize,
+) -> Option<DependencyGraphSourceProof> {
+    if !source_fingerprint
+        .normalized_source_hashes
+        .is_disjoint(&module_fingerprint.normalized_source_hashes)
+    {
+        return Some(DependencyGraphSourceProof::ExactSourceHash);
+    }
+    if graph.matched_edges >= 1 && function_matches >= 2 && string_matches >= 1 {
+        return Some(DependencyGraphSourceProof::FunctionStringFingerprint);
+    }
+    if graph.matched_edges >= 1 && string_matches >= 8 {
+        return Some(DependencyGraphSourceProof::StringFingerprintWithGraph);
+    }
+    if graph.matched_edges >= 2 && string_matches >= 3 {
+        return Some(DependencyGraphSourceProof::StringFingerprintWithGraph);
+    }
+    None
+}
+
+fn dependency_graph_source_evidence(
+    rows: &InputRows,
+    module_id: ModuleId,
+    candidate: &PackageSource,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> DependencyGraphEvidence {
+    let candidate_entry = package_source_entry_path(candidate);
+    let candidate_deps = external_source_index.dependency_entries(candidate);
+    let mut known_edges = 0usize;
+    let mut matched_edges = 0usize;
+
+    for dependency_id in direct_module_dependencies(rows, module_id) {
+        let Some(neighbor) = concrete_sources_by_module.get(&dependency_id) else {
+            continue;
+        };
+        if neighbor.package_name != candidate.package_name
+            || neighbor.package_version != candidate.package_version
+        {
+            continue;
+        }
+        known_edges += 1;
+        let neighbor_entry = package_source_entry_path_from_source_path(
+            neighbor.package_name.as_str(),
+            neighbor.package_version.as_str(),
+            neighbor.source_path.as_str(),
+        );
+        if candidate_deps
+            .iter()
+            .any(|target| source_entry_paths_match(target.as_str(), neighbor_entry.as_str()))
+        {
+            matched_edges += 1;
+        }
+    }
+
+    for dependent_id in direct_module_dependents(rows, module_id) {
+        let Some(neighbor) = concrete_sources_by_module.get(&dependent_id) else {
+            continue;
+        };
+        if neighbor.package_name != candidate.package_name
+            || neighbor.package_version != candidate.package_version
+        {
+            continue;
+        }
+        let neighbor_sources = external_source_index.sources_matching_concrete_path(
+            neighbor.package_name.as_str(),
+            neighbor.package_version.as_str(),
+            neighbor.source_path.as_str(),
+        );
+        if neighbor_sources.is_empty() {
+            continue;
+        }
+        known_edges += 1;
+        if neighbor_sources.iter().any(|neighbor_source| {
+            external_source_index
+                .dependency_entries(neighbor_source)
+                .iter()
+                .any(|target| source_entry_paths_match(target.as_str(), candidate_entry.as_str()))
+        }) {
+            matched_edges += 1;
+        }
+    }
+
+    DependencyGraphEvidence {
+        matched_edges,
+        known_edges,
+    }
 }
 
 fn forced_external_package_version(
@@ -6813,6 +7320,218 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(report.package_report.matches[0].external_importable);
         assert!(!report.package_report.attributions.is_empty());
+    }
+
+    #[test]
+    fn pipeline_externalizes_dependency_graph_source_fingerprint_match() {
+        let module_source = r#"
+            export function opaqueRuntime(value) {
+                return ["opaque-alpha", "opaque-beta", "opaque-gamma", value].join(":");
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/opaque.ts".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "dep-a.js",
+            Some("export const depA = 'dep-a';".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "dep-b.js",
+            Some("export const depB = 'dep-b';".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "depA",
+                "pkg/dep-a.js",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(12),
+                "depB",
+                "pkg/dep-b.js",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/dep-a")
+                .with_resolved_file("pkg@1.0.0/lib/dep-a.js"),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(12), "pkg", "1.0.0", "pkg/dep-b")
+                .with_resolved_file("pkg@1.0.0/lib/dep-b.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/utility",
+                "pkg@1.0.0/lib/utility.js",
+                r#"
+                const depA = require("./dep-a");
+                const depB = require("./dep-b");
+                exports.utility = function packageUtility(input) {
+                    return ["opaque-alpha", "opaque-beta", "opaque-gamma", input].join(":");
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/other",
+                "pkg@1.0.0/lib/other.js",
+                r#"
+                exports.other = function packageOther(input) {
+                    return ["opaque-alpha", "opaque-beta", "opaque-gamma", input].join(":");
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-a",
+                "pkg@1.0.0/lib/dep-a.js",
+                "exports.depA = 'dep-a';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-b",
+                "pkg@1.0.0/lib/dep-b.js",
+                "exports.depB = 'dep-b';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("dependency graph plus source strings should prove the source file");
+        assert_eq!(attribution.export_specifier.as_deref(), Some("pkg/utility"));
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved
+                    .starts_with("forced-external:dependency-graph-source:string-graph:")),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_rejects_ambiguous_dependency_graph_source_fingerprint_match() {
+        let module_source = r#"
+            export function opaqueRuntime(value) {
+                return ["opaque-alpha", "opaque-beta", "opaque-gamma", value].join(":");
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/opaque.ts".to_string();
+        for (module_id, file_id, name, file_name) in [
+            (ModuleId(11), 2, "depA", "dep-a.js"),
+            (ModuleId(12), 3, "depB", "dep-b.js"),
+        ] {
+            rows.source_files.push(SourceFileInput::new(
+                file_id,
+                file_name,
+                Some(format!("export const {name} = 1;")),
+            ));
+            rows.modules.push(
+                ModuleInput::package(
+                    module_id,
+                    name,
+                    format!("pkg/{file_name}"),
+                    "pkg",
+                    Some("1.0.0".to_string()),
+                )
+                .with_source_file(file_id),
+            );
+        }
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/dep-a")
+                .with_resolved_file("pkg@1.0.0/lib/dep-a.js"),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(12), "pkg", "1.0.0", "pkg/dep-b")
+                .with_resolved_file("pkg@1.0.0/lib/dep-b.js"),
+        );
+        let ambiguous_source = r#"
+            const depA = require("./dep-a");
+            const depB = require("./dep-b");
+            exports.value = function packageValue(input) {
+                return ["opaque-alpha", "opaque-beta", "opaque-gamma", input].join(":");
+            };
+        "#;
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/first",
+                "pkg@1.0.0/lib/first.js",
+                ambiguous_source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/second",
+                "pkg@1.0.0/lib/second.js",
+                ambiguous_source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-a",
+                "pkg@1.0.0/lib/dep-a.js",
+                "exports.depA = 'dep-a';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-b",
+                "pkg@1.0.0/lib/dep-b.js",
+                "exports.depB = 'dep-b';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "ambiguous graph/fingerprint proof must not externalize"
+        );
     }
 
     #[test]

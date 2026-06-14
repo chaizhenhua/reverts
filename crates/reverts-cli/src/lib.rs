@@ -5714,6 +5714,8 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
         "semantic_source"
     } else if source_path.starts_with("forced-external:source-match:") {
         "source_match_fallback"
+    } else if source_path.starts_with("forced-external:dependency-graph-source:") {
+        "dependency_graph_source"
     } else if source_path.starts_with("forced-external:semantic-path:") {
         "semantic_path_fallback"
     } else if source_path.starts_with("forced-external:package-root:") {
