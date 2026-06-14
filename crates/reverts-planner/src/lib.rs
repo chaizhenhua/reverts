@@ -1773,6 +1773,8 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .cloned()
                 .unwrap_or_default();
+            let extra_snippet_bindings_for_source =
+                runtime_var_migrations.extra_snippet_bindings_for_source(*source_file_id);
             let migrations_for_source =
                 runtime_var_migrations.primary_bindings_for_source(*source_file_id);
             let reexported_bindings_for_source =
@@ -1867,6 +1869,16 @@ impl ImportExportPlanner {
                     helper_closure.emitted_bindings.remove(binding);
                 }
             }
+            if !extra_snippet_bindings_for_source.is_empty() {
+                helper_closure.source = strip_runtime_snippet_sources(
+                    helper_closure.source.as_str(),
+                    prelude,
+                    &extra_snippet_bindings_for_source,
+                );
+                for binding in &extra_snippet_bindings_for_source {
+                    helper_closure.emitted_bindings.remove(binding);
+                }
+            }
             // Phase 11a: some runtime lazyValue thunks are not real lazy
             // module boundaries; they only fill private helper vars with
             // pure values and return `undefined`. Make those assignments
@@ -1887,7 +1899,12 @@ impl ImportExportPlanner {
                 &helper_closure.emitted_bindings,
                 externalized_packages,
             );
-            let helper_imports = runtime_externalized_binding_scan.source_module_imports;
+            let helper_imports = runtime_reexport_owner_imports_for_source(
+                helper_closure.source.as_str(),
+                &helper_closure.emitted_bindings,
+                &reexported_bindings_for_source,
+                runtime_externalized_binding_scan.source_module_imports,
+            );
             let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
             let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
             emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
@@ -2385,6 +2402,14 @@ impl RuntimeVarMigrationPlan {
                     .cloned()
                     .map(|binding| (migration.source_file_id, binding))
             })
+            .collect()
+    }
+
+    fn extra_snippet_bindings_for_source(&self, source_file_id: u32) -> BTreeSet<BindingName> {
+        self.migrations_by_binding
+            .values()
+            .filter(|migration| migration.source_file_id == source_file_id)
+            .flat_map(|migration| migration.extra_snippets.iter().cloned())
             .collect()
     }
 
@@ -5137,6 +5162,7 @@ fn migratable_runtime_reader_cluster_result(
     let mut moved_namespace_exports = BTreeSet::<BindingName>::new();
     let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
     let mut folded_runtime_deps = BTreeSet::<BindingName>::new();
+    let mut folded_non_snippet_snippets = BTreeSet::<BindingName>::new();
     let mut pinned_runtime_deps = BTreeSet::<BindingName>::new();
     let mut extra_source_deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
     let mut queue = initial_readers.into_iter().collect::<Vec<_>>();
@@ -5148,7 +5174,10 @@ fn migratable_runtime_reader_cluster_result(
             return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
-            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+            if !runtime_reader_folded_non_snippet_use_can_move(ctx, &reader) {
+                return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+            }
+            folded_non_snippet_snippets.insert(reader.clone());
         }
         let snippet = ctx
             .prelude
@@ -5369,6 +5398,38 @@ fn migratable_runtime_reader_cluster_result(
             > MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES
     {
         return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+    }
+
+    // If a folded runtime chunk still calls a moved reader, the runtime helper
+    // file will import that reader from the writer module. Only allow that
+    // runtime -> writer edge when the writer no longer needs to import the same
+    // runtime helper file: otherwise we would synthesize a brittle ESM cycle
+    // (`runtime -> writer -> runtime`) during module evaluation.
+    if !folded_non_snippet_snippets.is_empty() {
+        if !extra_runtime_deps.is_empty() || !folded_runtime_deps.is_empty() {
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        }
+        let owner_state = ctx
+            .owner_runtime_state
+            .get(&owner_module)
+            .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)?;
+        if owner_state.uses_lazy_module || owner_state.uses_lazy_value {
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        }
+        let mut locally_owned_runtime = primary_bindings.clone();
+        locally_owned_runtime.extend(moved_snippets.iter().cloned());
+        locally_owned_runtime.extend(moved_namespace_exports.iter().cloned());
+        if owner_state
+            .remaining_helpers
+            .iter()
+            .any(|helper| !locally_owned_runtime.contains(helper))
+            || owner_state
+                .written_helpers
+                .iter()
+                .any(|helper| !primary_bindings.contains(helper))
+        {
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        }
     }
 
     Ok(RuntimeReaderClusterMigration {
@@ -5619,6 +5680,30 @@ fn runtime_binding_has_blocking_non_snippet_use(
     }
     read_index.non_snippet_runtime_reads.contains(binding)
         || read_index.namespace_export_helpers.contains(binding)
+}
+
+fn runtime_reader_folded_non_snippet_use_can_move(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    binding: &BindingName,
+) -> bool {
+    ctx.read_index
+        .folded_non_snippet_runtime_reads
+        .contains(binding)
+        && !ctx
+            .read_index
+            .entrypoint_non_snippet_runtime_reads
+            .contains(binding)
+        && !ctx
+            .read_index
+            .entrypoint_callee
+            .as_ref()
+            .is_some_and(|entrypoint| entrypoint == binding)
+        && !ctx.read_index.namespace_export_helpers.contains(binding)
+        && !ctx
+            .read_index
+            .namespace_exports_by_namespace
+            .contains_key(binding)
+        && !ctx.folded_runtime_definitions.contains(binding)
 }
 
 fn runtime_private_function_dependency_closure(
@@ -7675,6 +7760,30 @@ fn scan_runtime_externalized_bindings(
         source_module_imports,
         package_init_shims,
     }
+}
+
+fn runtime_reexport_owner_imports_for_source(
+    source: &str,
+    satisfied_runtime_bindings: &BTreeSet<BindingName>,
+    reexported_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
+    mut imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut identifiers = runtime_import_identifiers_in_source(source);
+    identifiers.extend(call_identifiers_in_source(source));
+    for identifier in identifiers {
+        let binding = BindingName::new(identifier);
+        if satisfied_runtime_bindings.contains(&binding) {
+            continue;
+        }
+        let Some(owner_module) = reexported_bindings_for_source.get(&binding) else {
+            continue;
+        };
+        imports
+            .entry(*owner_module)
+            .or_default()
+            .insert(binding.clone());
+    }
+    imports
 }
 
 fn noop_function_statement(binding: &BindingName) -> String {
@@ -12702,6 +12811,52 @@ fn strip_runtime_var_declarations<'a>(
         out.push_str(line);
     }
     out
+}
+
+fn strip_runtime_snippet_sources(
+    source: &str,
+    prelude: &RuntimePrelude,
+    bindings: &BTreeSet<BindingName>,
+) -> String {
+    if bindings.is_empty() {
+        return source.to_string();
+    }
+    let mut snippets = bindings
+        .iter()
+        .filter_map(|binding| prelude.snippets.get(binding))
+        .collect::<Vec<_>>();
+    snippets.sort_by(|left, right| right.byte_start.cmp(&left.byte_start));
+    let mut stripped = source.to_string();
+    for snippet in snippets {
+        if let Some((start, end)) = find_runtime_source_chunk(&stripped, snippet.source.as_str()) {
+            stripped.replace_range(start..end, "");
+        }
+    }
+    stripped
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_runtime_source_chunk(source: &str, chunk: &str) -> Option<(usize, usize)> {
+    for (start, _) in source.match_indices(chunk) {
+        let end = start + chunk.len();
+        let before_ok = start == 0 || source.as_bytes().get(start - 1) == Some(&b'\n');
+        let after_ok = end == source.len() || source.as_bytes().get(end) == Some(&b'\n');
+        if !before_ok || !after_ok {
+            continue;
+        }
+        let mut drop_start = start;
+        let mut drop_end = end;
+        if source.as_bytes().get(drop_end) == Some(&b'\n') {
+            drop_end += 1;
+        } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
+            drop_start -= 1;
+        }
+        return Some((drop_start, drop_end));
+    }
+    None
 }
 
 fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
@@ -18907,6 +19062,158 @@ mod tests {
         );
         assert!(helper_source.contains("var initDecorate = () => {};"));
         assert!(helper_source.contains("export { decorate, initDecorate };"));
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_allows_folded_reader_use_without_runtime_deps() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var used;\n",
+            "function readShared() { return shared; }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let folded_body = concat!(
+            "var initUse = lazy(() => { used = readShared(); });\n",
+            "export { initUse, used };\n",
+        );
+        let consumer_body = "var value = initUse();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "folded", "modules/folded.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(
+            writer_source.contains("function readShared() { return shared; }"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
+        assert!(writer_source.contains("export { readShared };"));
+        assert!(
+            helper_source.contains("import { readShared } from '../writer.js';"),
+            "{helper_source}"
+        );
+        assert!(
+            !helper_source.contains("function readShared()"),
+            "{helper_source}"
+        );
+        assert!(!helper_source.contains("var shared;"), "{helper_source}");
+        assert!(
+            !helper_source.contains("__reverts_set_shared"),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source.contains("used = readShared();"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn reader_cluster_runtime_var_migration_rejects_folded_reader_use_with_runtime_dep_cycle() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var suffix = '!';\n",
+            "var used;\n",
+            "function readShared() { return shared + suffix; }\n",
+        );
+        let writer_body = "shared = 'ok';\nexport { shared };\n";
+        let folded_body = concat!(
+            "var initUse = lazy(() => { used = readShared(); });\n",
+            "export { initUse, used };\n",
+        );
+        let consumer_body = "var value = initUse();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "folded", "modules/folded.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(writer_source.contains(
+            "import { shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
+        ));
+        assert!(writer_source.contains("__reverts_set_shared('ok');"));
+        assert!(
+            !writer_source.contains("function readShared()"),
+            "{writer_source}"
+        );
+        assert!(
+            helper_source.contains("function readShared() { return shared + suffix; }"),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source
+                .contains("function __reverts_set_shared(value) { return shared = value; }")
+        );
+        assert!(!helper_source.contains("import { readShared } from '../writer.js';"));
     }
 
     #[test]
