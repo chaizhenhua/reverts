@@ -30,8 +30,8 @@ use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionMatchScore, VersionedPackageMatchReport, clean_package_semantic_path_hint,
     has_accepted_external_attribution, is_exact_package_version_hint, is_json_source_path,
-    match_packages_with_pipeline, ownership_by_module, package_import_names_from_sources,
-    package_module_source_quality, package_source_entry_path,
+    match_packages_with_pipeline, normalize_hint_text, ownership_by_module,
+    package_import_names_from_sources, package_module_source_quality, package_source_entry_path,
     package_source_semantic_surface_hint_score, strip_source_extension,
 };
 use reverts_pipeline::{
@@ -4444,7 +4444,7 @@ fn filter_package_sources_to_best_build_variants(
                         paths
                             .iter()
                             .map(|index| {
-                                package_source_semantic_surface_hint_score(
+                                package_source_semantic_filter_hint_score(
                                     &package_sources[*index],
                                     hint,
                                 )
@@ -4551,8 +4551,31 @@ fn filter_package_sources_to_relevant_path_hints(
         }
         hints
             .iter()
-            .any(|hint| package_source_semantic_surface_hint_score(source, hint.as_str()) > 0)
+            .any(|hint| package_source_semantic_filter_hint_score(source, hint.as_str()) > 0)
     });
+}
+
+fn package_source_semantic_filter_hint_score(source: &PackageSource, hint: &str) -> usize {
+    package_source_semantic_surface_hint_score(source, hint).max(
+        package_source_body_semantic_hint_score(source.source.as_str(), hint),
+    )
+}
+
+fn package_source_body_semantic_hint_score(source: &str, hint: &str) -> usize {
+    let hint = hint.trim().trim_matches('/');
+    if hint.is_empty() {
+        return 0;
+    }
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_hint_text(hint_last_segment);
+    if hint_last_normalized.len() < 4 {
+        return 0;
+    }
+    let source_normalized = normalize_hint_text(source);
+    source_normalized
+        .contains(hint_last_normalized.as_str())
+        .then_some(2)
+        .unwrap_or(0)
 }
 
 fn package_path_hints_by_version(rows: &InputRows) -> BTreeMap<(String, String), BTreeSet<String>> {
@@ -7673,6 +7696,45 @@ mod tests {
                 .any(|source| source.export_specifier == "pkg/public/client"
                     && source.source_path.ends_with("dist/index.js")
                     && source.external_importable),
+            "{sources:?}"
+        );
+    }
+
+    #[test]
+    fn package_source_path_hint_filter_keeps_body_semantic_member_match() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-opentelemetry/api/diag-log-level.ts",
+            "@opentelemetry/api",
+            Some("1.9.1".to_string()),
+        ));
+        let mut sources = (0..300)
+            .map(|index| {
+                PackageSource::source_only(
+                    "@opentelemetry/api",
+                    "1.9.1",
+                    format!("@opentelemetry/api/private-{index}"),
+                    format!("@opentelemetry/api@1.9.1/build/src/private-{index}.js"),
+                    "exports.privateValue = 1;",
+                )
+            })
+            .collect::<Vec<_>>();
+        sources.push(PackageSource::source_only(
+            "@opentelemetry/api",
+            "1.9.1",
+            "@opentelemetry/api/build/src/diag/types",
+            "@opentelemetry/api@1.9.1/build/src/diag/types.js",
+            "exports.DiagLogLevel = void 0;",
+        ));
+
+        filter_package_sources_to_relevant_path_hints(&rows, &mut sources);
+
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.source_path.ends_with("build/src/diag/types.js")),
             "{sources:?}"
         );
     }

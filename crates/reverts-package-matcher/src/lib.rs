@@ -2007,9 +2007,12 @@ fn semantic_source_only_export_member_package_source(
         .copied()
         .filter(|source| !source.external_importable)
         .filter_map(|source| {
+            let export_members = external_source_index.export_members(source);
             let (score, proof) = hints
                 .iter()
-                .map(|hint| semantic_external_source_score(source, hint))
+                .map(|hint| {
+                    semantic_source_only_external_source_score(source, &export_members, hint)
+                })
                 .max_by(|left, right| {
                     left.0
                         .cmp(&right.0)
@@ -2078,6 +2081,7 @@ fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch
 enum SemanticExternalSourceProof {
     SourcePath,
     ExportSurface,
+    ExportMember,
 }
 
 impl SemanticExternalSourceProof {
@@ -2085,6 +2089,7 @@ impl SemanticExternalSourceProof {
         match self {
             Self::SourcePath => "semantic-source",
             Self::ExportSurface => "semantic-export",
+            Self::ExportMember => "semantic-member",
         }
     }
 
@@ -2092,6 +2097,7 @@ impl SemanticExternalSourceProof {
         match self {
             Self::SourcePath => 0,
             Self::ExportSurface => 1,
+            Self::ExportMember => 2,
         }
     }
 }
@@ -2109,6 +2115,80 @@ fn semantic_external_source_score(
     } else {
         (source_score, SemanticExternalSourceProof::SourcePath)
     }
+}
+
+fn semantic_source_only_external_source_score(
+    source: &PackageSource,
+    export_members: &BTreeSet<String>,
+    hint: &str,
+) -> (usize, SemanticExternalSourceProof) {
+    let (path_score, path_proof) = semantic_external_source_score(source, hint);
+    let member_score = if semantic_export_member_hint_source_is_narrow(source, export_members) {
+        semantic_export_member_hint_score(export_members, hint)
+    } else {
+        0
+    };
+    if member_score > path_score
+        || (member_score == path_score
+            && member_score > 0
+            && SemanticExternalSourceProof::ExportMember.rank() > path_proof.rank())
+    {
+        (member_score, SemanticExternalSourceProof::ExportMember)
+    } else {
+        (path_score, path_proof)
+    }
+}
+
+fn semantic_export_member_hint_source_is_narrow(
+    source: &PackageSource,
+    export_members: &BTreeSet<String>,
+) -> bool {
+    if export_members.is_empty() || export_members.len() > 8 {
+        return false;
+    }
+    let relative_path = package_source_relative_path(source);
+    let leaf = strip_source_extension(relative_path.as_str())
+        .trim_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    !matches!(leaf, "" | "index")
+}
+
+fn semantic_export_member_hint_score(export_members: &BTreeSet<String>, hint: &str) -> usize {
+    let hint = hint.trim().trim_matches('/');
+    if hint.is_empty() {
+        return 0;
+    }
+    let hint_last_segment = hint.rsplit('/').next().unwrap_or(hint);
+    let hint_last_normalized = normalize_hint_text(hint_last_segment);
+    if hint_last_normalized.len() < 4 {
+        return 0;
+    }
+    let hint_tokens = path_hint_tokens(hint_last_segment);
+    export_members
+        .iter()
+        .filter_map(|member| {
+            let member_normalized = normalize_hint_text(member);
+            if member_normalized.len() < 4 {
+                return None;
+            }
+            if member_normalized == hint_last_normalized {
+                return Some(3);
+            }
+            let member_tokens = path_hint_tokens(member);
+            if hint_tokens.len() >= 2
+                && !member_tokens.is_empty()
+                && hint_tokens
+                    .iter()
+                    .all(|token| member_tokens.contains(token))
+            {
+                return Some(3);
+            }
+            None
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn exact_importable_package_match_source(
@@ -6452,6 +6532,163 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             target.source_path.ends_with("pkg@1.2.3/dist/index.js"),
             "target should point at the importable public barrel"
         );
+    }
+
+    #[test]
+    fn resolver_promotes_source_only_match_when_semantic_hint_names_exported_member() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "opentelemetryDiagLogLevel",
+            "modules/10-opentelemetry/api/diag-log-level.ts",
+            "@opentelemetry/api",
+            Some("1.9.1".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "@opentelemetry/api".to_string(),
+            package_version: "1.9.1".to_string(),
+            export_specifier: "@opentelemetry/api".to_string(),
+            source_path: "exact-hint:@opentelemetry/api@1.9.1:quality=trusted:semantic_path=modules/10-opentelemetry/api/diag-log-level.ts".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let module_source = r#"
+            Object.defineProperty(Dxq, "__esModule", { value: true });
+            Dxq.DiagLogLevel = void 0;
+            var DiagLogLevel;
+            (function (DiagLogLevel) {
+                DiagLogLevel[DiagLogLevel["NONE"] = 0] = "NONE";
+                DiagLogLevel[DiagLogLevel["ERROR"] = 30] = "ERROR";
+            })(DiagLogLevel = Dxq.DiagLogLevel || (Dxq.DiagLogLevel = {}));
+        "#;
+        let package_sources = [
+            PackageSource::source_only(
+                "@opentelemetry/api",
+                "1.9.1",
+                "@opentelemetry/api/build/src/diag/types",
+                "build/src/diag/types.js",
+                r#"
+                Object.defineProperty(exports, "__esModule", { value: true });
+                exports.DiagLogLevel = void 0;
+                var DiagLogLevel;
+                (function (DiagLogLevel) {
+                    DiagLogLevel[DiagLogLevel["NONE"] = 0] = "NONE";
+                    DiagLogLevel[DiagLogLevel["ERROR"] = 30] = "ERROR";
+                })(DiagLogLevel = exports.DiagLogLevel || (exports.DiagLogLevel = {}));
+                "#,
+            ),
+            PackageSource::source_only(
+                "@opentelemetry/api",
+                "1.9.1",
+                "@opentelemetry/api/build/esm/index.js",
+                "build/esm/index.js",
+                r#"
+                export { DiagLogLevel } from "./diag/types.js";
+                export { trace } from "./trace-api.js";
+                export { context } from "./context-api.js";
+                export { propagation } from "./propagation-api.js";
+                export { metrics } from "./metrics-api.js";
+                export { diag } from "./diag-api.js";
+                export { SpanKind } from "./trace/span_kind.js";
+                export { SpanStatusCode } from "./trace/status.js";
+                export { TraceFlags } from "./trace/trace_flags.js";
+                "#,
+            ),
+            PackageSource::external(
+                "@opentelemetry/api",
+                "1.9.1",
+                "@opentelemetry/api",
+                "build/src/index.js",
+                r#"
+                Object.defineProperty(exports, "__esModule", { value: true });
+                var types_1 = require("./diag/types");
+                Object.defineProperty(exports, "DiagLogLevel", {
+                    enumerable: true,
+                    get: function () { return types_1.DiagLogLevel; }
+                });
+                "#,
+            ),
+        ];
+
+        let target = resolve_external_import_target(
+            &module,
+            "@opentelemetry/api",
+            "1.9.1",
+            Some(&package_match),
+            &package_sources,
+            module_source,
+        )
+        .expect("trusted member-shaped semantic hint should bridge through public root export");
+
+        assert_eq!(target.export_specifier.as_str(), "@opentelemetry/api");
+        assert!(
+            target
+                .source_path
+                .contains("forced-external:export-members:barrel-reference:DiagLogLevel:"),
+            "{}",
+            target.source_path
+        );
+        assert!(target.source_path.ends_with("build/src/index.js"));
+    }
+
+    #[test]
+    fn resolver_rejects_export_member_semantic_bridge_for_weak_hint() {
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "opentelemetryDiagLogLevel",
+            "modules/10-opentelemetry/api/diag-log-level.ts",
+            "@opentelemetry/api",
+            Some("1.9.1".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "@opentelemetry/api".to_string(),
+            package_version: "1.9.1".to_string(),
+            export_specifier: "@opentelemetry/api".to_string(),
+            source_path: "exact-hint:@opentelemetry/api@1.9.1:quality=weak:semantic_path=modules/10-opentelemetry/api/diag-log-level.ts".to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let module_source = "exports.DiagLogLevel = void 0;";
+        let package_sources = [
+            PackageSource::source_only(
+                "@opentelemetry/api",
+                "1.9.1",
+                "@opentelemetry/api/build/src/diag/types",
+                "@opentelemetry/api@1.9.1/build/src/diag/types.js",
+                "exports.DiagLogLevel = void 0;",
+            ),
+            PackageSource::external(
+                "@opentelemetry/api",
+                "1.9.1",
+                "@opentelemetry/api",
+                "@opentelemetry/api@1.9.1/build/src/index.js",
+                r#"
+                var types_1 = require("./diag/types");
+                Object.defineProperty(exports, "DiagLogLevel", {
+                    enumerable: true,
+                    get: function () { return types_1.DiagLogLevel; }
+                });
+                "#,
+            ),
+        ];
+
+        let target = resolve_external_import_target(
+            &module,
+            "@opentelemetry/api",
+            "1.9.1",
+            Some(&package_match),
+            &package_sources,
+            module_source,
+        );
+
+        assert_eq!(target, None);
     }
 
     #[test]
