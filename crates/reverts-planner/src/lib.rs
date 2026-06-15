@@ -13972,20 +13972,33 @@ struct IdentifierReadUsage {
 }
 
 fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
+    try_identifier_read_facts_in_source(source).unwrap_or_default()
+}
+
+fn try_identifier_read_facts_in_source(source: &str) -> Option<Vec<IdentifierReadUsage>> {
     collect_identifier_read_facts(source, None, ParseGoal::TypeScript)
-        .expect("planner identifier reads require parseable generated TypeScript source")
-        .into_iter()
-        .map(|fact| IdentifierReadUsage {
-            name: fact.name,
-            byte_start: fact.byte_start as usize,
-            byte_end: fact.byte_end as usize,
-            is_call_callee: fact.is_call_callee,
+        .ok()
+        .map(|facts| {
+            facts
+                .into_iter()
+                .map(|fact| IdentifierReadUsage {
+                    name: fact.name,
+                    byte_start: fact.byte_start as usize,
+                    byte_end: fact.byte_end as usize,
+                    is_call_callee: fact.is_call_callee,
+                })
+                .collect()
         })
-        .collect()
 }
 
 fn identifier_read_rename_sites_are_safe(source: &str, binding: &BindingName) -> bool {
-    identifier_read_facts_in_source(source)
+    // When the generated source isn't parseable we can't enumerate reads,
+    // so we must declare the rename unsafe rather than admitting it on an
+    // empty fact set (which would silently miss usages).
+    let Some(facts) = try_identifier_read_facts_in_source(source) else {
+        return false;
+    };
+    facts
         .into_iter()
         .filter(|fact| fact.name == binding.as_str())
         .all(|fact| identifier_read_rename_site_is_safe(source, fact.byte_start, fact.byte_end))
@@ -14125,6 +14138,13 @@ fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
 fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
     let bytes = source.as_bytes();
     let before = previous_non_ws(bytes, open_paren)?;
+    // `previous_non_ws` walks raw bytes, so `before` can land inside a
+    // multi-byte UTF-8 sequence. Identifier keywords are ASCII; bail
+    // immediately when the preceding byte isn't ASCII so we never slice
+    // across a char boundary.
+    if !bytes[before].is_ascii() {
+        return None;
+    }
     let mut start = before;
     while start > 0 && is_identifier_continue(bytes[start - 1]) {
         start -= 1;
@@ -14145,6 +14165,9 @@ fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
         Some(index) => index,
         None => return false,
     };
+    if !bytes[await_end].is_ascii() {
+        return false;
+    }
     let mut await_start = await_end;
     while await_start > 0 && is_identifier_continue(bytes[await_start - 1]) {
         await_start -= 1;
@@ -14155,6 +14178,9 @@ fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
     let Some(for_end) = previous_non_ws(bytes, await_start) else {
         return false;
     };
+    if !bytes[for_end].is_ascii() {
+        return false;
+    }
     let mut for_start = for_end;
     while for_start > 0 && is_identifier_continue(bytes[for_start - 1]) {
         for_start -= 1;
@@ -20491,11 +20517,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "planner identifier reads require parseable generated TypeScript source"
-    )]
-    fn identifier_read_scans_reject_unparseable_source() {
-        let _ = super::identifier_read_facts_in_source("function entry(");
+    fn identifier_read_scans_return_none_on_unparseable_source() {
+        // Generated source can contain shapes the TypeScript parser refuses
+        // (e.g. JSX expressions using the comma operator surfaced from real
+        // bundles). The fact extractor must report None so safety-check
+        // callers can declare the rename unsafe rather than admitting on an
+        // empty fact set.
+        assert!(super::try_identifier_read_facts_in_source("function entry(").is_none());
+        assert!(super::identifier_read_facts_in_source("function entry(").is_empty());
     }
 
     fn planned_source(plan: &EmitPlan, path: &str) -> String {
