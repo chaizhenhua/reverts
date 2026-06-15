@@ -782,6 +782,11 @@ impl ImportExportPlanner {
             runtime_lazy_folds,
             &runtime_prelude_direct_imports,
         );
+        let binding_owners = BindingOwnerPlan::from_parts(
+            &runtime_var_migrations,
+            &runtime_prelude_direct_imports,
+            &package_runtime_islands,
+        );
 
         // When a lazy binding is folded into its helper module, the consumer no
         // longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
@@ -846,7 +851,7 @@ impl ImportExportPlanner {
                 let mut direct_stub_exports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
                 for binding in &folded.stub_exports {
                     if let Some(owner_module) =
-                        runtime_var_migrations.migrated_owner(folded.source_file_id, binding)
+                        binding_owners.module_owner(folded.source_file_id, binding)
                     {
                         if owner_module != module.id {
                             direct_stub_exports
@@ -862,8 +867,8 @@ impl ImportExportPlanner {
                     .required_bindings
                     .iter()
                     .filter(|binding| {
-                        runtime_var_migrations
-                            .migrated_owner(folded.source_file_id, binding)
+                        binding_owners
+                            .module_owner(folded.source_file_id, binding)
                             .is_none_or(|owner| owner == module.id)
                     })
                     .cloned()
@@ -961,8 +966,8 @@ impl ImportExportPlanner {
                             let mut direct_bindings =
                                 BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
                             for binding in effective_bindings {
-                                if let Some(owner_module) = runtime_var_migrations
-                                    .migrated_owner(folded.source_file_id, &binding)
+                                if let Some(owner_module) =
+                                    binding_owners.module_owner(folded.source_file_id, &binding)
                                     && owner_module != module.id
                                 {
                                     direct_bindings
@@ -1361,8 +1366,7 @@ impl ImportExportPlanner {
                     continue;
                 }
                 let import_partition = partition_runtime_owner_bindings(
-                    &runtime_var_migrations,
-                    &runtime_prelude_direct_imports,
+                    &binding_owners,
                     source_file_id,
                     module.id,
                     bindings,
@@ -1379,8 +1383,7 @@ impl ImportExportPlanner {
             let mut lowered_import_partition = lowered_source
                 .map(|lowered_source| {
                     partition_runtime_owner_bindings(
-                        &runtime_var_migrations,
-                        &runtime_prelude_direct_imports,
+                        &binding_owners,
                         lowered_source.source_file_id,
                         module.id,
                         remaining_runtime_helpers.clone(),
@@ -1589,14 +1592,14 @@ impl ImportExportPlanner {
                 );
                 let (package_remaining_helpers, remaining_runtime_helpers) =
                     partition_package_runtime_bindings(
-                        &package_runtime_islands,
+                        &binding_owners,
                         package_runtime_owner.as_ref(),
                         lowered_source.source_file_id,
                         &remaining_runtime_helpers,
                     );
                 let (package_written_helpers, written_runtime_helpers) =
                     partition_package_runtime_bindings(
-                        &package_runtime_islands,
+                        &binding_owners,
                         package_runtime_owner.as_ref(),
                         lowered_source.source_file_id,
                         &written_runtime_helpers,
@@ -1639,7 +1642,7 @@ impl ImportExportPlanner {
                                 );
                             let (_package_bindings, runtime_bindings) =
                                 partition_package_runtime_bindings(
-                                    &package_runtime_islands,
+                                    &binding_owners,
                                     package_runtime_owner.as_ref(),
                                     *source_file_id,
                                     &runtime_bindings,
@@ -1772,7 +1775,7 @@ impl ImportExportPlanner {
                     &inline_bindings,
                 );
                 let (package_bindings, bindings) = partition_package_runtime_bindings(
-                    &package_runtime_islands,
+                    &binding_owners,
                     package_runtime_owner.as_ref(),
                     source_file_id,
                     &runtime_bindings,
@@ -2202,8 +2205,12 @@ impl ImportExportPlanner {
                 runtime_var_migrations.extra_namespace_export_bindings_for_source(*source_file_id);
             let migrations_for_source =
                 runtime_var_migrations.primary_bindings_for_source(*source_file_id);
-            let migrated_bindings_for_source =
-                runtime_var_migrations.migrated_bindings_for_source(*source_file_id);
+            let module_owned_bindings_for_source =
+                binding_owners.module_owners_for_source(*source_file_id);
+            let module_owned_binding_names_for_source = module_owned_bindings_for_source
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>();
             let entrypoint = prelude
                 .entrypoint
                 .as_ref()
@@ -2237,7 +2244,7 @@ impl ImportExportPlanner {
             if let Some(setter_targets) = used_runtime_helper_setters.get(source_file_id) {
                 root_bindings.extend(setter_targets.iter().cloned());
             }
-            for binding in migrated_bindings_for_source.keys() {
+            for binding in &module_owned_binding_names_for_source {
                 root_bindings.remove(binding);
             }
             if let Some(entrypoint) = entrypoint {
@@ -2255,7 +2262,7 @@ impl ImportExportPlanner {
                     }
                 }
             }
-            for binding in migrated_bindings_for_source.keys() {
+            for binding in &module_owned_binding_names_for_source {
                 root_bindings.remove(binding);
             }
             let folded_chunks = runtime_lazy_folds
@@ -2263,8 +2270,13 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let mut helper_closure =
-                close_runtime_helper_source(prelude, &root_bindings, entrypoint, folded_chunks);
+            let mut helper_closure = close_runtime_helper_source_excluding(
+                prelude,
+                &root_bindings,
+                entrypoint,
+                folded_chunks,
+                &module_owned_binding_names_for_source,
+            );
             // Phase 9a: collapse `__reverts_set_X(arg)` → `(X = arg)`
             // whenever the call sits inside the runtime helpers module
             // itself. Same-module direct assignment is observationally
@@ -2364,10 +2376,10 @@ impl ImportExportPlanner {
                 &helper_closure.emitted_bindings,
                 externalized_packages,
             );
-            let mut helper_imports = runtime_migrated_owner_imports_for_source(
+            let mut helper_imports = runtime_module_owner_imports_for_source(
                 helper_closure.source.as_str(),
                 &helper_closure.emitted_bindings,
-                &migrated_bindings_for_source,
+                &module_owned_bindings_for_source,
                 runtime_externalized_binding_scan.source_module_imports,
             );
             for (module_id, bindings) in
@@ -2413,7 +2425,7 @@ impl ImportExportPlanner {
                 .get(source_file_id)
                 .cloned()
                 .unwrap_or_default();
-            // Phase 10b: skip setter functions for migrated bindings;
+            // Phase 10b: skip setter functions for migrated primary bindings;
             // the writer module now mutates them via direct assignment.
             let setter_bindings: BTreeSet<BindingName> = setter_bindings
                 .difference(
@@ -2443,10 +2455,10 @@ impl ImportExportPlanner {
                     .iter()
                     .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
             );
-            // Phase 10b: drop migrated bindings from the runtime helper's
+            // Phase 10b: drop module-owned bindings from the runtime helper's
             // own named export. All consumers should import the owner module
             // directly; the runtime file is no longer a compatibility barrel.
-            for binding in migrated_bindings_for_source.keys() {
+            for binding in &module_owned_binding_names_for_source {
                 exported_bindings.remove(binding);
             }
             if exports_lazy_module {
@@ -2460,7 +2472,7 @@ impl ImportExportPlanner {
             }
             for binding in public_helper_bindings
                 .iter()
-                .filter(|binding| !migrated_bindings_for_source.contains_key(*binding))
+                .filter(|binding| !module_owned_bindings_for_source.contains_key(*binding))
                 .cloned()
             {
                 file.add_binding(PlannedBinding::new(
@@ -3108,23 +3120,6 @@ impl RuntimeVarMigrationPlan {
             .collect()
     }
 
-    fn migrated_bindings_for_source(&self, source_file_id: u32) -> BTreeMap<BindingName, ModuleId> {
-        let mut bindings = BTreeMap::new();
-        for (binding, migration) in &self.migrations_by_binding {
-            if migration.source_file_id != source_file_id {
-                continue;
-            }
-            bindings.insert(binding.clone(), migration.owner_module);
-            for extra in &migration.extra_snippets {
-                bindings.insert(extra.clone(), migration.owner_module);
-            }
-            for namespace in &migration.extra_namespace_exports {
-                bindings.insert(namespace.clone(), migration.owner_module);
-            }
-        }
-        bindings
-    }
-
     fn migrated_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
         for (primary, migration) in &self.migrations_by_binding {
             if migration.source_file_id != source_file_id {
@@ -3674,17 +3669,6 @@ struct PackageRuntimeIslandPlan {
     owners_by_binding: BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
 }
 
-impl PackageRuntimeIslandPlan {
-    fn owner_for(
-        &self,
-        source_file_id: u32,
-        binding: &BindingName,
-    ) -> Option<&PackageRuntimeOwner> {
-        self.owners_by_binding
-            .get(&(source_file_id, binding.clone()))
-    }
-}
-
 fn package_runtime_owner_for_module(
     module: &ModuleInput,
     externalized_packages: &BTreeSet<ModuleId>,
@@ -4021,7 +4005,7 @@ fn module_dependency_reaches_any(
 }
 
 fn partition_package_runtime_bindings(
-    package_runtime_islands: &PackageRuntimeIslandPlan,
+    binding_owners: &BindingOwnerPlan,
     package_runtime_owner: Option<&PackageRuntimeOwner>,
     source_file_id: u32,
     bindings: &BTreeSet<BindingName>,
@@ -4030,8 +4014,8 @@ fn partition_package_runtime_bindings(
     let mut runtime_bindings = BTreeSet::<BindingName>::new();
     for binding in bindings {
         if let Some(owner) = package_runtime_owner
-            && package_runtime_islands
-                .owner_for(source_file_id, binding)
+            && binding_owners
+                .package_runtime_owner(source_file_id, binding)
                 .is_some_and(|candidate| candidate == owner)
         {
             package_bindings.insert(binding.clone());
@@ -4311,6 +4295,124 @@ fn emit_package_runtime_helper_files(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BindingOwner {
+    Module(ModuleId),
+    Runtime,
+    PackageRuntime(PackageRuntimeOwner),
+    PreludeImport(RuntimePreludeDirectImport),
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct BindingOwnerPlan {
+    owners_by_binding: BTreeMap<(u32, BindingName), BindingOwner>,
+}
+
+impl BindingOwnerPlan {
+    // Rebuild one canonical owner table for runtime-defined bindings. The
+    // insertion order is intentional: package islands are the broadest owner,
+    // direct prelude imports are more specific, and runtime var migrations
+    // (including their moved reader snippets/namespace exports) are the final
+    // authority.
+    fn from_parts(
+        runtime_var_migrations: &RuntimeVarMigrationPlan,
+        runtime_prelude_direct_imports: &BTreeMap<
+            u32,
+            BTreeMap<BindingName, RuntimePreludeDirectImport>,
+        >,
+        package_runtime_islands: &PackageRuntimeIslandPlan,
+    ) -> Self {
+        let mut owners_by_binding = BTreeMap::<(u32, BindingName), BindingOwner>::new();
+
+        for ((source_file_id, binding), owner) in &package_runtime_islands.owners_by_binding {
+            owners_by_binding.insert(
+                (*source_file_id, binding.clone()),
+                BindingOwner::PackageRuntime(owner.clone()),
+            );
+        }
+
+        for (source_file_id, imports) in runtime_prelude_direct_imports {
+            for (binding, import) in imports {
+                owners_by_binding.insert(
+                    (*source_file_id, binding.clone()),
+                    BindingOwner::PreludeImport(import.clone()),
+                );
+            }
+        }
+
+        for (binding, migration) in &runtime_var_migrations.migrations_by_binding {
+            owners_by_binding.insert(
+                (migration.source_file_id, binding.clone()),
+                BindingOwner::Module(migration.owner_module),
+            );
+            for extra in &migration.extra_snippets {
+                owners_by_binding.insert(
+                    (migration.source_file_id, extra.clone()),
+                    BindingOwner::Module(migration.owner_module),
+                );
+            }
+            for namespace in &migration.extra_namespace_exports {
+                owners_by_binding.insert(
+                    (migration.source_file_id, namespace.clone()),
+                    BindingOwner::Module(migration.owner_module),
+                );
+            }
+        }
+
+        Self { owners_by_binding }
+    }
+
+    fn owner_for(&self, source_file_id: u32, binding: &BindingName) -> BindingOwner {
+        self.owners_by_binding
+            .get(&(source_file_id, binding.clone()))
+            .cloned()
+            .unwrap_or(BindingOwner::Runtime)
+    }
+
+    fn module_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
+        match self.owner_for(source_file_id, binding) {
+            BindingOwner::Module(owner) => Some(owner),
+            BindingOwner::Runtime
+            | BindingOwner::PackageRuntime(_)
+            | BindingOwner::PreludeImport(_) => None,
+        }
+    }
+
+    fn module_owners_for_source(&self, source_file_id: u32) -> BTreeMap<BindingName, ModuleId> {
+        self.owners_by_binding
+            .iter()
+            .filter_map(|((owner_source_file_id, binding), owner)| {
+                if *owner_source_file_id != source_file_id {
+                    return None;
+                }
+                match owner {
+                    BindingOwner::Module(owner_module) => Some((binding.clone(), *owner_module)),
+                    BindingOwner::Runtime
+                    | BindingOwner::PackageRuntime(_)
+                    | BindingOwner::PreludeImport(_) => None,
+                }
+            })
+            .collect()
+    }
+
+    fn package_runtime_owner(
+        &self,
+        source_file_id: u32,
+        binding: &BindingName,
+    ) -> Option<&PackageRuntimeOwner> {
+        match self
+            .owners_by_binding
+            .get(&(source_file_id, binding.clone()))
+        {
+            Some(BindingOwner::PackageRuntime(owner)) => Some(owner),
+            Some(
+                BindingOwner::Module(_) | BindingOwner::Runtime | BindingOwner::PreludeImport(_),
+            )
+            | None => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RuntimeOwnerImportPartition {
     runtime_bindings: BTreeSet<BindingName>,
@@ -4350,34 +4452,27 @@ enum RuntimePreludeDirectImportKind {
 }
 
 fn partition_runtime_owner_bindings(
-    migrations: &RuntimeVarMigrationPlan,
-    direct_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
+    binding_owners: &BindingOwnerPlan,
     source_file_id: u32,
     current_module: ModuleId,
     bindings: BTreeSet<BindingName>,
 ) -> RuntimeOwnerImportPartition {
     let mut partition = RuntimeOwnerImportPartition::default();
-    let direct_imports_for_source = direct_imports.get(&source_file_id);
     for binding in bindings {
-        match migrations.migrated_owner(source_file_id, &binding) {
-            Some(owner) if owner != current_module => {
+        match binding_owners.owner_for(source_file_id, &binding) {
+            BindingOwner::Module(owner) if owner != current_module => {
                 partition
                     .direct_imports
                     .entry(owner)
                     .or_default()
                     .insert(binding);
             }
-            Some(_owner_is_current_module) => {}
-            None => {
-                if let Some(import) =
-                    direct_imports_for_source.and_then(|imports| imports.get(&binding))
-                {
-                    partition
-                        .direct_prelude_imports
-                        .insert(binding, import.clone());
-                } else {
-                    partition.runtime_bindings.insert(binding);
-                }
+            BindingOwner::Module(_owner_is_current_module) => {}
+            BindingOwner::PreludeImport(import) => {
+                partition.direct_prelude_imports.insert(binding, import);
+            }
+            BindingOwner::Runtime | BindingOwner::PackageRuntime(_) => {
+                partition.runtime_bindings.insert(binding);
             }
         }
     }
@@ -9882,7 +9977,24 @@ fn close_runtime_helper_source(
     entrypoint: Option<&RuntimeEntrypoint>,
     folded_chunks: &[RuntimeFoldedSourceChunk],
 ) -> ClosedRuntimeHelperSource {
-    let mut source_bindings = prelude.required_bindings_for(root_bindings.iter());
+    close_runtime_helper_source_excluding(
+        prelude,
+        root_bindings,
+        entrypoint,
+        folded_chunks,
+        &BTreeSet::new(),
+    )
+}
+
+fn close_runtime_helper_source_excluding(
+    prelude: &RuntimePrelude,
+    root_bindings: &BTreeSet<BindingName>,
+    entrypoint: Option<&RuntimeEntrypoint>,
+    folded_chunks: &[RuntimeFoldedSourceChunk],
+    excluded_bindings: &BTreeSet<BindingName>,
+) -> ClosedRuntimeHelperSource {
+    let mut source_bindings =
+        runtime_required_bindings_excluding(prelude, root_bindings.iter(), excluded_bindings);
 
     loop {
         let namespace_exports = runtime_namespace_exports_for_helpers(prelude, &source_bindings);
@@ -9891,7 +10003,8 @@ fn close_runtime_helper_source(
             roots.extend(namespace_export.exports.values().cloned());
         }
 
-        let source_bindings_with_namespaces = prelude.required_bindings_for(roots.iter());
+        let source_bindings_with_namespaces =
+            runtime_required_bindings_excluding(prelude, roots.iter(), excluded_bindings);
         let helper_source = runtime_helper_source(
             prelude,
             &source_bindings_with_namespaces,
@@ -9902,11 +10015,12 @@ fn close_runtime_helper_source(
         let mut next_roots = source_bindings_with_namespaces.clone();
         for identifier in runtime_import_identifiers_in_source(helper_source.as_str()) {
             let binding = BindingName::new(identifier);
-            if prelude.defines(&binding) {
+            if prelude.defines(&binding) && !excluded_bindings.contains(&binding) {
                 next_roots.insert(binding);
             }
         }
-        let next_source_bindings = prelude.required_bindings_for(next_roots.iter());
+        let next_source_bindings =
+            runtime_required_bindings_excluding(prelude, next_roots.iter(), excluded_bindings);
         if next_source_bindings == source_bindings_with_namespaces {
             let namespace_exports =
                 runtime_namespace_exports_for_helpers(prelude, &next_source_bindings);
@@ -9929,6 +10043,18 @@ fn close_runtime_helper_source(
 
         source_bindings = next_source_bindings;
     }
+}
+
+fn runtime_required_bindings_excluding<'a>(
+    prelude: &RuntimePrelude,
+    roots: impl Iterator<Item = &'a BindingName>,
+    excluded_bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    prelude
+        .required_bindings_for(roots)
+        .difference(excluded_bindings)
+        .cloned()
+        .collect()
 }
 
 fn emitted_runtime_helper_bindings(
@@ -10903,10 +11029,10 @@ fn scan_runtime_externalized_bindings(
     }
 }
 
-fn runtime_migrated_owner_imports_for_source(
+fn runtime_module_owner_imports_for_source(
     source: &str,
     satisfied_runtime_bindings: &BTreeSet<BindingName>,
-    migrated_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
+    module_owned_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
     mut imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut identifiers = runtime_import_identifiers_in_source(source);
@@ -10916,7 +11042,7 @@ fn runtime_migrated_owner_imports_for_source(
         if satisfied_runtime_bindings.contains(&binding) {
             continue;
         }
-        let Some(owner_module) = migrated_bindings_for_source.get(&binding) else {
+        let Some(owner_module) = module_owned_bindings_for_source.get(&binding) else {
             continue;
         };
         imports
@@ -17702,6 +17828,196 @@ mod tests {
         assert_eq!(coalesced.matches("from 'path'").count(), 1);
         assert!(coalesced.contains("import * as fsNS from 'fs';"));
         assert!(coalesced.contains("function use()"));
+    }
+
+    #[test]
+    fn binding_owner_plan_applies_global_precedence() {
+        let source_file_id = 1;
+        let migrated = BindingName::new("migratedState");
+        let migrated_reader = BindingName::new("readMigratedState");
+        let prelude_imported = BindingName::new("pathJoin");
+        let package_owned = BindingName::new("packageHelper");
+        let runtime_owned = BindingName::new("sharedRuntime");
+        let package_owner = super::PackageRuntimeOwner {
+            name: "pkg".to_string(),
+            version: "1.0.0".to_string(),
+        };
+
+        let mut migrations = super::RuntimeVarMigrationPlan::default();
+        migrations.insert(
+            migrated.clone(),
+            super::RuntimeVarMigration {
+                owner_module: ModuleId(7),
+                source_file_id,
+                extra_snippets: BTreeSet::from([migrated_reader.clone()]),
+                extra_namespace_exports: BTreeSet::new(),
+                extra_runtime_deps: BTreeSet::new(),
+                extra_runtime_setter_deps: BTreeSet::new(),
+                extra_runtime_dep_aliases: BTreeMap::new(),
+                extra_source_deps: BTreeMap::new(),
+                extra_runtime_reexport_source_deps: BTreeMap::new(),
+                extra_noop_deps: BTreeSet::new(),
+                initializer: None,
+            },
+        );
+        let direct_import = super::RuntimePreludeDirectImport {
+            source: "path".to_string(),
+            snippet_source: "import { join as pathJoin } from 'path';".to_string(),
+            snippet_byte_start: 0,
+            kind: super::RuntimePreludeDirectImportKind::Named {
+                imported: "join".to_string(),
+            },
+        };
+        let direct_imports = BTreeMap::from([(
+            source_file_id,
+            BTreeMap::from([
+                (prelude_imported.clone(), direct_import.clone()),
+                // A direct-import-looking binding that was later migrated must
+                // be owned by its module; migration wins over prelude/package
+                // routing in the global owner table.
+                (migrated.clone(), direct_import.clone()),
+            ]),
+        )]);
+        let package_islands = super::PackageRuntimeIslandPlan {
+            owners_by_binding: BTreeMap::from([
+                (
+                    (source_file_id, package_owned.clone()),
+                    package_owner.clone(),
+                ),
+                (
+                    (source_file_id, prelude_imported.clone()),
+                    package_owner.clone(),
+                ),
+            ]),
+        };
+
+        let owners =
+            super::BindingOwnerPlan::from_parts(&migrations, &direct_imports, &package_islands);
+
+        assert_eq!(
+            owners.module_owner(source_file_id, &migrated),
+            Some(ModuleId(7))
+        );
+        assert_eq!(
+            owners.module_owner(source_file_id, &migrated_reader),
+            Some(ModuleId(7))
+        );
+        assert_eq!(
+            owners.package_runtime_owner(source_file_id, &package_owned),
+            Some(&package_owner)
+        );
+        assert!(matches!(
+            owners.owner_for(source_file_id, &prelude_imported),
+            super::BindingOwner::PreludeImport(_)
+        ));
+        assert!(matches!(
+            owners.owner_for(source_file_id, &runtime_owned),
+            super::BindingOwner::Runtime
+        ));
+
+        let partition = super::partition_runtime_owner_bindings(
+            &owners,
+            source_file_id,
+            ModuleId(3),
+            BTreeSet::from([
+                migrated.clone(),
+                prelude_imported.clone(),
+                package_owned.clone(),
+                runtime_owned.clone(),
+            ]),
+        );
+        assert_eq!(
+            partition.direct_imports.get(&ModuleId(7)),
+            Some(&BTreeSet::from([migrated.clone()]))
+        );
+        assert!(
+            partition
+                .direct_prelude_imports
+                .contains_key(&prelude_imported)
+        );
+        assert!(partition.runtime_bindings.contains(&package_owned));
+        assert!(partition.runtime_bindings.contains(&runtime_owned));
+    }
+
+    #[test]
+    fn runtime_helper_closure_excludes_module_owned_transitive_bindings() {
+        let keep = "function keep() { return movedReader() + localDep(); }";
+        let moved_reader = "function movedReader() { return movedDep(); }";
+        let moved_dep = "function movedDep() { return 1; }";
+        let local_dep = "function localDep() { return 2; }";
+        let source = [keep, moved_reader, moved_dep, local_dep].join("\n");
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source,
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("keep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("movedReader"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("movedDep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("localDep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (BindingName::new("keep"), snippet(keep)),
+                (BindingName::new("movedReader"), snippet(moved_reader)),
+                (BindingName::new("movedDep"), snippet(moved_dep)),
+                (BindingName::new("localDep"), snippet(local_dep)),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+
+        let helper_closure = super::close_runtime_helper_source_excluding(
+            &prelude,
+            &BTreeSet::from([BindingName::new("keep")]),
+            None,
+            &[],
+            &BTreeSet::from([
+                BindingName::new("movedReader"),
+                BindingName::new("movedDep"),
+            ]),
+        );
+
+        assert!(helper_closure.source.contains("function keep()"));
+        assert!(helper_closure.source.contains("function localDep()"));
+        assert!(helper_closure.source.contains("movedReader()"));
+        assert!(!helper_closure.source.contains("function movedReader()"));
+        assert!(!helper_closure.source.contains("function movedDep()"));
+        assert!(
+            helper_closure
+                .emitted_bindings
+                .contains(&BindingName::new("keep"))
+        );
+        assert!(
+            helper_closure
+                .emitted_bindings
+                .contains(&BindingName::new("localDep"))
+        );
+        assert!(
+            !helper_closure
+                .emitted_bindings
+                .contains(&BindingName::new("movedReader"))
+        );
     }
 
     #[test]
