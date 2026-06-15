@@ -1,6 +1,7 @@
 use reverts_analyze::rollup::db::{Snapshot, load_snapshot};
 use reverts_analyze::rollup::oracle::{OracleConfig, OracleVerdict, build_oracle};
 use reverts_analyze::rollup::projection::{Projection, ProjectionKind, project};
+use reverts_analyze::rollup::report::{RollupReport, summarize};
 use rusqlite::Connection;
 
 fn seed() -> Connection {
@@ -137,4 +138,23 @@ fn projection_promotes_closure_modules_when_pkg_externalizable() {
         ProjectionKind::RolledUp { top_specifier } => assert_eq!(top_specifier, "lodash"),
         other => panic!("module 3: expected RolledUp, got {other:?}"),
     }
+}
+
+#[test]
+fn report_aggregates_global_and_per_package() {
+    let conn = seed();
+    let snap = load_snapshot(&conn).unwrap();
+    let oracle = build_oracle(&snap, OracleConfig::default());
+    let projections = project(&snap, &oracle);
+    let report: RollupReport = summarize(&snap, &projections);
+    assert_eq!(report.global.package_modules, 3);
+    assert_eq!(report.global.already_accepted, 1);
+    assert_eq!(report.global.rolled_up, 2);
+    assert!((report.global.projected_ratio - 1.0).abs() < 1e-9);
+    let lodash = report
+        .per_package
+        .iter()
+        .find(|p| p.package_name == "lodash")
+        .unwrap();
+    assert_eq!(lodash.projected_external, 3);
 }
