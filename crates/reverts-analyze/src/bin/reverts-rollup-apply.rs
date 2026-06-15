@@ -16,7 +16,10 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut db: Option<PathBuf> = None;
     let mut dry_run = true;
-    let mut policy_version: i64 = 2;
+    // Must match `reverts_input::PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION`
+    // or the sqlite loader silently downgrades the row back to rejected /
+    // application_source as a defense-in-depth check.
+    let mut policy_version: i64 = reverts_input::PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION;
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
