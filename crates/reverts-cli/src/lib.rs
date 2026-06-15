@@ -8590,8 +8590,8 @@ mod tests {
 
     use reverts_input::{
         InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
-        PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput, ProjectInput,
-        SourceFileInput,
+        PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput,
+        PackageAttributionStatus, ProjectInput, SourceFileInput,
     };
     use reverts_ir::{BindingName, ModuleId, ModuleKind};
     use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -9738,7 +9738,12 @@ mod tests {
     }
 
     #[test]
-    fn revalidation_removes_external_attributions_for_expanded_component() {
+    fn revalidation_preserves_accepted_external_attributions() {
+        // An accepted external_import row in InputRows already survived the
+        // sqlite loader's policy-version check, so the matcher/oracle pipeline
+        // previously approved it. Re-validation must preserve such rows so
+        // the rollup state persisted by a prior match-packages run is not
+        // wiped on every subsequent invocation.
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.package_attributions
             .push(PackageAttributionInput::accepted_external(
@@ -9767,12 +9772,41 @@ mod tests {
             &BTreeSet::from(["alpha".to_string(), "beta".to_string()]),
         );
 
-        assert_eq!(removed, 2);
+        assert_eq!(
+            removed, 0,
+            "accepted external imports must not be revalidated"
+        );
+        assert_eq!(rows.package_attributions.len(), 3);
+    }
+
+    #[test]
+    fn revalidation_drops_only_non_accepted_external_attributions_in_scope() {
+        // Proposed and rejected rows for in-scope packages still need to be
+        // revalidated — only accepted rows are oracle-approved survivors.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "alpha",
+                "1.0.0",
+                "alpha",
+            ));
+        let mut proposed =
+            PackageAttributionInput::accepted_external(ModuleId(11), "alpha", "1.0.0", "alpha");
+        proposed.status = PackageAttributionStatus::Proposed;
+        rows.package_attributions.push(proposed);
+
+        let removed = remove_package_attributions_for_revalidation(
+            &mut rows,
+            &BTreeSet::from(["alpha".to_string()]),
+        );
+
+        assert_eq!(removed, 1, "proposed external import must be revalidated");
         assert_eq!(rows.package_attributions.len(), 1);
         assert_eq!(
-            rows.package_attributions[0].package_name.as_str(),
-            "delta",
-            "external imports outside the expanded package component stay as existing proof"
+            rows.package_attributions[0].status,
+            PackageAttributionStatus::Accepted,
+            "accepted survivor stays"
         );
     }
 

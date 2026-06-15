@@ -19,7 +19,7 @@ use std::error::Error;
 use std::fmt;
 
 use reverts_input::PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION;
-use rusqlite::{Transaction, params};
+use rusqlite::{Connection, Transaction, params};
 
 use crate::rollup::db::Snapshot;
 use crate::rollup::oracle::{Oracle, OracleVerdict};
@@ -111,6 +111,18 @@ pub fn apply_rollup_projections(
     oracle: &Oracle,
     now_iso8601: &str,
 ) -> Result<ApplyOutcome, ApplyError> {
+    // The rollup pass needs both `package_surfaces` (for the surface
+    // backfill INSERT) and `package_attributions.external_import_policy_version`
+    // (so the rows we write are honored by the sqlite loader). An older
+    // database or an ad-hoc test fixture may be missing either; in that case
+    // the rollup is a safe no-op rather than a failure that would abort the
+    // whole match-packages invocation.
+    if !table_exists(tx, "package_surfaces")?
+        || !table_exists(tx, "package_attributions")?
+        || !column_exists(tx, "package_attributions", "external_import_policy_version")?
+    {
+        return Ok(ApplyOutcome::default());
+    }
     let plan = collect_rollups(snapshot, oracle);
 
     // Sanity-check: every row in `plan` came from a `ProjectionKind::RolledUp`
@@ -187,6 +199,27 @@ pub fn apply_rollup_projections(
         surfaces_inserted,
         candidate_modules: plan.len(),
     })
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, rusqlite::Error> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
