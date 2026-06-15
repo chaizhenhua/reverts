@@ -915,6 +915,9 @@ dependencies = [
  "reverts-model",
  "reverts-observe",
  "reverts-package",
+ "rusqlite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
