@@ -6625,21 +6625,18 @@ fn add_global_owned_runtime_snippet_migrations(
                     snippet.source.as_str(),
                 )
                 || read_index.entrypoint_callee.as_ref() == Some(binding)
-                || read_index.non_snippet_runtime_reads.contains(binding)
             {
                 continue;
             }
             eligible_movable_bindings.insert(binding.clone());
-            let owner_module = source_definition_modules
+            let definition_owner = source_definition_modules
                 .get(binding)
-                .and_then(|module_id| *module_id)
-                .or_else(|| {
-                    read_index
-                        .namespace_exports_by_namespace
-                        .get(binding)
-                        .and_then(|namespace_export| {
-                            namespace_export_owner(namespace_export, &source_definition_modules)
-                        })
+                .and_then(|module_id| *module_id);
+            let namespace_owner = read_index
+                .namespace_exports_by_namespace
+                .get(binding)
+                .and_then(|namespace_export| {
+                    namespace_export_owner(namespace_export, &source_definition_modules)
                 });
             let span_owner = runtime_snippet_source_span_owner(
                 program.model().modules(),
@@ -6648,19 +6645,8 @@ fn add_global_owned_runtime_snippet_migrations(
                 snippet.source.len(),
                 externalized_packages,
             );
-            let owner_module = match (span_owner, owner_module) {
-                (Some(span_owner), Some(definition_owner))
-                    if span_owner != definition_owner
-                        && source_definition_modules
-                            .get(binding)
-                            .and_then(|module_id| *module_id)
-                            .is_some() =>
-                {
-                    None
-                }
-                (Some(span_owner), _) => Some(span_owner),
-                (None, owner_module) => owner_module,
-            };
+            let owner_module =
+                global_runtime_snippet_owner(definition_owner, namespace_owner, span_owner);
             let Some(owner_module) = owner_module else {
                 continue;
             };
@@ -6690,6 +6676,10 @@ fn add_global_owned_runtime_snippet_migrations(
             &owner_available_bindings,
             &folded_modules,
         );
+        let owner_runtime_state = runtime_reader_owner_runtime_state(
+            lowered_runtime_sources,
+            candidate_owners.values().copied(),
+        );
 
         for (binding, migration) in closed_global_owned_runtime_snippets(
             prelude,
@@ -6697,10 +6687,24 @@ fn add_global_owned_runtime_snippet_migrations(
             &candidate_owners,
             &owner_available_bindings,
             &module_dependencies_by_owner,
+            &owner_runtime_state,
         ) {
             plan.insert_owned_snippet(binding, migration);
         }
     }
+}
+
+fn global_runtime_snippet_owner(
+    definition_owner: Option<ModuleId>,
+    namespace_owner: Option<ModuleId>,
+    span_owner: Option<ModuleId>,
+) -> Option<ModuleId> {
+    // Source spans are useful when the runtime binding has no recovered symbol,
+    // but they are lossy for bundled lazy stubs: a large function/class can be
+    // hoisted into runtime while the owning module span only covers the tiny
+    // lazy wrapper that initializes its package/module. A unique source-local
+    // symbol owner is therefore stronger than a conflicting span overlap.
+    definition_owner.or(span_owner).or(namespace_owner)
 }
 
 fn namespace_export_owner(
@@ -6733,7 +6737,7 @@ fn runtime_snippet_source_span_owner<'a>(
         byte_end = byte_start.saturating_add(1);
     }
 
-    let mut owners = modules
+    let candidate_spans = modules
         .into_iter()
         .filter(|module| module.source_file_id == Some(source_file_id))
         .filter(|module| {
@@ -6741,8 +6745,42 @@ fn runtime_snippet_source_span_owner<'a>(
         })
         .filter_map(|module| {
             let span = module.source_span?;
-            (span.byte_start < byte_end && byte_start < span.byte_end).then_some(module.id)
+            (span.byte_start < byte_end && byte_start < span.byte_end).then_some((module.id, span))
         })
+        .collect::<Vec<_>>();
+
+    // Prefer a true containment owner over a generic overlap. Bundler module
+    // spans can overlap when a wrapper/source unit was split again later; the
+    // smallest unique containing span is the most specific owner and avoids
+    // conservatively dropping recoverable runtime classes/functions as
+    // ambiguous. Fall back to the historical unique-overlap gate when no
+    // containing span exists.
+    let containing = candidate_spans
+        .iter()
+        .filter(|(_, span)| span.byte_start <= byte_start && byte_end <= span.byte_end)
+        .map(|(module_id, span)| {
+            (
+                span.byte_end.saturating_sub(span.byte_start),
+                span.byte_start,
+                span.byte_end,
+                *module_id,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if let Some((best_len, _best_start, _best_end, owner)) = containing.iter().next().copied() {
+        let equally_specific = containing
+            .iter()
+            .filter(|(len, _start, _end, _)| *len == best_len)
+            .count();
+        if equally_specific == 1 {
+            return Some(owner);
+        }
+        return None;
+    }
+
+    let mut owners = candidate_spans
+        .into_iter()
+        .map(|(module_id, _)| module_id)
         .collect::<BTreeSet<_>>();
     let owner = owners.pop_first()?;
     owners.is_empty().then_some(owner)
@@ -6828,6 +6866,7 @@ fn closed_global_owned_runtime_snippets(
     candidate_owners: &BTreeMap<BindingName, ModuleId>,
     owner_available_bindings: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
     module_dependencies_by_owner: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    owner_runtime_state: &BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
 ) -> BTreeMap<BindingName, RuntimeOwnedSnippetMigration> {
     let mut selected = candidate_owners.clone();
     loop {
@@ -6838,7 +6877,6 @@ fn closed_global_owned_runtime_snippets(
                 continue;
             };
             if read_index.entrypoint_callee.as_ref() == Some(binding)
-                || read_index.non_snippet_runtime_reads.contains(binding)
                 || read_index.namespace_export_helpers.contains(binding)
             {
                 removed.push(binding.clone());
@@ -6851,7 +6889,7 @@ fn closed_global_owned_runtime_snippets(
                 .map(BindingName::new)
                 .filter(|dep| prelude.defines(dep))
                 .collect::<BTreeSet<_>>();
-            if runtime_reads.iter().any(|dep| {
+            let blocking_cross_owner_dep = runtime_reads.iter().find(|dep| {
                 let Some(dep_owner) = selected.get(dep) else {
                     return false;
                 };
@@ -6863,7 +6901,8 @@ fn closed_global_owned_runtime_snippets(
                         *owner_module,
                         *dep_owner,
                     )
-            }) {
+            });
+            if blocking_cross_owner_dep.is_some() {
                 removed.push(binding.clone());
                 continue;
             }
@@ -6873,19 +6912,52 @@ fn closed_global_owned_runtime_snippets(
                 .filter(|write| !local_bindings.contains(write.as_str()))
                 .filter(|write| prelude.defines(write))
                 .collect::<BTreeSet<_>>();
-            if runtime_writes.iter().any(|dep| {
+            let blocking_write = runtime_writes.iter().find(|dep| {
                 selected
                     .get(dep)
                     .is_none_or(|dep_owner| dep_owner != owner_module)
-            }) {
+            });
+            if blocking_write.is_some() {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            if read_index.non_snippet_runtime_reads.contains(binding)
+                && !global_owned_folded_runtime_read_can_import_owner(
+                    GlobalOwnedRuntimeEdgeContext {
+                        prelude,
+                        read_index,
+                        selected: &selected,
+                        owner_runtime_state,
+                    },
+                    binding,
+                    *owner_module,
+                    &runtime_reads,
+                )
+            {
                 removed.push(binding.clone());
                 continue;
             }
 
             let runtime_readers = runtime_readers_for_binding(read_index, binding);
-            if runtime_readers
+            let retained_runtime_readers = runtime_readers
                 .iter()
-                .any(|reader| !selected.contains_key(reader))
+                .filter(|reader| !selected.contains_key(*reader))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !retained_runtime_readers.is_empty()
+                && !global_owned_retained_runtime_readers_can_import_owner(
+                    GlobalOwnedRuntimeEdgeContext {
+                        prelude,
+                        read_index,
+                        selected: &selected,
+                        owner_runtime_state,
+                    },
+                    binding,
+                    *owner_module,
+                    &retained_runtime_readers,
+                    &runtime_reads,
+                )
             {
                 removed.push(binding.clone());
                 continue;
@@ -6896,11 +6968,12 @@ fn closed_global_owned_runtime_snippets(
                 .get(binding)
                 .cloned()
                 .unwrap_or_default();
-            if runtime_writers.iter().any(|writer| {
+            let blocking_writer = runtime_writers.iter().find(|writer| {
                 selected
                     .get(writer)
                     .is_none_or(|writer_owner| writer_owner != owner_module)
-            }) {
+            });
+            if blocking_writer.is_some() {
                 removed.push(binding.clone());
                 continue;
             }
@@ -7019,6 +7092,188 @@ fn closed_global_owned_runtime_snippets(
             ))
         })
         .collect()
+}
+
+#[derive(Clone, Copy)]
+struct GlobalOwnedRuntimeEdgeContext<'a> {
+    prelude: &'a RuntimePrelude,
+    read_index: &'a RuntimeSourceReadIndex,
+    selected: &'a BTreeMap<BindingName, ModuleId>,
+    owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
+}
+
+fn global_owned_retained_runtime_readers_can_import_owner(
+    ctx: GlobalOwnedRuntimeEdgeContext<'_>,
+    binding: &BindingName,
+    owner_module: ModuleId,
+    retained_runtime_readers: &BTreeSet<BindingName>,
+    runtime_reads: &BTreeSet<BindingName>,
+) -> bool {
+    if retained_runtime_readers.is_empty() {
+        return true;
+    }
+    // A retained namespace export object is still emitted in the runtime
+    // helper. After this binding moves, runtime_module_owner_imports_for_source
+    // can import the moved target back from its rebuilt owner and keep the
+    // namespace barrel live. Other retained runtime readers would keep calling
+    // arbitrary runtime code across a new runtime -> owner edge, so they stay
+    // blocked until a fuller SCC move can take them as well.
+    if retained_runtime_readers
+        .iter()
+        .any(|reader| !global_owned_retained_runtime_reader_is_import_safe(ctx, reader))
+    {
+        return false;
+    }
+
+    global_owned_runtime_edge_to_owner_is_safe(ctx, binding, owner_module, runtime_reads)
+}
+
+fn global_owned_retained_runtime_reader_is_import_safe(
+    ctx: GlobalOwnedRuntimeEdgeContext<'_>,
+    reader: &BindingName,
+) -> bool {
+    if ctx
+        .read_index
+        .namespace_exports_by_namespace
+        .contains_key(reader)
+    {
+        return true;
+    }
+    if retained_runtime_reader_has_unsafe_runtime_caller(ctx.read_index, reader, ctx.selected) {
+        return false;
+    }
+    global_owned_moved_snippet_is_cycle_safe(ctx.prelude, reader)
+}
+
+fn retained_runtime_reader_has_unsafe_runtime_caller(
+    read_index: &RuntimeSourceReadIndex,
+    reader: &BindingName,
+    selected: &BTreeMap<BindingName, ModuleId>,
+) -> bool {
+    let mut visited = BTreeSet::<BindingName>::new();
+    let mut stack = vec![reader.clone()];
+    while let Some(binding) = stack.pop() {
+        if !visited.insert(binding.clone()) {
+            continue;
+        }
+        if read_index.entrypoint_callee.as_ref() == Some(&binding)
+            || read_index
+                .entrypoint_non_snippet_runtime_reads
+                .contains(&binding)
+            || read_index.folded_unsafe_runtime_reads.contains(&binding)
+        {
+            return true;
+        }
+        for caller in runtime_readers_for_binding(read_index, &binding) {
+            if selected.contains_key(&caller) {
+                continue;
+            }
+            stack.push(caller);
+        }
+    }
+    false
+}
+
+fn global_owned_folded_runtime_read_can_import_owner(
+    ctx: GlobalOwnedRuntimeEdgeContext<'_>,
+    binding: &BindingName,
+    owner_module: ModuleId,
+    runtime_reads: &BTreeSet<BindingName>,
+) -> bool {
+    if ctx
+        .read_index
+        .entrypoint_non_snippet_runtime_reads
+        .contains(binding)
+        || !ctx
+            .read_index
+            .folded_non_snippet_runtime_reads
+            .contains(binding)
+    {
+        return false;
+    }
+    // Folded chunks stay in the runtime helper. They may import a recovered
+    // owner binding only when the read is not an eager top-level call: lazy
+    // initializer reads and non-call references are already deferred/benign,
+    // while eager calls would execute through a new runtime -> owner edge.
+    if ctx.read_index.folded_unsafe_runtime_reads.contains(binding)
+        || (!ctx
+            .read_index
+            .folded_lazy_safe_runtime_reads
+            .contains(binding)
+            && !ctx
+                .read_index
+                .folded_non_call_runtime_reads
+                .contains(binding))
+    {
+        return false;
+    }
+
+    global_owned_runtime_edge_to_owner_is_safe(ctx, binding, owner_module, runtime_reads)
+}
+
+fn global_owned_runtime_edge_to_owner_is_safe(
+    ctx: GlobalOwnedRuntimeEdgeContext<'_>,
+    binding: &BindingName,
+    owner_module: ModuleId,
+    runtime_reads: &BTreeSet<BindingName>,
+) -> bool {
+    let Some(owner_state) = ctx.owner_runtime_state.get(&owner_module) else {
+        return false;
+    };
+    if owner_state.uses_lazy_module || !owner_state.written_helpers.is_empty() {
+        return false;
+    }
+
+    let locally_owned_runtime = ctx
+        .selected
+        .iter()
+        .filter_map(|(selected_binding, selected_owner)| {
+            (*selected_owner == owner_module).then_some(selected_binding.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let moved_runtime_deps = runtime_reads
+        .iter()
+        .filter(|dep| {
+            ctx.selected
+                .get(*dep)
+                .is_none_or(|dep_owner| *dep_owner != owner_module)
+        })
+        .filter(|dep| {
+            !ctx.prelude.snippets.get(*dep).is_some_and(|dep_snippet| {
+                runtime_prelude_snippet_is_noop(dep.as_str(), dep_snippet.source.as_str())
+            })
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let owner_runtime_deps = owner_state
+        .remaining_helpers
+        .iter()
+        .filter(|helper| !locally_owned_runtime.contains(*helper))
+        .cloned()
+        .chain(moved_runtime_deps)
+        .collect::<BTreeSet<_>>();
+    owner_runtime_imports_are_lazy_safe(owner_state.source.as_str(), &owner_runtime_deps)
+        && global_owned_moved_snippet_is_cycle_safe(ctx.prelude, binding)
+}
+
+fn global_owned_moved_snippet_is_cycle_safe(
+    prelude: &RuntimePrelude,
+    binding: &BindingName,
+) -> bool {
+    let Some(snippet) = prelude.snippets.get(binding) else {
+        return false;
+    };
+    let source = snippet.source.trim();
+    if function_declaration_names_binding(source, binding) {
+        return true;
+    }
+    if class_declaration_names_binding(source, binding) {
+        return true;
+    }
+    if is_migratable_namespace_reader_snippet(binding, source) {
+        return true;
+    }
+    variable_declaration_names_function_like_binding(source, binding)
 }
 
 fn global_owned_runtime_dep_aliases_for_owner_conflicts(
@@ -20576,6 +20831,7 @@ function ownedB() { return 1; }\n";
             &candidate_owners,
             &owner_available_bindings,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(
@@ -20650,6 +20906,166 @@ function runtimeReader() { return ownedA(); }\n";
             &candidate_owners,
             &owner_available_bindings,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_lazy_safe_retained_function_reader() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return 1; }\n\
+function runtimeReader() { return ownedA(); }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return 1; }"),
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    snippet("function runtimeReader() { return ownedA(); }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([
+                (BindingName::new("ownedA"), ModuleId(7)),
+                (BindingName::new("ownedB"), ModuleId(7)),
+            ]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => {});".to_string(),
+                    remaining_helpers: BTreeSet::new(),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert_eq!(
+            selected.keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from([BindingName::new("ownedA"), BindingName::new("ownedB")])
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_eager_retained_function_reader() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return 1; }\n\
+function runtimeReader() { return ownedA(); }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return 1; }"),
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    snippet("function runtimeReader() { return ownedA(); }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "runtimeReader();".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([
+                (BindingName::new("ownedA"), ModuleId(7)),
+                (BindingName::new("ownedB"), ModuleId(7)),
+            ]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => {});".to_string(),
+                    remaining_helpers: BTreeSet::new(),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
         );
 
         assert!(selected.is_empty());
@@ -20708,6 +21124,7 @@ function runtimeDep() { return 1; }\n";
             &read_index,
             &candidate_owners,
             &owner_available_bindings,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -20772,6 +21189,7 @@ function noop() {}\n";
             &read_index,
             &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
             &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
 
@@ -20865,6 +21283,7 @@ function leaf() { return 1; }\n";
             &read_index,
             &candidate_owners,
             &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         assert_eq!(selected.keys().cloned().collect::<BTreeSet<_>>(), eligible);
@@ -20968,6 +21387,7 @@ function ownedB() { return 1; }\n";
             &candidate_owners,
             &owner_available_bindings,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert_eq!(
@@ -21036,6 +21456,7 @@ function ownedB() { return ownedA(); }\n";
             &candidate_owners,
             &BTreeMap::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert!(selected.is_empty());
@@ -21097,6 +21518,7 @@ function ownedA() { return 1; }\n";
             &candidate_owners,
             &owner_available_bindings,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
 
         assert!(selected.contains_key(&BindingName::new("ownedA")));
@@ -21104,6 +21526,334 @@ function ownedA() { return 1; }\n";
             selected
                 .get(&BindingName::new("ns"))
                 .is_some_and(|migration| migration.moves_namespace_export)
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_retained_namespace_reader_with_lazy_safe_owner() {
+        let source = "\
+var ns = {};\n\
+class Owned {}\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("Owned"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (BindingName::new("ns"), snippet("var ns = {};")),
+                (BindingName::new("Owned"), snippet("class Owned {}")),
+            ]),
+            namespace_exports: vec![RuntimeNamespaceExport {
+                namespace: BindingName::new("ns"),
+                helper: BindingName::new("__export"),
+                exports: BTreeMap::from([("Owned".to_string(), BindingName::new("Owned"))]),
+                byte_start: offset,
+            }],
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("Owned"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var init = lazyValue(() => { runtimeDep(); });".to_string(),
+                    remaining_helpers: BTreeSet::from([
+                        BindingName::new("lazyValue"),
+                        BindingName::new("runtimeDep"),
+                    ]),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.contains_key(&BindingName::new("Owned")),
+            "namespace readers can remain in runtime when the runtime -> owner edge is lazy-safe"
+        );
+        assert!(!selected.contains_key(&BindingName::new("ns")));
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_retained_namespace_reader_with_eager_owner_runtime_edge() {
+        let source = "\
+var ns = {};\n\
+class Owned {}\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("Owned"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (BindingName::new("ns"), snippet("var ns = {};")),
+                (BindingName::new("Owned"), snippet("class Owned {}")),
+            ]),
+            namespace_exports: vec![RuntimeNamespaceExport {
+                namespace: BindingName::new("ns"),
+                helper: BindingName::new("__export"),
+                exports: BTreeMap::from([("Owned".to_string(), BindingName::new("Owned"))]),
+                byte_start: offset,
+            }],
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("Owned"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "runtimeDep();".to_string(),
+                    remaining_helpers: BTreeSet::from([BindingName::new("runtimeDep")]),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: false,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.is_empty(),
+            "retained namespace readers must not synthesize eager runtime -> owner -> runtime cycles"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_folded_lazy_reader_to_import_owner() {
+        let source = "function ownedA() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeSnippet {
+                    source: "function ownedA() { return 1; }".to_string(),
+                    byte_start: 0,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "var initUse = lazyValue(() => { ownedA(); });".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => {});".to_string(),
+                    remaining_helpers: BTreeSet::new(),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.contains_key(&BindingName::new("ownedA")),
+            "lazy folded reads can be routed through runtime -> owner imports"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_eager_folded_reader_import_owner_edge() {
+        let source = "function ownedA() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeSnippet {
+                    source: "function ownedA() { return 1; }".to_string(),
+                    byte_start: 0,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "ownedA();".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => {});".to_string(),
+                    remaining_helpers: BTreeSet::new(),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.is_empty(),
+            "eager folded calls must stay in runtime to avoid evaluation cycles"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_folded_lazy_namespace_reader_to_import_owner() {
+        let source = "\
+var ns = {};\n\
+function target() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("target"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeSnippet {
+                        source: "var ns = {};".to_string(),
+                        byte_start: 0,
+                    },
+                ),
+                (
+                    BindingName::new("target"),
+                    RuntimePreludeSnippet {
+                        source: "function target() { return 1; }".to_string(),
+                        byte_start: "var ns = {};\n".len() as u32,
+                    },
+                ),
+            ]),
+            namespace_exports: vec![RuntimeNamespaceExport {
+                namespace: BindingName::new("ns"),
+                helper: BindingName::new("__export"),
+                exports: BTreeMap::from([("target".to_string(), BindingName::new("target"))]),
+                byte_start: source.len() as u32,
+            }],
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32 + 1,
+            source: "var initUse = lazyValue(() => ns);".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([
+                (BindingName::new("ns"), ModuleId(7)),
+                (BindingName::new("target"), ModuleId(7)),
+            ]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => {});".to_string(),
+                    remaining_helpers: BTreeSet::new(),
+                    written_helpers: BTreeSet::new(),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(selected.contains_key(&BindingName::new("ns")));
+        assert!(selected.contains_key(&BindingName::new("target")));
+        assert!(
+            selected
+                .get(&BindingName::new("ns"))
+                .is_some_and(|migration| migration.moves_namespace_export)
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_prefers_symbol_owner_over_conflicting_span_owner() {
+        let owner = super::global_runtime_snippet_owner(Some(ModuleId(7)), None, Some(ModuleId(8)));
+
+        assert_eq!(
+            owner,
+            Some(ModuleId(7)),
+            "unique source-local symbols are stronger than lossy span overlaps"
         );
     }
 
@@ -21127,6 +21877,28 @@ function ownedA() { return 1; }\n";
         );
 
         assert_eq!(owner, Some(ModuleId(7)));
+    }
+
+    #[test]
+    fn global_owner_rebuild_prefers_specific_containing_source_span_owner() {
+        let modules = vec![
+            ModuleInput::application(ModuleId(7), "wrapper", "modules/wrapper")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(100, 500)),
+            ModuleInput::application(ModuleId(8), "inner", "modules/inner")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(150, 220)),
+        ];
+
+        let owner = super::runtime_snippet_source_span_owner(
+            &modules,
+            1,
+            160,
+            "function owned() { return 1; }".len(),
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(owner, Some(ModuleId(8)));
     }
 
     #[test]
