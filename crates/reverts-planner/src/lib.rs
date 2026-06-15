@@ -2377,6 +2377,8 @@ impl ImportExportPlanner {
                     helper_closure.emitted_bindings.remove(binding);
                 }
             }
+            helper_closure.source =
+                coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
             helper_closure.source = inline_single_use_runtime_proxy_functions(
                 helper_closure.source.as_str(),
                 &public_helper_bindings,
@@ -4220,6 +4222,8 @@ fn emit_package_runtime_helper_files(
             helper_closure.source.as_str(),
             &helper_closure.emitted_bindings,
         );
+        helper_closure.source =
+            coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
         helper_closure.source =
             coalesce_top_level_import_declarations(helper_closure.source.as_str());
         let mut runtime_binding_roots = usage.public_bindings.clone();
@@ -9249,6 +9253,126 @@ fn purify_private_runtime_lazy_initializers(
     apply_text_edits(source, &edits)
 }
 
+fn coalesce_runtime_lazy_initializer_call_runs(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let mut cursor = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if paren_depth == 0
+            && bracket_depth == 0
+            && brace_depth == 0
+            && let Some((initializer, after)) =
+                try_parse_runtime_lazy_initializer_declaration(source, cursor)
+        {
+            edits.extend(coalesced_lazy_body_call_run_edits(
+                source,
+                initializer.body,
+                initializer.body_span,
+            ));
+            cursor = after;
+            continue;
+        }
+        match bytes[cursor] {
+            b'(' => paren_depth += 1,
+            b')' => paren_depth = paren_depth.saturating_sub(1),
+            b'[' => bracket_depth += 1,
+            b']' => bracket_depth = bracket_depth.saturating_sub(1),
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+        cursor += 1;
+    }
+    if edits.is_empty() {
+        source.to_string()
+    } else {
+        apply_text_edits(source, &edits)
+    }
+}
+
+fn coalesced_lazy_body_call_run_edits(
+    full_source: &str,
+    body: &str,
+    body_span: (usize, usize),
+) -> Vec<(usize, usize, String)> {
+    let statements = top_level_statement_spans(body);
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let mut run = Vec::<(usize, usize, String)>::new();
+    for (start, end) in statements {
+        let statement = &body[start..end];
+        if let Some(expression) = coalescible_lazy_body_expression(statement) {
+            run.push((start, end, expression));
+            continue;
+        }
+        flush_lazy_body_call_run_edit(full_source, body_span, &mut run, &mut edits);
+    }
+    flush_lazy_body_call_run_edit(full_source, body_span, &mut run, &mut edits);
+    edits
+}
+
+fn flush_lazy_body_call_run_edit(
+    full_source: &str,
+    body_span: (usize, usize),
+    run: &mut Vec<(usize, usize, String)>,
+    edits: &mut Vec<(usize, usize, String)>,
+) {
+    if run.len() < 2 {
+        run.clear();
+        return;
+    }
+    let (first_start, _, _) = run.first().expect("run length checked");
+    let (_, last_end, _) = run.last().expect("run length checked");
+    let absolute_start = body_span.0 + *first_start;
+    let absolute_end = body_span.0 + *last_end;
+    let first_statement = &full_source[absolute_start..body_span.0 + run[0].1];
+    let leading = statement_leading_whitespace(first_statement);
+    let expression = run
+        .iter()
+        .map(|(_, _, expression)| expression.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    edits.push((
+        absolute_start,
+        absolute_end,
+        format!("{leading}{expression};"),
+    ));
+    run.clear();
+}
+
+fn statement_leading_whitespace(statement: &str) -> &str {
+    let trimmed_start = statement.trim_start();
+    &statement[..statement.len() - trimmed_start.len()]
+}
+
+fn coalescible_lazy_body_expression(statement: &str) -> Option<String> {
+    let trimmed = statement.trim();
+    let expression = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
+    if expression == "void 0" {
+        return Some(expression.to_string());
+    }
+    let (callee, after_callee) = parse_identifier(expression, 0)?;
+    if is_js_keyword(callee) {
+        return None;
+    }
+    let bytes = expression.as_bytes();
+    let open = skip_ws(bytes, after_callee);
+    if bytes.get(open) != Some(&b'(') {
+        return None;
+    }
+    let close = find_matching_paren(expression, open)?;
+    if !expression[open + 1..close].trim().is_empty() {
+        return None;
+    }
+    (skip_ws(bytes, close + 1) == expression.len()).then(|| expression.to_string())
+}
+
 fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -> String {
     let mut edits = edits.to_vec();
     edits.sort_by_key(|(start, _, _)| *start);
@@ -9364,6 +9488,7 @@ fn parse_pure_top_level_var_value(
 struct ParsedRuntimeLazyInitializer<'a> {
     binding: BindingName,
     body: &'a str,
+    body_span: (usize, usize),
     span: (usize, usize),
 }
 
@@ -9399,8 +9524,9 @@ fn try_parse_runtime_lazy_initializer_declaration(
     if bytes.get(cursor) != Some(&b'{') {
         return None;
     }
+    let body_start = cursor + 1;
     let body_end = find_matching_brace(source, cursor)?;
-    let body = source[cursor + 1..body_end].trim();
+    let body = &source[body_start..body_end];
     let after_body = skip_ws(bytes, body_end + 1);
     if bytes.get(after_body) != Some(&b')') {
         return None;
@@ -9415,6 +9541,7 @@ fn try_parse_runtime_lazy_initializer_declaration(
         ParsedRuntimeLazyInitializer {
             binding: BindingName::new(binding),
             body,
+            body_span: (body_start, body_end),
             span: (start, stmt_end),
         },
         stmt_end,
@@ -18095,7 +18222,8 @@ mod tests {
         CompilerRecoveryAction, EmitPlan, ExportMemberAdapterProofKind, ImportExportPlanner,
         PlannedFile, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
         RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
-        RuntimeSourceReadIndex, SourceCompilerStrategy, compact_source_defines_callable_binding,
+        RuntimeSourceReadIndex, SourceCompilerStrategy,
+        coalesce_runtime_lazy_initializer_call_runs, compact_source_defines_callable_binding,
         export_member_adapter_proof, inline_internal_setter_calls,
         inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
         merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
@@ -18219,6 +18347,31 @@ var orphan = () => dep();\n";
             pruned.dropped_bindings,
             BTreeSet::from([BindingName::new("dep"), BindingName::new("orphan")])
         );
+    }
+
+    #[test]
+    fn runtime_lazy_call_run_coalescing_compacts_only_lazy_body_top_level_calls() {
+        let source = "\
+var init = lazyValue(() => {\n\
+\ta();\n\
+\tb();\n\
+\tvoid 0;\n\
+\tvalue = 1;\n\
+\tc(arg);\n\
+\td();\n\
+\te();\n\
+});\n\
+function keep() {\n\
+\ta();\n\
+\tb();\n\
+}\n";
+
+        let compacted = coalesce_runtime_lazy_initializer_call_runs(source);
+
+        assert!(compacted.contains("\ta(), b(), void 0;\n\tvalue = 1;"));
+        assert!(compacted.contains("\td(), e();"));
+        assert!(compacted.contains("function keep() {\n\ta();\n\tb();\n}"));
+        assert!(compacted.contains("\tc(arg);"));
     }
 
     #[test]
