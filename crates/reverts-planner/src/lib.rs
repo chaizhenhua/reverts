@@ -6930,8 +6930,22 @@ fn closed_global_owned_runtime_snippets(
                         *dep_owner,
                     )
             });
-            if blocking_cross_owner_dep.is_some() {
-                removed.push(binding.clone());
+            if let Some(dep) = blocking_cross_owner_dep {
+                let binding_lines = snippet.source.lines().count().max(1);
+                let dep_lines = prelude
+                    .snippets
+                    .get(dep)
+                    .map(|dep_snippet| dep_snippet.source.lines().count().max(1))
+                    .unwrap_or(usize::MAX);
+                if dep_lines < binding_lines {
+                    // Break owner<->owner cycles by pinning the smaller
+                    // dependency in runtime. The larger recovered owner
+                    // snippet can then import it as a stable runtime dep
+                    // instead of discarding the whole recovered component.
+                    removed.push(dep.clone());
+                } else {
+                    removed.push(binding.clone());
+                }
                 continue;
             }
 
@@ -21601,6 +21615,76 @@ function ownedB() { return ownedA(); }\n";
         );
 
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn global_owner_rebuild_pins_smaller_cyclic_cross_owner_dep() {
+        let source = "\
+function ownedBig() {\n\
+  const value = ownedSmall();\n\
+  return value + 1;\n\
+}\n\
+function ownedSmall() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedBig"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedSmall"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedBig"),
+                    snippet(
+                        "function ownedBig() {\n  const value = ownedSmall();\n  return value + 1;\n}",
+                    ),
+                ),
+                (
+                    BindingName::new("ownedSmall"),
+                    snippet("function ownedSmall() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([
+                (BindingName::new("ownedBig"), ModuleId(7)),
+                (BindingName::new("ownedSmall"), ModuleId(8)),
+            ]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(ModuleId(8), BTreeSet::from([ModuleId(7)]))]),
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.contains_key(&BindingName::new("ownedBig")));
+        assert!(!selected.contains_key(&BindingName::new("ownedSmall")));
+        assert_eq!(
+            selected
+                .get(&BindingName::new("ownedBig"))
+                .expect("larger owner snippet should move")
+                .extra_runtime_deps,
+            BTreeSet::from([BindingName::new("ownedSmall")])
+        );
     }
 
     #[test]
