@@ -1035,8 +1035,13 @@ fn resolve_package_imports(
     for ((from_module_id, specifier), source_backed) in requested_imports {
         let resolution = package_index.resolve(&specifier);
         if let PackageResolution::Rejected { reason, .. } = &resolution {
+            // The input bundle references a bare specifier whose package
+            // surface isn't in the index (typically a package_source_cache
+            // miss). Per ADR 0002 the decompiler is faithful, not
+            // corrective: surface the unresolved specifier and let
+            // emission proceed; the operator can backfill the cache.
             audit.push(
-                AuditFinding::error(FindingCode::UnresolvableBareImport, reason.clone())
+                AuditFinding::warning(FindingCode::UnresolvableBareImport, reason.clone())
                     .with_module(from_module_id.0.to_string())
                     .with_binding(specifier.clone()),
             );
