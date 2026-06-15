@@ -5348,6 +5348,10 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
             ),
             AstKind::ArrowFunctionExpression(arrow) => self.record_arrow_function(arrow),
             AstKind::StringLiteral(literal) => self.record_string_anchor(literal.value.as_str()),
+            AstKind::RegExpLiteral(literal) => self.record_regex_anchor(
+                literal.regex.pattern.to_string().as_str(),
+                literal.regex.flags.to_string().as_str(),
+            ),
             _ => {}
         }
     }
@@ -5405,6 +5409,15 @@ impl FingerprintVisitor<'_> {
         let trimmed = value.trim();
         if trimmed.len() >= MIN_STRING_ANCHOR_LEN {
             self.fingerprint.string_anchors.insert(trimmed.to_string());
+        }
+    }
+
+    fn record_regex_anchor(&mut self, pattern: &str, flags: &str) {
+        let pattern = pattern.trim();
+        if pattern.len() >= MIN_REGEX_ANCHOR_LEN {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("regex:{pattern}/{flags}"));
         }
     }
 }
@@ -5722,6 +5735,7 @@ fn normalize_source(path: &str, source: &str) -> Result<String, String> {
 }
 
 const MIN_STRING_ANCHOR_LEN: usize = 3;
+const MIN_REGEX_ANCHOR_LEN: usize = 6;
 const SOURCE_HASH_WEIGHT: u32 = 10_000;
 const MODULE_MATCH_WEIGHT: u32 = 1_000;
 const FUNCTION_SIGNATURE_WEIGHT: u32 = 10;
@@ -7574,6 +7588,116 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn pipeline_externalizes_dependency_graph_regex_fingerprint_match() {
+        let module_source = r#"
+            export function opaqueRuntime(value) {
+                return [
+                    /^(?:[0-9a-f]{8})$/.test(value),
+                    /^(?:[0-9a-f]{4})$/.test(value),
+                    /^(?:[1-5][0-9a-f]{3})$/.test(value),
+                    /^(?:[89ab][0-9a-f]{3})$/.test(value),
+                    /^(?:[0-9a-f]{12})$/.test(value),
+                    /^(?:v?[0-9]+\\.[0-9]+\\.[0-9]+)$/.test(value),
+                    /^(?:alpha|beta|rc)\\.[0-9]+$/.test(value),
+                    /^(?:build|meta)\\.[0-9a-z-]+$/.test(value)
+                ].some(Boolean);
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/regex-runtime.ts".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "dep.js",
+            Some("export const dep = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "dep",
+                "pkg/dep.js",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/dep")
+                .with_resolved_file("pkg@1.0.0/lib/dep.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/regex-runtime",
+                "pkg@1.0.0/lib/regex-runtime.js",
+                r#"
+                const dep = require("./dep");
+                exports.opaqueRuntime = function opaqueRuntime(value) {
+                    return [
+                        /^(?:[0-9a-f]{8})$/.test(value),
+                        /^(?:[0-9a-f]{4})$/.test(value),
+                        /^(?:[1-5][0-9a-f]{3})$/.test(value),
+                        /^(?:[89ab][0-9a-f]{3})$/.test(value),
+                        /^(?:[0-9a-f]{12})$/.test(value),
+                        /^(?:v?[0-9]+\\.[0-9]+\\.[0-9]+)$/.test(value),
+                        /^(?:alpha|beta|rc)\\.[0-9]+$/.test(value),
+                        /^(?:build|meta)\\.[0-9a-z-]+$/.test(value)
+                    ].some(Boolean);
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/other",
+                "pkg@1.0.0/lib/other.js",
+                r#"
+                const dep = require("./dep");
+                exports.other = function other(value) {
+                    return [
+                        /^(?:one|two|three)$/.test(value),
+                        /^(?:four|five|six)$/.test(value)
+                    ].some(Boolean);
+                };
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep",
+                "pkg@1.0.0/lib/dep.js",
+                "exports.dep = 1;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("dependency graph plus regex anchors should prove the source file");
+        assert_eq!(
+            attribution.export_specifier.as_deref(),
+            Some("pkg/regex-runtime")
+        );
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved
+                    .starts_with("forced-external:dependency-graph-source:string-graph:")),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
     fn pipeline_iterates_dependency_graph_source_fingerprint_matches() {
         let module_a_source = r#"
             export function runtimeA(input) {
@@ -9198,6 +9322,32 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(report.matches[0].function_signature_matches >= 2);
         assert!(report.matches[0].string_anchor_matches >= 1);
+    }
+
+    #[test]
+    fn versioned_matcher_can_match_by_regex_anchors() {
+        let rows = rows_with_package_source_at_version(
+            "export function first(v){return /^(?:[0-9a-f]{8})$/.test(v)}\nexport function second(v){return /^(?:alpha|beta|rc)\\.[0-9]+$/.test(v)}",
+            "1.0.0",
+        );
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/regex",
+            "regex.js",
+            "const packageOnly = true;\nfunction first(v){return /^(?:[0-9a-f]{8})$/.test(v)}\nfunction second(v){return /^(?:alpha|beta|rc)\\.[0-9]+$/.test(v)}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        );
+        assert!(report.matches[0].function_signature_matches >= 2);
+        assert!(report.matches[0].string_anchor_matches >= 2);
     }
 
     #[test]
