@@ -549,6 +549,79 @@ impl InputBundle {
     pub fn module_ids(&self) -> BTreeSet<ModuleId> {
         self.modules.iter().map(|module| module.id).collect()
     }
+
+    /// Append additional modules to an already-validated bundle without
+    /// re-running validation on the existing rows. Validates only the new
+    /// modules: id uniqueness against the existing set, FK to a known
+    /// `source_file_id` (when set), and `source_span` consistency.
+    pub fn with_appended_modules(
+        mut self,
+        modules: Vec<ModuleInput>,
+    ) -> Result<Self, InputBundleError> {
+        if modules.is_empty() {
+            return Ok(self);
+        }
+        let mut existing_ids: BTreeSet<ModuleId> = self.modules.iter().map(|m| m.id).collect();
+        let source_file_ids: BTreeSet<u32> = self.source_files.iter().map(|sf| sf.id).collect();
+        for module in &modules {
+            ensure_non_empty(module.original_name.as_str(), "module.original_name")?;
+            ensure_non_empty(module.semantic_path.as_str(), "module.semantic_path")?;
+            if !existing_ids.insert(module.id) {
+                return Err(InputBundleError::DuplicateModuleId(module.id));
+            }
+            if let Some(source_file_id) = module.source_file_id
+                && !source_file_ids.contains(&source_file_id)
+            {
+                return Err(InputBundleError::UnknownSourceFile {
+                    source_file_id,
+                    owner: "module",
+                });
+            }
+            if let Some(source_span) = module.source_span {
+                if source_span.byte_end <= source_span.byte_start {
+                    return Err(invalid_source_span(module.id, source_span));
+                }
+                let Some(source_file_id) = module.source_file_id else {
+                    return Err(invalid_source_span(module.id, source_span));
+                };
+                if let Some(source_file) =
+                    self.source_files.iter().find(|sf| sf.id == source_file_id)
+                {
+                    let Some(source) = source_file.source.as_deref() else {
+                        return Err(invalid_source_span(module.id, source_span));
+                    };
+                    if source
+                        .get(source_span.byte_start as usize..source_span.byte_end as usize)
+                        .is_none()
+                    {
+                        return Err(invalid_source_span(module.id, source_span));
+                    }
+                }
+            }
+        }
+        self.modules.extend(modules);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn into_rows(self) -> InputRows {
+        InputRows {
+            project: self.project,
+            source_files: self.source_files,
+            assets: self.assets,
+            modules: self.modules,
+            symbols: self.symbols,
+            dependencies: self.dependencies,
+            package_attributions: self.package_attributions,
+            package_surfaces: self.package_surfaces,
+        }
+    }
+}
+
+impl From<InputBundle> for InputRows {
+    fn from(bundle: InputBundle) -> Self {
+        bundle.into_rows()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
