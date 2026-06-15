@@ -46,7 +46,7 @@ use oxc_ast::{
     visit::walk::{
         walk_assignment_expression, walk_call_expression, walk_export_all_declaration,
         walk_export_default_declaration, walk_export_named_declaration, walk_import_expression,
-        walk_template_element,
+        walk_object_expression, walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -211,6 +211,10 @@ pub enum ModuleMatchStrategy {
     /// matched the package source after minification removed local function
     /// names and bodies.
     PropertyShapeAndStringAnchors,
+    /// Object-literal key shape anchors plus string/property anchors uniquely
+    /// matched the package source after minification removed local variable
+    /// names and function bodies.
+    ObjectShapeAndStringAnchors,
     /// Function signatures plus string anchors matched the package version as
     /// an aggregate, but not one unique importable source file. This proves
     /// package ownership only.
@@ -245,6 +249,7 @@ impl ModuleMatchStrategy {
             Self::NormalizedSourceHash => "normalized_source_hash",
             Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
             Self::PropertyShapeAndStringAnchors => "property_shape_and_string_anchors",
+            Self::ObjectShapeAndStringAnchors => "object_shape_and_string_anchors",
             Self::AggregateFunctionSignatureAndStringAnchors => {
                 "aggregate_function_signature_and_string_anchors"
             }
@@ -1493,6 +1498,7 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+            | ModuleMatchStrategy::ObjectShapeAndStringAnchors
     )
 }
 
@@ -1899,7 +1905,8 @@ fn dependency_exact_hint_source_match_external_package_source(
     match source_match.strategy {
         ModuleMatchStrategy::NormalizedSourceHash
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::PropertyShapeAndStringAnchors => {}
+        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+        | ModuleMatchStrategy::ObjectShapeAndStringAnchors => {}
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -1954,6 +1961,15 @@ fn semantic_external_target_policies(
                 min_score: 1,
             }]
         }
+        ModuleMatchStrategy::ObjectShapeAndStringAnchors
+            if package_match.function_signature_matches > 0
+                && package_match.string_anchor_matches > 0 =>
+        {
+            vec![SemanticExternalTargetPolicy {
+                hint_mode: SemanticPathHintMode::ImportProof,
+                min_score: 1,
+            }]
+        }
         ModuleMatchStrategy::DependencyClosureOwnership => {
             if !package_match.source_path.starts_with("exact-hint:") {
                 return Vec::new();
@@ -1979,7 +1995,8 @@ fn semantic_external_target_policies(
             Vec::new()
         }
         ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::PropertyShapeAndStringAnchors => Vec::new(),
+        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+        | ModuleMatchStrategy::ObjectShapeAndStringAnchors => Vec::new(),
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -2192,6 +2209,7 @@ fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch
         ModuleMatchStrategy::NormalizedSourceHash
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+        | ModuleMatchStrategy::ObjectShapeAndStringAnchors
         | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -4482,6 +4500,7 @@ fn dependency_graph_source_fingerprint_policy_allows(strategy: ModuleMatchStrate
             | ModuleMatchStrategy::CascadePartialFunctionCoverage
             | ModuleMatchStrategy::AggregateStructuralBagSimilarity
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+            | ModuleMatchStrategy::ObjectShapeAndStringAnchors
     )
 }
 
@@ -6027,6 +6046,11 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
         }
         walk_call_expression(self, call);
     }
+
+    fn visit_object_expression(&mut self, object: &ObjectExpression<'a>) {
+        self.record_object_shape_anchor(object);
+        walk_object_expression(self, object);
+    }
 }
 
 impl FingerprintVisitor<'_> {
@@ -6105,6 +6129,29 @@ impl FingerprintVisitor<'_> {
         }
     }
 
+    fn record_object_shape_anchor(&mut self, object: &ObjectExpression<'_>) {
+        let keys = object_expression_static_keys(object)
+            .into_iter()
+            .filter(|key| is_usable_object_shape_key(key.as_str()))
+            .collect::<BTreeSet<_>>();
+        if keys.len() < 4 {
+            return;
+        }
+        for key in &keys {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("object-key:{key}"));
+        }
+        let shape = keys
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.fingerprint
+            .string_anchors
+            .insert(format!("object-shape:{shape}"));
+    }
+
     fn finish(mut self) -> AstFingerprint {
         if self.fingerprint.prototype_members.len() >= 3 {
             let members = self
@@ -6152,6 +6199,34 @@ fn expression_is_prototype_member(expression: &Expression<'_>) -> bool {
 
 fn is_usable_property_shape_member(member: &str) -> bool {
     !matches!(member, "constructor" | "__proto__" | "prototype") && is_identifier_name(member)
+}
+
+fn is_usable_object_shape_key(key: &str) -> bool {
+    if !is_identifier_name(key) {
+        return false;
+    }
+    let normalized = normalize_hint_text(key);
+    normalized.len() >= 3
+        && !matches!(
+            normalized.as_str(),
+            "key"
+                | "keys"
+                | "map"
+                | "get"
+                | "set"
+                | "has"
+                | "add"
+                | "run"
+                | "main"
+                | "init"
+                | "name"
+                | "type"
+                | "types"
+                | "value"
+                | "values"
+                | "index"
+                | "default"
+        )
 }
 
 fn score_version<'a>(
@@ -6253,19 +6328,28 @@ fn best_source_match(
                 property_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
             let property_anchor_matches =
                 property_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let object_shape_matches =
+                object_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let object_anchor_matches =
+                object_anchor_matches(&source.string_anchors, &module.string_anchors);
             let is_function_string_match = function_signature_matches
                 >= config.min_function_signature_matches
                 && string_anchor_matches >= config.min_string_anchor_matches;
             let is_property_shape_match = property_shape_matches >= 1 && string_anchor_matches >= 4;
-            if is_function_string_match || is_property_shape_match {
+            let is_object_shape_match = object_shape_matches >= 1 && string_anchor_matches >= 5;
+            if is_function_string_match || is_property_shape_match || is_object_shape_match {
                 Some((
                     source,
-                    function_signature_matches.max(property_anchor_matches),
+                    function_signature_matches
+                        .max(property_anchor_matches)
+                        .max(object_anchor_matches),
                     string_anchor_matches,
                     if is_function_string_match {
                         ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-                    } else {
+                    } else if is_property_shape_match {
                         ModuleMatchStrategy::PropertyShapeAndStringAnchors
+                    } else {
+                        ModuleMatchStrategy::ObjectShapeAndStringAnchors
                     },
                 ))
             } else {
@@ -6320,6 +6404,18 @@ fn property_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) ->
         .filter(|anchor| {
             anchor.starts_with("prototype-shape:") || anchor.starts_with("prototype-member:")
         })
+        .count()
+}
+
+fn object_shape_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| anchor.starts_with("object-shape:"))
+        .count()
+}
+
+fn object_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| anchor.starts_with("object-shape:") || anchor.starts_with("object-key:"))
         .count()
 }
 
@@ -9203,6 +9299,115 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         );
         assert!(package_match.external_importable);
         assert_eq!(package_match.export_specifier.as_str(), "pkg/_MapCache.js");
+    }
+
+    #[test]
+    fn minified_object_shape_matches_unique_external_source() {
+        let module_source = r#"
+            var parseResult = {
+                raw: input,
+                major: q,
+                minor: K,
+                patch: _,
+                prerelease: z,
+                build: Y,
+                version: q + "." + K + "." + _
+            };
+            exports.parseResult = parseResult;
+        "#;
+        let rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/parse",
+                "pkg@1.0.0/lib/parse.js",
+                r#"
+                    const parsed = {
+                        raw: input,
+                        major: major,
+                        minor: minor,
+                        patch: patch,
+                        prerelease: prerelease,
+                        build: build,
+                        version: `${major}.${minor}.${patch}`
+                    };
+                    exports.parseResult = parsed;
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/format",
+                "pkg@1.0.0/lib/format.js",
+                r#"
+                    const formatted = {
+                        source: input,
+                        output: result,
+                        options: options,
+                        diagnostics: diagnostics
+                    };
+                    exports.formatted = formatted;
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert_eq!(
+            package_match.strategy,
+            ModuleMatchStrategy::ObjectShapeAndStringAnchors
+        );
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg/parse");
+    }
+
+    #[test]
+    fn minified_object_shape_rejects_ambiguous_external_sources() {
+        let module_source = r#"
+            var parseResult = {
+                raw: input,
+                major: q,
+                minor: K,
+                patch: _,
+                prerelease: z,
+                build: Y,
+                version: q + "." + K + "." + _
+            };
+            exports.parseResult = parseResult;
+        "#;
+        let rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        let source = r#"
+            const parsed = {
+                raw: input,
+                major: major,
+                minor: minor,
+                patch: patch,
+                prerelease: prerelease,
+                build: build,
+                version: `${major}.${minor}.${patch}`
+            };
+            exports.parseResult = parsed;
+        "#;
+        let package_sources = [
+            PackageSource::external("pkg", "1.0.0", "pkg/parse-a", "pkg@1.0.0/lib/a.js", source),
+            PackageSource::external("pkg", "1.0.0", "pkg/parse-b", "pkg@1.0.0/lib/b.js", source),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "ambiguous object-shape source proof must not externalize"
+        );
     }
 
     #[test]
