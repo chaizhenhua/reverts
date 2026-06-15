@@ -3346,6 +3346,95 @@ mod tests {
     }
 
     #[test]
+    fn ast_fact_extractor_skips_advanced_typescript_type_positions() {
+        // Exercise every advanced TS construct that wraps an identifier in
+        // type position: conditional types, mapped types, `infer` in
+        // conditionals, type predicates (`x is T`), `typeof` queries inside
+        // a type, class type-parameter constraints, function-type return
+        // annotations, and method signatures. A regression in any one of
+        // these would leak the corresponding type-only identifier into the
+        // unresolved-value-reads stream and re-trigger the false-positive
+        // audit findings we removed.
+        let source = r#"
+            type Conditional<T> = T extends MarkerString ? T : MarkerNever;
+            type Mapped<T> = { [K in keyof T]: ValueOf<T[K]> };
+            type InferReturn<T> = T extends (...args: any) => infer InferredR ? InferredR : never;
+            type TupleHead<T> = T extends [infer InferredH, ...any[]] ? InferredH : never;
+            type ValueOf<T> = T[keyof T];
+
+            function isMarkerThing(x: unknown): x is MarkerThing {
+                return typeof x === "object";
+            }
+
+            const t: typeof externalValue = externalValue;
+
+            class Generic<T extends BaseConstraint> {
+                describe(value: T): MarkerString { return ""; }
+            }
+
+            type Callback = (input: CallbackInput) => CallbackOutput;
+            interface Bag { method(arg: BagArg): BagResult; }
+
+            export const externalValue = 1;
+            export { isMarkerThing, Generic };
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let unresolved = graph
+            .def_use()
+            .unresolved_reads()
+            .into_iter()
+            .map(|(_, binding)| binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(graph.ast_errors().is_empty());
+        for type_only in [
+            // local type aliases — declarations, not reads
+            "Conditional",
+            "Mapped",
+            "InferReturn",
+            "TupleHead",
+            "ValueOf",
+            "Callback",
+            "Bag",
+            // type-only ambients the bundle references
+            "MarkerString",
+            "MarkerNever",
+            "MarkerThing",
+            "BaseConstraint",
+            "CallbackInput",
+            "CallbackOutput",
+            "BagArg",
+            "BagResult",
+            // `infer X` introduces a type-position binding that should never
+            // leak as a value read either
+            "InferredR",
+            "InferredH",
+        ] {
+            assert!(
+                !unresolved.contains(&type_only.to_string()),
+                "type-only binding {type_only} leaked into unresolved value reads: {unresolved:?}",
+            );
+        }
+        // `typeof externalValue` references a value binding — `externalValue`
+        // appears in real value position on the next line too, so it must
+        // resolve normally and not leak.
+        assert!(
+            !unresolved.contains(&"externalValue".to_string()),
+            "value binding `externalValue` referenced via typeof query must resolve: {unresolved:?}",
+        );
+    }
+
+    #[test]
     fn ast_fact_extractor_projects_destructured_top_level_bindings() {
         let source = r#"
             const source = { value: 1, other: 2 };
