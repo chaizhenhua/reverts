@@ -1300,8 +1300,14 @@ fn runtime_helper_source_file_id(path: &str) -> Option<u32> {
 }
 
 fn runtime_setter_targets_in_source(source: &str) -> Vec<BindingName> {
-    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
-        .expect("runtime setter inventory requires parseable generated TypeScript source")
+    // When the emitted runtime helper file can't be re-parsed (rare bundle
+    // shapes the TS parser refuses, e.g. JSX comma patterns), return no
+    // setters from this source — the file already has an UnparseableOutput
+    // audit finding; we don't want to take the whole inventory run down.
+    let Ok(facts) = collect_top_level_statement_facts(source, None, ParseGoal::TypeScript) else {
+        return Vec::new();
+    };
+    facts
         .into_iter()
         .filter(|fact| fact.kind == TopLevelStatementKind::Setter)
         .flat_map(|fact| fact.bindings)
