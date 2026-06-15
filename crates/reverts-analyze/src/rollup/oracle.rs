@@ -10,7 +10,7 @@ pub struct OracleConfig {
 impl Default for OracleConfig {
     fn default() -> Self {
         Self {
-            direct_match_floor: 0.30,
+            direct_match_floor: 0.0,
         }
     }
 }
