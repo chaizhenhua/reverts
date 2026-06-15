@@ -4,8 +4,7 @@ use std::fmt;
 use reverts_ir::BindingName;
 use reverts_js::{
     CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename,
-    format_source_with_module_items_and_renames, parse_error_message, parse_source,
-    sanitize_identifier,
+    format_source_with_module_items_and_renames, parse_source, sanitize_identifier,
 };
 use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
 
@@ -69,6 +68,12 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         .collect::<Vec<_>>();
     let lowering = compiler_lowering(file.compiler_recovery.action);
 
+    // Per ADR 0002 the emitter is faithful, not corrective. When the
+    // parser refuses the body (`const X;` with no initializer, JSX comma
+    // patterns, etc.), we still emit the raw source. The downstream
+    // `audit_emitted_project_parse` pass surfaces the unparseable file as
+    // a finding so the consumer sees the broken module without stranding
+    // the rest of the project.
     let formatted = if should_preserve_raw_source_body(
         body_source.as_str(),
         &generated_imports,
@@ -76,18 +81,17 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         &generated_renames,
         lowering,
     ) {
-        parse_source(
+        // Parse-validate, but on failure fall back to raw body so the
+        // audit can speak to the unparseable module rather than the
+        // emitter aborting the whole project.
+        let _ = parse_source(
             body_source.as_str(),
             file.source_strategy().path_hint(file.path.as_str()),
             file.source_strategy().parse_goal(),
-        )
-        .map_err(|source_error| EmitError::UnparseableOutput {
-            path: file.path.clone(),
-            message: parse_error_message(&source_error, "output could not be parsed"),
-        })?;
+        );
         body_source
     } else {
-        format_source_with_module_items_and_renames(
+        match format_source_with_module_items_and_renames(
             &body_source,
             &generated_imports,
             &generated_exports,
@@ -95,11 +99,13 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
             file.source_strategy().path_hint(file.path.as_str()),
             file.source_strategy().parse_goal(),
             lowering,
-        )
-        .map_err(|source_error| EmitError::UnparseableOutput {
-            path: file.path.clone(),
-            message: parse_error_message(&source_error, "output could not be parsed"),
-        })?
+        ) {
+            Ok(formatted) => formatted,
+            // Parse failure here means the rename/import insertion pass
+            // can't transform the source. Emit the raw body; downstream
+            // audit surfaces it.
+            Err(_) => body_source,
+        }
     };
 
     Ok(EmittedFile {
