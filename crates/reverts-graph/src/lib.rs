@@ -13,15 +13,17 @@ use oxc_ast::{
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
         ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression,
         ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, UpdateExpression,
-        VariableDeclaration, VariableDeclarator,
+        SimpleAssignmentTarget, Statement, StaticMemberExpression, TSImportType,
+        TSInterfaceHeritage, TSType, TSTypeAnnotation, TSTypeParameterInstantiation,
+        UpdateExpression, VariableDeclaration, VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
         walk_computed_member_expression, walk_export_all_declaration,
         walk_export_default_declaration, walk_export_named_declaration, walk_function,
         walk_import_expression, walk_new_expression, walk_static_member_expression,
-        walk_variable_declarator,
+        walk_ts_import_type, walk_ts_interface_heritage, walk_ts_type, walk_ts_type_annotation,
+        walk_ts_type_parameter_instantiation, walk_variable_declarator,
     },
 };
 use oxc_parser::Parser;
@@ -1277,6 +1279,7 @@ impl AstFactExtractor {
                     function_depth: 0,
                     module_scope_bindings: collect_module_scope_bindings(&parsed.program),
                     function_stack: Vec::new(),
+                    type_position_depth: 0,
                 };
                 visitor.visit_program(&parsed.program);
                 return Ok(AstExtraction {
@@ -1411,6 +1414,12 @@ struct AstFactVisitor {
     /// Names of enclosing function declarations. `return X` looks at the
     /// top of the stack to determine which function aliases `X`.
     function_stack: Vec<String>,
+    /// Depth counter for TypeScript type positions. Identifier references
+    /// inside type annotations (`Record<K, V>`, `interface X extends Y`,
+    /// `foo<T>()`, etc.) are not value reads and must not be recorded as
+    /// such — otherwise they leak into `unresolved_reads` and the audit
+    /// flags real type-only utility names like `Record` or `Partial`.
+    type_position_depth: usize,
 }
 
 impl<'a> Visit<'a> for AstFactVisitor {
@@ -1587,6 +1596,19 @@ impl<'a> Visit<'a> for AstFactVisitor {
         self.function_depth -= 1;
     }
 
+    fn visit_catch_clause(&mut self, it: &oxc_ast::ast::CatchClause<'a>) {
+        // A `catch (E) { … }` clause introduces `E` for the body. Without
+        // recording it as a binding the body's reads of `E` look like
+        // unresolved module-scope reads (the catch body itself is at
+        // function_depth == 0 when the try/catch is top-level).
+        if let Some(param) = &it.param {
+            for name in binding_pattern_names(&param.pattern) {
+                self.definition(name);
+            }
+        }
+        oxc_ast::visit::walk::walk_catch_clause(self, it);
+    }
+
     fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
         if let Some(binding) = commonjs_export_binding(&it.left, &it.right) {
             self.export(binding);
@@ -1717,6 +1739,36 @@ impl<'a> Visit<'a> for AstFactVisitor {
         walk_static_member_expression(self, it);
     }
 
+    fn visit_ts_type(&mut self, it: &TSType<'a>) {
+        self.type_position_depth += 1;
+        walk_ts_type(self, it);
+        self.type_position_depth -= 1;
+    }
+
+    fn visit_ts_type_annotation(&mut self, it: &TSTypeAnnotation<'a>) {
+        self.type_position_depth += 1;
+        walk_ts_type_annotation(self, it);
+        self.type_position_depth -= 1;
+    }
+
+    fn visit_ts_type_parameter_instantiation(&mut self, it: &TSTypeParameterInstantiation<'a>) {
+        self.type_position_depth += 1;
+        walk_ts_type_parameter_instantiation(self, it);
+        self.type_position_depth -= 1;
+    }
+
+    fn visit_ts_interface_heritage(&mut self, it: &TSInterfaceHeritage<'a>) {
+        self.type_position_depth += 1;
+        walk_ts_interface_heritage(self, it);
+        self.type_position_depth -= 1;
+    }
+
+    fn visit_ts_import_type(&mut self, it: &TSImportType<'a>) {
+        self.type_position_depth += 1;
+        walk_ts_import_type(self, it);
+        self.type_position_depth -= 1;
+    }
+
     fn visit_computed_member_expression(&mut self, it: &ComputedMemberExpression<'a>) {
         if let Some(binding) = direct_member_object(&it.object) {
             // Computed key may be a string literal (e.g. `ns["foo"]`) — capture
@@ -1817,6 +1869,9 @@ impl AstFactVisitor {
     }
 
     fn should_emit_binding_fact(&self, binding: &str) -> bool {
+        if self.type_position_depth > 0 {
+            return false;
+        }
         self.function_depth == 0 || self.module_scope_bindings.contains(binding)
     }
 }
@@ -3196,6 +3251,98 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(unresolved, vec!["topLevelMissing".to_string()]);
+    }
+
+    #[test]
+    fn ast_fact_extractor_treats_catch_parameter_as_a_binding() {
+        let source = r#"
+            let flag = false;
+            try {
+                doThing();
+            } catch (err) {
+                flag = err.code === 'ERR';
+            }
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let unresolved = graph
+            .def_use()
+            .unresolved_reads()
+            .into_iter()
+            .map(|(_, binding)| binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(graph.ast_errors().is_empty());
+        assert!(
+            !unresolved.contains(&"err".to_string()),
+            "catch parameter `err` must not leak as an unresolved read: {unresolved:?}",
+        );
+        // `doThing` is genuinely unresolved (no import, no definition) — keep this assertion
+        // so the test fails if the scoping fix accidentally suppresses real missing bindings.
+        assert!(
+            unresolved.contains(&"doThing".to_string()),
+            "real unresolved binding `doThing` should still surface: {unresolved:?}",
+        );
+    }
+
+    #[test]
+    fn ast_fact_extractor_skips_identifier_reads_in_typescript_type_positions() {
+        let source = r#"
+            type Alias<T> = Record<string, T>;
+            interface Shape extends Pick<SomeOther, "a" | "b"> {
+                readonly value: Partial<Map<string, number>>;
+            }
+            export const make = (input: Omit<Shape, "value">): ReturnType<typeof builder> => {
+                return builder(input);
+            };
+            function builder(_: unknown) { return { value: undefined }; }
+        "#;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.ts",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let unresolved = graph
+            .def_use()
+            .unresolved_reads()
+            .into_iter()
+            .map(|(_, binding)| binding.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(graph.ast_errors().is_empty());
+        // `Record`, `Pick`, `Partial`, `Map`, `Omit`, `ReturnType`, `Shape`, `SomeOther`
+        // appear only in type positions and must not register as value reads.
+        for type_only in [
+            "Record",
+            "Pick",
+            "Partial",
+            "Map",
+            "Omit",
+            "ReturnType",
+            "Shape",
+            "SomeOther",
+            "Alias",
+        ] {
+            assert!(
+                !unresolved.contains(&type_only.to_string()),
+                "type-only binding {type_only} leaked into unresolved value reads: {unresolved:?}",
+            );
+        }
     }
 
     #[test]
