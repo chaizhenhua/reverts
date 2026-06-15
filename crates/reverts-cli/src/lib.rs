@@ -756,6 +756,20 @@ fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> 
             project.counts.named_export_statements,
             project.audit_findings,
         );
+        if project.audit_findings > 0 {
+            let top: Vec<String> = project
+                .audit_finding_codes
+                .iter()
+                .take(8)
+                .map(|(code, count)| format!("{code}={count}"))
+                .collect();
+            println!(
+                "  audit: errors={}, warnings={}, top=[{}]",
+                project.audit_errors,
+                project.audit_warnings,
+                top.join(", ")
+            );
+        }
         if let Some(report) = &project.setter_blockers {
             print_runtime_setter_blocker_report("  setter_blockers", report);
         }
@@ -1042,6 +1056,9 @@ pub struct RuntimeInventoryProject {
     pub skipped: bool,
     pub counts: RuntimeInventoryCounts,
     pub audit_findings: usize,
+    pub audit_errors: usize,
+    pub audit_warnings: usize,
+    pub audit_finding_codes: Vec<(String, usize)>,
     pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub runtime_attribution: Option<RuntimeLineAttributionReport>,
@@ -1144,6 +1161,9 @@ pub fn runtime_inventory_from_sqlite(
                 skipped: true,
                 counts: RuntimeInventoryCounts::default(),
                 audit_findings: 0,
+                audit_errors: 0,
+                audit_warnings: 0,
+                audit_finding_codes: Vec::new(),
                 setter_blockers: None,
                 emitted_setter_blockers: None,
                 runtime_attribution: None,
@@ -1187,6 +1207,29 @@ pub fn runtime_inventory_from_sqlite(
             total.add(project_report);
         }
         let project_audit_findings = run.audit.findings().len();
+        let project_audit_errors = run.audit.error_count();
+        let project_audit_warnings = run.audit.warning_count();
+        let mut finding_code_counts: BTreeMap<String, usize> = BTreeMap::new();
+        for finding in run.audit.findings() {
+            *finding_code_counts
+                .entry(format!("{:?}", finding.code))
+                .or_insert(0) += 1;
+        }
+        let mut audit_finding_codes: Vec<(String, usize)> =
+            finding_code_counts.into_iter().collect();
+        audit_finding_codes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        if project_audit_findings > 0 && project_audit_findings <= 20 {
+            for finding in run.audit.findings() {
+                eprintln!(
+                    "  finding {:?} [{:?}] module={:?} binding={:?} :: {}",
+                    finding.severity,
+                    finding.code,
+                    finding.module,
+                    finding.binding,
+                    finding.message
+                );
+            }
+        }
         totals.add(counts);
         audit_findings += project_audit_findings;
         projects.push(RuntimeInventoryProject {
@@ -1195,6 +1238,9 @@ pub fn runtime_inventory_from_sqlite(
             skipped: false,
             counts,
             audit_findings: project_audit_findings,
+            audit_errors: project_audit_errors,
+            audit_warnings: project_audit_warnings,
+            audit_finding_codes,
             setter_blockers: project_setter_blockers,
             emitted_setter_blockers: project_emitted_setter_blockers,
             runtime_attribution: project_runtime_attribution,
