@@ -142,8 +142,41 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         updated += n;
     }
     drop(stmt);
+
+    // Backfill package_surfaces for every accepted external_import attribution that lacks
+    // a matching (project_id, export_specifier) row. This covers both the rows we just flipped
+    // and pre-existing accepted external imports whose surfaces were never persisted.
+    let surfaces_inserted = tx.execute(
+        "INSERT OR IGNORE INTO package_surfaces
+            (project_id, package_name, package_version, export_specifier, status,
+             evidence_json, created_at, updated_at)
+         SELECT DISTINCT pf.project_id,
+                pa.package_name,
+                COALESCE(pa.package_version, '*'),
+                pa.export_specifier,
+                'accepted',
+                ?1,
+                ?2, ?2
+         FROM package_attributions pa
+         JOIN modules m ON m.id = pa.module_id
+         JOIN project_files pf ON pf.file_id = m.file_id
+         WHERE pa.status='accepted'
+           AND pa.emission_mode='external_import'
+           AND pa.export_specifier IS NOT NULL
+           AND TRIM(pa.export_specifier) != ''",
+        params![
+            format!(
+                "{{\"matcher\":\"rollup_apply\",\"policy_version\":{}}}",
+                args.policy_version
+            ),
+            now
+        ],
+    )?;
+
     tx.commit().map_err(|e| format!("commit: {e}"))?;
-    println!("apply complete: {updated} rows updated");
+    println!(
+        "apply complete: {updated} attribution row(s), {surfaces_inserted} surface row(s) inserted"
+    );
     Ok(ExitCode::SUCCESS)
 }
 
