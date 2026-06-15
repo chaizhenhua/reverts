@@ -117,6 +117,29 @@ impl AuditReport {
     pub fn is_clean(&self) -> bool {
         self.findings.is_empty()
     }
+
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        self.findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Error)
+    }
+
+    #[must_use]
+    pub fn error_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Error)
+            .count()
+    }
+
+    #[must_use]
+    pub fn warning_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Warning)
+            .count()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
