@@ -461,6 +461,11 @@ pub struct RuntimeSetterMigrationBlockerReport {
     pub accepted_bindings: usize,
     pub blocked_bindings: usize,
     pub reasons: BTreeMap<RuntimeSetterMigrationBlockerReason, usize>,
+    /// Sub-reason distribution per top-level reason. Populated for
+    /// ReaderNonSnippetUse (7 distinct internal causes) and any other
+    /// blocker that carries a `sub_reason` label. Used for guard-
+    /// relaxation planning without changing the top-level taxonomy.
+    pub sub_reasons: BTreeMap<(RuntimeSetterMigrationBlockerReason, &'static str), usize>,
     pub binding_statuses:
         BTreeMap<RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus>,
 }
@@ -484,9 +489,22 @@ impl RuntimeSetterMigrationBlockerReport {
         binding: BindingName,
         reason: RuntimeSetterMigrationBlockerReason,
     ) {
+        self.add_reason_with_sub(source_file_id, binding, reason, None);
+    }
+
+    pub fn add_reason_with_sub(
+        &mut self,
+        source_file_id: u32,
+        binding: BindingName,
+        reason: RuntimeSetterMigrationBlockerReason,
+        sub_reason: Option<&'static str>,
+    ) {
         self.remove_existing_status(source_file_id, &binding);
         self.blocked_bindings += 1;
         *self.reasons.entry(reason).or_default() += 1;
+        if let Some(label) = sub_reason {
+            *self.sub_reasons.entry((reason, label)).or_default() += 1;
+        }
         self.binding_statuses.insert(
             RuntimeSetterMigrationBindingKey {
                 source_file_id,
@@ -508,6 +526,9 @@ impl RuntimeSetterMigrationBlockerReport {
         );
         for (reason, count) in &other.reasons {
             *self.reasons.entry(*reason).or_default() += count;
+        }
+        for (key, count) in &other.sub_reasons {
+            *self.sub_reasons.entry(*key).or_default() += count;
         }
     }
 
@@ -7740,7 +7761,12 @@ fn runtime_setter_migration_blocker_report(
                             binding,
                             RuntimeSetterMigrationBlockerReason::ReaderClusterOverlapsMigratedBinding,
                         ),
-                        Err(reason) => report.add_reason(source_id, binding, reason.into()),
+                        Err(blocker) => report.add_reason_with_sub(
+                            source_id,
+                            binding,
+                            blocker.into(),
+                            blocker.sub_reason(),
+                        ),
                     }
                 }
                 Ok(RuntimeBindingReadProfile::Rejected) => {
@@ -7767,7 +7793,12 @@ fn runtime_setter_migration_blocker_report(
                                     binding,
                                     RuntimeSetterMigrationBlockerReason::ReaderClusterOverlapsMigratedBinding,
                                 ),
-                                Err(reason) => report.add_reason(source_id, binding, reason.into()),
+                                Err(blocker) => report.add_reason_with_sub(
+                                    source_id,
+                                    binding,
+                                    blocker.into(),
+                                    blocker.sub_reason(),
+                                ),
                             }
                             continue;
                         }
@@ -8016,7 +8047,7 @@ struct RuntimeReaderOwnerRuntimeState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuntimeReaderClusterBlocker {
-    NonSnippetUse,
+    NonSnippetUse(ReaderNonSnippetUseKind),
     MissingSnippet,
     InvalidNamespaceSnippet,
     InvalidReaderFunctionSnippet,
@@ -8028,6 +8059,50 @@ enum RuntimeReaderClusterBlocker {
     NamespaceTargetDifferentWriter,
     OwnerSourceMissing,
     OwnerNameConflict,
+}
+
+/// Why a reader cluster's "non-snippet use" guard fired. Surfaced as a
+/// sub-reason next to `RuntimeSetterMigrationBlockerReason::ReaderNonSnippetUse`
+/// so guard-relaxation work can tell apart benign size-cap rejections from
+/// cycle-correctness rejections without touching the rule itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReaderNonSnippetUseKind {
+    /// Cluster's seed snippet set already exceeds the source-line cap.
+    SeedClusterSizeCap,
+    /// A queued reader is itself in `folded_runtime_definitions` — moving
+    /// it would re-fold something already lowered.
+    ReaderAlreadyFolded,
+    /// A queued reader has a non-snippet use that the fold heuristic
+    /// can't rewrite. The canonical "real usage outside our region".
+    UnfoldableNonSnippetUse,
+    /// After expansion, accumulated moved source lines exceed the cap.
+    ExpandedClusterSizeCap,
+    /// `folded_runtime_deps` non-empty and the cluster source-line tally
+    /// exceeds the lower folded-deps cap.
+    FoldedDepClusterSizeCap,
+    /// One of the primary bindings has a folded non-snippet use that the
+    /// movability heuristic can't accommodate.
+    PrimaryBindingNonSnippetUse,
+    /// Lazy-init cycle: a folded chunk in the runtime helper still calls
+    /// a moved reader, and the writer module already imports the same
+    /// runtime helper, so migration would create `runtime → writer →
+    /// runtime`.
+    LazyInitCycleImport,
+}
+
+impl ReaderNonSnippetUseKind {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SeedClusterSizeCap => "seed_cluster_size_cap",
+            Self::ReaderAlreadyFolded => "reader_already_folded",
+            Self::UnfoldableNonSnippetUse => "unfoldable_non_snippet_use",
+            Self::ExpandedClusterSizeCap => "expanded_cluster_size_cap",
+            Self::FoldedDepClusterSizeCap => "folded_dep_cluster_size_cap",
+            Self::PrimaryBindingNonSnippetUse => "primary_binding_non_snippet_use",
+            Self::LazyInitCycleImport => "lazy_init_cycle_import",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8748,7 +8823,7 @@ fn merge_reader_migration_component(
 impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
     fn from(reason: RuntimeReaderClusterBlocker) -> Self {
         match reason {
-            RuntimeReaderClusterBlocker::NonSnippetUse => Self::ReaderNonSnippetUse,
+            RuntimeReaderClusterBlocker::NonSnippetUse(_) => Self::ReaderNonSnippetUse,
             RuntimeReaderClusterBlocker::MissingSnippet => Self::ReaderSnippetMissing,
             RuntimeReaderClusterBlocker::InvalidNamespaceSnippet
             | RuntimeReaderClusterBlocker::InvalidReaderFunctionSnippet => {
@@ -8770,6 +8845,18 @@ impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
             }
             RuntimeReaderClusterBlocker::OwnerSourceMissing => Self::OwnerSourceMissing,
             RuntimeReaderClusterBlocker::OwnerNameConflict => Self::OwnerNameConflict,
+        }
+    }
+}
+
+impl RuntimeReaderClusterBlocker {
+    /// Returns a static label for sub-reason analytics, when the blocker
+    /// carries a sub-classification. `None` means the blocker is itself
+    /// the leaf reason.
+    fn sub_reason(self) -> Option<&'static str> {
+        match self {
+            Self::NonSnippetUse(kind) => Some(kind.as_str()),
+            _ => None,
         }
     }
 }
@@ -8798,7 +8885,9 @@ fn migratable_runtime_reader_cluster_result(
     if runtime_reader_cluster_source_lines(ctx, &initial_readers)
         > MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES
     {
-        return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+            ReaderNonSnippetUseKind::SeedClusterSizeCap,
+        ));
     }
 
     let owner_available_bindings = owner_declared_or_imported_bindings(ctx, owner_module)?;
@@ -8819,11 +8908,15 @@ fn migratable_runtime_reader_cluster_result(
             continue;
         }
         if ctx.folded_runtime_definitions.contains(&reader) {
-            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                ReaderNonSnippetUseKind::ReaderAlreadyFolded,
+            ));
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
             if !runtime_reader_folded_non_snippet_use_can_move(ctx, &reader) {
-                return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+                return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                    ReaderNonSnippetUseKind::UnfoldableNonSnippetUse,
+                ));
             }
             folded_non_snippet_snippets.insert(reader.clone());
         }
@@ -8834,7 +8927,9 @@ fn migratable_runtime_reader_cluster_result(
             .ok_or(RuntimeReaderClusterBlocker::MissingSnippet)?;
         moved_source_lines += snippet.source.lines().count().max(1);
         if moved_source_lines > MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES {
-            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                ReaderNonSnippetUseKind::ExpandedClusterSizeCap,
+            ));
         }
         let is_namespace_reader = ctx
             .read_index
@@ -9128,7 +9223,9 @@ fn migratable_runtime_reader_cluster_result(
         && runtime_reader_cluster_source_lines(ctx, &moved_snippets)
             > MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES
     {
-        return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+            ReaderNonSnippetUseKind::FoldedDepClusterSizeCap,
+        ));
     }
     let folded_non_snippet_primary_bindings = primary_bindings
         .iter()
@@ -9143,7 +9240,9 @@ fn migratable_runtime_reader_cluster_result(
         .iter()
         .any(|binding| !runtime_reader_folded_non_snippet_use_can_move(ctx, binding))
     {
-        return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+            ReaderNonSnippetUseKind::PrimaryBindingNonSnippetUse,
+        ));
     }
 
     // If a folded runtime chunk still calls a moved reader, the runtime helper
@@ -9167,7 +9266,9 @@ fn migratable_runtime_reader_cluster_result(
             extra_runtime_setter_deps: &extra_runtime_setter_deps,
             extra_runtime_reexport_source_deps: &extra_runtime_reexport_source_deps,
         })? {
-            return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
+            return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                ReaderNonSnippetUseKind::LazyInitCycleImport,
+            ));
         }
     }
 

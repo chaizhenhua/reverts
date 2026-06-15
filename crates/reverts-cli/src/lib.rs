@@ -582,6 +582,12 @@ fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
         outcome.package_source_quality_missing,
         outcome.audit.findings().len()
     );
+    if outcome.rollup_attributions_promoted > 0 || outcome.rollup_surfaces_backfilled > 0 {
+        println!(
+            "oracle rollup: {} closure-owned module(s) promoted to external_import, {} surface row(s) backfilled",
+            outcome.rollup_attributions_promoted, outcome.rollup_surfaces_backfilled,
+        );
+    }
     if !outcome.audit.is_clean() {
         println!("{}", format_audit_findings(&outcome.audit));
     }
@@ -827,6 +833,19 @@ fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrat
     });
     for (reason, count) in reasons {
         println!("  {}={}", reason.as_str(), count);
+        let mut sub_reasons = report
+            .sub_reasons
+            .iter()
+            .filter_map(|((r, label), count)| (*r == reason).then_some((*label, *count)))
+            .collect::<Vec<_>>();
+        sub_reasons.sort_by(|(left_label, left_count), (right_label, right_count)| {
+            right_count
+                .cmp(left_count)
+                .then_with(|| left_label.cmp(right_label))
+        });
+        for (label, sub_count) in sub_reasons {
+            println!("    {label}={sub_count}");
+        }
         if std::env::var_os("REVERTS_RUNTIME_BLOCKER_EXAMPLES").is_some() {
             let examples = report
                 .binding_statuses
@@ -954,6 +973,14 @@ pub struct MatchPackagesOutcome {
     pub package_source_quality_missing: usize,
     pub audit: AuditReport,
     pub external_import_blockers: Vec<ExternalImportBlockerSummary>,
+    /// Closure-owned package modules the oracle rolled up to their top-level
+    /// package specifier after persistence. Zero unless `apply=true` and the
+    /// oracle found additional externalizable modules beyond what the matcher
+    /// produced on its own.
+    pub rollup_attributions_promoted: usize,
+    /// Surface rows backfilled by the oracle pass to cover accepted
+    /// external-import attributions (both pre-existing and freshly promoted).
+    pub rollup_surfaces_backfilled: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2373,6 +2400,30 @@ pub fn match_packages_from_connection(
         (0, 0, 0)
     };
     mark_timing!("persist");
+
+    // Oracle rollup pass: after the matcher has persisted its own
+    // attributions, run the externalizability oracle against the
+    // just-written database state. The oracle flips any remaining
+    // closure-owned rejection whose package as a whole is externalizable
+    // (per `package_externalization_hints` + an existing accepted top-level
+    // anchor) into an accepted external_import attribution stamped with the
+    // current safety policy. Without this every match-packages run would
+    // leave roughly 60% of package modules emitting their source even when
+    // a top-level import would satisfy them.
+    //
+    // Only runs on `--apply` because dry-run match-packages by contract
+    // must not mutate the DB. The same idempotent function powers
+    // `reverts-rollup-apply`; running it here makes the standalone binary
+    // optional for the normal path.
+    let (rollup_attributions_promoted, rollup_surfaces_backfilled) = if args.apply {
+        let outcome =
+            run_oracle_rollup_pass(connection).map_err(MatchPackagesError::WriteAttribution)?;
+        mark_timing!("oracle_rollup");
+        (outcome.attributions_updated, outcome.surfaces_inserted)
+    } else {
+        (0, 0)
+    };
+
     if timing_enabled {
         let _ = timing_last;
     }
@@ -2414,7 +2465,68 @@ pub fn match_packages_from_connection(
         package_source_quality_missing: source_quality_counts.missing,
         audit,
         external_import_blockers: external_import_safety.blockers,
+        rollup_attributions_promoted,
+        rollup_surfaces_backfilled,
     })
+}
+
+/// Run the externalizability oracle against the just-persisted database
+/// state. See [`run_match_packages`] for the rationale.
+fn run_oracle_rollup_pass(
+    connection: &mut Connection,
+) -> Result<reverts_analyze::rollup::apply::ApplyOutcome, rusqlite::Error> {
+    let snapshot = reverts_analyze::rollup::db::load_snapshot(connection)?;
+    let oracle = reverts_analyze::rollup::oracle::build_oracle(
+        &snapshot,
+        reverts_analyze::rollup::oracle::OracleConfig::default(),
+    );
+    let now = iso8601_now_utc();
+    let tx = connection.transaction()?;
+    let outcome =
+        reverts_analyze::rollup::apply::apply_rollup_projections(&tx, &snapshot, &oracle, &now)
+            .map_err(|err| match err {
+                reverts_analyze::rollup::apply::ApplyError::Sqlite(e) => e,
+                // OracleVerdictRegression is a programmer-error in the oracle
+                // implementation; surface it through the sqlite error channel so
+                // the cli reports it without panicking. Use a synthetic error
+                // payload rather than failing silently.
+                reverts_analyze::rollup::apply::ApplyError::OracleVerdictRegression { .. } => {
+                    rusqlite::Error::ExecuteReturnedResults
+                }
+            })?;
+    tx.commit()?;
+    Ok(outcome)
+}
+
+fn iso8601_now_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (days, secs_of_day) = (secs / 86_400, secs % 86_400);
+    let (hh, mm, ss) = (
+        secs_of_day / 3600,
+        (secs_of_day / 60) % 60,
+        secs_of_day % 60,
+    );
+    let (y, mo, d) = days_since_unix_epoch_to_civil(days as i64);
+    format!("{y:04}-{mo:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
+}
+
+fn days_since_unix_epoch_to_civil(z: i64) -> (i64, u32, u32) {
+    // Howard Hinnant's date algorithm: days since 1970-01-01 → civil (y, m, d).
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
 }
 
 fn remove_package_attributions_for_revalidation(
@@ -2423,9 +2535,27 @@ fn remove_package_attributions_for_revalidation(
 ) -> usize {
     let before = rows.package_attributions.len();
     rows.package_attributions.retain(|attribution| {
-        (!requested_package_names.is_empty()
-            && !requested_package_names.contains(&attribution.package_name))
-            || attribution.emission_mode != PackageEmissionMode::ExternalImport
+        // Rows outside the requested package scope are never re-validated.
+        if !requested_package_names.is_empty()
+            && !requested_package_names.contains(&attribution.package_name)
+        {
+            return true;
+        }
+        // Keep non-external-import rows as-is; this function only re-validates
+        // accepted external imports.
+        if attribution.emission_mode != PackageEmissionMode::ExternalImport {
+            return true;
+        }
+        // The sqlite loader downgrades any accepted external-import row that
+        // is not stamped with the current safety policy back to
+        // rejected/application_source on load, so by the time we get here a
+        // row in InputRows that still carries Accepted + ExternalImport has
+        // already passed that gate. Treat those rows as oracle-approved and
+        // do NOT strip them — otherwise every match-packages run would wipe
+        // the rollup state the matcher just persisted in a prior invocation.
+        // `retain` keeps rows where the predicate is true: return true to
+        // preserve the accepted row, false to drop it for revalidation.
+        attribution.status == PackageAttributionStatus::Accepted
     });
     before.saturating_sub(rows.package_attributions.len())
 }
