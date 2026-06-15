@@ -200,13 +200,17 @@ pub struct PackageVersionCandidate<'a> {
     pub sources: Vec<PackageSourceFingerprint<'a>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 /// Strategy that proved a module-to-package-source match.
 pub enum ModuleMatchStrategy {
     /// Full module source identity after AST normalization.
     NormalizedSourceHash,
     /// Function signatures plus string anchors matched the package source.
     FunctionSignatureAndStringAnchors,
+    /// Prototype/member shape anchors plus string/property anchors uniquely
+    /// matched the package source after minification removed local function
+    /// names and bodies.
+    PropertyShapeAndStringAnchors,
     /// Function signatures plus string anchors matched the package version as
     /// an aggregate, but not one unique importable source file. This proves
     /// package ownership only.
@@ -240,6 +244,7 @@ impl ModuleMatchStrategy {
         match self {
             Self::NormalizedSourceHash => "normalized_source_hash",
             Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
+            Self::PropertyShapeAndStringAnchors => "property_shape_and_string_anchors",
             Self::AggregateFunctionSignatureAndStringAnchors => {
                 "aggregate_function_signature_and_string_anchors"
             }
@@ -1487,6 +1492,7 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
         strategy,
         ModuleMatchStrategy::NormalizedSourceHash
             | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+            | ModuleMatchStrategy::PropertyShapeAndStringAnchors
     )
 }
 
@@ -1504,6 +1510,7 @@ struct ExternalImportSourceIndex<'a> {
     by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
     normalized_by_version_hash:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
+    normalized_by_hash: BTreeMap<String, Vec<&'a PackageSource>>,
     export_members_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
     fingerprints_by_source_path: RefCell<BTreeMap<String, Option<SourceFingerprint>>>,
     dependency_entries_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
@@ -1549,6 +1556,11 @@ impl<'a> ExternalImportSourceIndex<'a> {
                     .or_default()
                     .entry(source.package_version.clone())
                     .or_default()
+                    .entry(normalized_hash.clone())
+                    .or_default()
+                    .push(source);
+                index
+                    .normalized_by_hash
                     .entry(normalized_hash)
                     .or_default()
                     .push(source);
@@ -1578,6 +1590,9 @@ impl<'a> ExternalImportSourceIndex<'a> {
                 }
             }
         }
+        for sources in index.normalized_by_hash.values_mut() {
+            sort_external_sources(sources);
+        }
         index
     }
 
@@ -1601,6 +1616,17 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .and_then(|versions| versions.get(package_version))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    fn normalized_sources_for_any_package(
+        &self,
+        normalized_hashes: &BTreeSet<String>,
+    ) -> Vec<&'a PackageSource> {
+        normalized_hashes
+            .iter()
+            .filter_map(|hash| self.normalized_by_hash.get(hash))
+            .flat_map(|sources| sources.iter().copied())
+            .collect()
     }
 
     fn sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
@@ -1872,7 +1898,8 @@ fn dependency_exact_hint_source_match_external_package_source(
     )?;
     match source_match.strategy {
         ModuleMatchStrategy::NormalizedSourceHash
-        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors => {}
+        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::PropertyShapeAndStringAnchors => {}
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -1918,6 +1945,15 @@ fn semantic_external_target_policies(
                 min_score: 1,
             }]
         }
+        ModuleMatchStrategy::PropertyShapeAndStringAnchors
+            if package_match.function_signature_matches > 0
+                && package_match.string_anchor_matches > 0 =>
+        {
+            vec![SemanticExternalTargetPolicy {
+                hint_mode: SemanticPathHintMode::ImportProof,
+                min_score: 1,
+            }]
+        }
         ModuleMatchStrategy::DependencyClosureOwnership => {
             if !package_match.source_path.starts_with("exact-hint:") {
                 return Vec::new();
@@ -1942,7 +1978,8 @@ fn semantic_external_target_policies(
             }
             Vec::new()
         }
-        ModuleMatchStrategy::FunctionSignatureAndStringAnchors => Vec::new(),
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::PropertyShapeAndStringAnchors => Vec::new(),
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -2154,6 +2191,7 @@ fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch
         }
         ModuleMatchStrategy::NormalizedSourceHash
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
         | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -2437,6 +2475,7 @@ fn export_member_external_package_source_for_source_path(
                     external,
                     &matched_members,
                     &external_members,
+                    external_source_index,
                 )?;
                 Some((*matched, proof))
             })
@@ -2521,6 +2560,7 @@ fn export_member_source_proof(
     external: &PackageSource,
     matched_members: &BTreeSet<String>,
     external_members: &BTreeSet<String>,
+    external_source_index: &ExternalImportSourceIndex<'_>,
 ) -> Option<ExportMemberSourceProof> {
     if package_sources_are_equivalent(matched, external) {
         return Some(ExportMemberSourceProof::SourceEquivalent);
@@ -2537,6 +2577,13 @@ fn export_member_source_proof(
         return Some(ExportMemberSourceProof::BarrelReference);
     }
     if external_source_export_all_reexports_matched_source(external, matched) {
+        return Some(ExportMemberSourceProof::ExportAllReexport);
+    }
+    if external_source_export_all_reexports_matched_source_transitively(
+        external,
+        matched,
+        external_source_index,
+    ) {
         return Some(ExportMemberSourceProof::ExportAllReexport);
     }
     if external_source_commonjs_reexports_matched_source(external, matched) {
@@ -2664,6 +2711,72 @@ fn external_source_export_all_reexports_matched_source(
     export_all_reexport_targets(external.source.as_str())
         .into_iter()
         .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
+}
+
+fn external_source_export_all_reexports_matched_source_transitively(
+    external: &PackageSource,
+    matched: &PackageSource,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+) -> bool {
+    let matched_entry = package_source_entry_path(matched);
+    let mut visited = BTreeSet::<String>::new();
+    external_source_export_all_reexports_entry_transitively(
+        external,
+        matched_entry.as_str(),
+        external_source_index,
+        &mut visited,
+    )
+}
+
+fn external_source_export_all_reexports_entry_transitively(
+    source: &PackageSource,
+    matched_entry: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    let source_key = format!(
+        "{}@{}:{}",
+        source.package_name, source.package_version, source.source_path
+    );
+    if !visited.insert(source_key) {
+        return false;
+    }
+    for entry in package_source_export_all_reexport_entries(source) {
+        if source_entry_paths_match(entry.as_str(), matched_entry) {
+            return true;
+        }
+        for next in sources_matching_entry(
+            source.package_name.as_str(),
+            source.package_version.as_str(),
+            entry.as_str(),
+            external_source_index,
+        ) {
+            if external_source_export_all_reexports_entry_transitively(
+                next,
+                matched_entry,
+                external_source_index,
+                visited,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn package_source_export_all_reexport_entries(source: &PackageSource) -> BTreeSet<String> {
+    export_all_reexport_targets(source.source.as_str())
+        .into_iter()
+        .filter_map(|target| {
+            resolve_package_relative_require(package_source_entry_path(source).as_str(), &target)
+        })
+        .map(|entry| {
+            strip_source_extension(entry.as_str())
+                .trim_matches('/')
+                .to_ascii_lowercase()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 fn package_source_dependency_entries(source: &PackageSource) -> BTreeSet<String> {
@@ -3905,8 +4018,17 @@ fn force_externalize_remaining_package_modules(
                 source_only_match,
                 &external_source_index,
             );
-            let Some(target) = standard_target.or_else(|| {
-                source_only_match.and_then(|package_match| {
+            let mut accepted_package_name = package_name.to_string();
+            let mut accepted_package_version = package_version.clone();
+            let mut accepted_function_matches = source_only_match
+                .map(|package_match| package_match.function_signature_matches)
+                .unwrap_or_default();
+            let mut accepted_string_matches = source_only_match
+                .map(|package_match| package_match.string_anchor_matches)
+                .unwrap_or_default();
+            let mut target = standard_target;
+            if target.is_none() {
+                target = source_only_match.and_then(|package_match| {
                     dependency_graph_source_fingerprint_external_import_target(
                         rows,
                         module,
@@ -3924,16 +4046,34 @@ fn force_externalize_remaining_package_modules(
                             &concrete_sources_by_module,
                         )
                     })
+                });
+            }
+            if target.is_none()
+                && let Some(correction) = source_only_match.and_then(|package_match| {
+                    cross_package_exact_source_external_import_target(
+                        rows,
+                        module,
+                        package_match,
+                        &external_source_index,
+                        module_source,
+                        &concrete_sources_by_module,
+                    )
                 })
-            }) else {
+            {
+                accepted_package_name = correction.package_name;
+                accepted_package_version = correction.package_version;
+                accepted_function_matches = correction.function_signature_matches;
+                accepted_string_matches = correction.string_anchor_matches;
+                target = Some(correction.target);
+            }
+            let Some(target) = target else {
                 continue;
             };
             let target_source_path = target.source_path.clone();
-            let accepted_package_version = package_version.clone();
             let mut attribution = PackageAttributionInput::accepted_external(
                 module.id,
-                package_name,
-                package_version.as_str(),
+                accepted_package_name.as_str(),
+                accepted_package_version.as_str(),
                 target.export_specifier.as_str(),
             )
             .with_resolved_file(target.source_path.as_str());
@@ -3945,33 +4085,31 @@ fn force_externalize_remaining_package_modules(
             report.attributions.push(attribution);
             if let Some(index) = source_only_match_indices.get(&module.id).copied() {
                 let package_match = &mut report.matches[index];
-                package_match.package_name = package_name.to_string();
-                package_match.package_version = package_version.clone();
+                package_match.package_name = accepted_package_name.clone();
+                package_match.package_version = accepted_package_version.clone();
                 package_match.export_specifier = target.export_specifier;
                 package_match.source_path = target.source_path;
+                package_match.function_signature_matches = accepted_function_matches;
+                package_match.string_anchor_matches = accepted_string_matches;
                 package_match.external_importable = true;
             } else {
                 report.matches.push(PackageMatch {
                     module_id: module.id,
-                    package_name: package_name.to_string(),
-                    package_version: package_version.clone(),
+                    package_name: accepted_package_name.clone(),
+                    package_version: accepted_package_version.clone(),
                     export_specifier: target.export_specifier,
                     source_path: target.source_path,
                     normalized_source_hash: String::new(),
                     strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-                    function_signature_matches: source_only_match
-                        .map(|package_match| package_match.function_signature_matches)
-                        .unwrap_or_default(),
-                    string_anchor_matches: source_only_match
-                        .map(|package_match| package_match.string_anchor_matches)
-                        .unwrap_or_default(),
+                    function_signature_matches: accepted_function_matches,
+                    string_anchor_matches: accepted_string_matches,
                     external_importable: true,
                 });
             }
             accepted_modules.insert(module.id);
             if let Some(concrete) = concrete_package_source_from_parts(
                 module.id,
-                package_name,
+                accepted_package_name.as_str(),
                 report
                     .matches
                     .iter()
@@ -4085,6 +4223,9 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
         return rest.rsplit(':').next().map(ToOwned::to_owned);
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-package-source:") {
         return rest.rsplit(':').next().map(ToOwned::to_owned);
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
@@ -4255,6 +4396,7 @@ fn dependency_graph_source_fingerprint_policy_allows(strategy: ModuleMatchStrate
             | ModuleMatchStrategy::CascadeFunctionOwnership
             | ModuleMatchStrategy::CascadePartialFunctionCoverage
             | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            | ModuleMatchStrategy::PropertyShapeAndStringAnchors
     )
 }
 
@@ -4531,15 +4673,191 @@ fn external_importable_sources_matching_entry<'a>(
     entry: &str,
     external_source_index: &'a ExternalImportSourceIndex<'a>,
 ) -> Vec<&'a PackageSource> {
+    sources_matching_entry(package_name, package_version, entry, external_source_index)
+        .into_iter()
+        .filter(|source| source.external_importable)
+        .collect()
+}
+
+fn sources_matching_entry<'a>(
+    package_name: &str,
+    package_version: &str,
+    entry: &str,
+    external_source_index: &'a ExternalImportSourceIndex<'a>,
+) -> Vec<&'a PackageSource> {
     external_source_index
         .all_sources(package_name, package_version)
         .iter()
         .copied()
-        .filter(|source| source.external_importable)
         .filter(|source| {
             source_entry_paths_match(package_source_entry_path(source).as_str(), entry)
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct CorrectedPackageExternalImportTarget {
+    package_name: String,
+    package_version: String,
+    target: ExternalImportTarget,
+    function_signature_matches: usize,
+    string_anchor_matches: usize,
+}
+
+fn cross_package_exact_source_external_import_target(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> Option<CorrectedPackageExternalImportTarget> {
+    if !cross_package_exact_source_policy_allows(package_match) || module_source.trim().is_empty() {
+        return None;
+    }
+    let module_fingerprint =
+        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+    let mut candidates = external_source_index
+        .normalized_sources_for_any_package(&module_fingerprint.normalized_source_hashes)
+        .into_iter()
+        .filter(|source| source.external_importable && source.is_within_fingerprint_budget())
+        .filter_map(|source| {
+            let source_fingerprint = external_source_index.source_fingerprint(source)?;
+            if source_fingerprint
+                .normalized_source_hashes
+                .is_disjoint(&module_fingerprint.normalized_source_hashes)
+            {
+                return None;
+            }
+            let function_matches = source_fingerprint
+                .function_signature_hashes
+                .intersection(&module_fingerprint.function_signature_hashes)
+                .count();
+            let string_matches = source_fingerprint
+                .string_anchors
+                .intersection(&module_fingerprint.string_anchors)
+                .count();
+            let graph = dependency_graph_source_evidence(
+                rows,
+                module.id,
+                source,
+                external_source_index,
+                concrete_sources_by_module,
+            );
+            if !cross_package_exact_source_candidate_allowed(
+                module_source,
+                source,
+                graph,
+                function_matches,
+                string_matches,
+            ) {
+                return None;
+            }
+            Some(CrossPackageExactSourceCandidate {
+                source,
+                graph,
+                function_matches,
+                string_matches,
+            })
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        cross_package_exact_source_score(right)
+            .cmp(&cross_package_exact_source_score(left))
+            .then_with(|| {
+                package_source_external_import_rank(left.source)
+                    .cmp(&package_source_external_import_rank(right.source))
+            })
+            .then_with(|| left.source.package_name.cmp(&right.source.package_name))
+            .then_with(|| {
+                left.source
+                    .package_version
+                    .cmp(&right.source.package_version)
+            })
+            .then_with(|| {
+                left.source
+                    .export_specifier
+                    .cmp(&right.source.export_specifier)
+            })
+            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+    });
+    let best_score = cross_package_exact_source_score(candidates.first()?);
+    let best = candidates
+        .into_iter()
+        .filter(|candidate| cross_package_exact_source_score(candidate) == best_score)
+        .collect::<Vec<_>>();
+    let targets = best
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.source.package_name.as_str(),
+                candidate.source.package_version.as_str(),
+                candidate.source.export_specifier.as_str(),
+                candidate.source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if targets.len() != 1 {
+        return None;
+    }
+    let selected = best.into_iter().next()?;
+    Some(CorrectedPackageExternalImportTarget {
+        package_name: selected.source.package_name.clone(),
+        package_version: selected.source.package_version.clone(),
+        function_signature_matches: selected.function_matches,
+        string_anchor_matches: selected.string_matches,
+        target: ExternalImportTarget {
+            export_specifier: selected.source.export_specifier.clone(),
+            source_path: format!(
+                "forced-external:cross-package-source:source-hash:hint={}@{}:graph={}/{}:functions={}:strings={}:{}",
+                package_match.package_name,
+                package_match.package_version,
+                selected.graph.matched_edges,
+                selected.graph.known_edges,
+                selected.function_matches,
+                selected.string_matches,
+                selected.source.source_path,
+            ),
+        },
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CrossPackageExactSourceCandidate<'a> {
+    source: &'a PackageSource,
+    graph: DependencyGraphEvidence,
+    function_matches: usize,
+    string_matches: usize,
+}
+
+fn cross_package_exact_source_policy_allows(package_match: &PackageMatch) -> bool {
+    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
+        && package_match.source_path.starts_with("exact-hint:")
+}
+
+fn cross_package_exact_source_candidate_allowed(
+    module_source: &str,
+    source: &PackageSource,
+    graph: DependencyGraphEvidence,
+    function_matches: usize,
+    string_matches: usize,
+) -> bool {
+    if is_json_source_path(source.source_path.as_str()) {
+        return false;
+    }
+    graph.matched_edges >= 1
+        || (module_source.len() >= 120 && function_matches >= 1 && string_matches >= 1)
+        || (module_source.len() >= 300 && (function_matches >= 1 || string_matches >= 2))
+}
+
+fn cross_package_exact_source_score(candidate: &CrossPackageExactSourceCandidate<'_>) -> usize {
+    1_000
+        + candidate.graph.matched_edges * 50
+        + candidate.function_matches * 10
+        + candidate.string_matches
 }
 
 fn forced_external_package_version(
@@ -5493,6 +5811,7 @@ fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint, Str
 struct AstFingerprint {
     function_signature_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
+    prototype_members: BTreeSet<String>,
 }
 
 fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint, String> {
@@ -5508,7 +5827,7 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
                 fingerprint: AstFingerprint::default(),
             };
             visitor.visit_program(&parsed.program);
-            return Ok(visitor.fingerprint);
+            return Ok(visitor.finish());
         }
 
         errors.push(ParseError {
@@ -5610,6 +5929,9 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
                     self.record_export_member_anchor(member.as_str());
                 }
             }
+            if let Some(member) = prototype_assignment_property_name(&expression.left) {
+                self.record_prototype_member_anchor(member.as_str());
+            }
         }
         walk_assignment_expression(self, expression);
     }
@@ -5684,6 +6006,67 @@ impl FingerprintVisitor<'_> {
                 .insert(format!("export:{member}"));
         }
     }
+
+    fn record_prototype_member_anchor(&mut self, member: &str) {
+        if is_identifier_name(member) {
+            self.fingerprint
+                .prototype_members
+                .insert(member.to_string());
+        }
+        if is_usable_property_shape_member(member) {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("prototype-member:{member}"));
+        }
+    }
+
+    fn finish(mut self) -> AstFingerprint {
+        if self.fingerprint.prototype_members.len() >= 3 {
+            let members = self
+                .fingerprint
+                .prototype_members
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(",");
+            self.fingerprint
+                .string_anchors
+                .insert(format!("prototype-shape:{members}"));
+        }
+        self.fingerprint
+    }
+}
+
+fn prototype_assignment_property_name(
+    target: &oxc_ast::ast::AssignmentTarget<'_>,
+) -> Option<String> {
+    match target {
+        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
+            expression_is_prototype_member(&member.object)
+                .then(|| member.property.name.as_str().to_string())
+        }
+        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
+            if !expression_is_prototype_member(&member.object) {
+                return None;
+            }
+            let Expression::StringLiteral(property) = &member.expression else {
+                return None;
+            };
+            Some(property.value.as_str().to_string())
+        }
+        _ => None,
+    }
+}
+
+fn expression_is_prototype_member(expression: &Expression<'_>) -> bool {
+    let Expression::StaticMemberExpression(member) = expression else {
+        return false;
+    };
+    member.property.name == "prototype"
+}
+
+fn is_usable_property_shape_member(member: &str) -> bool {
+    !matches!(member, "constructor" | "__proto__" | "prototype") && is_identifier_name(member)
 }
 
 fn score_version<'a>(
@@ -5781,10 +6164,25 @@ fn best_source_match(
                 .string_anchors
                 .intersection(&module.string_anchors)
                 .count();
-            if function_signature_matches >= config.min_function_signature_matches
-                && string_anchor_matches >= config.min_string_anchor_matches
-            {
-                Some((source, function_signature_matches, string_anchor_matches))
+            let property_shape_matches =
+                property_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let property_anchor_matches =
+                property_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let is_function_string_match = function_signature_matches
+                >= config.min_function_signature_matches
+                && string_anchor_matches >= config.min_string_anchor_matches;
+            let is_property_shape_match = property_shape_matches >= 1 && string_anchor_matches >= 4;
+            if is_function_string_match || is_property_shape_match {
+                Some((
+                    source,
+                    function_signature_matches.max(property_anchor_matches),
+                    string_anchor_matches,
+                    if is_function_string_match {
+                        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+                    } else {
+                        ModuleMatchStrategy::PropertyShapeAndStringAnchors
+                    },
+                ))
             } else {
                 None
             }
@@ -5802,6 +6200,7 @@ fn best_source_match(
                     .external_importable
                     .cmp(&left.0.source.external_importable)
             })
+            .then_with(|| left.3.cmp(&right.3))
             .then_with(|| left.0.source.source_path.cmp(&right.0.source.source_path))
     });
 
@@ -5810,7 +6209,7 @@ fn best_source_match(
     };
     if ranked
         .get(1)
-        .is_some_and(|next| next.1 == best.1 && next.2 == best.2)
+        .is_some_and(|next| next.1 == best.1 && next.2 == best.2 && next.3 == best.3)
     {
         return best_aggregate_match(version, module, config);
     }
@@ -5818,11 +6217,25 @@ fn best_source_match(
     Some(module_package_match(
         module,
         best.0,
-        ModuleMatchStrategy::FunctionSignatureAndStringAnchors,
+        best.3,
         best.1,
         best.2,
         best.0.source.external_importable,
     ))
+}
+
+fn property_shape_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| anchor.starts_with("prototype-shape:"))
+        .count()
+}
+
+fn property_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| {
+            anchor.starts_with("prototype-shape:") || anchor.starts_with("prototype-member:")
+        })
+        .count()
 }
 
 fn best_aggregate_match(
@@ -8315,6 +8728,107 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn pipeline_corrects_wrong_package_hint_with_unique_exact_source() {
+        let source = r#"
+            export function realRuntime(input) {
+                const marker = "real-package-stable-anchor";
+                return `${marker}:${input}`;
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].package_name = Some("wrong-pkg".to_string());
+        rows.modules[0].semantic_path = "modules/10-wrong-pkg/opaque.ts".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "wrong-pkg",
+                "1.0.0",
+                "wrong-pkg/other",
+                "wrong-pkg@1.0.0/lib/other.js",
+                "export const unrelated = 'wrong-package-source';",
+            ),
+            PackageSource::external(
+                "real-pkg",
+                "2.0.0",
+                "real-pkg/runtime",
+                "real-pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("unique exact source should override wrong package hint");
+        assert_eq!(attribution.package_name.as_str(), "real-pkg");
+        assert_eq!(attribution.package_version.as_deref(), Some("2.0.0"));
+        assert_eq!(
+            attribution.export_specifier.as_deref(),
+            Some("real-pkg/runtime")
+        );
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved
+                    .starts_with("forced-external:cross-package-source:source-hash:")),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_rejects_ambiguous_cross_package_exact_source_correction() {
+        let source = r#"
+            export function realRuntime(input) {
+                const marker = "real-package-stable-anchor";
+                return `${marker}:${input}`;
+            }
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].package_name = Some("wrong-pkg".to_string());
+        rows.modules[0].semantic_path = "modules/10-wrong-pkg/opaque.ts".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "wrong-pkg",
+                "1.0.0",
+                "wrong-pkg/other",
+                "wrong-pkg@1.0.0/lib/other.js",
+                "export const unrelated = 'wrong-package-source';",
+            ),
+            PackageSource::external(
+                "real-pkg",
+                "2.0.0",
+                "real-pkg/runtime",
+                "real-pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+            PackageSource::external(
+                "other-real-pkg",
+                "2.0.0",
+                "other-real-pkg/runtime",
+                "other-real-pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "duplicate exact source across packages must not correct ownership"
+        );
+    }
+
+    #[test]
     fn pipeline_promotes_trusted_exact_hint_with_unique_root_surface_to_external_import() {
         let mut rows =
             rows_with_package_source_at_version("function sample(){return 42;}", "1.2.3");
@@ -8540,6 +9054,73 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
     }
 
     #[test]
+    fn minified_prototype_shape_matches_unique_external_source() {
+        let module_source = r#"
+            var initMapCache = E(() => {
+                depClear();
+                depDelete();
+                depGet();
+                depHas();
+                depSet();
+                MinifiedCache.prototype.clear = clearImpl;
+                MinifiedCache.prototype.delete = deleteImpl;
+                MinifiedCache.prototype.get = getImpl;
+                MinifiedCache.prototype.has = hasImpl;
+                MinifiedCache.prototype.set = setImpl;
+                exportedCache = MinifiedCache;
+            });
+        "#;
+        let rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/_MapCache.js",
+                "pkg@1.0.0/_MapCache.js",
+                r#"
+                    var mapClear = require('./_mapClear'),
+                        mapDelete = require('./_mapDelete'),
+                        mapGet = require('./_mapGet'),
+                        mapHas = require('./_mapHas'),
+                        mapSet = require('./_mapSet');
+                    function MapCache(values) { this.clear(); }
+                    MapCache.prototype.clear = mapClear;
+                    MapCache.prototype['delete'] = mapDelete;
+                    MapCache.prototype.get = mapGet;
+                    MapCache.prototype.has = mapHas;
+                    MapCache.prototype.set = mapSet;
+                    module.exports = MapCache;
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/_SetCache.js",
+                "pkg@1.0.0/_SetCache.js",
+                r#"
+                    function SetCache(values) { this.__data__ = []; }
+                    SetCache.prototype.add = cacheAdd;
+                    SetCache.prototype.push = cacheAdd;
+                    SetCache.prototype.has = cacheHas;
+                    module.exports = SetCache;
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert_eq!(
+            package_match.strategy,
+            ModuleMatchStrategy::PropertyShapeAndStringAnchors
+        );
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg/_MapCache.js");
+    }
+
+    #[test]
     fn source_only_match_promotes_to_export_member_adapter_when_barrel_reexports_members() {
         let source = r#"
             function Widget() { return "widget-anchor"; }
@@ -8674,6 +9255,62 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 "pkg",
                 "pkg@1.0.0/dist/index.js",
                 "export * from './internal/widget.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:export-all-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+        assert!(
+            package_match.source_path.contains("PublicWidget")
+                && package_match.source_path.contains("makePublicWidget"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_export_star_chain_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            function makePublicWidget() { return new PublicWidget(); }
+            exports.PublicWidget = PublicWidget;
+            exports.makePublicWidget = makePublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist/internal/widget.js",
+                source,
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/public",
+                "pkg@1.0.0/dist/public.js",
+                "export * from './internal/widget.js';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist/index.js",
+                "export * from './public.js';",
             ),
         ];
 

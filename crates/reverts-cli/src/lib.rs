@@ -5718,6 +5718,8 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
         "dependency_graph_source"
     } else if source_path.starts_with("forced-external:dependency-edge-path:") {
         "dependency_edge_path"
+    } else if source_path.starts_with("forced-external:cross-package-source:") {
+        "cross_package_source"
     } else if source_path.starts_with("forced-external:semantic-path:") {
         "semantic_path_fallback"
     } else if source_path.starts_with("forced-external:package-root:") {
