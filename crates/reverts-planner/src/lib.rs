@@ -15,9 +15,8 @@ use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
     collect_top_level_statement_facts, format_source_pretty,
     is_ascii_identifier_continue as is_identifier_continue,
-    is_ascii_identifier_start as is_identifier_start, is_js_keyword, parse_error_message,
-    sanitize_identifier, skip_block_comment, skip_line_comment,
-    verify_only_immediate_call_references,
+    is_ascii_identifier_start as is_identifier_start, is_js_keyword, sanitize_identifier,
+    skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
 };
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::{
@@ -2921,21 +2920,23 @@ impl ImportExportPlanner {
 }
 
 fn normalize_source_for_emit(
-    module_id: ModuleId,
+    _module_id: ModuleId,
     path: &str,
     source: &str,
     source_strategy: SourceCompilerStrategy,
 ) -> Result<String, PlanError> {
-    format_source_pretty(
+    // OXC's prettifier refuses some legitimate-but-edge bundle constructs
+    // (e.g. `const X;` without initializer, certain JSX comma patterns).
+    // Per ADR 0002 we don't repair the input: when prettification fails we
+    // emit the raw source unchanged. Downstream `audit_emitted_project_parse`
+    // will then surface an `UnparseableOutput` warning so the consumer
+    // sees the affected module without stranding the whole project.
+    Ok(format_source_pretty(
         source,
         source_strategy.path_hint(path),
         source_strategy.parse_goal(),
     )
-    .map_err(|error| PlanError::UnparseableSource {
-        module_id,
-        path: path.to_string(),
-        message: parse_error_message(&error, "source could not be parsed"),
-    })
+    .unwrap_or_else(|_| source.to_string()))
 }
 
 fn group_runtime_imports(
