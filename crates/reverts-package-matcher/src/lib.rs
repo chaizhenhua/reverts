@@ -1528,7 +1528,10 @@ struct ForceExternalizeCache<'a> {
         RefCell<BTreeMap<(String, String), Vec<PackageSourceFingerprint<'a>>>>,
     source_fingerprints_by_package: RefCell<BTreeMap<String, Vec<PackageSourceFingerprint<'a>>>>,
     dependency_graph_evidence:
-        RefCell<BTreeMap<(ModuleId, String, usize), DependencyGraphEvidence>>,
+        RefCell<BTreeMap<(ModuleId, String, String), DependencyGraphEvidence>>,
+    direct_dependencies: RefCell<BTreeMap<ModuleId, Vec<ModuleId>>>,
+    direct_dependents: RefCell<BTreeMap<ModuleId, Vec<ModuleId>>>,
+    package_modules_by_id: RefCell<Option<BTreeMap<ModuleId, (String, String)>>>,
 }
 
 impl<'a> ForceExternalizeCache<'a> {
@@ -1602,25 +1605,86 @@ impl<'a> ForceExternalizeCache<'a> {
         external_source_index: &ExternalImportSourceIndex<'a>,
         concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
     ) -> DependencyGraphEvidence {
+        let dependency_ids = self.direct_dependencies(rows, module_id);
+        let dependent_ids = self.direct_dependents(rows, module_id);
+        let neighborhood_signature = dependency_graph_concrete_neighborhood_signature(
+            dependency_ids.as_slice(),
+            dependent_ids.as_slice(),
+            candidate,
+            concrete_sources_by_module,
+        );
         let key = (
             module_id,
             package_source_cache_key(candidate),
-            concrete_sources_by_module.len(),
+            neighborhood_signature,
         );
         if let Some(evidence) = self.dependency_graph_evidence.borrow().get(&key) {
             return *evidence;
         }
         let evidence = dependency_graph_source_evidence(
-            rows,
-            module_id,
             candidate,
             external_source_index,
             concrete_sources_by_module,
+            dependency_ids.as_slice(),
+            dependent_ids.as_slice(),
         );
         self.dependency_graph_evidence
             .borrow_mut()
             .insert(key, evidence);
         evidence
+    }
+
+    fn direct_dependencies(&self, rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
+        if let Some(dependencies) = self.direct_dependencies.borrow().get(&module_id) {
+            return dependencies.clone();
+        }
+        let dependencies = direct_module_dependencies(rows, module_id);
+        self.direct_dependencies
+            .borrow_mut()
+            .insert(module_id, dependencies.clone());
+        dependencies
+    }
+
+    fn direct_dependents(&self, rows: &InputRows, module_id: ModuleId) -> Vec<ModuleId> {
+        if let Some(dependents) = self.direct_dependents.borrow().get(&module_id) {
+            return dependents.clone();
+        }
+        let dependents = direct_module_dependents(rows, module_id);
+        self.direct_dependents
+            .borrow_mut()
+            .insert(module_id, dependents.clone());
+        dependents
+    }
+
+    fn row_module_is_same_package_version(
+        &self,
+        rows: &InputRows,
+        module_id: ModuleId,
+        package_name: &str,
+        package_version: &str,
+    ) -> bool {
+        if self.package_modules_by_id.borrow().is_none() {
+            let package_modules = rows
+                .modules
+                .iter()
+                .filter(|module| module.kind == ModuleKind::Package)
+                .filter_map(|module| {
+                    Some((
+                        module.id,
+                        (
+                            module.package_name.as_deref()?.to_string(),
+                            module.package_version.as_deref()?.to_string(),
+                        ),
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+            *self.package_modules_by_id.borrow_mut() = Some(package_modules);
+        }
+        self.package_modules_by_id
+            .borrow()
+            .as_ref()
+            .and_then(|package_modules| package_modules.get(&module_id))
+            .is_some_and(|(name, version)| name == package_name && version == package_version)
     }
 }
 
@@ -3336,6 +3400,32 @@ fn package_source_cache_key(source: &PackageSource) -> String {
     )
 }
 
+fn dependency_graph_concrete_neighborhood_signature(
+    dependency_ids: &[ModuleId],
+    dependent_ids: &[ModuleId],
+    candidate: &PackageSource,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> String {
+    let mut parts = Vec::new();
+    for dependency_id in dependency_ids {
+        if let Some(concrete) = concrete_sources_by_module.get(dependency_id)
+            && concrete.package_name == candidate.package_name
+            && concrete.package_version == candidate.package_version
+        {
+            parts.push(format!("d{}={}", dependency_id.0, concrete.source_path));
+        }
+    }
+    for dependent_id in dependent_ids {
+        if let Some(concrete) = concrete_sources_by_module.get(dependent_id)
+            && concrete.package_name == candidate.package_name
+            && concrete.package_version == candidate.package_version
+        {
+            parts.push(format!("r{}={}", dependent_id.0, concrete.source_path));
+        }
+    }
+    parts.join("|")
+}
+
 fn export_member_proof_source_path(
     source: &PackageSource,
     proof: ExportMemberSourceProof,
@@ -4439,6 +4529,7 @@ fn force_externalize_remaining_package_modules(
                             package_match,
                             &external_source_index,
                             &concrete_sources_by_module,
+                            &cache,
                         )
                     })
                 });
@@ -4869,19 +4960,19 @@ fn dependency_graph_source_proof(
 }
 
 fn dependency_graph_source_evidence(
-    rows: &InputRows,
-    module_id: ModuleId,
     candidate: &PackageSource,
     external_source_index: &ExternalImportSourceIndex<'_>,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    dependency_ids: &[ModuleId],
+    dependent_ids: &[ModuleId],
 ) -> DependencyGraphEvidence {
     let candidate_entry = package_source_entry_path(candidate);
     let candidate_deps = external_source_index.dependency_entries(candidate);
     let mut known_edges = 0usize;
     let mut matched_edges = 0usize;
 
-    for dependency_id in direct_module_dependencies(rows, module_id) {
-        let Some(neighbor) = concrete_sources_by_module.get(&dependency_id) else {
+    for dependency_id in dependency_ids {
+        let Some(neighbor) = concrete_sources_by_module.get(dependency_id) else {
             continue;
         };
         if neighbor.package_name != candidate.package_name
@@ -4903,8 +4994,8 @@ fn dependency_graph_source_evidence(
         }
     }
 
-    for dependent_id in direct_module_dependents(rows, module_id) {
-        let Some(neighbor) = concrete_sources_by_module.get(&dependent_id) else {
+    for dependent_id in dependent_ids {
+        let Some(neighbor) = concrete_sources_by_module.get(dependent_id) else {
             continue;
         };
         if neighbor.package_name != candidate.package_name
@@ -4943,12 +5034,13 @@ fn dependency_edge_path_external_import_target(
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'_>,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    cache: &ForceExternalizeCache<'_>,
 ) -> Option<ExternalImportTarget> {
     if !dependency_edge_path_policy_allows(package_match) {
         return None;
     }
     let mut candidates = Vec::<DependencyEdgePathCandidate<'_>>::new();
-    for dependent_id in direct_module_dependents(rows, module.id) {
+    for dependent_id in cache.direct_dependents(rows, module.id) {
         let Some(dependent) = concrete_sources_by_module.get(&dependent_id) else {
             continue;
         };
@@ -4970,6 +5062,7 @@ fn dependency_edge_path_external_import_target(
                 dependent_source,
                 external_source_index,
                 concrete_sources_by_module,
+                cache,
             );
             if entries.len() != 1 {
                 continue;
@@ -5047,8 +5140,9 @@ fn dependency_edge_path_remaining_entries(
     dependent_source: &PackageSource,
     external_source_index: &ExternalImportSourceIndex<'_>,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    cache: &ForceExternalizeCache<'_>,
 ) -> BTreeSet<String> {
-    let dependency_ids = direct_module_dependencies(rows, dependent_id);
+    let dependency_ids = cache.direct_dependencies(rows, dependent_id);
     if !dependency_ids.contains(&unresolved_module_id) {
         return BTreeSet::new();
     }
@@ -5075,7 +5169,7 @@ fn dependency_edge_path_remaining_entries(
             }
             continue;
         }
-        if row_module_is_same_package_version(
+        if cache.row_module_is_same_package_version(
             rows,
             dependency_id,
             dependent_source.package_name.as_str(),
@@ -5085,20 +5179,6 @@ fn dependency_edge_path_remaining_entries(
         }
     }
     entries
-}
-
-fn row_module_is_same_package_version(
-    rows: &InputRows,
-    module_id: ModuleId,
-    package_name: &str,
-    package_version: &str,
-) -> bool {
-    rows.modules.iter().any(|module| {
-        module.id == module_id
-            && module.kind == ModuleKind::Package
-            && module.package_name.as_deref() == Some(package_name)
-            && module.package_version.as_deref() == Some(package_version)
-    })
 }
 
 fn external_importable_sources_matching_entry<'a>(
@@ -7364,10 +7444,11 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ExternalImportSourceIndex,
-        ForceExternalizeCache, ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
-        PackageMatch, PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
-        VersionedPackageMatcher, match_packages_with_pipeline, match_structural_bags,
+        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ConcretePackageSourcePath,
+        ExternalImportSourceIndex, ForceExternalizeCache, ModuleMatchStrategy,
+        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality,
+        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher,
+        match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
         resolve_external_import_target, same_package_cross_version_source_external_import_target,
@@ -7595,6 +7676,30 @@ mod tests {
         assert_eq!(first_graph.matched_edges, second_graph.matched_edges);
         assert_eq!(first_graph.known_edges, second_graph.known_edges);
         assert_eq!(cache.dependency_graph_evidence.borrow().len(), 1);
+
+        let mut unrelated_concrete_sources_by_module = BTreeMap::new();
+        unrelated_concrete_sources_by_module.insert(
+            ModuleId(99),
+            ConcretePackageSourcePath {
+                package_name: "other-pkg".to_string(),
+                package_version: "1.0.0".to_string(),
+                source_path: "other-pkg@1.0.0/index.js".to_string(),
+            },
+        );
+        let unrelated_graph = cache.dependency_graph_evidence(
+            &rows,
+            rows.modules[0].id,
+            package_fingerprints[0].source,
+            &index,
+            &unrelated_concrete_sources_by_module,
+        );
+        assert_eq!(first_graph.matched_edges, unrelated_graph.matched_edges);
+        assert_eq!(first_graph.known_edges, unrelated_graph.known_edges);
+        assert_eq!(
+            cache.dependency_graph_evidence.borrow().len(),
+            1,
+            "unrelated concrete modules should reuse the same graph-evidence cache entry"
+        );
     }
 
     #[test]
