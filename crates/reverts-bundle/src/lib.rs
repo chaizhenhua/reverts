@@ -87,8 +87,13 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
         let classification = match classifier::classify(Path::new(&source_file.path), source) {
             Ok(classification) => classification,
             Err(message) => {
+                // Bundle classifier parse failure means we can't split this
+                // source into inner modules. Per ADR 0002 we surface the
+                // failure as a warning; the source remains as a single
+                // unsplit module and the rest of the pipeline can still
+                // run on the project.
                 audit.push(
-                    AuditFinding::error(
+                    AuditFinding::warning(
                         FindingCode::AstFactExtractionFailed,
                         format!(
                             "bundle classifier could not parse {}: {message}",

@@ -70,9 +70,15 @@ fn should_collect_enrichment_function_fingerprints(model: &ProgramModel) -> bool
 
 fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
     let mut audit = AuditReport::default();
+    // Parser failures on a single bundle source mean we couldn't extract
+    // AST facts for that module. Per ADR 0002 we surface the failure as a
+    // warning so the rest of the project can emit; the planner sees the
+    // affected module as having no definitions/imports/exports and the
+    // emitter produces only what it can back with facts. The audit names
+    // the failing module so the consumer knows where the gap is.
     for error in model.graph().ast_errors() {
         audit.push(
-            AuditFinding::error(FindingCode::AstFactExtractionFailed, error.message.clone())
+            AuditFinding::warning(FindingCode::AstFactExtractionFailed, error.message.clone())
                 .with_module(error.module_id.0.to_string())
                 .with_binding(error.path.clone()),
         );
@@ -82,12 +88,18 @@ fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
 
 fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
     let mut audit = AuditReport::default();
+    // A bare `MissingDefinition` reflects an incomplete bundle slice: the
+    // referenced binding lives outside our extraction. Per ADR 0002 we
+    // surface the missing read/write as a warning and let emission proceed
+    // — the TypeScript output will reference the unresolved name and fail
+    // type-check, but the user gets the faithful structure and audit pin-
+    // points the missing binding for backfill.
     for (module_id, binding) in model.graph().def_use().unresolved_reads() {
         if is_ambient_binding(binding.as_str()) {
             continue;
         }
         audit.push(
-            AuditFinding::error(
+            AuditFinding::warning(
                 FindingCode::MissingDefinition,
                 format!("binding '{binding}' is read without a local definition or import"),
             )
@@ -100,7 +112,7 @@ fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
             continue;
         }
         audit.push(
-            AuditFinding::error(
+            AuditFinding::warning(
                 FindingCode::MissingDefinition,
                 format!("binding '{binding}' is written without a local definition or import"),
             )

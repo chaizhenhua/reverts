@@ -789,10 +789,15 @@ fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
             continue;
         }
 
+        // A non-package module without a source body means the bundle
+        // slice is incomplete for that module. Per ADR 0002 we surface
+        // the gap as a warning rather than stranding emission for the
+        // whole project; the planner will skip emitting bodies it can't
+        // back with source and the audit names the missing binding.
         let definitions = program.model().graph().definitions_for(module.id);
         if definitions.is_empty() {
             audit.push(
-                AuditFinding::error(
+                AuditFinding::warning(
                     FindingCode::MissingDefinition,
                     "module has no real source body to emit",
                 )
@@ -803,7 +808,7 @@ fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
 
         for definition in definitions {
             audit.push(
-                AuditFinding::error(
+                AuditFinding::warning(
                     FindingCode::MissingDefinition,
                     "module has symbols but no real source body to emit",
                 )
@@ -2235,8 +2240,16 @@ mod tests {
 
         let run = generate_project_from_input(input).expect("fixture should emit");
 
+        // Per ADR 0002 unresolvable bare imports are an input-bundle
+        // condition: the audit names them as warnings but emission proceeds.
         assert!(run.audit.has(FindingCode::UnresolvableBareImport));
-        assert!(run.project.files.is_empty());
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| finding.code == FindingCode::UnresolvableBareImport)
+            .expect("unresolvable bare import finding present");
+        assert_eq!(finding.severity, Severity::Warning);
     }
 
     #[test]
@@ -2252,18 +2265,26 @@ mod tests {
     }
 
     #[test]
-    fn module_without_source_is_reported_without_emitting_empty_file() {
+    fn module_without_source_is_reported_as_warning() {
         let rows = rows_with_application_module();
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should emit");
 
-        assert!(run.audit.findings().iter().any(|finding| {
-            finding.code == FindingCode::MissingDefinition
-                && finding.module.as_deref() == Some("1")
-                && finding.binding.is_none()
-        }));
-        assert!(run.project.files.is_empty());
+        // Module-without-source is an input condition (ADR 0002): warn,
+        // don't strand. The emitter simply won't produce a file for the
+        // module since there's no source body to back it.
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| {
+                finding.code == FindingCode::MissingDefinition
+                    && finding.module.as_deref() == Some("1")
+                    && finding.binding.is_none()
+            })
+            .expect("missing-source finding present");
+        assert_eq!(finding.severity, Severity::Warning);
     }
 
     #[test]
@@ -2446,14 +2467,26 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
     }
 
     #[test]
-    fn unresolved_ast_read_is_rejected_by_first_audit_gate() {
+    fn unresolved_ast_read_is_reported_as_warning() {
         let rows = rows_with_application_source("missing();");
         let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
 
         let run = generate_project_from_input(input).expect("fixture should return audit");
 
-        assert!(run.audit.has(FindingCode::MissingDefinition));
-        assert!(run.project.files.is_empty());
+        // Per ADR 0002 a missing binding read is an input condition: the
+        // audit names it as a warning and emission proceeds. The emitted
+        // file references `missing` and would fail at runtime/type-check;
+        // the audit is loud enough for the consumer to fix the slice.
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| {
+                finding.code == FindingCode::MissingDefinition
+                    && finding.binding.as_deref() == Some("missing")
+            })
+            .expect("missing-binding finding present");
+        assert_eq!(finding.severity, Severity::Warning);
     }
 
     #[test]
