@@ -3915,6 +3915,15 @@ fn force_externalize_remaining_package_modules(
                         module_source,
                         &concrete_sources_by_module,
                     )
+                    .or_else(|| {
+                        dependency_edge_path_external_import_target(
+                            rows,
+                            module,
+                            package_match,
+                            &external_source_index,
+                            &concrete_sources_by_module,
+                        )
+                    })
                 })
             }) else {
                 continue;
@@ -4073,6 +4082,9 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
         return Some(rest.to_string());
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-graph-source:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
         return rest.rsplit(':').next().map(ToOwned::to_owned);
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
@@ -4347,6 +4359,187 @@ fn dependency_graph_source_evidence(
         matched_edges,
         known_edges,
     }
+}
+
+fn dependency_edge_path_external_import_target(
+    rows: &InputRows,
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> Option<ExternalImportTarget> {
+    if !dependency_edge_path_policy_allows(package_match) {
+        return None;
+    }
+    let mut candidates = Vec::<DependencyEdgePathCandidate<'_>>::new();
+    for dependent_id in direct_module_dependents(rows, module.id) {
+        let Some(dependent) = concrete_sources_by_module.get(&dependent_id) else {
+            continue;
+        };
+        if dependent.package_name != package_match.package_name
+            || dependent.package_version != package_match.package_version
+        {
+            continue;
+        }
+        let dependent_sources = external_source_index.sources_matching_concrete_path(
+            dependent.package_name.as_str(),
+            dependent.package_version.as_str(),
+            dependent.source_path.as_str(),
+        );
+        for dependent_source in dependent_sources {
+            let entries = dependency_edge_path_remaining_entries(
+                rows,
+                dependent_id,
+                module.id,
+                dependent_source,
+                external_source_index,
+                concrete_sources_by_module,
+            );
+            if entries.len() != 1 {
+                continue;
+            }
+            let entry = entries
+                .into_iter()
+                .next()
+                .expect("one remaining dependency entry");
+            for source in external_importable_sources_matching_entry(
+                package_match.package_name.as_str(),
+                package_match.package_version.as_str(),
+                entry.as_str(),
+                external_source_index,
+            ) {
+                candidates.push(DependencyEdgePathCandidate {
+                    source,
+                    dependent_id,
+                    dependent_source_path: dependent_source.source_path.as_str(),
+                    entry: entry.clone(),
+                });
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let targets = candidates
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.source.export_specifier.as_str(),
+                candidate.source.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if targets.len() != 1 {
+        return None;
+    }
+    let selected = candidates.into_iter().min_by(|left, right| {
+        package_source_external_import_rank(left.source)
+            .cmp(&package_source_external_import_rank(right.source))
+            .then_with(|| left.source.source_path.cmp(&right.source.source_path))
+            .then_with(|| left.dependent_id.cmp(&right.dependent_id))
+    })?;
+    Some(ExternalImportTarget {
+        export_specifier: selected.source.export_specifier.clone(),
+        source_path: format!(
+            "forced-external:dependency-edge-path:dependent={}:entry={}:from={}:{}",
+            selected.dependent_id.0,
+            selected.entry,
+            selected.dependent_source_path,
+            selected.source.source_path,
+        ),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct DependencyEdgePathCandidate<'a> {
+    source: &'a PackageSource,
+    dependent_id: ModuleId,
+    dependent_source_path: &'a str,
+    entry: String,
+}
+
+fn dependency_edge_path_policy_allows(package_match: &PackageMatch) -> bool {
+    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
+        && package_match.source_path.starts_with("exact-hint:")
+        && package_match.source_path.contains(":quality=trusted:")
+}
+
+fn dependency_edge_path_remaining_entries(
+    rows: &InputRows,
+    dependent_id: ModuleId,
+    unresolved_module_id: ModuleId,
+    dependent_source: &PackageSource,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+) -> BTreeSet<String> {
+    let dependency_ids = direct_module_dependencies(rows, dependent_id);
+    if !dependency_ids.contains(&unresolved_module_id) {
+        return BTreeSet::new();
+    }
+    let mut entries = external_source_index.dependency_entries(dependent_source);
+    if entries.is_empty() {
+        return entries;
+    }
+    for dependency_id in dependency_ids {
+        if dependency_id == unresolved_module_id {
+            continue;
+        }
+        if let Some(concrete) = concrete_sources_by_module.get(&dependency_id) {
+            if concrete.package_name == dependent_source.package_name
+                && concrete.package_version == dependent_source.package_version
+            {
+                let known_entry = package_source_entry_path_from_source_path(
+                    concrete.package_name.as_str(),
+                    concrete.package_version.as_str(),
+                    concrete.source_path.as_str(),
+                );
+                entries.retain(|entry| {
+                    !source_entry_paths_match(entry.as_str(), known_entry.as_str())
+                });
+            }
+            continue;
+        }
+        if row_module_is_same_package_version(
+            rows,
+            dependency_id,
+            dependent_source.package_name.as_str(),
+            dependent_source.package_version.as_str(),
+        ) {
+            return BTreeSet::new();
+        }
+    }
+    entries
+}
+
+fn row_module_is_same_package_version(
+    rows: &InputRows,
+    module_id: ModuleId,
+    package_name: &str,
+    package_version: &str,
+) -> bool {
+    rows.modules.iter().any(|module| {
+        module.id == module_id
+            && module.kind == ModuleKind::Package
+            && module.package_name.as_deref() == Some(package_name)
+            && module.package_version.as_deref() == Some(package_version)
+    })
+}
+
+fn external_importable_sources_matching_entry<'a>(
+    package_name: &str,
+    package_version: &str,
+    entry: &str,
+    external_source_index: &'a ExternalImportSourceIndex<'a>,
+) -> Vec<&'a PackageSource> {
+    external_source_index
+        .all_sources(package_name, package_version)
+        .iter()
+        .copied()
+        .filter(|source| source.external_importable)
+        .filter(|source| {
+            source_entry_paths_match(package_source_entry_path(source).as_str(), entry)
+        })
+        .collect()
 }
 
 fn forced_external_package_version(
@@ -7992,6 +8185,132 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .iter()
                 .any(|attribution| attribution.module_id == ModuleId(10)),
             "ambiguous graph/fingerprint proof must not externalize"
+        );
+    }
+
+    #[test]
+    fn pipeline_externalizes_unique_dependency_edge_path_match() {
+        let mut rows = rows_with_package_source_at_version("var tiny = 1;", "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-obfuscated.ts".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "entry.js",
+            Some("export const entry = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "entry",
+                "pkg/entry.js",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/entry")
+                .with_resolved_file("pkg@1.0.0/lib/entry.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/entry",
+                "pkg@1.0.0/lib/entry.js",
+                "const tiny = require('./tiny'); exports.entry = tiny;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/tiny",
+                "pkg@1.0.0/lib/tiny.js",
+                "exports.tiny = 1;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("unique package dependency edge path should externalize tiny module");
+        assert_eq!(attribution.export_specifier.as_deref(), Some("pkg/tiny"));
+        assert!(
+            attribution.resolved_file.as_deref().is_some_and(
+                |resolved| resolved.starts_with("forced-external:dependency-edge-path:")
+            ),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_rejects_ambiguous_dependency_edge_path_match() {
+        let mut rows = rows_with_package_source_at_version("var tiny = 1;", "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-obfuscated.ts".to_string();
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "entry.js",
+            Some("export const entry = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(11),
+                "entry",
+                "pkg/entry.js",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/entry")
+                .with_resolved_file("pkg@1.0.0/lib/entry.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/entry",
+                "pkg@1.0.0/lib/entry.js",
+                "const tiny = require('./tiny'); const other = require('./other'); exports.entry = tiny;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/tiny",
+                "pkg@1.0.0/lib/tiny.js",
+                "exports.tiny = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/other",
+                "pkg@1.0.0/lib/other.js",
+                "exports.other = 1;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "multiple remaining package source dependency paths must stay source-only"
         );
     }
 
