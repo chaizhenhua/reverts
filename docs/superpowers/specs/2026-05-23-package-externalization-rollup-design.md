@@ -113,6 +113,20 @@ Re-running the matcher + planner against `~/.reverts/.reverts.db` produces:
 - `package_attributions` with `status='accepted'` AND `emission_mode in ('external_import','internal_to_externalized_package')` covering ≥ **90%** of `module_category='package'` modules (10,070 of 11,189).
 - Audit clean: every emitted file parses, no reference points at a dissolved module.
 
+## Phase A outcome (2026-05-23)
+
+The `reverts-rollup-probe` binary, run against `~/.reverts/.reverts.db` with the iterated oracle, reports:
+
+- package modules: 11,189
+- already accepted (today): 4,243 (37.9%)
+- projected rolled-up (new): 6,421 (57.4%)
+- still rejected: 36 (0.3%)
+- **projected external import ratio: 0.9531** — exceeds the 0.90 gate
+
+Final oracle rule that produced this result: a `(package_name, package_version)` is `Externalizable` when (a) the matcher recorded **any** attribution for that version in this DB (accepted or rejected — both prove the matcher saw the package in the bundle) **and** (b) the externalization-hint table contains a row where `export_specifier = package_name` for that version (proving the package can be imported by its bare name). The original "≥30% direct-match ratio" floor was relaxed to 0 — for bundled libraries that explode into many internal helpers (lodash, zod, react, msal, aws-sdk), the direct-match ratio is naturally low even when externalization is safe, so the floor was filtering out exactly the cases we wanted to roll up.
+
+Top still-rejected packages after rollup: `@aws-sdk/client-bedrock` (216), `zod` (77 of 298), `@opentelemetry/otlp-exporter-base` (67) — these have version-mismatched evidence (e.g. attribution version differs from hint version) and need a separate version-reconciliation pass; deferred out of Phase A.
+
 ## 8. Out of scope
 
 - Reclassifying `application` / `unknown` modules into `package` (separate problem, ~16k modules — would be a follow-up to push the all-modules import ratio higher than 36%).
