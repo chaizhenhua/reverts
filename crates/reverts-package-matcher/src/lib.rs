@@ -5364,6 +5364,69 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
         }
         walk_template_element(self, it);
     }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if let Some(declaration) = &declaration.declaration {
+            for binding in declaration_binding_names(declaration) {
+                self.record_export_member_anchor(binding);
+            }
+        }
+        for specifier in &declaration.specifiers {
+            if let Some(exported) = module_export_name(&specifier.exported) {
+                self.record_export_member_anchor(exported);
+            }
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_default_declaration(&mut self, declaration: &ExportDefaultDeclaration<'a>) {
+        match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                if let Some(id) = &function.id {
+                    self.record_export_member_anchor(id.name.as_str());
+                }
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                if let Some(id) = &class.id {
+                    self.record_export_member_anchor(id.name.as_str());
+                }
+            }
+            _ => {}
+        }
+        walk_export_default_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        if let Some(exported) = &declaration.exported
+            && let Some(binding) = module_export_name(exported)
+        {
+            self.record_export_member_anchor(binding);
+        }
+        walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_assignment_expression(&mut self, expression: &oxc_ast::ast::AssignmentExpression<'a>) {
+        if expression.operator.is_assign() {
+            if let Some(exported) = commonjs_export_property_name(&expression.left) {
+                self.record_export_member_anchor(exported.as_str());
+            }
+            if commonjs_module_exports_target(&expression.left)
+                && let Expression::ObjectExpression(object) = &expression.right
+            {
+                for member in object_expression_static_keys(object) {
+                    self.record_export_member_anchor(member.as_str());
+                }
+            }
+        }
+        walk_assignment_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if let Some(exported) = object_define_property_export_member(call) {
+            self.record_export_member_anchor(exported.as_str());
+        }
+        walk_call_expression(self, call);
+    }
 }
 
 impl FingerprintVisitor<'_> {
@@ -5418,6 +5481,14 @@ impl FingerprintVisitor<'_> {
             self.fingerprint
                 .string_anchors
                 .insert(format!("regex:{pattern}/{flags}"));
+        }
+    }
+
+    fn record_export_member_anchor(&mut self, member: &str) {
+        if is_usable_export_member(member) {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("export:{member}"));
         }
     }
 }
@@ -9336,6 +9407,32 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "pkg/regex",
             "regex.js",
             "const packageOnly = true;\nfunction first(v){return /^(?:[0-9a-f]{8})$/.test(v)}\nfunction second(v){return /^(?:alpha|beta|rc)\\.[0-9]+$/.test(v)}",
+        )];
+
+        let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
+
+        assert!(report.audit.is_clean());
+        assert_eq!(report.attributions.len(), 1);
+        assert_eq!(
+            report.matches[0].strategy,
+            ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+        );
+        assert!(report.matches[0].function_signature_matches >= 2);
+        assert!(report.matches[0].string_anchor_matches >= 2);
+    }
+
+    #[test]
+    fn versioned_matcher_can_match_by_export_member_anchors() {
+        let rows = rows_with_package_source_at_version(
+            "function alpha(q){return q + 1;}\nfunction beta(q){return q - 1;}\nexports.parseVersion = alpha;\nexports.formatVersion = beta;",
+            "1.0.0",
+        );
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/version-tools",
+            "version-tools.js",
+            "const packageOnly = true;\nfunction alpha(q){return q + 1;}\nfunction beta(q){return q - 1;}\nmodule.exports = { parseVersion: alpha, formatVersion: beta };",
         )];
 
         let report = VersionedPackageMatcher::default().match_rows(&rows, &package_sources);
