@@ -56,19 +56,19 @@ pub fn build_oracle(snap: &Snapshot, cfg: OracleConfig) -> Oracle {
     }
 
     let mut accepted_direct_by_pkg: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut attribution_count_by_pkg: BTreeMap<(String, String), usize> = BTreeMap::new();
     for attribution in &snap.attributions {
-        if attribution.status != "accepted" || attribution.emission_mode != "external_import" {
-            continue;
-        }
         let Some(version) = &attribution.package_version else {
             continue;
         };
-        if !is_direct_subpath_proof(attribution) {
-            continue;
+        let key = (attribution.package_name.clone(), version.clone());
+        *attribution_count_by_pkg.entry(key.clone()).or_default() += 1;
+        if attribution.status == "accepted"
+            && attribution.emission_mode == "external_import"
+            && is_direct_subpath_proof(attribution)
+        {
+            *accepted_direct_by_pkg.entry(key).or_default() += 1;
         }
-        *accepted_direct_by_pkg
-            .entry((attribution.package_name.clone(), version.clone()))
-            .or_default() += 1;
     }
 
     let hint_index = build_hint_index(&snap.hints);
@@ -80,12 +80,22 @@ pub fn build_oracle(snap: &Snapshot, cfg: OracleConfig) -> Oracle {
             .get(&(name.clone(), version.clone()))
             .copied()
             .unwrap_or(0);
+        let attributions = attribution_count_by_pkg
+            .get(&(name.clone(), version.clone()))
+            .copied()
+            .unwrap_or(0);
         let key = (name.clone(), version.clone());
-        let verdict = if accepted == 0 {
+        let direct_ratio = if total == 0 {
+            0.0
+        } else {
+            (accepted as f64) / (total as f64)
+        };
+        let has_anchor = accepted > 0 || attributions > 0;
+        let verdict = if !has_anchor {
             OracleVerdict::NotExternalizable {
-                reason: "no direct-subpath acceptance for this version".into(),
+                reason: "no matcher attribution for this version".into(),
             }
-        } else if (accepted as f64) / (total.max(1) as f64) < cfg.direct_match_floor {
+        } else if accepted > 0 && direct_ratio < cfg.direct_match_floor {
             OracleVerdict::NotExternalizable {
                 reason: format!(
                     "direct match ratio {accepted}/{total} below floor {floor:.2}",
