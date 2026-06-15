@@ -2634,6 +2634,9 @@ fn export_member_source_proof(
     {
         return Some(ExportMemberSourceProof::BarrelReference);
     }
+    if external_source_commonjs_reexports_matched_source(external, matched) {
+        return Some(ExportMemberSourceProof::CommonJsReexport);
+    }
     if external_source_export_all_reexports_matched_source(external, matched) {
         return Some(ExportMemberSourceProof::ExportAllReexport);
     }
@@ -2650,9 +2653,6 @@ fn export_member_source_proof(
         external_source_index,
     ) {
         return Some(ExportMemberSourceProof::NamedReexport);
-    }
-    if external_source_commonjs_reexports_matched_source(external, matched) {
-        return Some(ExportMemberSourceProof::CommonJsReexport);
     }
     None
 }
@@ -2764,7 +2764,7 @@ fn external_source_commonjs_reexports_matched_source(
     external: &PackageSource,
     matched: &PackageSource,
 ) -> bool {
-    commonjs_module_exports_require_targets(external.source.as_str())
+    commonjs_reexport_targets(external.source.as_str())
         .into_iter()
         .any(|target| relative_require_targets_package_source(external, target.as_str(), matched))
 }
@@ -2971,6 +2971,7 @@ fn export_all_reexport_targets(source: &str) -> BTreeSet<String> {
     let mut targets = BTreeSet::new();
     collect_export_all_declaration_targets(compact.as_str(), &mut targets);
     collect_export_star_helper_targets(compact.as_str(), &mut targets);
+    collect_commonjs_module_exports_require_targets(compact.as_str(), &mut targets);
     targets
 }
 
@@ -2980,6 +2981,7 @@ fn reexport_targets(source: &str) -> BTreeSet<String> {
     collect_export_all_declaration_targets(compact.as_str(), &mut targets);
     collect_export_named_declaration_targets(compact.as_str(), &mut targets);
     collect_export_star_helper_targets(compact.as_str(), &mut targets);
+    collect_commonjs_reexport_targets(compact.as_str(), &mut targets);
     targets
 }
 
@@ -3042,24 +3044,97 @@ fn collect_export_star_helper_targets(source: &str, targets: &mut BTreeSet<Strin
     }
 }
 
-fn commonjs_module_exports_require_targets(source: &str) -> BTreeSet<String> {
+fn commonjs_reexport_targets(source: &str) -> BTreeSet<String> {
     let compact = compact_ascii_ws(source);
     let mut targets = BTreeSet::new();
+    collect_commonjs_reexport_targets(compact.as_str(), &mut targets);
+    targets
+}
+
+fn collect_commonjs_reexport_targets(source: &str, targets: &mut BTreeSet<String>) {
+    collect_commonjs_module_exports_require_targets(source, targets);
+    collect_commonjs_export_member_require_targets(source, targets);
+    collect_create_binding_require_targets(source, targets);
+    collect_import_star_reexport_targets(source, targets);
+}
+
+fn collect_commonjs_module_exports_require_targets(source: &str, targets: &mut BTreeSet<String>) {
     let needle = "module.exports=";
     let mut cursor = 0;
-    while let Some(relative) = compact[cursor..].find(needle) {
+    while let Some(relative) = source[cursor..].find(needle) {
         let rhs_start = cursor + relative + needle.len();
-        let statement_end = compact[rhs_start..]
+        let statement_end = source[rhs_start..]
             .find(';')
             .map(|offset| rhs_start + offset)
-            .unwrap_or(compact.len());
-        let rhs = &compact[rhs_start..statement_end];
-        if rhs.starts_with("require(") || (rhs.contains("?require(") && rhs.contains(":require(")) {
-            collect_require_targets_from_compact_slice(rhs, &mut targets);
+            .unwrap_or(source.len());
+        let rhs = &source[rhs_start..statement_end];
+        if rhs.starts_with("require(")
+            || rhs.contains("__importStar(require(")
+            || (rhs.contains("?require(") && rhs.contains(":require("))
+        {
+            collect_require_targets_from_compact_slice(rhs, targets);
         }
-        cursor = statement_end.saturating_add(1).min(compact.len());
+        cursor = statement_end.saturating_add(1).min(source.len());
     }
-    targets
+}
+
+fn collect_commonjs_export_member_require_targets(source: &str, targets: &mut BTreeSet<String>) {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("=require(") {
+        let equals = cursor + relative;
+        let statement_start = source[..equals]
+            .rfind(';')
+            .map(|index| index + 1)
+            .unwrap_or_default();
+        let lhs = &source[statement_start..equals];
+        if lhs.starts_with("exports.") || lhs.starts_with("module.exports.") {
+            let require_start = equals + "=require(".len();
+            if let Some((target, end)) = read_quoted_string_at(source, require_start) {
+                if target.starts_with('.') {
+                    targets.insert(target);
+                }
+                cursor = end;
+                continue;
+            }
+        }
+        cursor = equals + 1;
+    }
+}
+
+fn collect_create_binding_require_targets(source: &str, targets: &mut BTreeSet<String>) {
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find("__createBinding(") {
+        let call_start = cursor + relative + "__createBinding(".len();
+        let statement_end = source[call_start..]
+            .find(';')
+            .map(|offset| call_start + offset)
+            .unwrap_or(source.len());
+        let call = &source[call_start..statement_end];
+        if call.starts_with("exports,") || call.starts_with("module.exports,") {
+            collect_require_targets_from_compact_slice(call, targets);
+        }
+        cursor = statement_end.saturating_add(1).min(source.len());
+    }
+}
+
+fn collect_import_star_reexport_targets(source: &str, targets: &mut BTreeSet<String>) {
+    if !(source.contains("exports.") || source.contains("module.exports.")) {
+        return;
+    }
+    for helper in ["__importStar(require(", "__importDefault(require("] {
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find(helper) {
+            let require_start = cursor + relative + helper.len();
+            let Some((target, end)) = read_quoted_string_at(source, require_start) else {
+                cursor = require_start;
+                continue;
+            };
+            if target.starts_with('.') {
+                targets.insert(target);
+            }
+            cursor = end;
+        }
+    }
 }
 
 fn collect_require_targets_from_compact_slice(source: &str, targets: &mut BTreeSet<String>) {
@@ -3680,6 +3755,9 @@ impl<'a> Visit<'a> for ExportMemberCollector {
         if let Some(exported) = object_define_property_export_member(call) {
             self.insert(exported);
         }
+        if let Some(exported) = commonjs_create_binding_export_member(call) {
+            self.insert(exported);
+        }
         walk_call_expression(self, call);
     }
 }
@@ -3807,6 +3885,16 @@ fn object_define_property_export_member(call: &CallExpression<'_>) -> Option<Str
     argument_string_literal_owned(&call.arguments[1])
 }
 
+fn commonjs_create_binding_export_member(call: &CallExpression<'_>) -> Option<String> {
+    if expression_identifier(&call.callee) != Some("__createBinding") || call.arguments.len() < 3 {
+        return None;
+    }
+    if !argument_is_commonjs_exports_object(&call.arguments[0]) {
+        return None;
+    }
+    argument_string_literal_owned(&call.arguments[2])
+}
+
 fn argument_is_commonjs_exports_object(argument: &Argument<'_>) -> bool {
     match argument {
         Argument::Identifier(identifier) => identifier.name == "exports",
@@ -3855,6 +3943,7 @@ fn commonjs_export_members_from_text(source: &str) -> BTreeSet<String> {
     collect_member_assignments_from_text(source, "module.exports.", &mut members);
     collect_define_property_members_from_text(source, "exports", &mut members);
     collect_define_property_members_from_text(source, "module.exports", &mut members);
+    collect_create_binding_members_from_text(source, &mut members);
     members
 }
 
@@ -3896,6 +3985,31 @@ fn collect_define_property_members_from_text(
         };
         members.insert(member);
         cursor = end;
+    }
+}
+
+fn collect_create_binding_members_from_text(source: &str, members: &mut BTreeSet<String>) {
+    let compact = compact_ascii_ws(source);
+    let mut cursor = 0;
+    while let Some(relative) = compact[cursor..].find("__createBinding(") {
+        let start = cursor + relative + "__createBinding(".len();
+        let statement_end = compact[start..]
+            .find(';')
+            .map(|offset| start + offset)
+            .unwrap_or(compact.len());
+        let call = &compact[start..statement_end];
+        if !(call.starts_with("exports,") || call.starts_with("module.exports,")) {
+            cursor = statement_end.saturating_add(1).min(compact.len());
+            continue;
+        }
+        let Some(last_comma) = call.rfind(',') else {
+            cursor = statement_end.saturating_add(1).min(compact.len());
+            continue;
+        };
+        if let Some((member, _end)) = read_quoted_string_at(call, last_comma + 1) {
+            members.insert(member);
+        }
+        cursor = statement_end.saturating_add(1).min(compact.len());
     }
 }
 
@@ -6081,6 +6195,9 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if let Some(exported) = object_define_property_export_member(call) {
+            self.record_export_member_anchor(exported.as_str());
+        }
+        if let Some(exported) = commonjs_create_binding_export_member(call) {
             self.record_export_member_anchor(exported.as_str());
         }
         walk_call_expression(self, call);
@@ -10205,6 +10322,185 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
         assert_eq!(report.package_report.attributions.len(), 1);
         let package_match = &report.package_report.matches[0];
         assert!(package_match.external_importable);
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:export-all-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_commonjs_member_require_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            exports.PublicWidget = PublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/internal/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-cjs/index.js",
+                r#"exports.PublicWidget = require("./internal/widget.js").PublicWidget;"#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_create_binding_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            exports.PublicWidget = PublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/internal/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-cjs/index.js",
+                r#"
+                var __createBinding = function(o, m, k) {
+                  Object.defineProperty(o, k, { enumerable: true, get: function() { return m[k]; } });
+                };
+                __createBinding(exports, require("./internal/widget.js"), "PublicWidget");
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_import_star_reexports_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            exports.PublicWidget = PublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/internal/widget.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-cjs/index.js",
+                r#"
+                var widget = __importStar(require("./internal/widget.js"));
+                exports.PublicWidget = widget.PublicWidget;
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:barrel-reference:"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_commonjs_reexport_chain_reaches_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            exports.PublicWidget = PublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist-cjs/internal/widget.js",
+                source,
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/public",
+                "pkg@1.0.0/dist-cjs/public.js",
+                r#"module.exports = require("./internal/widget.js");"#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist-cjs/index.js",
+                r#"module.exports = require("./public.js");"#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
         assert!(
             package_match
                 .source_path
