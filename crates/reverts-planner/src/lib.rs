@@ -13163,6 +13163,36 @@ fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) 
     ]
     .iter()
     .any(|needle| compact_source.contains(needle))
+        || compact_source_defines_thunk_factory_binding(compact_source, binding)
+}
+
+fn compact_source_defines_thunk_factory_binding(compact_source: &str, binding: &str) -> bool {
+    ["var", "let", "const"].iter().any(|declaration| {
+        let needle = format!("{declaration}{binding}=");
+        let mut search_start = 0usize;
+        while let Some(relative) = compact_source[search_start..].find(needle.as_str()) {
+            let initializer_start = search_start + relative + needle.len();
+            if compact_initializer_is_thunk_factory(&compact_source[initializer_start..]) {
+                return true;
+            }
+            search_start = initializer_start;
+        }
+        false
+    })
+}
+
+fn compact_initializer_is_thunk_factory(source: &str) -> bool {
+    let Some((callee, callee_end)) = parse_identifier(source, 0) else {
+        return false;
+    };
+    if callee.is_empty() || source.as_bytes().get(callee_end) != Some(&b'(') {
+        return false;
+    }
+    let argument = &source[callee_end + 1..];
+    argument.starts_with("()=>")
+        || argument.starts_with("async()=>")
+        || argument.starts_with("function(")
+        || argument.starts_with("asyncfunction(")
 }
 
 fn external_package_adapter_return_expression(
@@ -17830,10 +17860,11 @@ mod tests {
         CompilerRecoveryAction, EmitPlan, ExportMemberAdapterProofKind, ImportExportPlanner,
         PlannedFile, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
         RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
-        RuntimeSourceReadIndex, SourceCompilerStrategy, export_member_adapter_proof,
-        inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
-        lower_runtime_helpers, merge_same_owner_overlapping_reader_migrations,
-        parse_generated_named_export_statement, purify_private_runtime_lazy_initializers,
+        RuntimeSourceReadIndex, SourceCompilerStrategy, compact_source_defines_callable_binding,
+        export_member_adapter_proof, inline_internal_setter_calls,
+        inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
+        merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
+        purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -22259,6 +22290,22 @@ mod tests {
         let source = package_file.body.join("\n");
         assert!(source.contains("runtimeValue = 1"));
         assert!(!source.contains("external_fixture_package"));
+    }
+
+    #[test]
+    fn external_adapter_treats_minified_thunk_factory_initializer_as_callable() {
+        assert!(compact_source_defines_callable_binding(
+            "varrP7=E(()=>{v3();});",
+            "rP7"
+        ));
+        assert!(compact_source_defines_callable_binding(
+            "constinit=lazy(()=>{});",
+            "init"
+        ));
+        assert!(!compact_source_defines_callable_binding(
+            "varnotCallable=factory(value);",
+            "notCallable"
+        ));
     }
 
     #[test]

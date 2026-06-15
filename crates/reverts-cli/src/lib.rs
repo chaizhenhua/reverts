@@ -1442,7 +1442,8 @@ pub fn match_packages_from_connection(
         (!args.package_names.is_empty()).then_some(&package_names),
     );
     mark_timing!("match_pipeline");
-    let report = pipeline_report.package_report;
+    let mut report = pipeline_report.package_report;
+    filter_unsafe_interpackage_external_attributions(&rows, &mut report);
     let function_attributions = pipeline_report.function_attributions;
     let function_ownership_matches = pipeline_report.function_ownership_matches;
 
@@ -5595,6 +5596,102 @@ fn rejected_package_attributions_for_unaccepted_modules(
     Ok(rejected)
 }
 
+fn filter_unsafe_interpackage_external_attributions(
+    rows: &InputRows,
+    report: &mut VersionedPackageMatchReport,
+) -> usize {
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let incoming_dependencies = incoming_dependency_index(rows);
+    let report_external_modules = report
+        .attributions
+        .iter()
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    if report_external_modules.is_empty() {
+        return 0;
+    }
+    let mut accepted_external_modules = rows
+        .package_attributions
+        .iter()
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .chain(report_external_modules.iter().copied())
+        .collect::<BTreeSet<_>>();
+    let mut rejected = BTreeSet::<ModuleId>::new();
+
+    loop {
+        let mut changed = false;
+        for module_id in &report_external_modules {
+            if rejected.contains(module_id) {
+                continue;
+            }
+            if external_attribution_has_unexternalized_consumer(
+                *module_id,
+                &accepted_external_modules,
+                &modules_by_id,
+                &incoming_dependencies,
+            ) {
+                rejected.insert(*module_id);
+                accepted_external_modules.remove(module_id);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    if rejected.is_empty() {
+        return 0;
+    }
+    let before = report.attributions.len();
+    report
+        .attributions
+        .retain(|attribution| !rejected.contains(&attribution.module_id));
+    before.saturating_sub(report.attributions.len())
+}
+
+fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bool {
+    attribution.status == PackageAttributionStatus::Accepted
+        && attribution.emission_mode == PackageEmissionMode::ExternalImport
+}
+
+fn incoming_dependency_index(rows: &InputRows) -> BTreeMap<ModuleId, Vec<ModuleId>> {
+    let mut incoming = BTreeMap::<ModuleId, Vec<ModuleId>>::new();
+    for dependency in &rows.dependencies {
+        let ModuleDependencyTarget::Module(target) = dependency.target else {
+            continue;
+        };
+        incoming
+            .entry(target)
+            .or_default()
+            .push(dependency.from_module_id);
+    }
+    incoming
+}
+
+fn external_attribution_has_unexternalized_consumer(
+    module_id: ModuleId,
+    accepted_external_modules: &BTreeSet<ModuleId>,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    incoming_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+) -> bool {
+    for consumer_id in incoming_dependencies.get(&module_id).into_iter().flatten() {
+        if accepted_external_modules.contains(consumer_id) {
+            continue;
+        }
+        if modules_by_id.contains_key(consumer_id) {
+            return true;
+        }
+    }
+    false
+}
+
 fn package_source_quality_rejection_reason(
     rows: &InputRows,
     module: &ModuleInput,
@@ -9118,6 +9215,81 @@ mod tests {
         assert_eq!(emission_mode, "external_import");
         assert_eq!(export_specifier, "pkg/package.json");
         assert!(resolved_file.ends_with("package.json"));
+    }
+
+    #[test]
+    fn match_packages_does_not_externalize_package_needed_by_nonexternal_consumer() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let first_module = "export function init(){return 1;}";
+        let second_module = "\nexport const consumer = init();";
+        let bundled_source = format!("{first_module}{second_module}");
+        let mut connection = package_match_connection(
+            tempdir.path().join("bundle.js"),
+            bundled_source.as_str(),
+            &[("pkg", "1.2.3", "index.js", first_module)],
+        );
+        connection
+            .execute(
+                r"
+                UPDATE modules
+                   SET original_name = 'init',
+                       semantic_name = 'pkg/index.js',
+                       package_version = '1.2.3',
+                       byte_start = 0,
+                       byte_end = ?1
+                 WHERE id = 10
+                ",
+                [first_module.len() as i64],
+            )
+            .expect("narrow package module");
+        connection
+            .execute(
+                r"
+                INSERT INTO modules
+                    (id, file_id, original_name, semantic_name, module_category,
+                     package_name, package_version, byte_start, byte_end)
+                VALUES (11, 1, 'consumer', 'other/consumer.js', 'package',
+                        'other', '1.0.0', ?1, ?2)
+                ",
+                [first_module.len() as i64, bundled_source.len() as i64],
+            )
+            .expect("insert package consumer");
+        connection
+            .execute(
+                "INSERT INTO module_dependencies (module_id, dependency_id) VALUES (11, 10)",
+                [],
+            )
+            .expect("insert package dependency");
+        let args = MatchPackagesArgs {
+            input: PathBuf::from("unused.db"),
+            project_id: 1,
+            apply: true,
+            package_names: vec!["pkg".to_string()],
+            package_source_roots: Vec::new(),
+            materialize_package_sources: false,
+        };
+
+        let outcome =
+            match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    r"
+                    SELECT COUNT(*)
+                      FROM package_attributions
+                     WHERE module_id = 10
+                       AND status = 'accepted'
+                       AND emission_mode = 'external_import'
+                    ",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count accepted external"),
+            0,
+            "externalizing one package must not strand a non-external consumer"
+        );
     }
 
     #[test]
