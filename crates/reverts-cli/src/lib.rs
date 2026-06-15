@@ -843,10 +843,7 @@ fn runtime_emitted_setter_blockers_from_files(
         let Some(source_file_id) = runtime_helper_source_file_id(file.path.as_str()) else {
             continue;
         };
-        for line in file.source.lines() {
-            let Some(binding) = runtime_setter_target_from_line(line.trim_start()) else {
-                continue;
-            };
+        for binding in runtime_setter_targets_in_source(file.source.as_str()) {
             emitted.total_bindings += 1;
             let key = RuntimeSetterMigrationBindingKey {
                 source_file_id,
@@ -877,13 +874,23 @@ fn runtime_helper_source_file_id(path: &str) -> Option<u32> {
     source_id.parse().ok()
 }
 
-fn runtime_setter_target_from_line(line: &str) -> Option<BindingName> {
-    let rest = line.strip_prefix("function __reverts_set_")?;
-    let (binding, _tail) = rest.split_once("(value)")?;
-    if binding.is_empty() {
-        return None;
+fn runtime_setter_targets_in_source(source: &str) -> Vec<BindingName> {
+    const MARKER: &str = "function __reverts_set_";
+    let mut targets = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(relative_start) = source[cursor..].find(MARKER) {
+        let binding_start = cursor + relative_start + MARKER.len();
+        let tail = &source[binding_start..];
+        let Some((binding, _rest)) = tail.split_once("(value)") else {
+            cursor = binding_start;
+            continue;
+        };
+        if !binding.is_empty() {
+            targets.push(BindingName::new(binding));
+        }
+        cursor = binding_start + binding.len();
     }
-    Some(BindingName::new(binding))
+    targets
 }
 
 fn runtime_inventory_project_selections(
@@ -996,13 +1003,12 @@ fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> RuntimeInventor
             if trimmed.starts_with("import ") && trimmed.contains("__reverts_set_") {
                 counts.setter_import_statements += 1;
             }
-            if trimmed.starts_with("function __reverts_set_") {
-                counts.setter_function_definitions += 1;
-            }
             if is_runtime_file && trimmed.starts_with("export {") && trimmed.contains(" from ") {
                 counts.runtime_reexport_statements += 1;
             }
         }
+        counts.setter_function_definitions +=
+            runtime_setter_targets_in_source(file.source.as_str()).len();
     }
     counts
 }
@@ -6696,10 +6702,13 @@ mod tests {
         InputRows, ModuleInput, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, ProjectInput,
         SourceFileInput,
     };
-    use reverts_ir::ModuleId;
+    use reverts_ir::{BindingName, ModuleId};
     use reverts_observe::{AuditFinding, AuditReport, FindingCode};
     use reverts_package_matcher::PackageSource;
-    use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency};
+    use reverts_pipeline::{
+        EmittedAsset, EmittedFile, RuntimeDependency, RuntimeSetterMigrationBlockerReason,
+        RuntimeSetterMigrationBlockerReport,
+    };
     use rusqlite::{Connection, params};
 
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
@@ -6716,11 +6725,11 @@ mod tests {
         package_export_specifier, package_version_hints_for_materialization,
         package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
         persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
-        runtime_inventory_counts_from_files, runtime_inventory_project_selections,
-        runtime_line_attribution_from_files, runtime_module_owner_label,
-        runtime_original_name_owners_by_binding, runtime_source_span_owner_label_for_range,
-        stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
-        version_text,
+        runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
+        runtime_inventory_project_selections, runtime_line_attribution_from_files,
+        runtime_module_owner_label, runtime_original_name_owners_by_binding,
+        runtime_source_span_owner_label_for_range, stale_cache_version_hints_for_materialization,
+        stale_package_source_cache_versions, version_text,
     };
 
     #[test]
@@ -6933,7 +6942,7 @@ mod tests {
         let files = vec![
             EmittedFile {
                 path: "modules/runtime/source-1-helpers.ts".to_string(),
-                source: "// @ts-nocheck\nexport { X } from '../real.js';\nfunction __reverts_set_X(value) { return X = value; }\n".to_string(),
+                source: "// @ts-nocheck\nexport { X } from '../real.js';\nfunction __reverts_set_X(value) { return X = value; }function __reverts_set_Y(value) { return Y = value; }\n".to_string(),
             },
             EmittedFile {
                 path: "modules/consumer.ts".to_string(),
@@ -6948,12 +6957,51 @@ mod tests {
         assert_eq!(counts.runtime_lines, 3);
         assert_eq!(counts.runtime_import_statements, 1);
         assert_eq!(counts.runtime_reexport_statements, 1);
-        assert_eq!(counts.setter_function_definitions, 1);
+        assert_eq!(counts.setter_function_definitions, 2);
         assert_eq!(counts.setter_import_statements, 1);
-        assert_eq!(counts.setter_occurrences, 3);
-        assert_eq!(counts.reverts_internal_occurrences, 3);
+        assert_eq!(counts.setter_occurrences, 4);
+        assert_eq!(counts.reverts_internal_occurrences, 4);
         assert_eq!(counts.named_import_statements, 1);
         assert_eq!(counts.named_export_statements, 1);
+    }
+
+    #[test]
+    fn runtime_emitted_setter_blockers_count_batched_setter_declarations() {
+        let files = vec![EmittedFile {
+            path: "modules/runtime/source-1-helpers.ts".to_string(),
+            source: "function __reverts_set_X(value) { return X = value; }function __reverts_set_Y(value) { return Y = value; }\n".to_string(),
+        }];
+        let mut report = RuntimeSetterMigrationBlockerReport {
+            total_bindings: 2,
+            ..Default::default()
+        };
+        report.add_reason(
+            1,
+            BindingName::new("X"),
+            RuntimeSetterMigrationBlockerReason::ReaderNonSnippetUse,
+        );
+        report.add_reason(
+            1,
+            BindingName::new("Y"),
+            RuntimeSetterMigrationBlockerReason::RuntimeNonSnippetRead,
+        );
+
+        let emitted = runtime_emitted_setter_blockers_from_files(&files, &report);
+
+        assert_eq!(emitted.total_bindings, 2);
+        assert_eq!(emitted.blocked_bindings, 2);
+        assert_eq!(
+            emitted
+                .reasons
+                .get(&RuntimeSetterMigrationBlockerReason::ReaderNonSnippetUse),
+            Some(&1)
+        );
+        assert_eq!(
+            emitted
+                .reasons
+                .get(&RuntimeSetterMigrationBlockerReason::RuntimeNonSnippetRead),
+            Some(&1)
+        );
     }
 
     #[test]

@@ -2444,15 +2444,13 @@ impl ImportExportPlanner {
                     bindings: unresolved.into_iter().collect(),
                 });
             }
-            for (module_id, bindings) in &helper_imports {
-                ensure_planned_module_exports(&mut plan, program, *module_id, bindings);
-                let Some(module_path) = module_output_path(program, *module_id) else {
-                    continue;
-                };
-                let specifier =
-                    relative_import_specifier(helper_path.as_str(), module_path.as_str());
-                file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-            }
+            push_packed_runtime_helper_imports(
+                program,
+                &mut plan,
+                &mut file,
+                helper_path.as_str(),
+                &helper_imports,
+            );
             for binding in &package_init_shims {
                 file.push_source(noop_function_statement(binding));
             }
@@ -2470,8 +2468,8 @@ impl ImportExportPlanner {
                 )
                 .cloned()
                 .collect();
-            for binding in &setter_bindings {
-                file.push_source(runtime_helper_setter_declaration(binding));
+            if !setter_bindings.is_empty() {
+                file.push_source(runtime_helper_setter_declarations(&setter_bindings));
             }
             let emits_lazy_module = used_lazy_module.contains(source_file_id);
             let emits_lazy_value = used_lazy_value.contains(source_file_id);
@@ -4275,14 +4273,13 @@ fn emit_package_runtime_helper_files(
         }
 
         let mut file = PlannedFile::new(helper_path.clone());
-        for (module_id, bindings) in &helper_imports {
-            ensure_planned_module_exports(plan, program, *module_id, bindings);
-            let Some(module_path) = module_output_path(program, *module_id) else {
-                continue;
-            };
-            let specifier = relative_import_specifier(helper_path.as_str(), module_path.as_str());
-            file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
-        }
+        push_packed_runtime_helper_imports(
+            program,
+            plan,
+            &mut file,
+            helper_path.as_str(),
+            &helper_imports,
+        );
         for binding in &package_init_shims {
             file.push_source(noop_function_statement(binding));
         }
@@ -4291,8 +4288,8 @@ fn emit_package_runtime_helper_files(
         if !helper_closure.source.trim().is_empty() {
             file.push_source(helper_closure.source);
         }
-        for binding in &usage.setter_bindings {
-            file.push_source(runtime_helper_setter_declaration(binding));
+        if !usage.setter_bindings.is_empty() {
+            file.push_source(runtime_helper_setter_declarations(&usage.setter_bindings));
         }
         if emits_lazy_module {
             file.push_source(lazy_module_helper_source());
@@ -4339,6 +4336,57 @@ fn emit_package_runtime_helper_files(
         plan.push_file(file);
     }
     Ok(())
+}
+
+fn push_packed_runtime_helper_imports(
+    program: &EnrichedProgram,
+    plan: &mut EmitPlan,
+    file: &mut PlannedFile,
+    helper_path: &str,
+    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) {
+    let mut imports = Vec::<(String, BTreeSet<BindingName>)>::new();
+    for (module_id, bindings) in helper_imports {
+        ensure_planned_module_exports(plan, program, *module_id, bindings);
+        let Some(module_path) = module_output_path(program, *module_id) else {
+            continue;
+        };
+        imports.push((
+            relative_import_specifier(helper_path, module_path.as_str()),
+            bindings.clone(),
+        ));
+    }
+    if let Some(source) = packed_named_import_statements(imports) {
+        file.push_source(source);
+    }
+}
+
+fn packed_named_import_statements(
+    imports: impl IntoIterator<Item = (String, BTreeSet<BindingName>)>,
+) -> Option<String> {
+    let mut ordered = Vec::<(String, BTreeSet<BindingName>)>::new();
+    let mut index_by_specifier = BTreeMap::<String, usize>::new();
+    for (specifier, bindings) in imports {
+        if bindings.is_empty() {
+            continue;
+        }
+        if let Some(index) = index_by_specifier.get(&specifier).copied() {
+            ordered[index].1.extend(bindings);
+            continue;
+        }
+        index_by_specifier.insert(specifier.clone(), ordered.len());
+        ordered.push((specifier, bindings));
+    }
+    if ordered.is_empty() {
+        return None;
+    }
+    Some(
+        ordered
+            .iter()
+            .map(|(specifier, bindings)| named_import_statement(bindings.iter(), specifier))
+            .collect::<Vec<_>>()
+            .join(""),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18073,6 +18121,14 @@ fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
     format!("function {setter}(value) {{ return {binding} = value; }}")
 }
 
+fn runtime_helper_setter_declarations(bindings: &BTreeSet<BindingName>) -> String {
+    bindings
+        .iter()
+        .map(runtime_helper_setter_declaration)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 /// Inline same-module setter calls inside the runtime helpers module.
 /// `__reverts_set_X(<arg>)` becomes `(X = <arg>)` whenever:
 ///   * The identifier appears in call position (not as a value reference
@@ -18783,6 +18839,48 @@ var init = lazyValue(() => {\n\
         assert!(compacted.contains("import a from 'a';import b from 'b';"));
         assert!(compacted.contains("`keep\\n\\nblank`"));
         assert!(compacted.contains("}\nimport { c } from 'c';"));
+    }
+
+    #[test]
+    fn runtime_setter_declarations_are_batched_without_newlines() {
+        let declarations = super::runtime_helper_setter_declarations(&BTreeSet::from([
+            BindingName::new("left"),
+            BindingName::new("right"),
+        ]));
+
+        assert_eq!(declarations.lines().count(), 1);
+        assert!(declarations.contains(
+            "function __reverts_set_left(value) { return left = value; }function __reverts_set_right(value) { return right = value; }"
+        ));
+        super::collect_top_level_statement_facts(&declarations, None, super::ParseGoal::TypeScript)
+            .expect("batched setter declarations must remain parseable");
+    }
+
+    #[test]
+    fn packed_named_import_statements_preserve_order_and_merge_duplicates() {
+        let source = super::packed_named_import_statements([
+            (
+                "./first.js".to_string(),
+                BTreeSet::from([BindingName::new("beta")]),
+            ),
+            (
+                "./second.js".to_string(),
+                BTreeSet::from([BindingName::new("gamma")]),
+            ),
+            (
+                "./first.js".to_string(),
+                BTreeSet::from([BindingName::new("alpha")]),
+            ),
+        ])
+        .expect("imports should be emitted");
+
+        assert_eq!(source.lines().count(), 1);
+        assert_eq!(
+            source,
+            "import { alpha, beta } from './first.js';import { gamma } from './second.js';"
+        );
+        super::collect_top_level_statement_facts(&source, None, super::ParseGoal::TypeScript)
+            .expect("packed import declarations must remain parseable");
     }
 
     #[test]
