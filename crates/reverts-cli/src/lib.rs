@@ -913,13 +913,10 @@ pub struct MatchPackagesOutcome {
     /// Accepted direct package-import modules in the loaded project rows,
     /// including existing persisted external attributions and fresh matches.
     pub external_import_modules: usize,
-    /// Backward-compatible alias for `source_eliminated_package_modules`.
-    ///
-    /// This counts package modules whose source can be eliminated because they
-    /// are either directly emitted as an external import or are private package
-    /// modules reachable only through such externalized public modules.
-    pub source_suppressed_package_modules: usize,
     pub private_source_suppressed_package_modules: usize,
+    /// Package modules whose source can be eliminated because they are either
+    /// directly emitted as an external import or are private package modules
+    /// reachable only through such externalized public modules.
     pub source_eliminated_package_modules: usize,
     pub remaining_package_source_modules: usize,
     pub external_import_candidates: usize,
@@ -969,8 +966,6 @@ pub struct MatchPackagesReportTotals {
     pub package_modules: usize,
     pub matched_modules: usize,
     pub external_import_modules: usize,
-    /// Backward-compatible alias for `source_eliminated_package_modules`.
-    pub source_suppressed_package_modules: usize,
     pub private_source_suppressed_package_modules: usize,
     pub source_eliminated_package_modules: usize,
     pub remaining_package_source_modules: usize,
@@ -1766,8 +1761,6 @@ pub fn match_packages_report_from_sqlite(
         outcome.totals.package_modules += project_outcome.loaded_package_modules;
         outcome.totals.matched_modules += project_outcome.matched_modules;
         outcome.totals.external_import_modules += project_outcome.external_import_modules;
-        outcome.totals.source_suppressed_package_modules +=
-            project_outcome.source_suppressed_package_modules;
         outcome.totals.private_source_suppressed_package_modules +=
             project_outcome.private_source_suppressed_package_modules;
         outcome.totals.source_eliminated_package_modules +=
@@ -2352,7 +2345,6 @@ pub fn match_packages_from_connection(
         loaded_package_sources: package_sources.len(),
         matched_modules,
         external_import_modules: source_elimination.direct_external_import_modules,
-        source_suppressed_package_modules: source_elimination.source_eliminated_package_modules,
         private_source_suppressed_package_modules: source_elimination
             .private_source_suppressed_package_modules,
         source_eliminated_package_modules: source_elimination.source_eliminated_package_modules,
@@ -6872,7 +6864,7 @@ fn filter_unsafe_interpackage_external_attributions(
 }
 
 #[cfg(test)]
-fn source_suppressed_package_modules_for_report(
+fn source_eliminated_package_modules_for_report(
     rows: &InputRows,
     report: &VersionedPackageMatchReport,
 ) -> usize {
@@ -8452,7 +8444,7 @@ mod tests {
         runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
         runtime_inventory_project_selections, runtime_line_attribution_from_files,
         runtime_module_owner_label, runtime_original_name_owners_by_binding,
-        runtime_source_span_owner_label_for_range, source_suppressed_package_modules_for_report,
+        runtime_source_span_owner_label_for_range, source_eliminated_package_modules_for_report,
         stable_hash, stale_cache_version_hints_for_materialization,
         stale_package_source_cache_versions, version_text,
     };
@@ -10009,7 +10001,7 @@ mod tests {
     }
 
     #[test]
-    fn source_suppressed_metric_counts_externalized_private_closure() {
+    fn source_eliminated_metric_counts_externalized_private_closure() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
@@ -10050,7 +10042,7 @@ mod tests {
         };
 
         assert_eq!(
-            source_suppressed_package_modules_for_report(&rows, &report),
+            source_eliminated_package_modules_for_report(&rows, &report),
             2
         );
         let stats = package_source_elimination_stats_for_report(&rows, &report, 2);
@@ -11626,7 +11618,7 @@ mod tests {
             "unproven same-package consumers are preserved as source boundaries rather than source-suppressed"
         );
         assert_eq!(
-            source_suppressed_package_modules_for_report(&rows, &report),
+            source_eliminated_package_modules_for_report(&rows, &report),
             2,
             "only the two direct external imports are eliminated; the unproven consumer is not source-suppressed"
         );
@@ -11997,7 +11989,7 @@ mod tests {
         };
 
         assert_eq!(
-            source_suppressed_package_modules_for_report(&rows, &report),
+            source_eliminated_package_modules_for_report(&rows, &report),
             1,
             "private transitive package sources are only suppressed when every consumer can be removed or is an application/package boundary"
         );

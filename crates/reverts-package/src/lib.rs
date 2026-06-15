@@ -237,14 +237,14 @@ impl ExternalImportProofKind {
             Self::OwnershipSourceMatch => "ownership_source_match",
             Self::SemanticExport => "semantic_export",
             Self::SemanticSource => "semantic_source",
-            Self::SourceMatch => "source_match_fallback",
+            Self::SourceMatch => "source_match",
             Self::DependencyGraphSource => "dependency_graph_source",
             Self::DependencyEdgePath => "dependency_edge_path",
             Self::CrossVersionSource => "cross_version_source",
             Self::CrossPackageSource => "cross_package_source",
             Self::ExportMembers => "export_members_adapter",
-            Self::SemanticPath => "semantic_path_fallback",
-            Self::PackageRoot => "package_root_fallback",
+            Self::SemanticPath => "semantic_path",
+            Self::PackageRoot => "package_root",
             Self::Unknown => "unknown",
         }
     }
@@ -566,7 +566,8 @@ mod tests {
         ExternalImportProofKind, PackageResolution, PackageSurfaceIndex,
         accepted_external_attribution_for_module, accepted_external_module_ids,
         external_import_concrete_source_path, external_import_proof_kind,
-        is_accepted_external_attribution, is_node_builtin, parse_export_members_import_proof,
+        external_import_proof_label, is_accepted_external_attribution, is_node_builtin,
+        parse_export_members_import_proof,
     };
 
     #[test]
@@ -833,6 +834,18 @@ mod tests {
             external_import_concrete_source_path("normalized-source-export:pkg@1.0.0/index.js")
                 .as_deref(),
             Some("pkg@1.0.0/index.js")
+        );
+        assert_eq!(
+            external_import_proof_label("forced-external:source-match:pkg@1.0.0/index.js"),
+            "source_match"
+        );
+        assert_eq!(
+            external_import_proof_label("forced-external:semantic-path:pkg@1.0.0/index.js"),
+            "semantic_path"
+        );
+        assert_eq!(
+            external_import_proof_label("forced-external:package-root:pkg@1.0.0/index.js"),
+            "package_root"
         );
     }
 

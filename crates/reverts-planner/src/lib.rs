@@ -16949,13 +16949,7 @@ fn runtime_owner_definition_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
-    let mut definition_bindings_by_module = source_definition_bindings_by_module(program);
-    for symbol in program.model().symbols() {
-        definition_bindings_by_module
-            .entry(symbol.module_id)
-            .or_default()
-            .insert(BindingName::new(symbol.name.clone()));
-    }
+    let definition_bindings_by_module = runtime_owner_definition_bindings_by_module(program);
     unique_source_definition_modules_from_bindings(
         program,
         externalized_packages,
@@ -16967,6 +16961,17 @@ fn runtime_owner_definition_modules_by_source(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<u32, BTreeMap<BindingName, Option<ModuleId>>> {
+    let definition_bindings_by_module = runtime_owner_definition_bindings_by_module(program);
+    unique_source_definition_modules_by_source_from_bindings(
+        program,
+        externalized_packages,
+        &definition_bindings_by_module,
+    )
+}
+
+fn runtime_owner_definition_bindings_by_module(
+    program: &EnrichedProgram,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut definition_bindings_by_module = source_definition_bindings_by_module(program);
     for symbol in program.model().symbols() {
         definition_bindings_by_module
@@ -16974,11 +16979,7 @@ fn runtime_owner_definition_modules_by_source(
             .or_default()
             .insert(BindingName::new(symbol.name.clone()));
     }
-    unique_source_definition_modules_by_source_from_bindings(
-        program,
-        externalized_packages,
-        &definition_bindings_by_module,
-    )
+    definition_bindings_by_module
 }
 
 fn source_definition_bindings_by_module(
