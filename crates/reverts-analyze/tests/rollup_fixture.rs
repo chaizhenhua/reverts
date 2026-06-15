@@ -1,5 +1,6 @@
 use reverts_analyze::rollup::db::{Snapshot, load_snapshot};
 use reverts_analyze::rollup::oracle::{OracleConfig, OracleVerdict, build_oracle};
+use reverts_analyze::rollup::projection::{Projection, ProjectionKind, project};
 use rusqlite::Connection;
 
 fn seed() -> Connection {
@@ -114,4 +115,26 @@ fn oracle_rejects_when_hint_missing() {
     let oracle = build_oracle(&snap, OracleConfig::default());
     let verdict = oracle.lookup("rare", "1.0.0").expect("present");
     assert!(matches!(verdict, OracleVerdict::NotExternalizable { .. }));
+}
+
+#[test]
+fn projection_promotes_closure_modules_when_pkg_externalizable() {
+    let conn = seed();
+    let snap = load_snapshot(&conn).unwrap();
+    let oracle = build_oracle(&snap, OracleConfig::default());
+    let projections: Vec<Projection> = project(&snap, &oracle);
+    let by_module: std::collections::BTreeMap<i64, &Projection> =
+        projections.iter().map(|p| (p.module_id, p)).collect();
+    assert!(matches!(
+        by_module[&1].kind,
+        ProjectionKind::AlreadyAccepted
+    ));
+    match &by_module[&2].kind {
+        ProjectionKind::RolledUp { top_specifier } => assert_eq!(top_specifier, "lodash"),
+        other => panic!("module 2: expected RolledUp, got {other:?}"),
+    }
+    match &by_module[&3].kind {
+        ProjectionKind::RolledUp { top_specifier } => assert_eq!(top_specifier, "lodash"),
+        other => panic!("module 3: expected RolledUp, got {other:?}"),
+    }
 }
