@@ -742,6 +742,58 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_loader_downgrades_external_import_rows_stamped_with_wrong_policy_version() {
+        // A writer that stamps any value other than the current policy
+        // constant (e.g. `2`, anticipating a "future" version, or a stale
+        // older version still in the database) MUST have its rows silently
+        // downgraded. This protects the pipeline from unsafe externalization
+        // wiring that did not run through the current safety proof.
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_attributions
+                    ADD COLUMN external_import_policy_version INTEGER NOT NULL DEFAULT 0;
+                ",
+            )
+            .expect("add policy column");
+        let wrong_version = PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION + 1;
+        connection
+            .execute(
+                "UPDATE package_attributions SET external_import_policy_version = ?1",
+                [wrong_version],
+            )
+            .expect("stamp wrong policy version");
+
+        let rows =
+            load_project_rows_from_connection(&connection, 7).expect("fixture rows should load");
+        assert_eq!(rows.package_attributions.len(), 1);
+        assert_eq!(
+            rows.package_attributions[0].status,
+            PackageAttributionStatus::Rejected,
+            "row stamped with policy_version={wrong_version} (current={}) must downgrade to rejected",
+            PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
+        );
+        assert_eq!(
+            rows.package_attributions[0].emission_mode,
+            PackageEmissionMode::ApplicationSource,
+        );
+        assert!(
+            rows.package_attributions[0]
+                .rejection_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("current import-safety policy")),
+        );
+    }
+
+    #[test]
     fn sqlite_project_loader_treats_missing_project_assets_table_as_empty() {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
         create_schema_without_project_assets(&connection);

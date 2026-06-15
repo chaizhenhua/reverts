@@ -12,10 +12,22 @@ pub mod sqlite;
 
 /// Current safety policy version for accepted external package imports.
 ///
-/// Consumers should ignore accepted `external_import` attributions that either
-/// predate this column or carry an older policy version. This prevents stale
-/// rows from keeping unsafe external wiring alive after the matcher tightens
-/// its proof requirements.
+/// Any row in `package_attributions` whose `status='accepted'` and
+/// `emission_mode='external_import'` MUST stamp this exact value into the
+/// `external_import_policy_version` column. The sqlite loader at
+/// `crates/reverts-input/src/sqlite.rs` performs a defense-in-depth check on
+/// load: rows whose stored version does not equal this constant are silently
+/// downgraded to `status='rejected'`/`emission_mode='application_source'` with
+/// a "rerun match-packages to revalidate" rejection reason — they are
+/// invisible to the rest of the pipeline. This protects against stale rows
+/// (older matcher, older oracle) keeping unsafe external wiring alive after
+/// the matcher tightens its proof requirements.
+///
+/// **Lifecycle**: bump this constant only when the externalization safety
+/// proof changes in a way that invalidates previously-written attributions.
+/// Any tool that writes `accepted/external_import` rows (matcher,
+/// `reverts-rollup-apply`, future integrations) must reference this constant
+/// directly — never hard-code an integer.
 pub const PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
