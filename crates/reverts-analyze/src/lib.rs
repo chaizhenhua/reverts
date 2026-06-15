@@ -128,8 +128,15 @@ fn audit_duplicate_top_level_bindings(model: &ProgramModel) -> AuditReport {
         if count <= 1 {
             continue;
         }
+        // The input bundle has multiple top-level declarations of the same
+        // name. JS permits this for `var`/`function`; for `let`/`const` it's
+        // a parse error in the source, but bundlers regularly emit code
+        // where two distinct logical bindings happen to share a generated
+        // name. Per ADR 0002 the decompiler is faithful, not corrective:
+        // we surface the duplicate so consumers can disambiguate, but we
+        // don't strand emission on this module-local condition.
         audit.push(
-            AuditFinding::error(
+            AuditFinding::warning(
                 FindingCode::DuplicateTopLevelBinding,
                 format!("top-level binding '{binding}' is declared {count} times"),
             )
@@ -282,19 +289,28 @@ fn audit_unreachable_top_level_code(model: &ProgramModel) -> AuditReport {
 fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> AuditReport {
     let mut audit = AuditReport::default();
     for conflict in binding_shapes.conflicts() {
+        let code = binding_shape_conflict_code(conflict.existing_kind, conflict.incoming_kind);
+        let message = format!(
+            "binding has incompatible shape constraints: {:?} requires {:?}, {:?} requires {:?}",
+            conflict.existing_kind,
+            conflict.existing_shape,
+            conflict.incoming_kind,
+            conflict.incoming_shape
+        );
+        // `CallableEmittedAsNonCallable` is a structural mistake the
+        // emitter can introduce (object literal where a callable was
+        // required), so it stays an error: emission must abort.
+        // `AmbiguousBindingShape` indicates the *input bundle* uses the
+        // same name with conflicting shapes; faithful-not-corrective per
+        // ADR 0002 keeps emission going with a warning.
+        let finding = match code {
+            FindingCode::CallableEmittedAsNonCallable => AuditFinding::error(code, message),
+            _ => AuditFinding::warning(code, message),
+        };
         audit.push(
-            AuditFinding::error(
-                binding_shape_conflict_code(conflict.existing_kind, conflict.incoming_kind),
-                format!(
-                    "binding has incompatible shape constraints: {:?} requires {:?}, {:?} requires {:?}",
-                    conflict.existing_kind,
-                    conflict.existing_shape,
-                    conflict.incoming_kind,
-                    conflict.incoming_shape
-                ),
-            )
-            .with_module(conflict.module_id.0.to_string())
-            .with_binding(conflict.binding.as_str().to_string()),
+            finding
+                .with_module(conflict.module_id.0.to_string())
+                .with_binding(conflict.binding.as_str().to_string()),
         );
     }
     audit
@@ -345,7 +361,10 @@ fn audit_unprotected_nullable_member_reads(model: &ProgramModel) -> AuditReport 
             }
             already_reported.insert(key);
             audit.push(
-                AuditFinding::error(
+                // Documented as a warning per ADR 0002: the decompiler is
+                // faithful, not corrective. Crash potential exists in the
+                // original bundle; we surface it but don't strand emission.
+                AuditFinding::warning(
                     FindingCode::UnprotectedNullableMemberRead,
                     format!(
                         "binding '{}' is assigned from a member chain on a call/await result and later member-read without a null guard — the original bundle can crash here",
