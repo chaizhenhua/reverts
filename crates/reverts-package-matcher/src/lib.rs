@@ -4492,6 +4492,7 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
 enum DependencyGraphSourceProof {
     ExactSourceHash,
     FunctionStringFingerprint,
+    DependencyNeighborhood,
     StringFingerprintWithGraph,
 }
 
@@ -4500,6 +4501,7 @@ impl DependencyGraphSourceProof {
         match self {
             Self::ExactSourceHash => "source-hash",
             Self::FunctionStringFingerprint => "function-string",
+            Self::DependencyNeighborhood => "dependency-neighborhood",
             Self::StringFingerprintWithGraph => "string-graph",
         }
     }
@@ -4508,8 +4510,13 @@ impl DependencyGraphSourceProof {
         match self {
             Self::ExactSourceHash => 300,
             Self::FunctionStringFingerprint => 200,
+            Self::DependencyNeighborhood => 150,
             Self::StringFingerprintWithGraph => 100,
         }
+    }
+
+    const fn requires_unique_source_path(self) -> bool {
+        matches!(self, Self::DependencyNeighborhood)
     }
 }
 
@@ -4606,12 +4613,27 @@ fn dependency_graph_source_fingerprint_external_import_target(
         .into_iter()
         .filter(|candidate| dependency_graph_source_candidate_score(candidate) == best_score)
         .collect::<Vec<_>>();
+    let best_proof = best.first()?.proof;
     let export_specifiers = best
         .iter()
         .map(|candidate| candidate.source.export_specifier.as_str())
         .collect::<BTreeSet<_>>();
     if export_specifiers.len() != 1 {
         return None;
+    }
+    if best_proof.requires_unique_source_path() {
+        let targets = best
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.source.export_specifier.as_str(),
+                    candidate.source.source_path.as_str(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        if targets.len() != 1 {
+            return None;
+        }
     }
     let selected = best.into_iter().min_by(|left, right| {
         package_source_external_import_rank(left.source)
@@ -4687,6 +4709,9 @@ fn dependency_graph_source_proof(
     }
     if graph.matched_edges >= 2 && string_matches >= 3 {
         return Some(DependencyGraphSourceProof::StringFingerprintWithGraph);
+    }
+    if graph.known_edges >= 2 && graph.matched_edges == graph.known_edges {
+        return Some(DependencyGraphSourceProof::DependencyNeighborhood);
     }
     None
 }
@@ -8817,6 +8842,191 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .is_some_and(|resolved| resolved
                     .starts_with("forced-external:dependency-graph-source:string-graph:")),
             "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_externalizes_dependency_neighborhood_source_match() {
+        let mut rows = rows_with_package_source_at_version("var utility = tinyRuntime;", "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/tiny-runtime.ts".to_string();
+        for (module_id, file_id, name, file_name) in [
+            (ModuleId(11), 2, "depA", "dep-a.js"),
+            (ModuleId(12), 3, "depB", "dep-b.js"),
+        ] {
+            rows.source_files.push(SourceFileInput::new(
+                file_id,
+                file_name,
+                Some(format!("export const {name} = 1;")),
+            ));
+            rows.modules.push(
+                ModuleInput::package(
+                    module_id,
+                    name,
+                    format!("pkg/{file_name}"),
+                    "pkg",
+                    Some("1.0.0".to_string()),
+                )
+                .with_source_file(file_id),
+            );
+        }
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/dep-a")
+                .with_resolved_file("pkg@1.0.0/lib/dep-a.js"),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(12), "pkg", "1.0.0", "pkg/dep-b")
+                .with_resolved_file("pkg@1.0.0/lib/dep-b.js"),
+        );
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/utility",
+                "pkg@1.0.0/lib/utility.js",
+                "const depA = require('./dep-a'); const depB = require('./dep-b'); module.exports = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/other",
+                "pkg@1.0.0/lib/other.js",
+                "const depA = require('./dep-a'); const extra = require('./extra'); module.exports = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-a",
+                "pkg@1.0.0/lib/dep-a.js",
+                "exports.depA = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-b",
+                "pkg@1.0.0/lib/dep-b.js",
+                "exports.depB = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/extra",
+                "pkg@1.0.0/lib/extra.js",
+                "exports.extra = 1;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("unique dependency neighborhood should prove tiny package source");
+        assert_eq!(attribution.export_specifier.as_deref(), Some("pkg/utility"));
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved.starts_with(
+                    "forced-external:dependency-graph-source:dependency-neighborhood:"
+                )),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_rejects_ambiguous_dependency_neighborhood_source_match() {
+        let mut rows = rows_with_package_source_at_version("var utility = tinyRuntime;", "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/tiny-runtime.ts".to_string();
+        for (module_id, file_id, name, file_name) in [
+            (ModuleId(11), 2, "depA", "dep-a.js"),
+            (ModuleId(12), 3, "depB", "dep-b.js"),
+        ] {
+            rows.source_files.push(SourceFileInput::new(
+                file_id,
+                file_name,
+                Some(format!("export const {name} = 1;")),
+            ));
+            rows.modules.push(
+                ModuleInput::package(
+                    module_id,
+                    name,
+                    format!("pkg/{file_name}"),
+                    "pkg",
+                    Some("1.0.0".to_string()),
+                )
+                .with_source_file(file_id),
+            );
+        }
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg/dep-a")
+                .with_resolved_file("pkg@1.0.0/lib/dep-a.js"),
+        );
+        rows.package_attributions.push(
+            PackageAttributionInput::accepted_external(ModuleId(12), "pkg", "1.0.0", "pkg/dep-b")
+                .with_resolved_file("pkg@1.0.0/lib/dep-b.js"),
+        );
+        let same_neighborhood =
+            "const depA = require('./dep-a'); const depB = require('./dep-b'); module.exports = 1;";
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/first",
+                "pkg@1.0.0/lib/first.js",
+                same_neighborhood,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/second",
+                "pkg@1.0.0/lib/second.js",
+                same_neighborhood,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-a",
+                "pkg@1.0.0/lib/dep-a.js",
+                "exports.depA = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/dep-b",
+                "pkg@1.0.0/lib/dep-b.js",
+                "exports.depB = 1;",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "ambiguous dependency-neighborhood proof must not externalize"
         );
     }
 
