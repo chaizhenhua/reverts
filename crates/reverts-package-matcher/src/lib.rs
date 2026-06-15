@@ -1522,6 +1522,109 @@ struct ExternalImportTarget {
 }
 
 #[derive(Debug, Default)]
+struct ForceExternalizeCache<'a> {
+    module_fingerprints: RefCell<BTreeMap<ModuleId, Option<ModuleMatchFingerprint>>>,
+    source_fingerprints_by_version:
+        RefCell<BTreeMap<(String, String), Vec<PackageSourceFingerprint<'a>>>>,
+    source_fingerprints_by_package: RefCell<BTreeMap<String, Vec<PackageSourceFingerprint<'a>>>>,
+    dependency_graph_evidence:
+        RefCell<BTreeMap<(ModuleId, String, usize), DependencyGraphEvidence>>,
+}
+
+impl<'a> ForceExternalizeCache<'a> {
+    fn module_fingerprint(
+        &self,
+        module: &ModuleInput,
+        path: &str,
+        source: &str,
+    ) -> Option<ModuleMatchFingerprint> {
+        if let Some(fingerprint) = self.module_fingerprints.borrow().get(&module.id) {
+            return fingerprint.clone();
+        }
+        let fingerprint = module_match_fingerprint(module, path, source).ok();
+        self.module_fingerprints
+            .borrow_mut()
+            .insert(module.id, fingerprint.clone());
+        fingerprint
+    }
+
+    fn source_fingerprints_for_version(
+        &self,
+        external_source_index: &ExternalImportSourceIndex<'a>,
+        package_name: &str,
+        package_version: &str,
+    ) -> Vec<PackageSourceFingerprint<'a>> {
+        let key = (package_name.to_string(), package_version.to_string());
+        if let Some(fingerprints) = self.source_fingerprints_by_version.borrow().get(&key) {
+            return fingerprints.clone();
+        }
+        let fingerprints = external_source_index
+            .all_sources(package_name, package_version)
+            .iter()
+            .filter(|source| source.is_within_fingerprint_budget())
+            .filter_map(|source| external_source_index.source_fingerprint(source))
+            .collect::<Vec<_>>();
+        self.source_fingerprints_by_version
+            .borrow_mut()
+            .insert(key, fingerprints.clone());
+        fingerprints
+    }
+
+    fn source_fingerprints_for_package(
+        &self,
+        external_source_index: &ExternalImportSourceIndex<'a>,
+        package_name: &str,
+    ) -> Vec<PackageSourceFingerprint<'a>> {
+        if let Some(fingerprints) = self
+            .source_fingerprints_by_package
+            .borrow()
+            .get(package_name)
+        {
+            return fingerprints.clone();
+        }
+        let fingerprints = external_source_index
+            .all_sources_for_package(package_name)
+            .into_iter()
+            .filter(|source| source.is_within_fingerprint_budget())
+            .filter_map(|source| external_source_index.source_fingerprint(source))
+            .collect::<Vec<_>>();
+        self.source_fingerprints_by_package
+            .borrow_mut()
+            .insert(package_name.to_string(), fingerprints.clone());
+        fingerprints
+    }
+
+    fn dependency_graph_evidence(
+        &self,
+        rows: &InputRows,
+        module_id: ModuleId,
+        candidate: &PackageSource,
+        external_source_index: &ExternalImportSourceIndex<'a>,
+        concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    ) -> DependencyGraphEvidence {
+        let key = (
+            module_id,
+            package_source_cache_key(candidate),
+            concrete_sources_by_module.len(),
+        );
+        if let Some(evidence) = self.dependency_graph_evidence.borrow().get(&key) {
+            return *evidence;
+        }
+        let evidence = dependency_graph_source_evidence(
+            rows,
+            module_id,
+            candidate,
+            external_source_index,
+            concrete_sources_by_module,
+        );
+        self.dependency_graph_evidence
+            .borrow_mut()
+            .insert(key, evidence);
+        evidence
+    }
+}
+
+#[derive(Debug, Default)]
 struct ExternalImportSourceIndex<'a> {
     all_by_version_path:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
@@ -1811,6 +1914,7 @@ fn resolve_external_import_target_with_index(
     external_source_index: &ExternalImportSourceIndex<'_>,
     module_source: &str,
 ) -> Option<ExternalImportTarget> {
+    let cache = ForceExternalizeCache::default();
     if let Some(package_match) = package_match
         && let Some(target) =
             exact_importable_package_match_source(package_match, external_source_index)
@@ -1834,6 +1938,7 @@ fn resolve_external_import_target_with_index(
             package_match,
             external_source_index,
             module_source,
+            &cache,
         )
     {
         return Some(target);
@@ -1887,11 +1992,12 @@ fn resolve_external_import_target_with_index(
     None
 }
 
-fn dependency_exact_hint_source_match_external_package_source(
+fn dependency_exact_hint_source_match_external_package_source<'a>(
     module: &ModuleInput,
     package_match: &PackageMatch,
-    external_source_index: &ExternalImportSourceIndex<'_>,
+    external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
+    cache: &ForceExternalizeCache<'a>,
 ) -> Option<ExternalImportTarget> {
     if package_match.strategy != ModuleMatchStrategy::DependencyClosureOwnership
         || !package_match.source_path.starts_with("exact-hint:")
@@ -1901,16 +2007,12 @@ fn dependency_exact_hint_source_match_external_package_source(
         return None;
     }
     let module_fingerprint =
-        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
-    let sources = external_source_index
-        .all_sources(
-            package_match.package_name.as_str(),
-            package_match.package_version.as_str(),
-        )
-        .iter()
-        .filter(|source| source.is_within_fingerprint_budget())
-        .filter_map(|source| external_source_index.source_fingerprint(source))
-        .collect::<Vec<_>>();
+        cache.module_fingerprint(module, module.semantic_path.as_str(), module_source)?;
+    let sources = cache.source_fingerprints_for_version(
+        external_source_index,
+        package_match.package_name.as_str(),
+        package_match.package_version.as_str(),
+    );
     if sources.is_empty() {
         return None;
     }
@@ -3227,6 +3329,13 @@ fn package_source_entry_path_from_source_path(
         .to_ascii_lowercase()
 }
 
+fn package_source_cache_key(source: &PackageSource) -> String {
+    format!(
+        "{}@{}:{}",
+        source.package_name, source.package_version, source.source_path
+    )
+}
+
 fn export_member_proof_source_path(
     source: &PackageSource,
     proof: ExportMemberSourceProof,
@@ -4263,6 +4372,7 @@ fn force_externalize_remaining_package_modules(
         .map(|(index, package_match)| (package_match.module_id, index))
         .collect::<BTreeMap<_, _>>();
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
+    let cache = ForceExternalizeCache::default();
     let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
     let mut forced = 0usize;
 
@@ -4320,6 +4430,7 @@ fn force_externalize_remaining_package_modules(
                         &external_source_index,
                         module_source,
                         &concrete_sources_by_module,
+                        &cache,
                     )
                     .or_else(|| {
                         dependency_edge_path_external_import_target(
@@ -4339,6 +4450,7 @@ fn force_externalize_remaining_package_modules(
                         package_match,
                         &external_source_index,
                         module_source,
+                        &cache,
                     )
                 })
             {
@@ -4357,6 +4469,7 @@ fn force_externalize_remaining_package_modules(
                         &external_source_index,
                         module_source,
                         &concrete_sources_by_module,
+                        &cache,
                     )
                 })
             {
@@ -4574,13 +4687,14 @@ struct DependencyGraphSourceCandidate<'a> {
     string_matches: usize,
 }
 
-fn dependency_graph_source_fingerprint_external_import_target(
+fn dependency_graph_source_fingerprint_external_import_target<'a>(
     rows: &InputRows,
     module: &ModuleInput,
     package_match: &PackageMatch,
-    external_source_index: &ExternalImportSourceIndex<'_>,
+    external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    cache: &ForceExternalizeCache<'a>,
 ) -> Option<ExternalImportTarget> {
     if !dependency_graph_source_fingerprint_policy_allows(package_match.strategy)
         || module_source.trim().is_empty()
@@ -4588,18 +4702,17 @@ fn dependency_graph_source_fingerprint_external_import_target(
         return None;
     }
     let module_fingerprint =
-        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
-    let mut candidates = external_source_index
-        .all_sources(
+        cache.module_fingerprint(module, module.semantic_path.as_str(), module_source)?;
+    let mut candidates = cache
+        .source_fingerprints_for_version(
+            external_source_index,
             package_match.package_name.as_str(),
             package_match.package_version.as_str(),
         )
-        .iter()
-        .copied()
-        .filter(|source| source.is_within_fingerprint_budget())
-        .filter_map(|source| {
-            let source_fingerprint = external_source_index.source_fingerprint(source)?;
-            let graph = dependency_graph_source_evidence(
+        .into_iter()
+        .filter_map(|source_fingerprint| {
+            let source = source_fingerprint.source;
+            let graph = cache.dependency_graph_evidence(
                 rows,
                 module.id,
                 source,
@@ -5031,11 +5144,12 @@ struct CrossVersionSourceCandidate {
     target: ExternalImportTarget,
 }
 
-fn same_package_cross_version_source_external_import_target(
+fn same_package_cross_version_source_external_import_target<'a>(
     module: &ModuleInput,
     package_match: &PackageMatch,
-    external_source_index: &ExternalImportSourceIndex<'_>,
+    external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
+    cache: &ForceExternalizeCache<'a>,
 ) -> Option<CorrectedPackageExternalImportTarget> {
     if !same_package_cross_version_source_policy_allows(package_match)
         || module_source.trim().is_empty()
@@ -5043,22 +5157,18 @@ fn same_package_cross_version_source_external_import_target(
         return None;
     }
     let module_fingerprint =
-        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+        cache.module_fingerprint(module, module.semantic_path.as_str(), module_source)?;
     let mut by_version = BTreeMap::<String, Vec<PackageSourceFingerprint<'_>>>::new();
-    for source in external_source_index
-        .all_sources_for_package(package_match.package_name.as_str())
-        .into_iter()
-        .filter(|source| source.is_within_fingerprint_budget())
+    for source_fingerprint in cache
+        .source_fingerprints_for_package(external_source_index, package_match.package_name.as_str())
     {
-        if source.package_version == package_match.package_version {
+        if source_fingerprint.source.package_version == package_match.package_version {
             continue;
         }
-        if let Some(source_fingerprint) = external_source_index.source_fingerprint(source) {
-            by_version
-                .entry(source.package_version.clone())
-                .or_default()
-                .push(source_fingerprint);
-        }
+        by_version
+            .entry(source_fingerprint.source.package_version.clone())
+            .or_default()
+            .push(source_fingerprint);
     }
     let mut candidates = Vec::<CrossVersionSourceCandidate>::new();
     for (package_version, sources) in by_version {
@@ -5096,6 +5206,14 @@ fn same_package_cross_version_source_external_import_target(
                 module_source,
             )?
         };
+        if !cross_version_source_target_allowed_by_runtime_surface(
+            package_match,
+            &source_match,
+            &target,
+            external_source_index,
+        ) {
+            continue;
+        }
         candidates.push(CrossVersionSourceCandidate {
             package_match: source_match,
             target,
@@ -5160,6 +5278,34 @@ fn same_package_cross_version_source_policy_allows(package_match: &PackageMatch)
         && package_match.source_path.contains(":quality=trusted:")
 }
 
+fn cross_version_source_target_allowed_by_runtime_surface(
+    package_match: &PackageMatch,
+    source_match: &ModulePackageMatch,
+    target: &ExternalImportTarget,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+) -> bool {
+    if !cross_version_source_proof_is_older_than_hint(
+        source_match.package_version.as_str(),
+        package_match.package_version.as_str(),
+    ) {
+        return true;
+    }
+    external_source_index
+        .sources(
+            package_match.package_name.as_str(),
+            package_match.package_version.as_str(),
+        )
+        .iter()
+        .any(|source| source.export_specifier == target.export_specifier)
+}
+
+fn cross_version_source_proof_is_older_than_hint(proof_version: &str, hint_version: &str) -> bool {
+    match (Version::parse(proof_version), Version::parse(hint_version)) {
+        (Ok(proof_version), Ok(hint_version)) => proof_version < hint_version,
+        _ => proof_version != hint_version,
+    }
+}
+
 fn cross_version_source_candidate_score(package_match: &ModulePackageMatch) -> usize {
     let strategy_score = match package_match.strategy {
         ModuleMatchStrategy::NormalizedSourceHash => 1000,
@@ -5180,19 +5326,20 @@ fn cross_version_source_candidate_score(package_match: &ModulePackageMatch) -> u
         + package_match.string_anchor_matches
 }
 
-fn cross_package_exact_source_external_import_target(
+fn cross_package_exact_source_external_import_target<'a>(
     rows: &InputRows,
     module: &ModuleInput,
     package_match: &PackageMatch,
-    external_source_index: &ExternalImportSourceIndex<'_>,
+    external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
+    cache: &ForceExternalizeCache<'a>,
 ) -> Option<CorrectedPackageExternalImportTarget> {
     if !cross_package_exact_source_policy_allows(package_match) || module_source.trim().is_empty() {
         return None;
     }
     let module_fingerprint =
-        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+        cache.module_fingerprint(module, module.semantic_path.as_str(), module_source)?;
     let mut candidates = external_source_index
         .normalized_sources_for_any_package(&module_fingerprint.normalized_source_hashes)
         .into_iter()
@@ -5213,7 +5360,7 @@ fn cross_package_exact_source_external_import_target(
                 .string_anchors
                 .intersection(&module_fingerprint.string_anchors)
                 .count();
-            let graph = dependency_graph_source_evidence(
+            let graph = cache.dependency_graph_evidence(
                 rows,
                 module.id,
                 source,
@@ -7218,8 +7365,8 @@ mod tests {
 
     use super::{
         BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ExternalImportSourceIndex,
-        ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch,
-        PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
+        ForceExternalizeCache, ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
+        PackageMatch, PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
         VersionedPackageMatcher, match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
@@ -7372,6 +7519,82 @@ mod tests {
             Some("pkg/add")
         );
         assert_eq!(report.attributions[0].subpath.as_deref(), Some("add"));
+    }
+
+    #[test]
+    fn force_externalize_cache_reuses_source_and_graph_evidence() {
+        let source = "export function add(a, b) { return a + b; }";
+        let rows = rows_with_package_source_at_version(source, "1.0.0");
+        let package_sources = [PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/add",
+            "pkg@1.0.0/lib/add.js",
+            source,
+        )];
+        let index = ExternalImportSourceIndex::build(&package_sources);
+        let cache = ForceExternalizeCache::default();
+
+        let first_module_fingerprint = cache
+            .module_fingerprint(
+                &rows.modules[0],
+                rows.modules[0].semantic_path.as_str(),
+                source,
+            )
+            .expect("module fingerprint");
+        let second_module_fingerprint = cache
+            .module_fingerprint(
+                &rows.modules[0],
+                rows.modules[0].semantic_path.as_str(),
+                source,
+            )
+            .expect("module fingerprint");
+        assert_eq!(
+            first_module_fingerprint.normalized_source_hashes,
+            second_module_fingerprint.normalized_source_hashes
+        );
+        assert_eq!(cache.module_fingerprints.borrow().len(), 1);
+
+        assert_eq!(
+            cache
+                .source_fingerprints_for_version(&index, "pkg", "1.0.0")
+                .len(),
+            1
+        );
+        assert_eq!(
+            cache
+                .source_fingerprints_for_version(&index, "pkg", "1.0.0")
+                .len(),
+            1
+        );
+        assert_eq!(cache.source_fingerprints_by_version.borrow().len(), 1);
+
+        let package_fingerprints = cache.source_fingerprints_for_package(&index, "pkg");
+        assert_eq!(package_fingerprints.len(), 1);
+        assert_eq!(
+            cache.source_fingerprints_for_package(&index, "pkg").len(),
+            1
+        );
+        assert_eq!(cache.source_fingerprints_by_package.borrow().len(), 1);
+
+        let concrete_sources_by_module = BTreeMap::new();
+        let first_graph = cache.dependency_graph_evidence(
+            &rows,
+            rows.modules[0].id,
+            package_fingerprints[0].source,
+            &index,
+            &concrete_sources_by_module,
+        );
+        let second_graph = cache.dependency_graph_evidence(
+            &rows,
+            rows.modules[0].id,
+            package_fingerprints[0].source,
+            &index,
+            &concrete_sources_by_module,
+        );
+        assert_eq!(first_graph.matched_edges, second_graph.matched_edges);
+        assert_eq!(first_graph.known_edges, second_graph.known_edges);
+        assert_eq!(cache.dependency_graph_evidence.borrow().len(), 1);
     }
 
     #[test]
@@ -9880,12 +10103,14 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             ),
         ];
         let index = ExternalImportSourceIndex::build(&package_sources);
+        let cache = ForceExternalizeCache::default();
 
         let correction = same_package_cross_version_source_external_import_target(
             &module,
             &package_match,
             &index,
             source,
+            &cache,
         )
         .expect("unique cross-version source proof should resolve");
 
@@ -9899,6 +10124,67 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .starts_with("forced-external:cross-version-source:normalized_source_hash:"),
             "{}",
             correction.target.source_path
+        );
+    }
+
+    #[test]
+    fn cross_version_source_proof_rejects_older_private_import_absent_from_hint_surface() {
+        let source = r#"
+            exports.privateValue = function privateValue() {
+                return "runtime-token-anchor";
+            };
+        "#;
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-pkg/private-token.ts",
+            "pkg",
+            Some("2.0.0".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "2.0.0".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path:
+                "exact-hint:pkg@2.0.0:quality=trusted:semantic_path=modules/10-pkg/private-token.ts"
+                    .to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/lib/private.js",
+                "pkg@1.0.0/lib/private.js",
+                source,
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "2.0.0",
+                "pkg/lib/private.js",
+                "pkg@2.0.0/lib/private.js",
+                source,
+            ),
+        ];
+        let index = ExternalImportSourceIndex::build(&package_sources);
+        let cache = ForceExternalizeCache::default();
+
+        let correction = same_package_cross_version_source_external_import_target(
+            &module,
+            &package_match,
+            &index,
+            source,
+            &cache,
+        );
+
+        assert!(
+            correction.is_none(),
+            "older cross-version proof must not emit a private subpath absent from the hinted runtime export surface"
         );
     }
 
