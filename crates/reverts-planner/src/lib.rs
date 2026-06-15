@@ -6621,6 +6621,8 @@ fn add_global_owned_runtime_snippet_migrations(
             .get(source_file_id)
             .cloned()
             .unwrap_or_default();
+        let namespace_target_owners =
+            runtime_namespace_target_owners(&read_index, &source_definition_modules);
         let mut eligible_movable_bindings = BTreeSet::<BindingName>::new();
         let mut candidate_owners = BTreeMap::<BindingName, ModuleId>::new();
         for (binding, snippet) in &prelude.snippets {
@@ -6648,6 +6650,9 @@ fn add_global_owned_runtime_snippet_migrations(
                 .and_then(|namespace_export| {
                     namespace_export_owner(namespace_export, &source_definition_modules)
                 });
+            let namespace_target_owner = namespace_target_owners
+                .get(binding)
+                .and_then(|owner| *owner);
             let span_owner = runtime_snippet_source_span_owner(
                 program.model().modules(),
                 prelude.source_file_id,
@@ -6655,8 +6660,11 @@ fn add_global_owned_runtime_snippet_migrations(
                 snippet.source.len(),
                 externalized_packages,
             );
-            let owner_module =
-                global_runtime_snippet_owner(definition_owner, namespace_owner, span_owner);
+            let owner_module = global_runtime_snippet_owner(
+                definition_owner,
+                namespace_owner.or(namespace_target_owner),
+                span_owner,
+            );
             let Some(owner_module) = owner_module else {
                 continue;
             };
@@ -6743,6 +6751,32 @@ fn namespace_export_owner(
         .collect::<BTreeSet<_>>();
     let owner = owners.pop_first()?;
     owners.is_empty().then_some(owner)
+}
+
+fn runtime_namespace_target_owners(
+    read_index: &RuntimeSourceReadIndex,
+    source_definition_modules: &BTreeMap<BindingName, Option<ModuleId>>,
+) -> BTreeMap<BindingName, Option<ModuleId>> {
+    let mut owners = BTreeMap::<BindingName, Option<ModuleId>>::new();
+    for (namespace, namespace_export) in &read_index.namespace_exports_by_namespace {
+        let Some(owner_module) = source_definition_modules
+            .get(namespace)
+            .and_then(|owner| *owner)
+        else {
+            continue;
+        };
+        for target in namespace_export.exports.values() {
+            owners
+                .entry(target.clone())
+                .and_modify(|existing| {
+                    if *existing != Some(owner_module) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(owner_module));
+        }
+    }
+    owners
 }
 
 fn runtime_snippet_source_span_owner<'a>(
@@ -21684,6 +21718,61 @@ function ownedSmall() { return 1; }\n";
                 .expect("larger owner snippet should move")
                 .extra_runtime_deps,
             BTreeSet::from([BindingName::new("ownedSmall")])
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_infers_namespace_target_owner_from_namespace_object() {
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: "var ns = {}; function exportedOnly() { return 1; }".to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("exportedOnly"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeSnippet {
+                        source: "var ns = {};".to_string(),
+                        byte_start: 0,
+                    },
+                ),
+                (
+                    BindingName::new("exportedOnly"),
+                    RuntimePreludeSnippet {
+                        source: "function exportedOnly() { return 1; }".to_string(),
+                        byte_start: 13,
+                    },
+                ),
+            ]),
+            namespace_exports: vec![RuntimeNamespaceExport {
+                namespace: BindingName::new("ns"),
+                helper: BindingName::new("__export"),
+                exports: BTreeMap::from([(
+                    "exportedOnly".to_string(),
+                    BindingName::new("exportedOnly"),
+                )]),
+                byte_start: 55,
+            }],
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let target_owners = super::runtime_namespace_target_owners(
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ns"), Some(ModuleId(7)))]),
+        );
+
+        assert_eq!(
+            target_owners.get(&BindingName::new("exportedOnly")),
+            Some(&Some(ModuleId(7)))
         );
     }
 
