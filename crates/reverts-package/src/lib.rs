@@ -217,6 +217,7 @@ pub enum ExternalImportProofKind {
     SourceMatch,
     DependencyGraphSource,
     DependencyEdgePath,
+    CrossVersionSource,
     CrossPackageSource,
     ExportMembers,
     SemanticPath,
@@ -239,6 +240,7 @@ impl ExternalImportProofKind {
             Self::SourceMatch => "source_match_fallback",
             Self::DependencyGraphSource => "dependency_graph_source",
             Self::DependencyEdgePath => "dependency_edge_path",
+            Self::CrossVersionSource => "cross_version_source",
             Self::CrossPackageSource => "cross_package_source",
             Self::ExportMembers => "export_members_adapter",
             Self::SemanticPath => "semantic_path_fallback",
@@ -270,6 +272,8 @@ pub fn external_import_proof_kind(source_path: &str) -> ExternalImportProofKind 
         ExternalImportProofKind::DependencyGraphSource
     } else if source_path.starts_with("forced-external:dependency-edge-path:") {
         ExternalImportProofKind::DependencyEdgePath
+    } else if source_path.starts_with("forced-external:cross-version-source:") {
+        ExternalImportProofKind::CrossVersionSource
     } else if source_path.starts_with("forced-external:cross-package-source:") {
         ExternalImportProofKind::CrossPackageSource
     } else if source_path.starts_with("forced-external:export-members:") {
@@ -312,6 +316,9 @@ pub fn external_import_concrete_source_path(proof_path: &str) -> Option<String> 
         return rest.rsplit(':').next().map(ToOwned::to_owned);
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-version-source:") {
         return rest.rsplit(':').next().map(ToOwned::to_owned);
     }
     if let Some(rest) = proof_path.strip_prefix("forced-external:cross-package-source:") {
@@ -812,6 +819,15 @@ mod tests {
                 "forced-external:cross-package-source:source-hash:hint=wrong@1.0.0:graph=0/0:functions=1:strings=2:real@2.0.0/index.js"
             ),
             ExternalImportProofKind::CrossPackageSource
+        );
+        let cross_version = "forced-external:cross-version-source:normalized_source_hash:from=1.0.0:pkg@2.0.0/lib/runtime.js";
+        assert_eq!(
+            external_import_proof_kind(cross_version),
+            ExternalImportProofKind::CrossVersionSource
+        );
+        assert_eq!(
+            external_import_concrete_source_path(cross_version).as_deref(),
+            Some("pkg@2.0.0/lib/runtime.js")
         );
         assert_eq!(
             external_import_concrete_source_path("normalized-source-export:pkg@1.0.0/index.js")

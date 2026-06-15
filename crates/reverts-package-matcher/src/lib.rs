@@ -1637,6 +1637,15 @@ impl<'a> ExternalImportSourceIndex<'a> {
             .unwrap_or(&[])
     }
 
+    fn all_sources_for_package(&self, package_name: &str) -> Vec<&'a PackageSource> {
+        self.all_by_version
+            .get(package_name)
+            .into_iter()
+            .flat_map(BTreeMap::values)
+            .flat_map(|sources| sources.iter().copied())
+            .collect()
+    }
+
     fn normalized_sources_for_any_package(
         &self,
         normalized_hashes: &BTreeSet<String>,
@@ -4325,6 +4334,22 @@ fn force_externalize_remaining_package_modules(
             }
             if target.is_none()
                 && let Some(correction) = source_only_match.and_then(|package_match| {
+                    same_package_cross_version_source_external_import_target(
+                        module,
+                        package_match,
+                        &external_source_index,
+                        module_source,
+                    )
+                })
+            {
+                accepted_package_name = correction.package_name;
+                accepted_package_version = correction.package_version;
+                accepted_function_matches = correction.function_signature_matches;
+                accepted_string_matches = correction.string_anchor_matches;
+                target = Some(correction.target);
+            }
+            if target.is_none()
+                && let Some(correction) = source_only_match.and_then(|package_match| {
                     cross_package_exact_source_external_import_target(
                         rows,
                         module,
@@ -4344,6 +4369,12 @@ fn force_externalize_remaining_package_modules(
             let Some(target) = target else {
                 continue;
             };
+            if let Some(proven_version) = package_version_from_proof_path(
+                accepted_package_name.as_str(),
+                target.source_path.as_str(),
+            ) {
+                accepted_package_version = proven_version;
+            }
             let target_source_path = target.source_path.clone();
             let mut attribution = PackageAttributionInput::accepted_external(
                 module.id,
@@ -4486,6 +4517,14 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
         return Some(source_path);
     }
     Some(proof_path.to_string())
+}
+
+fn package_version_from_proof_path(package_name: &str, proof_path: &str) -> Option<String> {
+    let concrete = concrete_package_source_path_from_proof(proof_path)?;
+    let prefix = format!("{package_name}@");
+    let rest = concrete.strip_prefix(prefix.as_str())?;
+    let (version, _path) = rest.split_once('/')?;
+    (!version.trim().is_empty()).then(|| version.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -4984,6 +5023,161 @@ struct CorrectedPackageExternalImportTarget {
     target: ExternalImportTarget,
     function_signature_matches: usize,
     string_anchor_matches: usize,
+}
+
+#[derive(Debug, Clone)]
+struct CrossVersionSourceCandidate {
+    package_match: ModulePackageMatch,
+    target: ExternalImportTarget,
+}
+
+fn same_package_cross_version_source_external_import_target(
+    module: &ModuleInput,
+    package_match: &PackageMatch,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    module_source: &str,
+) -> Option<CorrectedPackageExternalImportTarget> {
+    if !same_package_cross_version_source_policy_allows(package_match)
+        || module_source.trim().is_empty()
+    {
+        return None;
+    }
+    let module_fingerprint =
+        module_match_fingerprint(module, module.semantic_path.as_str(), module_source).ok()?;
+    let mut by_version = BTreeMap::<String, Vec<PackageSourceFingerprint<'_>>>::new();
+    for source in external_source_index
+        .all_sources_for_package(package_match.package_name.as_str())
+        .into_iter()
+        .filter(|source| source.is_within_fingerprint_budget())
+    {
+        if source.package_version == package_match.package_version {
+            continue;
+        }
+        if let Some(source_fingerprint) = external_source_index.source_fingerprint(source) {
+            by_version
+                .entry(source.package_version.clone())
+                .or_default()
+                .push(source_fingerprint);
+        }
+    }
+    let mut candidates = Vec::<CrossVersionSourceCandidate>::new();
+    for (package_version, sources) in by_version {
+        let version = PackageVersionCandidate {
+            package_name: package_match.package_name.clone(),
+            package_version,
+            sources,
+        };
+        let Some(source_match) = best_source_match(
+            &version,
+            &module_fingerprint,
+            &VersionedPackageMatcherConfig::default(),
+        ) else {
+            continue;
+        };
+        if !source_only_match_can_be_promoted_to_import(source_match.strategy) {
+            continue;
+        }
+        let target = if source_match.external_importable {
+            ExternalImportTarget {
+                export_specifier: source_match.export_specifier.clone(),
+                source_path: format!(
+                    "forced-external:cross-version-source:{}:from={}:{}",
+                    source_match.strategy.as_str(),
+                    package_match.package_version,
+                    source_match.source_path
+                ),
+            }
+        } else {
+            export_member_external_package_source_for_source_path(
+                source_match.package_name.as_str(),
+                source_match.package_version.as_str(),
+                source_match.source_path.as_str(),
+                external_source_index,
+                module_source,
+            )?
+        };
+        candidates.push(CrossVersionSourceCandidate {
+            package_match: source_match,
+            target,
+        });
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by(|left, right| {
+        cross_version_source_candidate_score(&right.package_match)
+            .cmp(&cross_version_source_candidate_score(&left.package_match))
+            .then_with(|| {
+                left.package_match
+                    .package_version
+                    .cmp(&right.package_match.package_version)
+            })
+            .then_with(|| {
+                left.package_match
+                    .export_specifier
+                    .cmp(&right.package_match.export_specifier)
+            })
+            .then_with(|| {
+                left.package_match
+                    .source_path
+                    .cmp(&right.package_match.source_path)
+            })
+    });
+    let best_score = cross_version_source_candidate_score(&candidates.first()?.package_match);
+    let best = candidates
+        .into_iter()
+        .filter(|candidate| {
+            cross_version_source_candidate_score(&candidate.package_match) == best_score
+        })
+        .collect::<Vec<_>>();
+    let targets = best
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.package_match.package_name.as_str(),
+                candidate.package_match.package_version.as_str(),
+                candidate.target.export_specifier.as_str(),
+                candidate.target.source_path.as_str(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if targets.len() != 1 {
+        return None;
+    }
+    let selected = best.into_iter().next()?;
+    Some(CorrectedPackageExternalImportTarget {
+        package_name: selected.package_match.package_name,
+        package_version: selected.package_match.package_version,
+        target: selected.target,
+        function_signature_matches: selected.package_match.function_signature_matches,
+        string_anchor_matches: selected.package_match.string_anchor_matches,
+    })
+}
+
+fn same_package_cross_version_source_policy_allows(package_match: &PackageMatch) -> bool {
+    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
+        && package_match.source_path.starts_with("exact-hint:")
+        && package_match.source_path.contains(":quality=trusted:")
+}
+
+fn cross_version_source_candidate_score(package_match: &ModulePackageMatch) -> usize {
+    let strategy_score = match package_match.strategy {
+        ModuleMatchStrategy::NormalizedSourceHash => 1000,
+        ModuleMatchStrategy::FunctionSignatureAndStringAnchors => 700,
+        ModuleMatchStrategy::PropertyShapeAndStringAnchors
+        | ModuleMatchStrategy::ObjectShapeAndStringAnchors
+        | ModuleMatchStrategy::ClassShapeAndStringAnchors
+        | ModuleMatchStrategy::SwitchShapeAndStringAnchors => 600,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+        | ModuleMatchStrategy::CascadeFunctionCoverage
+        | ModuleMatchStrategy::CascadeFunctionOwnership
+        | ModuleMatchStrategy::CascadePartialFunctionCoverage
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership => 0,
+    };
+    strategy_score
+        + package_match.function_signature_matches * 3
+        + package_match.string_anchor_matches
 }
 
 fn cross_package_exact_source_external_import_target(
@@ -7023,13 +7217,13 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy,
-        PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality,
-        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher,
-        match_packages_with_pipeline, match_structural_bags,
+        BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ExternalImportSourceIndex,
+        ModuleMatchStrategy, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch,
+        PackageModuleSourceQuality, PackageSource, VersionedPackageMatchReport,
+        VersionedPackageMatcher, match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, promote_cascade_function_coverage_to_module_attributions,
-        resolve_external_import_target,
+        resolve_external_import_target, same_package_cross_version_source_external_import_target,
     };
     use reverts_graph::FunctionExtractor;
     use reverts_input::{
@@ -9591,6 +9785,166 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .iter()
                 .any(|attribution| attribution.module_id == ModuleId(10)),
             "duplicate exact source across packages must not correct ownership"
+        );
+    }
+
+    #[test]
+    fn pipeline_corrects_exact_hint_version_with_cross_version_source_proof() {
+        let source = r#"
+            exports.actual = function actual() {
+                return "runtime-token-anchor";
+            };
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/runtime-token.ts".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/legacy",
+                "pkg@1.0.0/lib/legacy.js",
+                "exports.legacy = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/runtime",
+                "pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        let attribution = report
+            .package_report
+            .attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(10))
+            .expect("cross-version source proof should correct the exact hint");
+        assert_eq!(attribution.package_name.as_str(), "pkg");
+        assert_eq!(attribution.package_version.as_deref(), Some("2.0.0"));
+        assert_eq!(attribution.export_specifier.as_deref(), Some("pkg/runtime"));
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved.contains("pkg@2.0.0/lib/runtime.js")),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn cross_version_source_proof_selects_unique_importable_version() {
+        let source = r#"
+            exports.actual = function actual() {
+                return "runtime-token-anchor";
+            };
+        "#;
+        let module = ModuleInput::package(
+            ModuleId(10),
+            "m10",
+            "modules/10-pkg/runtime-token.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        );
+        let package_match = PackageMatch {
+            module_id: ModuleId(10),
+            package_name: "pkg".to_string(),
+            package_version: "1.0.0".to_string(),
+            export_specifier: "pkg".to_string(),
+            source_path:
+                "exact-hint:pkg@1.0.0:quality=trusted:semantic_path=modules/10-pkg/runtime-token.ts"
+                    .to_string(),
+            normalized_source_hash: String::new(),
+            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: false,
+        };
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/legacy",
+                "pkg@1.0.0/lib/legacy.js",
+                "exports.legacy = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/runtime",
+                "pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+        ];
+        let index = ExternalImportSourceIndex::build(&package_sources);
+
+        let correction = same_package_cross_version_source_external_import_target(
+            &module,
+            &package_match,
+            &index,
+            source,
+        )
+        .expect("unique cross-version source proof should resolve");
+
+        assert_eq!(correction.package_name.as_str(), "pkg");
+        assert_eq!(correction.package_version.as_str(), "2.0.0");
+        assert_eq!(correction.target.export_specifier.as_str(), "pkg/runtime");
+        assert!(
+            correction
+                .target
+                .source_path
+                .starts_with("forced-external:cross-version-source:normalized_source_hash:"),
+            "{}",
+            correction.target.source_path
+        );
+    }
+
+    #[test]
+    fn pipeline_rejects_ambiguous_cross_version_source_proof() {
+        let source = r#"
+            exports.actual = function actual() {
+                return "runtime-token-anchor";
+            };
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "modules/10-pkg/runtime-token.ts".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/legacy",
+                "pkg@1.0.0/lib/legacy.js",
+                "exports.legacy = 1;",
+            ),
+            PackageSource::external(
+                "pkg",
+                "2.0.0",
+                "pkg/runtime",
+                "pkg@2.0.0/lib/runtime.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "3.0.0",
+                "pkg/runtime",
+                "pkg@3.0.0/lib/runtime.js",
+                source,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "ambiguous cross-version source proof must not externalize"
         );
     }
 
