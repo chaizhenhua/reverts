@@ -6296,6 +6296,8 @@ fn compute_runtime_var_migration_plan(
             .get(&source_id)
             .cloned()
             .unwrap_or_default();
+        let owner_source_lines =
+            owner_module_source_lines(program, candidate_owners.values().copied());
         let reader_cluster_context = RuntimeReaderClusterContext {
             source_file_id: source_id,
             owner_available_bindings: &owner_available_bindings,
@@ -6307,6 +6309,7 @@ fn compute_runtime_var_migration_plan(
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_runtime_definitions,
             owner_runtime_state: &candidate_owner_runtime_state,
+            owner_source_lines: &owner_source_lines,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -7718,6 +7721,8 @@ fn runtime_setter_migration_blocker_report(
             lowered_runtime_sources,
             candidate_owners.values().copied(),
         );
+        let owner_source_lines =
+            owner_module_source_lines(program, candidate_owners.values().copied());
         let reader_cluster_context = RuntimeReaderClusterContext {
             source_file_id: source_id,
             owner_available_bindings: &owner_available_bindings,
@@ -7729,6 +7734,7 @@ fn runtime_setter_migration_blocker_report(
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_runtime_definitions,
             owner_runtime_state: &candidate_owner_runtime_state,
+            owner_source_lines: &owner_source_lines,
             prelude,
             read_index: &read_index,
             movable_bindings: &movable_bindings,
@@ -8029,10 +8035,68 @@ struct RuntimeReaderClusterContext<'a> {
     folded_modules: &'a BTreeSet<ModuleId>,
     folded_runtime_definitions: &'a BTreeSet<BindingName>,
     owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
+    /// Source line count for each candidate owner module. Lets the cluster
+    /// size cap scale with the receiving module so large source modules can
+    /// absorb proportionally larger reader clusters; small modules still
+    /// see the fixed floor.
+    owner_source_lines: &'a BTreeMap<ModuleId, usize>,
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     movable_bindings: &'a BTreeSet<BindingName>,
     candidate_owners: &'a BTreeMap<BindingName, ModuleId>,
+}
+
+/// Per-owner cluster line cap: keep the historical fixed floor as a lower
+/// bound, but allow growth proportional to the owner module's source so
+/// large modules can absorb proportionally larger runtime clusters
+/// without producing 99%-runtime-disguised-as-source output for small
+/// modules.
+fn runtime_reader_cluster_cap_for_owner(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+) -> usize {
+    let owner_lines = ctx
+        .owner_source_lines
+        .get(&owner_module)
+        .copied()
+        .unwrap_or(0);
+    MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES.max(owner_lines.saturating_mul(3))
+}
+
+/// Tally source-file line counts for the given owner modules. Modules
+/// produced by a bundle splitter are typically only a handful of lines
+/// each — the meaningful "absorption capacity" is the source file the
+/// module slice was carved from, not the per-module slice. Two owners
+/// drawn from the same source file share its capacity here.
+fn owner_module_source_lines(
+    program: &EnrichedProgram,
+    owners: impl IntoIterator<Item = ModuleId>,
+) -> BTreeMap<ModuleId, usize> {
+    let input = program.model().input();
+    let mut file_lines = BTreeMap::<u32, usize>::new();
+    for source_file in &input.source_files {
+        let lines = source_file
+            .source
+            .as_deref()
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        file_lines.insert(source_file.id, lines);
+    }
+    let mut map = BTreeMap::new();
+    for owner in owners {
+        if map.contains_key(&owner) {
+            continue;
+        }
+        let lines = input
+            .modules
+            .iter()
+            .find(|module| module.id == owner)
+            .and_then(|module| module.source_file_id)
+            .and_then(|id| file_lines.get(&id).copied())
+            .unwrap_or(0);
+        map.insert(owner, lines);
+    }
+    map
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -8144,8 +8208,10 @@ type RuntimeReaderClusterResult =
     Result<RuntimeReaderClusterMigration, RuntimeReaderClusterBlocker>;
 
 const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
+/// Floor for the reader-cluster line cap. `runtime_reader_cluster_cap_for_owner`
+/// raises this proportionally for owners whose own source is large, but
+/// never lowers it below this floor.
 const MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES: usize = 10000;
-const MAX_LAZY_STAY_LOCAL_READER_CLUSTER_LINES: usize = MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES;
 
 fn merge_same_owner_overlapping_reader_migrations(
     ctx: &RuntimeReaderClusterContext<'_>,
@@ -8882,9 +8948,8 @@ fn migratable_runtime_reader_cluster_result(
             extra_noop_deps: BTreeSet::new(),
         });
     }
-    if runtime_reader_cluster_source_lines(ctx, &initial_readers)
-        > MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES
-    {
+    let cluster_cap = runtime_reader_cluster_cap_for_owner(ctx, owner_module);
+    if runtime_reader_cluster_source_lines(ctx, &initial_readers) > cluster_cap {
         return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
             ReaderNonSnippetUseKind::SeedClusterSizeCap,
         ));
@@ -8926,7 +8991,7 @@ fn migratable_runtime_reader_cluster_result(
             .get(&reader)
             .ok_or(RuntimeReaderClusterBlocker::MissingSnippet)?;
         moved_source_lines += snippet.source.lines().count().max(1);
-        if moved_source_lines > MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES {
+        if moved_source_lines > cluster_cap {
             return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
                 ReaderNonSnippetUseKind::ExpandedClusterSizeCap,
             ));
@@ -10738,6 +10803,8 @@ fn runtime_lazy_fold_plan(
         lowered_runtime_sources,
         lowered_runtime_owner_modules.iter().copied(),
     );
+    let owner_source_lines =
+        owner_module_source_lines(program, lowered_runtime_owner_modules.iter().copied());
     let stay_local_context = RuntimeLazyStayLocalContext {
         externalized_packages,
         writer_modules_by_binding: &writer_modules_by_binding,
@@ -10749,6 +10816,7 @@ fn runtime_lazy_fold_plan(
         runtime_source_consumers: &runtime_source_consumers,
         owner_available_bindings: &owner_available_bindings,
         owner_runtime_state: &owner_runtime_state,
+        owner_source_lines: &owner_source_lines,
     };
     for module in program.model().modules() {
         if module.kind != ModuleKind::Application {
@@ -10946,6 +11014,7 @@ struct RuntimeLazyStayLocalContext<'a> {
     runtime_source_consumers: &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
     owner_available_bindings: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
     owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
+    owner_source_lines: &'a BTreeMap<ModuleId, usize>,
 }
 
 fn runtime_lazy_fold_can_stay_local(
@@ -10996,6 +11065,7 @@ fn runtime_lazy_fold_can_stay_local(
         folded_modules: &folded_modules,
         folded_runtime_definitions: &folded_runtime_definitions,
         owner_runtime_state: ctx.owner_runtime_state,
+        owner_source_lines: ctx.owner_source_lines,
         prelude,
         read_index,
         movable_bindings: &movable_bindings,
@@ -11010,7 +11080,7 @@ fn runtime_lazy_fold_can_stay_local(
             }
             Ok(RuntimeBindingReadProfile::SnippetReaders(readers)) => {
                 if runtime_reader_cluster_source_lines(&reader_cluster_context, &readers)
-                    > MAX_LAZY_STAY_LOCAL_READER_CLUSTER_LINES
+                    > runtime_reader_cluster_cap_for_owner(&reader_cluster_context, module_id)
                 {
                     return false;
                 }
@@ -31870,6 +31940,7 @@ function migratedDep() { return 1; }\n";
         let folded_definitions = BTreeSet::new();
         let owner_available_bindings = BTreeMap::new();
         let owner_state = BTreeMap::new();
+        let owner_source_lines = BTreeMap::new();
         let read_index = RuntimeSourceReadIndex::default();
         let movable = BTreeSet::new();
         let candidate_owners = BTreeMap::new();
@@ -31884,6 +31955,7 @@ function migratedDep() { return 1; }\n";
             folded_modules: &folded_modules,
             folded_runtime_definitions: &folded_definitions,
             owner_runtime_state: &owner_state,
+            owner_source_lines: &owner_source_lines,
             prelude: &prelude,
             read_index: &read_index,
             movable_bindings: &movable,
