@@ -483,8 +483,12 @@ fn audit_required_assets(input: &InputBundle, references: &[AssetReference]) -> 
         if available.contains(reference.logical_path.as_str()) {
             continue;
         }
+        // The input bundle references an asset whose binary is not in
+        // project_assets. Per ADR 0002 the decompiler is faithful, not
+        // corrective: emit the reference, surface the missing asset, and
+        // let the operator backfill the asset table.
         audit.push(
-            AuditFinding::error(
+            AuditFinding::warning(
                 FindingCode::MissingRequiredAsset,
                 "source references an asset that is absent from project_assets",
             )
@@ -1177,7 +1181,7 @@ mod tests {
     };
     use reverts_js::{ParseGoal, parse_source};
     use reverts_model::ProgramModel;
-    use reverts_observe::FindingCode;
+    use reverts_observe::{FindingCode, Severity};
     use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
     use std::collections::BTreeSet;
@@ -1431,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_rejects_asset_reference_missing_from_project_assets() {
+    fn pipeline_warns_on_asset_reference_missing_from_project_assets() {
         let rows = rows_with_application_source(
             "const native = require('/$bunfs/root/addon.node'); export { native };",
         );
@@ -1440,13 +1444,22 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should return audit");
 
         assert!(run.audit.has(FindingCode::MissingRequiredAsset));
-        assert!(run.project.files.is_empty());
+        // Per ADR 0002 the missing asset is an input-bundle condition; emit
+        // the project anyway and let the audit surface what's missing.
+        assert!(
+            !run.project.files.is_empty(),
+            "missing-asset is now a warning; project should still emit"
+        );
         assert!(run.assets.is_empty());
-        assert!(run.audit.findings().iter().any(|finding| {
-            finding.code == FindingCode::MissingRequiredAsset
-                && finding.module.as_deref() == Some("1")
-                && finding.binding.as_deref() == Some("/$bunfs/root/addon.node")
-        }));
+        let finding = run
+            .audit
+            .findings()
+            .iter()
+            .find(|finding| finding.code == FindingCode::MissingRequiredAsset)
+            .expect("missing-asset finding present");
+        assert_eq!(finding.severity, Severity::Warning);
+        assert_eq!(finding.module.as_deref(), Some("1"));
+        assert_eq!(finding.binding.as_deref(), Some("/$bunfs/root/addon.node"));
     }
 
     #[test]
