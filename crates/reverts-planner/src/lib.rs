@@ -637,8 +637,12 @@ impl PlannerAnalysis {
             &eager_safe_analysis,
             &source_suppressed_packages,
         );
-        let runtime_lazy_folds =
-            runtime_lazy_fold_plan(program, &source_module_wiring, &lowered_runtime_sources);
+        let runtime_lazy_folds = runtime_lazy_fold_plan(
+            program,
+            &source_module_wiring,
+            &lowered_runtime_sources,
+            &externalized_packages,
+        );
 
         Self {
             external_package_adapters,
@@ -1245,9 +1249,7 @@ impl ImportExportPlanner {
                     .as_ref()
                     .map(|rewrite| rewrite.source.as_str())
                     .unwrap_or(lowered_source.source.as_str());
-                let (localized, changed) =
-                    inline_remaining_lazy_value_wrappers_allowing_assignments(source_for_lazy);
-                if changed {
+                if let Some(localized) = localize_lazy_value_source(source_for_lazy) {
                     localized_lazy_value_source = Some(localized);
                     lazy_helper_names.retain(|name| *name != "lazyValue");
                 }
@@ -1374,6 +1376,32 @@ impl ImportExportPlanner {
                         &package_remaining_helpers,
                         &package_written_helpers,
                     );
+                }
+                // A module can fail the earlier lazyValue-localization gate
+                // only because it still referenced a singleton runtime helper.
+                // After singleton inlining above, that dependency is now a
+                // same-module declaration. If the shared lazyValue import is
+                // the only remaining runtime edge, localize it too and avoid
+                // materializing the runtime helper file just for the memoizer.
+                if localized_lazy_value_source.is_none()
+                    && lowered_source.uses_lazy_value
+                    && !lowered_source.uses_lazy_module
+                    && !has_runtime_edge_before_lazy_helpers
+                    && !has_runtime_group_imports
+                    && remaining_runtime_helpers.is_empty()
+                    && written_runtime_helpers.is_empty()
+                    && package_remaining_helpers.is_empty()
+                    && package_written_helpers.is_empty()
+                    && lazy_helper_names.contains(&"lazyValue")
+                {
+                    let source_for_lazy = namespace_member_rewrite
+                        .as_ref()
+                        .map(|rewrite| rewrite.source.as_str())
+                        .unwrap_or(lowered_source.source.as_str());
+                    if let Some(localized) = localize_lazy_value_source(source_for_lazy) {
+                        localized_lazy_value_source = Some(localized);
+                        lazy_helper_names.retain(|name| *name != "lazyValue");
+                    }
                 }
                 if !remaining_runtime_helpers.is_empty()
                     || !written_runtime_helpers.is_empty()
@@ -5141,6 +5169,7 @@ struct RuntimeReaderOwnerRuntimeState {
     written_helpers: BTreeSet<BindingName>,
     uses_lazy_module: bool,
     uses_lazy_value: bool,
+    can_localize_lazy_value: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5655,7 +5684,7 @@ fn migratable_runtime_reader_cluster_result(
             .owner_runtime_state
             .get(&owner_module)
             .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)?;
-        if owner_state.uses_lazy_module || owner_state.uses_lazy_value {
+        if owner_state_needs_shared_lazy_helper(owner_state) {
             return Err(RuntimeReaderClusterBlocker::NonSnippetUse);
         }
         let mut locally_owned_runtime = primary_bindings.clone();
@@ -5718,7 +5747,7 @@ fn migratable_folded_non_snippet_runtime_read_result(
         return None;
     }
     let owner_state = ctx.owner_runtime_state.get(&owner_module)?;
-    if owner_state.uses_lazy_module || owner_state.uses_lazy_value {
+    if owner_state_needs_shared_lazy_helper(owner_state) {
         return None;
     }
     if !owner_state
@@ -5769,6 +5798,11 @@ fn runtime_reader_owner_available_bindings(
     by_owner
 }
 
+fn owner_state_needs_shared_lazy_helper(owner_state: &RuntimeReaderOwnerRuntimeState) -> bool {
+    owner_state.uses_lazy_module
+        || (owner_state.uses_lazy_value && !owner_state.can_localize_lazy_value)
+}
+
 fn runtime_reader_owner_runtime_state(
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     owners: impl IntoIterator<Item = ModuleId>,
@@ -5781,6 +5815,16 @@ fn runtime_reader_owner_runtime_state(
         let Some(owner_source) = lowered_runtime_sources.get(&owner_module) else {
             continue;
         };
+        let can_localize_lazy_value = if owner_source.uses_lazy_value
+            && !owner_source.uses_lazy_module
+        {
+            let (localized, changed) = inline_remaining_lazy_value_wrappers_allowing_assignments(
+                owner_source.source.as_str(),
+            );
+            changed && !source_contains_top_level_call(localized.as_str(), "lazyValue")
+        } else {
+            false
+        };
         by_owner.insert(
             owner_module,
             RuntimeReaderOwnerRuntimeState {
@@ -5788,6 +5832,7 @@ fn runtime_reader_owner_runtime_state(
                 written_helpers: owner_source.written_helpers.clone(),
                 uses_lazy_module: owner_source.uses_lazy_module,
                 uses_lazy_value: owner_source.uses_lazy_value,
+                can_localize_lazy_value,
             },
         );
     }
@@ -6450,8 +6495,25 @@ fn runtime_lazy_fold_plan(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    externalized_packages: &BTreeSet<ModuleId>,
 ) -> RuntimeLazyFoldPlan {
     let mut plan = RuntimeLazyFoldPlan::default();
+    let writer_modules_by_binding =
+        runtime_writer_modules_by_binding(program, lowered_runtime_sources, externalized_packages);
+    let remaining_modules_by_binding =
+        runtime_remaining_modules_by_binding(lowered_runtime_sources);
+    let foldable_import_modules_by_binding = runtime_foldable_import_modules_by_binding(
+        program,
+        source_module_wiring,
+        lowered_runtime_sources,
+    );
+    let read_indices_by_source = program
+        .model()
+        .graph()
+        .runtime_preludes()
+        .iter()
+        .map(|(source_file_id, prelude)| (*source_file_id, runtime_source_read_index(prelude, &[])))
+        .collect::<BTreeMap<_, _>>();
     for module in program.model().modules() {
         if module.kind != ModuleKind::Application {
             continue;
@@ -6485,6 +6547,29 @@ fn runtime_lazy_fold_plan(
             continue;
         };
         if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
+            continue;
+        }
+        // A self-contained lazy writer module does not need to become a
+        // runtime chunk at all. Keeping it as a normal source module lets the
+        // runtime-var migration below move its written helper vars into the
+        // same module and remove the setters entirely. Stay conservative:
+        // skip folding only when every written helper is a migratable var,
+        // has this module as its only writer/source reader, and has no prelude
+        // read that would force the runtime helper file to import it back.
+        if read_indices_by_source
+            .get(&source.source_file_id)
+            .is_some_and(|read_index| {
+                runtime_lazy_fold_can_stay_local(
+                    module.id,
+                    source,
+                    prelude,
+                    read_index,
+                    &writer_modules_by_binding,
+                    &remaining_modules_by_binding,
+                    &foldable_import_modules_by_binding,
+                )
+            })
+        {
             continue;
         }
         let folded_source =
@@ -6532,6 +6617,119 @@ fn runtime_lazy_fold_plan(
         chunks.sort_by_key(|chunk| chunk.byte_start);
     }
     plan
+}
+
+fn runtime_writer_modules_by_binding(
+    program: &EnrichedProgram,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeMap<BindingName, BTreeSet<ModuleId>> {
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let mut writers = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
+    for (module_id, source) in lowered_runtime_sources {
+        if modules_by_id.get(module_id).is_some_and(|module| {
+            module.kind == ModuleKind::Package && externalized_packages.contains(module_id)
+        }) {
+            continue;
+        }
+        for binding in &source.written_helpers {
+            writers
+                .entry(binding.clone())
+                .or_default()
+                .insert(*module_id);
+        }
+    }
+    writers
+}
+
+fn runtime_remaining_modules_by_binding(
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+) -> BTreeMap<BindingName, BTreeSet<ModuleId>> {
+    let mut readers = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
+    for (module_id, source) in lowered_runtime_sources {
+        for binding in &source.remaining_helpers {
+            readers
+                .entry(binding.clone())
+                .or_default()
+                .insert(*module_id);
+        }
+    }
+    readers
+}
+
+fn runtime_foldable_import_modules_by_binding(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+) -> BTreeMap<BindingName, BTreeSet<ModuleId>> {
+    let mut readers = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
+    for module in program.model().modules() {
+        if module.kind != ModuleKind::Application
+            || !program.package_imports_for(module.id).is_empty()
+        {
+            continue;
+        }
+        let Some(source) = lowered_runtime_sources.get(&module.id) else {
+            continue;
+        };
+        if source.written_helpers.is_empty() {
+            continue;
+        }
+        let Some((folded_source, _explicit_exports)) =
+            strip_top_level_named_exports(source.source.as_str())
+        else {
+            continue;
+        };
+        if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
+            continue;
+        }
+        let Some(imports_by_target) = source_module_wiring.imports_by_module.get(&module.id) else {
+            continue;
+        };
+        for binding in imports_by_target.values().flatten() {
+            readers
+                .entry(binding.clone())
+                .or_default()
+                .insert(module.id);
+        }
+    }
+    readers
+}
+
+fn runtime_lazy_fold_can_stay_local(
+    module_id: ModuleId,
+    source: &LoweredRuntimeModuleSource,
+    prelude: &RuntimePrelude,
+    read_index: &RuntimeSourceReadIndex,
+    writer_modules_by_binding: &BTreeMap<BindingName, BTreeSet<ModuleId>>,
+    remaining_modules_by_binding: &BTreeMap<BindingName, BTreeSet<ModuleId>>,
+    foldable_import_modules_by_binding: &BTreeMap<BindingName, BTreeSet<ModuleId>>,
+) -> bool {
+    if source.written_helpers.is_empty() || source.uses_lazy_module || !source.uses_lazy_value {
+        return false;
+    }
+    source.written_helpers.iter().all(|binding| {
+        prelude.defines(binding)
+            && migratable_runtime_var_initializer(prelude, binding).is_some()
+            && writer_modules_by_binding
+                .get(binding)
+                .is_some_and(|writers| writers.len() == 1 && writers.contains(&module_id))
+            && remaining_modules_by_binding
+                .get(binding)
+                .is_none_or(|readers| readers.iter().all(|reader| *reader == module_id))
+            && foldable_import_modules_by_binding
+                .get(binding)
+                .is_none_or(|readers| readers.iter().all(|reader| *reader == module_id))
+            && matches!(
+                runtime_binding_read_profile_diagnostic(read_index, binding),
+                Ok(RuntimeBindingReadProfile::NoReads)
+            )
+    })
 }
 
 fn strip_top_level_named_exports(source: &str) -> Option<(String, BTreeSet<BindingName>)> {
@@ -11294,6 +11492,12 @@ fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
 
 fn inline_remaining_lazy_value_wrappers_allowing_assignments(source: &str) -> (String, bool) {
     inline_remaining_lazy_value_wrappers_with_options(source, true)
+}
+
+fn localize_lazy_value_source(source: &str) -> Option<String> {
+    let (localized, changed) = inline_remaining_lazy_value_wrappers_allowing_assignments(source);
+    (changed && !source_contains_top_level_call(localized.as_str(), "lazyValue"))
+        .then_some(localized)
 }
 
 fn inline_remaining_lazy_value_wrappers_with_options(
@@ -18734,7 +18938,7 @@ mod tests {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
             "function buildShared() { return 42; }\n",
         );
         let body = concat!(
@@ -18781,11 +18985,118 @@ mod tests {
     }
 
     #[test]
+    fn self_contained_lazy_writer_stays_local_and_eliminates_runtime_setter() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+        );
+        let writer_body = concat!(
+            "var initShared = lazy(() => { shared = 'ok'; });\n",
+            "export { initShared, shared };\n",
+        );
+        let consumer_body = "var value = initShared();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(2),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let consumer_source = planned_source(&plan, "modules/consumer.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("var _$l"), "{writer_source}");
+        assert!(
+            writer_source.contains("var initShared = _$l(() => {\n\tshared = 'ok';\n});"),
+            "{writer_source}"
+        );
+        assert!(!writer_source.contains("lazyValue("), "{writer_source}");
+        assert!(!writer_source.contains("__reverts_set_shared"));
+        assert!(consumer_source.contains("import { initShared } from './writer.js';"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn self_contained_lazy_writer_localizes_lazy_value_after_inlining_private_runtime_dep() {
+        let planner = ImportExportPlanner;
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "function buildShared() { return 42; }\n",
+        );
+        let body = concat!(
+            "var initShared = lazy(() => { shared = buildShared(); });\n",
+            "export { initShared, shared };\n",
+        );
+        let source = format!("{prelude}{body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        let entry_source = planned_source(&plan, "modules/entry.ts");
+
+        assert!(!entry_source.contains("source-1-helpers"), "{entry_source}");
+        assert!(entry_source.contains("var shared;"), "{entry_source}");
+        assert!(
+            entry_source.contains("function buildShared() { return 42; }"),
+            "{entry_source}"
+        );
+        assert!(entry_source.contains("var _$l"), "{entry_source}");
+        assert!(
+            entry_source.contains("var initShared = _$l(() => {\n\tshared = buildShared();\n});"),
+            "{entry_source}"
+        );
+        assert!(!entry_source.contains("lazyValue("), "{entry_source}");
+        assert!(!entry_source.contains("__reverts_set_shared"));
+        assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
     fn folded_non_snippet_runtime_read_can_import_migrated_writer_binding() {
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
             "var shared;\n",
-            "var used;\n",
+            "var used = Date.now();\n",
         );
         let writer_body = "shared = 'ok';\nexport { shared };\n";
         let folded_body = concat!(
@@ -21157,7 +21468,7 @@ mod tests {
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
             "var shared;\n",
-            "var used;\n",
+            "var used = Date.now();\n",
             "function readShared() { return shared; }\n",
         );
         let writer_body = "shared = 'ok';\nexport { shared };\n";
@@ -21234,12 +21545,179 @@ mod tests {
     }
 
     #[test]
+    fn reader_cluster_runtime_var_migration_allows_folded_reader_use_when_writer_lazy_localizes() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var used = Date.now();\n",
+            "function readShared() { return shared; }\n",
+        );
+        let writer_body = concat!(
+            "var writerInit = lazy(() => { shared = 'ok'; });\n",
+            "writerInit();\n",
+            "export { shared, writerInit };\n",
+        );
+        let folded_body = concat!(
+            "var initUse = lazy(() => { used = readShared(); });\n",
+            "export { initUse, used };\n",
+        );
+        let consumer_body = "var value = initUse();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "folded", "modules/folded.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("var _$l"), "{writer_source}");
+        assert!(
+            writer_source.contains("var writerInit = _$l(() => {\n\tshared = 'ok';\n});"),
+            "{writer_source}"
+        );
+        assert!(!writer_source.contains("lazyValue("), "{writer_source}");
+        assert!(
+            writer_source.contains("function readShared() { return shared; }"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("export { readShared };"));
+        assert!(
+            helper_source.contains("import { readShared } from '../writer.js';"),
+            "{helper_source}"
+        );
+        assert!(
+            !helper_source.contains("function readShared()"),
+            "{helper_source}"
+        );
+        assert!(!helper_source.contains("var shared;"), "{helper_source}");
+        assert!(
+            !helper_source.contains("__reverts_set_shared"),
+            "{helper_source}"
+        );
+        assert!(
+            helper_source.contains("used = readShared();"),
+            "{helper_source}"
+        );
+    }
+
+    #[test]
+    fn folded_non_snippet_runtime_read_migration_allows_writer_lazy_localization() {
+        let prelude = concat!(
+            "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+            "var shared;\n",
+            "var used = Date.now();\n",
+        );
+        let writer_body = concat!(
+            "var writerInit = lazy(() => { shared = 'ok'; });\n",
+            "writerInit();\n",
+            "export { shared, writerInit };\n",
+        );
+        let folded_body = concat!(
+            "var initUse = lazy(() => { used = shared; });\n",
+            "export { initUse, used };\n",
+        );
+        let consumer_body = "var value = initUse();\nexport { value };\n";
+        let source = format!("{prelude}{writer_body}{folded_body}{consumer_body}");
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    prelude.len() as u32,
+                    (prelude.len() + writer_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(2), "folded", "modules/folded.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len()) as u32,
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                )),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "consumer", "modules/consumer.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(
+                    (prelude.len() + writer_body.len() + folded_body.len()) as u32,
+                    source.len() as u32,
+                )),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+
+        let plan = plan_from_rows(rows);
+        let writer_source = planned_source(&plan, "modules/writer.ts");
+        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+        assert!(
+            !writer_source.contains("source-1-helpers"),
+            "{writer_source}"
+        );
+        assert!(writer_source.contains("var shared;"), "{writer_source}");
+        assert!(writer_source.contains("var _$l"), "{writer_source}");
+        assert!(
+            writer_source.contains("var writerInit = _$l(() => {\n\tshared = 'ok';\n});"),
+            "{writer_source}"
+        );
+        assert!(!writer_source.contains("lazyValue("), "{writer_source}");
+        assert!(
+            helper_source.contains("import { shared } from '../writer.js';"),
+            "{helper_source}"
+        );
+        assert!(!helper_source.contains("var shared;"), "{helper_source}");
+        assert!(
+            !helper_source.contains("__reverts_set_shared"),
+            "{helper_source}"
+        );
+        assert!(helper_source.contains("used = shared;"), "{helper_source}");
+    }
+
+    #[test]
     fn reader_cluster_runtime_var_migration_rejects_folded_reader_use_with_runtime_dep_cycle() {
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
             "var shared;\n",
             "var suffix = '!';\n",
-            "var used;\n",
+            "var used = Date.now();\n",
             "function readShared() { return shared + suffix; }\n",
         );
         let writer_body = "shared = 'ok';\nexport { shared };\n";
@@ -22146,7 +22624,7 @@ mod tests {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
             "var Custom;\n",
         );
         let body = concat!(
@@ -22192,9 +22670,10 @@ mod tests {
         ));
         assert!(!entry_source.contains("__reverts_set_shared"));
         assert!(
-            helper_source.contains("var shared, Custom;"),
-            "consecutive runtime var declarations should be coalesced:\n{helper_source}"
+            helper_source.contains("var shared = Date.now();"),
+            "non-migratable initializer should keep the fixture folded:\n{helper_source}"
         );
+        assert!(helper_source.contains("var Custom;"), "{helper_source}");
         assert!(helper_source.contains("shared = { ['required']: !1, matches: (A) => A.ready };"));
         assert!(
             helper_source
@@ -22213,7 +22692,7 @@ mod tests {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
         );
         let body = concat!(
             "var initShared = lazy(() => { shared = Date.now(); });\n",
@@ -22268,7 +22747,7 @@ mod tests {
     fn lazy_folded_stub_with_internal_consumers_is_bypassed() {
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
         );
         let folded_body = concat!(
             "var initShared = lazy(() => { shared = 1; });\n",
@@ -22630,7 +23109,7 @@ mod tests {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
         );
         let body = concat!(
             "var initShared = lazy(() => { shared = 1; });\n",
@@ -22689,7 +23168,7 @@ mod tests {
         let planner = ImportExportPlanner;
         let prelude = concat!(
             "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
-            "var shared;\n",
+            "var shared = Date.now();\n",
         );
         let body = concat!(
             "var initShared = lazy(() => { shared = buildValue(); });\n",
