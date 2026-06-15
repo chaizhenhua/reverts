@@ -938,11 +938,13 @@ dependencies = [
 name = "reverts-cli"
 version = "0.1.0"
 dependencies = [
+ "reverts-analyze",
  "reverts-bundle",
  "reverts-graph",
  "reverts-input",
  "reverts-ir",
  "reverts-js",
+ "reverts-model",
  "reverts-observe",
  "reverts-package",
  "reverts-package-matcher",

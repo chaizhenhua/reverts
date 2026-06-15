@@ -15,10 +15,11 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use reverts_analyze::enrich_program;
 use reverts_graph::FunctionExtractor;
 use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_from_connection};
 use reverts_input::{
-    AssetKind, InputRows, ModuleDependencyTarget, ModuleInput,
+    AssetKind, InputBundle, InputRows, ModuleDependencyTarget, ModuleInput,
     PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput,
     PackageAttributionStatus, PackageEmissionMode, SourceFileInput, SourceSpan,
 };
@@ -27,6 +28,7 @@ use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
 use reverts_js::{
     ParseGoal, collect_top_level_statement_facts, normalize_source_for_pipeline, parse_source,
 };
+use reverts_model::ProgramModel;
 use reverts_observe::AuditReport;
 use reverts_package::external_import_proof_label;
 use reverts_package_matcher::{
@@ -545,6 +547,30 @@ fn print_runtime_line_attribution_report(label: &str, report: &RuntimeLineAttrib
             bucket.lines, bucket.items
         );
     }
+    let mut package_buckets = report
+        .by_package
+        .iter()
+        .map(|(package, bucket)| (package.as_str(), *bucket))
+        .collect::<Vec<_>>();
+    package_buckets.sort_by(
+        |(left_package, left_bucket), (right_package, right_bucket)| {
+            right_bucket
+                .lines
+                .cmp(&left_bucket.lines)
+                .then_with(|| left_package.cmp(right_package))
+        },
+    );
+    for (package, bucket) in package_buckets.iter().take(20) {
+        let runtime_pct = if report.total_runtime_lines == 0 {
+            0.0
+        } else {
+            (bucket.lines as f64 * 100.0) / report.total_runtime_lines as f64
+        };
+        println!(
+            "  package {package}: lines={}, pct={runtime_pct:.2}%, items={}",
+            bucket.lines, bucket.items
+        );
+    }
     let mut items = report.items.clone();
     items.sort_by(|left, right| {
         right
@@ -555,8 +581,14 @@ fn print_runtime_line_attribution_report(label: &str, report: &RuntimeLineAttrib
     });
     for item in items.iter().take(20) {
         println!(
-            "  top {} {} {}:{}-{} lines={}",
-            item.kind, item.binding, item.path, item.line_start, item.line_end, item.lines
+            "  top {} {} package={} {}:{}-{} lines={}",
+            item.kind,
+            item.binding,
+            item.package,
+            item.path,
+            item.line_start,
+            item.line_end,
+            item.lines
         );
     }
 }
@@ -658,6 +690,7 @@ pub struct RuntimeLineAttributionReport {
     pub unattributed_lines: usize,
     pub items: Vec<RuntimeLineAttributionItem>,
     pub by_kind: BTreeMap<String, RuntimeLineAttributionBucket>,
+    pub by_package: BTreeMap<String, RuntimeLineAttributionBucket>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -674,6 +707,7 @@ pub struct RuntimeLineAttributionItem {
     pub lines: usize,
     pub kind: String,
     pub binding: String,
+    pub package: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -745,6 +779,9 @@ pub fn runtime_inventory_from_sqlite(
         } else {
             None
         };
+        let runtime_package_ownership = args
+            .runtime_attribution
+            .then(|| runtime_package_ownership_by_binding(&input));
         if let (Some(total), Some(project_report)) =
             (setter_blockers.as_mut(), project_setter_blockers.as_ref())
         {
@@ -752,9 +789,9 @@ pub fn runtime_inventory_from_sqlite(
         }
         let run = generate_project_from_input(input).map_err(RuntimeInventoryError::Pipeline)?;
         let counts = runtime_inventory_counts_from_files(&run.project.files);
-        let project_runtime_attribution = args
-            .runtime_attribution
-            .then(|| runtime_line_attribution_from_files(&run.project.files));
+        let project_runtime_attribution = runtime_package_ownership
+            .as_ref()
+            .map(|ownership| runtime_line_attribution_from_files(&run.project.files, ownership));
         if let (Some(total), Some(project_report)) = (
             runtime_attribution.as_mut(),
             project_runtime_attribution.as_ref(),
@@ -970,7 +1007,10 @@ fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> RuntimeInventor
     counts
 }
 
-fn runtime_line_attribution_from_files(files: &[EmittedFile]) -> RuntimeLineAttributionReport {
+fn runtime_line_attribution_from_files(
+    files: &[EmittedFile],
+    package_ownership: &BTreeMap<(u32, String), String>,
+) -> RuntimeLineAttributionReport {
     let mut report = RuntimeLineAttributionReport::default();
     for file in files {
         if !file.path.starts_with("modules/runtime/") {
@@ -997,9 +1037,17 @@ fn runtime_line_attribution_from_files(files: &[EmittedFile]) -> RuntimeLineAttr
                 let lines = line_end - line_start + 1;
                 let binding = runtime_attribution_binding_label(&fact.bindings);
                 let kind = fact.kind.as_str().to_string();
+                let package = runtime_attribution_package_label(
+                    runtime_helper_source_file_id(file.path.as_str()),
+                    &fact.bindings,
+                    package_ownership,
+                );
                 let bucket = report.by_kind.entry(kind.clone()).or_default();
                 bucket.items += 1;
                 bucket.lines += lines;
+                let package_bucket = report.by_package.entry(package.clone()).or_default();
+                package_bucket.items += 1;
+                package_bucket.lines += lines;
                 report.items.push(RuntimeLineAttributionItem {
                     path: file.path.clone(),
                     line_start,
@@ -1007,6 +1055,7 @@ fn runtime_line_attribution_from_files(files: &[EmittedFile]) -> RuntimeLineAttr
                     lines,
                     kind,
                     binding,
+                    package,
                 });
             }
         }
@@ -1014,6 +1063,189 @@ fn runtime_line_attribution_from_files(files: &[EmittedFile]) -> RuntimeLineAttr
         report.unattributed_lines += runtime_lines.saturating_sub(covered_lines.len());
     }
     report
+}
+
+fn runtime_attribution_package_label(
+    source_file_id: Option<u32>,
+    bindings: &[String],
+    package_ownership: &BTreeMap<(u32, String), String>,
+) -> String {
+    let Some(source_file_id) = source_file_id else {
+        return "<runtime-glue>".to_string();
+    };
+    let Some(primary_binding) = bindings.first() else {
+        return "<runtime-glue>".to_string();
+    };
+    let target_binding = primary_binding
+        .strip_prefix("__reverts_set_")
+        .unwrap_or(primary_binding);
+    package_ownership
+        .get(&(source_file_id, target_binding.to_string()))
+        .cloned()
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn runtime_package_ownership_by_binding(input: &InputBundle) -> BTreeMap<(u32, String), String> {
+    let source_owners = runtime_source_span_owners(input);
+    let original_name_owners = runtime_original_name_owners_by_binding(&input.modules);
+    let enrichment = enrich_program(ProgramModel::from_input(input.clone()));
+    let mut consumer_owners = BTreeMap::<(u32, String), BTreeSet<String>>::new();
+    for module in enrichment.program.model().modules() {
+        let owner = runtime_module_owner_label(module);
+        for import in enrichment
+            .program
+            .model()
+            .graph()
+            .runtime_imports_for(module.id)
+        {
+            consumer_owners
+                .entry((import.source_file_id, import.binding.as_str().to_string()))
+                .or_default()
+                .insert(owner.clone());
+        }
+    }
+    let mut ownership = BTreeMap::<(u32, String), String>::new();
+    for (key, owners) in &original_name_owners {
+        ownership.insert(key.clone(), runtime_consumer_owner_label(owners));
+    }
+    for (source_file_id, prelude) in enrichment.program.model().graph().runtime_preludes() {
+        let Some(owners) = source_owners.get(source_file_id) else {
+            for binding in prelude.snippets.keys() {
+                let key = (*source_file_id, binding.as_str().to_string());
+                let owner = consumer_owners
+                    .get(&key)
+                    .map(runtime_consumer_owner_label)
+                    .or_else(|| {
+                        original_name_owners
+                            .get(&key)
+                            .map(runtime_consumer_owner_label)
+                    })
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                ownership.insert(key, owner);
+            }
+            continue;
+        };
+        for (binding, snippet) in &prelude.snippets {
+            let key = (*source_file_id, binding.as_str().to_string());
+            let snippet_byte_end = snippet
+                .byte_start
+                .saturating_add(u32::try_from(snippet.source.len()).unwrap_or(u32::MAX));
+            let owner = consumer_owners
+                .get(&key)
+                .map(runtime_consumer_owner_label)
+                .or_else(|| {
+                    original_name_owners
+                        .get(&key)
+                        .map(runtime_consumer_owner_label)
+                })
+                .or_else(|| {
+                    runtime_source_span_owner_label_for_range(
+                        owners,
+                        snippet.byte_start,
+                        snippet_byte_end,
+                    )
+                })
+                .unwrap_or_else(|| "<unknown>".to_string());
+            ownership.insert(key, owner);
+        }
+    }
+    ownership
+}
+
+fn runtime_original_name_owners_by_binding(
+    modules: &[ModuleInput],
+) -> BTreeMap<(u32, String), BTreeSet<String>> {
+    let mut owners = BTreeMap::<(u32, String), BTreeSet<String>>::new();
+    for module in modules {
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        owners
+            .entry((source_file_id, module.original_name.clone()))
+            .or_default()
+            .insert(runtime_module_owner_label(module));
+    }
+    owners
+}
+
+fn runtime_consumer_owner_label(owners: &BTreeSet<String>) -> String {
+    match owners.len() {
+        0 => "<unknown>".to_string(),
+        1 => owners
+            .iter()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_string()),
+        _ => "<shared>".to_string(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeSourceSpanOwner {
+    byte_start: u32,
+    byte_end: u32,
+    label: String,
+}
+
+fn runtime_source_span_owners(input: &InputBundle) -> BTreeMap<u32, Vec<RuntimeSourceSpanOwner>> {
+    let mut owners = BTreeMap::<u32, Vec<RuntimeSourceSpanOwner>>::new();
+    for module in &input.modules {
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        let Some(span) = module.source_span else {
+            continue;
+        };
+        owners
+            .entry(source_file_id)
+            .or_default()
+            .push(RuntimeSourceSpanOwner {
+                byte_start: span.byte_start,
+                byte_end: span.byte_end,
+                label: runtime_module_owner_label(module),
+            });
+    }
+    for source_owners in owners.values_mut() {
+        source_owners.sort_by_key(|owner| (owner.byte_start, owner.byte_end));
+    }
+    owners
+}
+
+fn runtime_source_span_owner_label_for_range(
+    owners: &[RuntimeSourceSpanOwner],
+    byte_start: u32,
+    byte_end: u32,
+) -> Option<String> {
+    let mut overlapping = BTreeSet::<String>::new();
+    for owner in owners {
+        if owner.byte_start < byte_end && byte_start < owner.byte_end {
+            overlapping.insert(owner.label.clone());
+        }
+    }
+    if overlapping.is_empty() {
+        None
+    } else {
+        Some(runtime_consumer_owner_label(&overlapping))
+    }
+}
+
+fn runtime_module_owner_label(module: &ModuleInput) -> String {
+    if let Some(package_name) = module
+        .package_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+    {
+        return format!(
+            "{}@{}",
+            package_name,
+            module.package_version.as_deref().unwrap_or("unknown")
+        );
+    }
+    match module.kind {
+        ModuleKind::Package => "<package>".to_string(),
+        ModuleKind::Application => "<application>".to_string(),
+        ModuleKind::Builtin => "<builtin>".to_string(),
+    }
 }
 
 fn runtime_attribution_binding_label(bindings: &[String]) -> String {
@@ -1094,6 +1326,11 @@ impl RuntimeLineAttributionReport {
         self.items.extend(other.items.iter().cloned());
         for (kind, bucket) in &other.by_kind {
             let target = self.by_kind.entry(kind.clone()).or_default();
+            target.items += bucket.items;
+            target.lines += bucket.lines;
+        }
+        for (package, bucket) in &other.by_package {
+            let target = self.by_package.entry(package.clone()).or_default();
             target.items += bucket.items;
             target.lines += bucket.lines;
         }
@@ -6354,7 +6591,7 @@ pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::path::PathBuf;
 
@@ -6372,10 +6609,10 @@ mod tests {
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
         MatchPackagesArgs, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
-        RuntimeInventoryArgs, best_matching_package_version_by_binary_search,
-        best_project_exact_version_candidate, collect_local_package_sources, dedup_audit_report,
-        exact_project_version_counts_by_package, extract_bun_embedded_asset_from_bytes,
-        filter_package_sources_to_best_build_variants,
+        RuntimeInventoryArgs, RuntimeSourceSpanOwner,
+        best_matching_package_version_by_binary_search, best_project_exact_version_candidate,
+        collect_local_package_sources, dedup_audit_report, exact_project_version_counts_by_package,
+        extract_bun_embedded_asset_from_bytes, filter_package_sources_to_best_build_variants,
         filter_package_sources_to_relevant_path_hints, help_text, json_package_source_module,
         load_package_sources, local_package_metadata, match_packages_from_connection,
         nearest_package_version_by_binary_search, network_package_version_resolution_hints,
@@ -6383,8 +6620,10 @@ mod tests {
         package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
         persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections,
-        runtime_line_attribution_from_files, stale_cache_version_hints_for_materialization,
-        stale_package_source_cache_versions, version_text,
+        runtime_line_attribution_from_files, runtime_module_owner_label,
+        runtime_original_name_owners_by_binding, runtime_source_span_owner_label_for_range,
+        stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
+        version_text,
     };
 
     #[test]
@@ -6640,7 +6879,12 @@ mod tests {
             },
         ];
 
-        let report = runtime_line_attribution_from_files(&files);
+        let package_ownership = BTreeMap::from([
+            ((1, "cached".to_string()), "fixture@1.0.0".to_string()),
+            ((1, "run".to_string()), "<application>".to_string()),
+            ((1, "Box".to_string()), "ui@2.0.0".to_string()),
+        ]);
+        let report = runtime_line_attribution_from_files(&files, &package_ownership);
 
         assert_eq!(report.total_runtime_lines, 8);
         assert_eq!(report.unattributed_lines, 0);
@@ -6650,6 +6894,10 @@ mod tests {
         assert_eq!(report.by_kind["function"].lines, 3);
         assert_eq!(report.by_kind["class"].lines, 1);
         assert_eq!(report.by_kind["export"].lines, 1);
+        assert_eq!(report.by_package["fixture@1.0.0"].lines, 2);
+        assert_eq!(report.by_package["<application>"].lines, 3);
+        assert_eq!(report.by_package["ui@2.0.0"].lines, 1);
+        assert_eq!(report.by_package["<runtime-glue>"].lines, 2);
         assert!(
             report
                 .items
@@ -6664,6 +6912,72 @@ mod tests {
                 .iter()
                 .all(|item| item.path.starts_with("modules/runtime/")),
             "only runtime files should be attributed"
+        );
+    }
+
+    #[test]
+    fn runtime_source_span_owner_matches_runtime_wrapper_that_overlaps_module_body() {
+        let owners = vec![RuntimeSourceSpanOwner {
+            byte_start: 25,
+            byte_end: 125,
+            label: "zod@3.24.2".to_string(),
+        }];
+
+        assert_eq!(
+            runtime_source_span_owner_label_for_range(&owners, 10, 150).as_deref(),
+            Some("zod@3.24.2")
+        );
+        assert_eq!(
+            runtime_source_span_owner_label_for_range(&owners, 0, 10).as_deref(),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_source_span_owner_reports_shared_cross_package_overlap() {
+        let owners = vec![
+            RuntimeSourceSpanOwner {
+                byte_start: 25,
+                byte_end: 75,
+                label: "alpha@1.0.0".to_string(),
+            },
+            RuntimeSourceSpanOwner {
+                byte_start: 80,
+                byte_end: 125,
+                label: "beta@2.0.0".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            runtime_source_span_owner_label_for_range(&owners, 10, 150).as_deref(),
+            Some("<shared>")
+        );
+    }
+
+    #[test]
+    fn runtime_module_owner_label_prefers_package_hint_on_application_modules() {
+        let mut module = ModuleInput::application(ModuleId(7), "lazy", "lazy").with_source_file(1);
+        module.package_name = Some("zod".to_string());
+        module.package_version = Some("3.24.2".to_string());
+
+        assert_eq!(runtime_module_owner_label(&module), "zod@3.24.2");
+    }
+
+    #[test]
+    fn runtime_original_name_owner_labels_runtime_wrapper_by_module_name() {
+        let mut module =
+            ModuleInput::application(ModuleId(7), "kP7", "modules/7-kp7.ts").with_source_file(1);
+        module.package_name = Some("zod".to_string());
+        module.package_version = Some("3.24.2".to_string());
+
+        let owners = runtime_original_name_owners_by_binding(&[module]);
+
+        assert_eq!(
+            owners
+                .get(&(1, "kP7".to_string()))
+                .and_then(|labels| labels.iter().next())
+                .map(String::as_str),
+            Some("zod@3.24.2")
         );
     }
 

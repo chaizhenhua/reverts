@@ -9,11 +9,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+reverts-analyze = { path = "../reverts-analyze" }
 reverts-bundle = { path = "../reverts-bundle" }
 reverts-graph = { path = "../reverts-graph" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
+reverts-model = { path = "../reverts-model" }
 reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
 reverts-package-matcher = { path = "../reverts-package-matcher" }
