@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 use reverts_analyze::enrich_program;
@@ -12,7 +13,8 @@ use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     DeclarationCallability, ParseGoal, classify_top_level_bindings,
     collect_file_url_source_location_rewrites, collect_path_builder_calls,
-    collect_static_resource_specifiers, collect_string_literals, parse_error_message, parse_source,
+    collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
+    parse_error_message, parse_source,
 };
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
@@ -98,6 +100,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
     let mut project = emit_project(&plan).map_err(PipelineError::Emit)?;
     canonicalize_emitted_source_locations(&mut project);
     rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
+    fold_multiline_static_template_literals(&mut project);
 
     audit.extend(audit_emitted_project_parse(&project));
     audit.extend(audit_binding_shape_consistency(&plan, &project));
@@ -462,6 +465,56 @@ fn canonicalize_emitted_source_locations(project: &mut EmittedProject) {
     }
 }
 
+const STATIC_TEMPLATE_LITERAL_FOLD_MIN_LINES: usize = 2;
+
+fn fold_multiline_static_template_literals(project: &mut EmittedProject) {
+    for file in &mut project.files {
+        if !file.source.contains('`') {
+            continue;
+        }
+        file.source = fold_multiline_static_template_literals_in_source(
+            file.source.as_str(),
+            file.path.as_str(),
+        );
+    }
+}
+
+fn fold_multiline_static_template_literals_in_source(source: &str, path_hint: &str) -> String {
+    let Ok(literals) =
+        collect_static_template_literals(source, Some(Path::new(path_hint)), ParseGoal::TypeScript)
+    else {
+        return source.to_string();
+    };
+    let mut replacements = literals
+        .into_iter()
+        .filter_map(|literal| {
+            let start = literal.byte_start as usize;
+            let end = literal.byte_end as usize;
+            let raw = source.get(start..end)?;
+            let raw_line_count = raw.as_bytes().iter().filter(|byte| **byte == b'\n').count() + 1;
+            (raw_line_count >= STATIC_TEMPLATE_LITERAL_FOLD_MIN_LINES)
+                .then(|| (start, end, double_quoted_js_string(literal.value.as_str())))
+        })
+        .collect::<Vec<_>>();
+    if replacements.is_empty() {
+        return source.to_string();
+    }
+    replacements.sort_by_key(|(start, _, _)| *start);
+
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    for (start, end, replacement) in replacements {
+        if start < cursor || end < start || end > source.len() {
+            return source.to_string();
+        }
+        output.push_str(&source[cursor..start]);
+        output.push_str(replacement.as_str());
+        cursor = end;
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
 fn rewrite_file_url_source_locations(source: &str, path_hint: &str) -> String {
     let Ok(rewrites) = collect_file_url_source_location_rewrites(
         source,
@@ -500,6 +553,30 @@ fn rewrite_string_literal_values(
             single_quoted_js_string(replacement).as_str(),
         );
     }
+    output
+}
+
+fn double_quoted_js_string(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{08}' => output.push_str("\\b"),
+            '\u{0C}' => output.push_str("\\f"),
+            '\u{2028}' => output.push_str("\\u2028"),
+            '\u{2029}' => output.push_str("\\u2029"),
+            ch if ch.is_control() => {
+                write!(output, "\\u{:04X}", ch as u32).expect("writing to String should not fail");
+            }
+            _ => output.push(ch),
+        }
+    }
+    output.push('"');
     output
 }
 
@@ -982,7 +1059,8 @@ mod tests {
 
     use super::{
         OutputRun, audit_emit_plan_synthesis, audit_namespace_object_member_consistency,
-        collect_dynamic_asset_references, current_node_platform_dir, generate_project_from_input,
+        collect_dynamic_asset_references, current_node_platform_dir,
+        fold_multiline_static_template_literals_in_source, generate_project_from_input,
     };
 
     fn rows_with_application_module() -> InputRows {
@@ -1163,6 +1241,65 @@ mod tests {
         assert_eq!(run.assets[0].path, "modules/1-app/vendor/rg");
         assert_eq!(run.assets[0].bytes, b"rg-binary");
         assert!(run.assets[0].executable);
+    }
+
+    #[test]
+    fn pipeline_folds_multiline_static_template_literals_without_runtime_io() {
+        let docs = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+        ]
+        .join("\n");
+        let source = format!("var docs = `{docs}`;\nexport {{ docs }};\n");
+        let mut rows = rows_with_application_source(source.as_str());
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "docs"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let emitted = run.project.files[0].source.as_str();
+        assert!(
+            emitted.contains("var docs = \"alpha\\nbravo\\ncharlie\\ndelta"),
+            "multiline static template must be a regular escaped string, got:\n{emitted}",
+        );
+        assert!(
+            !emitted.contains("readFileSync") && !emitted.contains("node:fs"),
+            "line folding must not introduce runtime I/O dependencies, got:\n{emitted}",
+        );
+        assert!(
+            emitted.lines().count() < source.lines().count(),
+            "folded source should have fewer lines; before={}, after={}\n{emitted}",
+            source.lines().count(),
+            emitted.lines().count(),
+        );
+        parse_source(
+            emitted,
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("folded output should remain parseable");
+    }
+
+    #[test]
+    fn static_template_folding_keeps_single_line_interpolated_and_tagged_templates() {
+        let source = "const short = `one\\ntwo`;\n\
+                      const interpolated = `hello ${name}`;\n\
+                      const tagged = tag`a\nb\nc\nd\ne\nf\ng\nh`;\n";
+
+        let folded = fold_multiline_static_template_literals_in_source(source, "fixture.ts");
+
+        assert!(
+            folded.contains("const short = `one\\ntwo`;"),
+            "short one-line templates are not a line-count problem: {folded}"
+        );
+        assert!(
+            folded.contains("const interpolated = `hello ${name}`;"),
+            "interpolated templates are not a static string: {folded}"
+        );
+        assert!(
+            folded.contains("tag`a\nb\nc\nd\ne\nf\ng\nh`"),
+            "tagged templates expose raw/cooked arrays and must be preserved: {folded}"
+        );
     }
 
     #[test]

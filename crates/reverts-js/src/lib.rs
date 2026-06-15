@@ -132,6 +132,13 @@ pub struct StringLiteralFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticTemplateLiteralFact {
+    pub value: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocationRewriteFact {
     pub value: String,
     pub byte_start: u32,
@@ -228,6 +235,34 @@ pub fn collect_string_literals(
         }
 
         let mut collector = StringLiteralCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.literals);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_static_template_literals(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<StaticTemplateLiteralFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = StaticTemplateLiteralCollector::default();
         collector.visit_program(&parsed.program);
         return Ok(collector.literals);
     }
@@ -360,6 +395,29 @@ impl<'a> Visit<'a> for StringLiteralCollector {
             byte_end: literal.span.end,
         });
         walk_string_literal(self, literal);
+    }
+}
+
+#[derive(Debug, Default)]
+struct StaticTemplateLiteralCollector {
+    literals: Vec<StaticTemplateLiteralFact>,
+}
+
+impl<'a> Visit<'a> for StaticTemplateLiteralCollector {
+    fn visit_expression(&mut self, expression: &Expression<'a>) {
+        if let Expression::TemplateLiteral(template) = expression
+            && template.expressions.is_empty()
+            && let Some(quasi) = template.quasis.first()
+            && let Some(value) = quasi.value.cooked.as_deref()
+        {
+            let span = expression.span();
+            self.literals.push(StaticTemplateLiteralFact {
+                value: value.to_string(),
+                byte_start: span.start,
+                byte_end: span.end,
+            });
+        }
+        walk_expression(self, expression);
     }
 }
 
@@ -5912,9 +5970,9 @@ mod tests {
         JsError, LazyBodyClassification, ParseGoal, classify_import_usage_scope,
         classify_lazy_module_body, collect_file_url_source_location_rewrites,
         collect_identifier_read_facts, collect_path_builder_calls,
-        collect_static_resource_specifiers, collect_string_literals,
-        extract_lazy_module_eager_value, format_source_pretty, format_source_with_module_items,
-        format_source_with_module_items_and_renames,
+        collect_static_resource_specifiers, collect_static_template_literals,
+        collect_string_literals, extract_lazy_module_eager_value, format_source_pretty,
+        format_source_with_module_items, format_source_with_module_items_and_renames,
         format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
         parse_error_message, parse_options_for, parse_source, sanitize_identifier,
         skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
@@ -5958,6 +6016,38 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(values.contains(&"./tree-sitter.wasm"));
         assert!(values.contains(&"/$bunfs/root/addon.node"));
+        assert!(
+            literals
+                .iter()
+                .all(|literal| literal.byte_end > literal.byte_start)
+        );
+    }
+
+    #[test]
+    fn collects_static_template_literals_without_touching_tagged_or_interpolated() {
+        let source = r#"
+            const docs = `one
+two`;
+            const nested = `${`inner
+value`}-${name}`;
+            const tagged = tag`raw
+value`;
+        "#;
+
+        let literals = collect_static_template_literals(
+            source,
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("template literals should be collected from parseable source");
+
+        let values = literals
+            .iter()
+            .map(|literal| literal.value.as_str())
+            .collect::<Vec<_>>();
+        assert!(values.contains(&"one\ntwo"));
+        assert!(values.contains(&"inner\nvalue"));
+        assert!(!values.contains(&"raw\nvalue"));
         assert!(
             literals
                 .iter()
