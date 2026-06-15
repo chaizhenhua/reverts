@@ -11,12 +11,12 @@ pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_f
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 pub use hungarian::assign_max_weight;
 pub use package_helpers::{
-    SemanticPathHintMode, accepted_external_modules, clean_package_semantic_path_hint,
-    direct_module_dependencies, direct_module_dependents, has_accepted_external_attribution,
-    is_build_path_segment, is_exact_package_version_hint, is_json_source_path,
-    module_package_semantic_path_hints, normalize_hint_text, ownership_by_module,
-    package_semantic_path_prefixes, package_source_entry_path, package_source_export_path,
-    package_source_external_import_rank, package_source_relative_path,
+    SemanticPathHintMode, accepted_external_modules, canonical_public_path_segments,
+    clean_package_semantic_path_hint, direct_module_dependencies, direct_module_dependents,
+    has_accepted_external_attribution, is_build_path_segment, is_exact_package_version_hint,
+    is_json_source_path, module_package_semantic_path_hints, normalize_hint_text,
+    ownership_by_module, package_semantic_path_prefixes, package_source_entry_path,
+    package_source_export_path, package_source_external_import_rank, package_source_relative_path,
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
 };
@@ -1998,7 +1998,15 @@ fn semantic_external_package_source(
         .map(|source| source.export_specifier.as_str())
         .collect::<BTreeSet<_>>();
     if export_specifiers.len() != 1 {
-        return None;
+        let source = disambiguate_semantic_build_variant_source(best.as_slice())?;
+        return Some(ExternalImportTarget {
+            export_specifier: source.export_specifier.clone(),
+            source_path: format!(
+                "forced-external:{}:build-variant:{}",
+                best_proof.label(),
+                source.source_path
+            ),
+        });
     }
     let export_specifier = export_specifiers.into_iter().next()?;
     let source = best.into_iter().min_by(|left, right| {
@@ -2014,6 +2022,43 @@ fn semantic_external_package_source(
             source.source_path
         ),
     })
+}
+
+fn disambiguate_semantic_build_variant_source<'a>(
+    sources: &[&'a PackageSource],
+) -> Option<&'a PackageSource> {
+    if sources.is_empty() {
+        return None;
+    }
+    let source_keys = sources
+        .iter()
+        .map(|source| semantic_build_variant_key(package_source_relative_path(source).as_str()))
+        .collect::<BTreeSet<_>>();
+    let export_keys = sources
+        .iter()
+        .map(|source| semantic_build_variant_key(package_source_export_path(source).as_str()))
+        .collect::<BTreeSet<_>>();
+    let Some(source_key) = source_keys.iter().next() else {
+        return None;
+    };
+    if source_keys.len() != 1 || source_key.is_empty() || export_keys.len() != 1 {
+        return None;
+    }
+
+    let best_rank = sources
+        .iter()
+        .map(|source| package_source_external_import_rank(source))
+        .min()?;
+    let best = sources
+        .iter()
+        .copied()
+        .filter(|source| package_source_external_import_rank(source) == best_rank)
+        .collect::<Vec<_>>();
+    (best.len() == 1).then_some(best[0])
+}
+
+fn semantic_build_variant_key(path: &str) -> Vec<String> {
+    canonical_public_path_segments(path)
 }
 
 fn semantic_source_only_export_member_package_source(
@@ -6474,6 +6519,86 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             "pkg/sample"
         );
         assert_eq!(report.package_report.attributions.len(), 1);
+    }
+
+    #[test]
+    fn pipeline_disambiguates_semantic_build_variant_surfaces() {
+        let mut rows =
+            rows_with_package_source_at_version("function widget(){return 'widget';}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-pkg/export/widget.ts".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/build/src/export/widget.js",
+                "pkg@1.2.3/build/src/export/widget.js",
+                "export const widget = 'src-variant';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/build/cjs/export/widget.js",
+                "pkg@1.2.3/build/cjs/export/widget.js",
+                "exports.widget = 'cjs-variant';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/build/esm/export/widget.js",
+                "pkg@1.2.3/build/esm/export/widget.js",
+                "export const widget = 'esm-variant';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let attribution = &report.package_report.attributions[0];
+        assert_eq!(
+            attribution.export_specifier.as_deref(),
+            Some("pkg/build/esm/export/widget.js")
+        );
+        assert!(
+            attribution
+                .resolved_file
+                .as_deref()
+                .is_some_and(|resolved| resolved
+                    == "forced-external:semantic-source:build-variant:pkg@1.2.3/build/esm/export/widget.js"),
+            "{attribution:?}"
+        );
+    }
+
+    #[test]
+    fn pipeline_keeps_equal_rank_build_variants_source_only() {
+        let mut rows =
+            rows_with_package_source_at_version("function widget(){return 'widget';}", "1.2.3");
+        rows.modules[0].semantic_path = "modules/10-pkg/export/widget.ts".to_string();
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/dist/esm/export/widget.js",
+                "pkg@1.2.3/dist/esm/export/widget.js",
+                "export const widget = 'dist-esm-variant';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.2.3",
+                "pkg/build/esm/export/widget.js",
+                "pkg@1.2.3/build/esm/export/widget.js",
+                "export const widget = 'build-esm-variant';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report.package_report.matches[0].external_importable,
+            "same-rank build variants remain ambiguous"
+        );
+        assert!(report.package_report.attributions.is_empty());
     }
 
     #[test]
