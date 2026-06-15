@@ -2379,6 +2379,8 @@ impl ImportExportPlanner {
             }
             helper_closure.source =
                 coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
+            helper_closure.source =
+                compact_pure_static_runtime_literals(helper_closure.source.as_str());
             helper_closure.source = inline_single_use_runtime_proxy_functions(
                 helper_closure.source.as_str(),
                 &public_helper_bindings,
@@ -4225,6 +4227,8 @@ fn emit_package_runtime_helper_files(
         helper_closure.source =
             coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
         helper_closure.source =
+            compact_pure_static_runtime_literals(helper_closure.source.as_str());
+        helper_closure.source =
             coalesce_top_level_import_declarations(helper_closure.source.as_str());
         let mut runtime_binding_roots = usage.public_bindings.clone();
         runtime_binding_roots.extend(usage.setter_bindings.iter().cloned());
@@ -5300,7 +5304,7 @@ struct MergeableImportDeclaration {
 
 fn coalesce_top_level_import_declarations(source: &str) -> String {
     let mut groups = BTreeMap::<String, Vec<(usize, usize, MergeableImportDeclaration)>>::new();
-    for (start, end) in top_level_statement_spans(source) {
+    for (start, end) in parsed_top_level_statement_spans(source) {
         let statement = &source[start..end];
         let Some(import) = parse_mergeable_import_declaration(statement) else {
             continue;
@@ -5320,14 +5324,69 @@ fn coalesce_top_level_import_declarations(source: &str) -> String {
             .iter()
             .filter_map(|(_, _, declaration)| declaration.default_binding.clone())
             .collect::<BTreeSet<_>>();
-        if default_bindings.len() > 1 {
-            continue;
-        }
         let named_specifiers = declarations
             .iter()
             .flat_map(|(_, _, declaration)| declaration.named_specifiers.iter().cloned())
             .collect::<BTreeSet<_>>();
         if named_specifiers.is_empty() {
+            continue;
+        }
+        if default_bindings.len() > 1 {
+            let named_declarations = declarations
+                .iter()
+                .filter(|(_, _, declaration)| !declaration.named_specifiers.is_empty())
+                .collect::<Vec<_>>();
+            if named_declarations.len() < 2 {
+                continue;
+            }
+            let replacement_candidates = named_declarations
+                .iter()
+                .copied()
+                .filter(|(_, _, declaration)| declaration.default_binding.is_some())
+                .collect::<Vec<_>>();
+            let replacement_candidates = if replacement_candidates.is_empty() {
+                named_declarations.clone()
+            } else {
+                replacement_candidates
+            };
+            let Some((replacement_start, replacement_end, replacement_declaration)) =
+                replacement_candidates
+                    .iter()
+                    .min_by_key(|(start, _, _)| *start)
+                    .map(|(start, end, declaration)| (*start, *end, declaration))
+            else {
+                continue;
+            };
+            let replacement =
+                if let Some(default_binding) = replacement_declaration.default_binding.as_ref() {
+                    default_named_import_alias_statement(
+                        default_binding,
+                        named_specifiers
+                            .iter()
+                            .map(|(imported, local)| (imported.as_str(), local)),
+                        specifier.as_str(),
+                    )
+                } else {
+                    named_import_alias_statement(
+                        named_specifiers
+                            .iter()
+                            .map(|(imported, local)| (imported.as_str(), local)),
+                        specifier.as_str(),
+                    )
+                };
+            edits.push((replacement_start, replacement_end, replacement));
+            for (start, end, declaration) in named_declarations {
+                if *start == replacement_start {
+                    continue;
+                }
+                let replacement = declaration
+                    .default_binding
+                    .as_ref()
+                    .map_or_else(String::new, |binding| {
+                        default_import_statement(binding, specifier.as_str())
+                    });
+                edits.push((*start, *end, replacement));
+            }
             continue;
         }
         let mergeable_declarations = declarations
@@ -5375,7 +5434,7 @@ fn coalesce_top_level_import_declarations(source: &str) -> String {
     if edits.is_empty() {
         source.to_string()
     } else {
-        apply_text_edits(source, &edits)
+        compact_top_level_import_trivia(&apply_text_edits(source, &edits))
     }
 }
 
@@ -5413,6 +5472,45 @@ fn parse_mergeable_import_declaration(source: &str) -> Option<MergeableImportDec
         named_specifiers,
         specifier: specifier.to_string(),
     })
+}
+
+fn compact_top_level_import_trivia(source: &str) -> String {
+    let spans = parsed_top_level_statement_spans(source);
+    if spans.len() < 2 {
+        return source.to_string();
+    }
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    for window in spans.windows(2) {
+        let (previous_start, previous_end) = window[0];
+        let (next_start, next_end) = window[1];
+        let gap = &source[previous_end..next_start];
+        if gap.is_empty() || !gap.chars().all(char::is_whitespace) {
+            continue;
+        }
+        let previous = &source[previous_start..previous_end];
+        let next = &source[next_start..next_end];
+        let previous_is_import = is_static_import_declaration(previous);
+        let next_is_import = is_static_import_declaration(next);
+        let replacement =
+            if next_is_import && (previous_is_import || previous.trim_end().ends_with(';')) {
+                ""
+            } else if gap.as_bytes().iter().filter(|byte| **byte == b'\n').count() > 1 {
+                "\n"
+            } else {
+                continue;
+            };
+        edits.push((previous_end, next_start, replacement.to_string()));
+    }
+    if edits.is_empty() {
+        source.to_string()
+    } else {
+        apply_text_edits(source, &edits)
+    }
+}
+
+fn is_static_import_declaration(source: &str) -> bool {
+    let source = source.trim();
+    source.starts_with("import ") && source.ends_with(';')
 }
 
 fn is_bare_import_specifier(specifier: &str) -> bool {
@@ -9371,6 +9469,158 @@ fn coalescible_lazy_body_expression(statement: &str) -> Option<String> {
         return None;
     }
     (skip_ws(bytes, close + 1) == expression.len()).then(|| expression.to_string())
+}
+
+fn compact_pure_static_runtime_literals(source: &str) -> String {
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    let bytes = source.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            cursor = next;
+            continue;
+        }
+        if bytes[cursor] != b'=' || !assignment_rhs_can_start_static_literal(source, cursor) {
+            cursor += 1;
+            continue;
+        }
+        let literal_start = skip_ws(bytes, cursor + 1);
+        let Some(open) = bytes.get(literal_start).copied() else {
+            break;
+        };
+        let literal_end = match open {
+            b'{' => find_matching_brace(source, literal_start),
+            b'[' => find_matching_bracket(source, literal_start),
+            _ => None,
+        };
+        let Some(literal_end) = literal_end else {
+            cursor += 1;
+            continue;
+        };
+        let literal = &source[literal_start..=literal_end];
+        if let Some(replacement) = compact_pure_static_literal(literal) {
+            edits.push((literal_start, literal_end + 1, replacement));
+        }
+        cursor = literal_end + 1;
+    }
+    if edits.is_empty() {
+        source.to_string()
+    } else {
+        apply_text_edits(source, &edits)
+    }
+}
+
+fn assignment_rhs_can_start_static_literal(source: &str, equals: usize) -> bool {
+    let bytes = source.as_bytes();
+    let previous = previous_non_ws(bytes, equals);
+    if previous.is_some_and(|index| matches!(bytes[index], b'=' | b'!' | b'<' | b'>')) {
+        return false;
+    }
+    let next = skip_ws(bytes, equals + 1);
+    !matches!(bytes.get(next), Some(b'=') | Some(b'>'))
+}
+
+fn compact_pure_static_literal(literal: &str) -> Option<String> {
+    if literal.lines().count() < 6
+        || !is_pure_initializer_expression(literal)
+        || !static_literal_is_text_compaction_safe(literal)
+    {
+        return None;
+    }
+    let replacement = compact_static_literal_text(literal);
+    if replacement.lines().count() < literal.lines().count() && replacement.len() < literal.len() {
+        Some(replacement)
+    } else {
+        None
+    }
+}
+
+fn static_literal_is_text_compaction_safe(literal: &str) -> bool {
+    let blocked_keywords = [
+        "await", "break", "case", "catch", "class", "const", "continue", "do", "else", "for",
+        "function", "if", "let", "return", "switch", "throw", "try", "var", "while", "yield",
+    ];
+    let bytes = literal.as_bytes();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(literal, cursor) {
+            cursor = next;
+            continue;
+        }
+        if bytes[cursor] == b'=' && bytes.get(cursor + 1) == Some(&b'>') {
+            return false;
+        }
+        if is_identifier_start(bytes[cursor]) {
+            let start = cursor;
+            cursor += 1;
+            while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+                cursor += 1;
+            }
+            let word = &literal[start..cursor];
+            if blocked_keywords.contains(&word) {
+                return false;
+            }
+            continue;
+        }
+        cursor += 1;
+    }
+    true
+}
+
+fn compact_static_literal_text(literal: &str) -> String {
+    let bytes = literal.as_bytes();
+    let mut output = String::with_capacity(literal.len());
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' => {
+                let next = skip_quoted(bytes, cursor, bytes[cursor]);
+                output.push_str(&literal[cursor..next]);
+                cursor = next;
+            }
+            b'`' => {
+                let next = skip_template_literal(bytes, cursor);
+                output.push_str(&literal[cursor..next]);
+                cursor = next;
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                let next = skip_line_comment(bytes, cursor + 2);
+                if compact_removed_separator_needs_space(&output, literal, next) {
+                    output.push(' ');
+                }
+                cursor = next;
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                let next = skip_block_comment(bytes, cursor + 2);
+                if compact_removed_separator_needs_space(&output, literal, next) {
+                    output.push(' ');
+                }
+                cursor = next;
+            }
+            byte if byte.is_ascii_whitespace() => {
+                let next = skip_ws(bytes, cursor);
+                if compact_removed_separator_needs_space(&output, literal, next) {
+                    output.push(' ');
+                }
+                cursor = next;
+            }
+            _ => {
+                output.push(bytes[cursor] as char);
+                cursor += 1;
+            }
+        }
+    }
+    output
+}
+
+fn compact_removed_separator_needs_space(output: &str, source: &str, next: usize) -> bool {
+    let Some(previous) = output.as_bytes().last().copied() else {
+        return false;
+    };
+    let Some(next) = source.as_bytes().get(next).copied() else {
+        return false;
+    };
+    is_identifier_continue(previous) && is_identifier_continue(next)
 }
 
 fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -> String {
@@ -18223,11 +18473,12 @@ mod tests {
         PlannedFile, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
         RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
         RuntimeSourceReadIndex, SourceCompilerStrategy,
-        coalesce_runtime_lazy_initializer_call_runs, compact_source_defines_callable_binding,
-        export_member_adapter_proof, inline_internal_setter_calls,
-        inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
-        merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
-        prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
+        coalesce_runtime_lazy_initializer_call_runs, compact_pure_static_runtime_literals,
+        compact_source_defines_callable_binding, export_member_adapter_proof,
+        inline_internal_setter_calls, inline_remaining_lazy_value_wrappers_allowing_assignments,
+        lower_runtime_helpers, merge_same_owner_overlapping_reader_migrations,
+        parse_generated_named_export_statement, prune_orphan_runtime_bindings,
+        purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -18375,6 +18626,38 @@ function keep() {\n\
     }
 
     #[test]
+    fn runtime_static_literal_compaction_minifies_only_pure_assignment_literals() {
+        let source = "\
+var init = lazyValue(() => {\n\
+\tconfig = {\n\
+\t\tname: 'alpha beta',\n\
+\t\tflags: [\n\
+\t\t\t'a',\n\
+\t\t\t'b'\n\
+\t\t]\n\
+\t};\n\
+\titems = [\n\
+\t\t1,\n\
+\t\t2,\n\
+\t\t3,\n\
+\t\t4\n\
+\t];\n\
+\tkept = build({\n\
+\t\tvalue: 1\n\
+\t});\n\
+});\n";
+
+        let compacted = compact_pure_static_runtime_literals(source);
+
+        assert!(compacted.contains("config = {name:'alpha beta',flags:['a','b']}"));
+        assert!(compacted.contains("items = [1,2,3,4]"));
+        assert!(
+            compacted.contains("kept = build({\n\t\tvalue: 1\n\t});"),
+            "call argument literals are not assignment RHS values and must not be rewritten"
+        );
+    }
+
+    #[test]
     fn emit_plan_coalesces_duplicate_generated_named_imports() {
         let mut file = PlannedFile::new("modules/consumer.ts");
         file.push_source("import { beta } from './runtime/source-1-helpers.js';");
@@ -18428,6 +18711,78 @@ function keep() {\n\
         assert_eq!(coalesced.matches("from 'path'").count(), 1);
         assert!(coalesced.contains("import * as fsNS from 'fs';"));
         assert!(coalesced.contains("function use()"));
+    }
+
+    #[test]
+    fn runtime_import_declaration_coalescing_sees_imports_after_declarations() {
+        let source = concat!(
+            "function before() { return 1; }\n",
+            "import { join as pathJoin } from 'path';\n",
+            "function middle() { return pathJoin; }\n",
+            "import { sep as pathSep } from 'path';\n",
+            "function after() { return pathSep; }\n",
+        );
+
+        let coalesced = super::coalesce_top_level_import_declarations(source);
+
+        assert!(coalesced.contains("import { join as pathJoin, sep as pathSep } from 'path';"));
+        assert_eq!(coalesced.matches("from 'path'").count(), 1);
+        assert!(coalesced.contains("function before()"));
+        assert!(coalesced.contains("function middle()"));
+        assert!(coalesced.contains("function after()"));
+    }
+
+    #[test]
+    fn runtime_import_declaration_coalescing_preserves_multiple_defaults() {
+        let source = concat!(
+            "import cryptoA, { createHash as hashA } from 'crypto';\n",
+            "function first() { return cryptoA; }\n",
+            "import cryptoB from 'crypto';\n",
+            "import { randomBytes as randomBytesB } from 'crypto';\n",
+            "function second() { return [hashA, cryptoB, randomBytesB]; }\n",
+        );
+
+        let coalesced = super::coalesce_top_level_import_declarations(source);
+
+        assert!(coalesced.contains(
+            "import cryptoA, { createHash as hashA, randomBytes as randomBytesB } from 'crypto';"
+        ));
+        assert!(coalesced.contains("import cryptoB from 'crypto';"));
+        assert_eq!(coalesced.matches("from 'crypto'").count(), 2);
+        assert!(coalesced.contains("function first()"));
+        assert!(coalesced.contains("function second()"));
+    }
+
+    #[test]
+    fn runtime_import_declaration_coalescing_preserves_same_line_prelude() {
+        let source = concat!(
+            "var state;import pathDefault from 'path';\n",
+            "function useDefault() { return pathDefault; }\n",
+            "import { join as pathJoin } from 'path';\n",
+        );
+
+        let coalesced = super::coalesce_top_level_import_declarations(source);
+
+        assert!(
+            coalesced.contains("var state;import pathDefault, { join as pathJoin } from 'path';")
+        );
+        assert!(!coalesced.contains("var state;\nimport"));
+    }
+
+    #[test]
+    fn runtime_import_trivia_compaction_only_touches_top_level_whitespace() {
+        let source = concat!(
+            "import a from 'a';\n\n",
+            "import b from 'b';\n\n",
+            "function f() { return `keep\\n\\nblank`; }\n\n",
+            "import { c } from 'c';\n",
+        );
+
+        let compacted = super::compact_top_level_import_trivia(source);
+
+        assert!(compacted.contains("import a from 'a';import b from 'b';"));
+        assert!(compacted.contains("`keep\\n\\nblank`"));
+        assert!(compacted.contains("}\nimport { c } from 'c';"));
     }
 
     #[test]

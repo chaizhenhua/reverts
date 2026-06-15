@@ -861,6 +861,23 @@ pub fn format_source_pretty(
     path_hint: Option<&Path>,
     goal: ParseGoal,
 ) -> Result<String> {
+    format_source_with_minify(source, path_hint, goal, false)
+}
+
+pub fn format_source_minified(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<String> {
+    format_source_with_minify(source, path_hint, goal, true)
+}
+
+fn format_source_with_minify(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+    minify: bool,
+) -> Result<String> {
     let mut errors = Vec::new();
 
     for source_type in source_type_candidates(path_hint, goal) {
@@ -879,7 +896,7 @@ pub fn format_source_pretty(
         let output = CodeGenerator::new()
             .with_options(CodegenOptions {
                 single_quote: true,
-                minify: false,
+                minify,
                 ..Default::default()
             })
             .build(&parsed.program);
@@ -6165,8 +6182,9 @@ mod tests {
         collect_file_url_source_location_rewrites, collect_identifier_read_facts,
         collect_path_builder_calls, collect_static_resource_specifiers,
         collect_static_template_literals, collect_string_literals,
-        collect_top_level_statement_facts, extract_lazy_module_eager_value, format_source_pretty,
-        format_source_with_module_items, format_source_with_module_items_and_renames,
+        collect_top_level_statement_facts, extract_lazy_module_eager_value, format_source_minified,
+        format_source_pretty, format_source_with_module_items,
+        format_source_with_module_items_and_renames,
         format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
         parse_error_message, parse_options_for, parse_source, sanitize_identifier,
         skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
@@ -6452,6 +6470,18 @@ value`;
             .expect("fixture should parse");
 
         assert!(formatted.contains("const x: number = 1"));
+    }
+
+    #[test]
+    fn minifies_typescript_through_oxc_codegen() {
+        let formatted = format_source_minified(
+            "const x = { alpha: ['a', 'b c'] };",
+            None,
+            ParseGoal::TypeScript,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(formatted, "const x={alpha:['a','b c']};");
     }
 
     #[test]
