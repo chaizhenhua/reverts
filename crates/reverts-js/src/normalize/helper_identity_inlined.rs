@@ -1,18 +1,28 @@
 use oxc_allocator::Allocator;
-use oxc_ast::AstBuilder;
 use oxc_ast::ast::{Argument, BindingPatternKind, Expression, FunctionBody, Program, Statement};
 use oxc_ast::visit::VisitMut;
 use oxc_ast::visit::walk_mut::walk_expression;
+use oxc_ast::{AstBuilder, Visit};
 use oxc_span::SPAN;
 use reverts_ir::NormalizationPassId;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::NormalizationPass;
 
-/// `HelperIdentityInlined` collapses top-level identity-shaped helper functions
-/// at their call sites. A function is considered an identity helper when its
-/// body is exactly `return <param>;` — i.e. it unconditionally returns its
-/// single parameter unchanged. Calls like `_id(42)` are rewritten to `42`.
+/// `HelperIdentityInlined` collapses top-level identity-shaped helper
+/// functions at their call sites. A function is considered an identity
+/// helper when its body is exactly `return <param>;` — it
+/// unconditionally returns its single parameter unchanged. Calls like
+/// `_id(42)` are rewritten to `42`.
+///
+/// The rewrite is **strictly spec-equivalent** when the call-site
+/// identifier resolves to the top-level helper. To guarantee this,
+/// the pass drops helper candidates whose name is **shadowed**
+/// anywhere else in the program — a local `let _id = ...` or a
+/// `function _id(...)` nested inside another function would mean the
+/// reference `_id(x)` may resolve to the shadowing binding, not to
+/// the identity helper, and inlining could silently drop a real call
+/// to a different function with the same name.
 pub struct HelperIdentityInlined;
 
 impl NormalizationPass for HelperIdentityInlined {
@@ -41,6 +51,10 @@ impl NormalizationPass for HelperIdentityInlined {
 /// is exactly `return <param>;`, confirming the returned identifier matches the
 /// sole parameter binding.
 fn collect_identity_helpers(program: &Program<'_>) -> BTreeSet<String> {
+    let binding_scope = collect_binding_scope(program);
+    if binding_scope.has_dynamic_scope {
+        return BTreeSet::new();
+    }
     let mut found = BTreeSet::new();
     for stmt in &program.body {
         if let Statement::FunctionDeclaration(func) = stmt
@@ -48,11 +62,46 @@ fn collect_identity_helpers(program: &Program<'_>) -> BTreeSet<String> {
             && func.params.items.len() == 1
             && let Some(body) = &func.body
             && is_identity_body(body, &func.params.items[0])
+            && binding_scope.counts.get(id.name.as_str()) == Some(&1)
         {
             found.insert(id.name.as_str().to_string());
         }
     }
     found
+}
+
+struct BindingScope {
+    counts: BTreeMap<String, usize>,
+    has_dynamic_scope: bool,
+}
+
+fn collect_binding_scope(program: &Program<'_>) -> BindingScope {
+    struct Collector {
+        counts: BTreeMap<String, usize>,
+        has_dynamic_scope: bool,
+    }
+    impl<'a> Visit<'a> for Collector {
+        fn visit_binding_identifier(&mut self, binding: &oxc_ast::ast::BindingIdentifier<'a>) {
+            *self
+                .counts
+                .entry(binding.name.as_str().to_string())
+                .or_default() += 1;
+        }
+
+        fn visit_with_statement(&mut self, _: &oxc_ast::ast::WithStatement<'a>) {
+            self.has_dynamic_scope = true;
+        }
+    }
+
+    let mut collector = Collector {
+        counts: BTreeMap::new(),
+        has_dynamic_scope: false,
+    };
+    collector.visit_program(program);
+    BindingScope {
+        counts: collector.counts,
+        has_dynamic_scope: collector.has_dynamic_scope,
+    }
 }
 
 fn is_identity_body<'a>(
@@ -130,5 +179,22 @@ mod tests {
         let src = "function adds(x) { return x + 1; }\nlet v = adds(2);";
         let out = apply_to_source(&HelperIdentityInlined, src).expect("normalize should succeed");
         assert!(out.contains("adds("));
+    }
+
+    #[test]
+    fn identity_helper_is_left_alone_when_name_is_shadowed() {
+        let src = "function _id(x) { return x; }\nfunction outer(_id) { return _id(1); }\nlet v = _id(42);";
+        let out = apply_to_source(&HelperIdentityInlined, src).expect("normalize should succeed");
+
+        assert!(out.contains("_id(1)"), "got: {out}");
+        assert!(out.contains("_id(42)"), "got: {out}");
+    }
+
+    #[test]
+    fn identity_helper_is_left_alone_with_dynamic_scope() {
+        let src = "function _id(x) { return x; }\nwith (obj) { _id(1); }";
+        let out = apply_to_source(&HelperIdentityInlined, src).expect("normalize should succeed");
+
+        assert!(out.contains("_id(1)"), "got: {out}");
     }
 }

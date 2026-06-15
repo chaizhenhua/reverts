@@ -1,6 +1,8 @@
 pub mod normalize;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::error::Error;
+use std::fmt;
 use std::path::Path;
 
 use oxc_allocator::Allocator;
@@ -45,6 +47,28 @@ pub struct ParseError {
 pub enum JsError {
     ParseFailed(Vec<ParseError>),
 }
+
+impl fmt::Display for JsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ParseFailed(errors) => {
+                let Some(error) = errors.first() else {
+                    return write!(formatter, "parse failed");
+                };
+                let Some(diagnostic) = error.diagnostics.first() else {
+                    return write!(formatter, "parse failed for {}", error.source_type);
+                };
+                write!(
+                    formatter,
+                    "parse failed for {}: {diagnostic}",
+                    error.source_type
+                )
+            }
+        }
+    }
+}
+
+impl Error for JsError {}
 
 pub type Result<T> = std::result::Result<T, JsError>;
 
@@ -4060,7 +4084,10 @@ pub enum ImportUsageScope {
 /// Classify every binding in `binding_names` by where it's referenced
 /// in `source`. Returns one entry per requested binding (even if the
 /// binding is never seen — those map to `NestedOnly` as a vacuously
-/// safe default: zero top-level refs means zero constraints).
+/// safe default: zero top-level refs means zero constraints). Parse
+/// failure is not recovered from: this analysis gates rewrites, so an
+/// upstream parser issue must surface instead of turning into a safe
+/// classification.
 ///
 /// Use this to decide whether eliminating a lazy thunk that exports a
 /// given binding is safe from a module-eval-order perspective: if every
@@ -4096,7 +4123,7 @@ pub fn classify_import_usage_scope(
         collector.visit_program(&parsed.program);
         return out;
     }
-    out
+    panic!("import usage scope classification requires parseable source")
 }
 
 struct ImportUsageScopeCollector<'a> {
@@ -4174,9 +4201,8 @@ pub fn verify_only_immediate_call_references(
     if binding_names.is_empty() {
         return out;
     }
-    let Ok(facts) = collect_identifier_read_facts(source, path_hint, goal) else {
-        return out;
-    };
+    let facts = collect_identifier_read_facts(source, path_hint, goal)
+        .expect("call-reference verification requires parseable source");
     let mut call_count = BTreeMap::<String, u32>::new();
     let mut total_count = BTreeMap::<String, u32>::new();
     for fact in facts {
@@ -7914,6 +7940,17 @@ value`;
     }
 
     #[test]
+    #[should_panic(expected = "import usage scope classification requires parseable source")]
+    fn import_usage_scope_rejects_unparseable_source() {
+        let _ = classify_import_usage_scope(
+            "function entry(",
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
+    }
+
+    #[test]
     fn promotes_to_top_level_on_first_top_level_occurrence() {
         // `foo` appears both inside a function (nested) and at the top
         // level (the expression statement `foo;`). The classification
@@ -8056,6 +8093,17 @@ value`;
             ParseGoal::TypeScript,
         );
         assert_eq!(result.get("foo"), Some(&true));
+    }
+
+    #[test]
+    #[should_panic(expected = "call-reference verification requires parseable source")]
+    fn immediate_call_reference_verification_rejects_unparseable_source() {
+        let _ = verify_only_immediate_call_references(
+            "function entry(",
+            &binding_set(&["foo"]),
+            Some(Path::new("entry.ts")),
+            ParseGoal::TypeScript,
+        );
     }
 
     #[test]

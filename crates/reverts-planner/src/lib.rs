@@ -6,7 +6,10 @@ use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
     RuntimePreludeBindingKind, RuntimePreludeImport,
 };
-use reverts_input::{ModuleDependencyTarget, ModuleInput, PackageAttributionInput};
+use reverts_input::{
+    ModuleDependencyTarget, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
+    PackageEmissionMode,
+};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
@@ -679,8 +682,23 @@ impl PlannerAnalysis {
             .difference(&adapter_backed_packages)
             .copied()
             .collect::<BTreeSet<_>>();
-        let source_suppressed_packages = accepted_externalized_packages
+        let base_source_suppressed_packages = accepted_externalized_packages
             .difference(&source_preserved_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let ownership_proven_packages = package_ownership_proven_module_ids(program);
+        let source_suppressed_packages = source_suppressed_package_dependency_closure(
+            program,
+            &base_source_suppressed_packages,
+            &source_preserved_packages,
+            &ownership_proven_packages,
+        );
+        let closure_externalized_packages = source_suppressed_packages
+            .difference(&accepted_externalized_packages)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let externalized_packages = externalized_packages
+            .union(&closure_externalized_packages)
             .copied()
             .collect::<BTreeSet<_>>();
         let source_module_wiring =
@@ -1627,7 +1645,7 @@ impl ImportExportPlanner {
                         module_path: path,
                         owner: package_runtime_owner
                             .as_ref()
-                            .expect("partition only returns package bindings with an owner"),
+                            .expect("package runtime bindings must have an owner"),
                         source_file_id: lowered_source.source_file_id,
                     };
                     emit_package_runtime_helper_import(
@@ -1803,7 +1821,7 @@ impl ImportExportPlanner {
                         module_path: path,
                         owner: package_runtime_owner
                             .as_ref()
-                            .expect("partition only returns package bindings with an owner"),
+                            .expect("package runtime bindings must have an owner"),
                         source_file_id,
                     };
                     emit_package_runtime_helper_import(
@@ -5187,7 +5205,7 @@ fn first_local_for_import<'a>(
     bindings
         .iter()
         .find(|binding| imports.get(*binding).is_some_and(|import| import == target))
-        .unwrap_or_else(|| bindings.first().expect("non-empty bindings"))
+        .unwrap_or_else(|| bindings.first().expect("non-empty import binding group"))
 }
 
 fn import_statement_local_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
@@ -5352,7 +5370,7 @@ struct MergeableImportDeclaration {
 
 fn coalesce_top_level_import_declarations(source: &str) -> String {
     let mut groups = BTreeMap::<String, Vec<(usize, usize, MergeableImportDeclaration)>>::new();
-    for (start, end) in parsed_top_level_statement_spans(source) {
+    for (start, end) in top_level_statement_spans(source) {
         let statement = &source[start..end];
         let Some(import) = parse_mergeable_import_declaration(statement) else {
             continue;
@@ -5523,7 +5541,7 @@ fn parse_mergeable_import_declaration(source: &str) -> Option<MergeableImportDec
 }
 
 fn compact_top_level_import_trivia(source: &str) -> String {
-    let spans = parsed_top_level_statement_spans(source);
+    let spans = top_level_statement_spans(source);
     if spans.len() < 2 {
         return source.to_string();
     }
@@ -8330,6 +8348,172 @@ fn module_dependency_modules_by_owner(
     transitive_dependencies
 }
 
+fn source_suppressed_package_dependency_closure(
+    program: &EnrichedProgram,
+    seed_modules: &BTreeSet<ModuleId>,
+    source_preserved_packages: &BTreeSet<ModuleId>,
+    ownership_proven_packages: &BTreeSet<ModuleId>,
+) -> BTreeSet<ModuleId> {
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let (outgoing_dependencies, incoming_dependencies) = direct_module_dependency_indexes(program);
+    let mut reachable = seed_modules
+        .iter()
+        .copied()
+        .filter(|module_id| {
+            modules_by_id
+                .get(module_id)
+                .is_some_and(|module| module.kind == ModuleKind::Package)
+                && !source_preserved_packages.contains(module_id)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut stack = reachable.iter().copied().collect::<Vec<_>>();
+    while let Some(module_id) = stack.pop() {
+        for dependency_id in outgoing_dependencies
+            .get(&module_id)
+            .into_iter()
+            .flatten()
+            .copied()
+        {
+            let Some(dependency) = modules_by_id.get(&dependency_id) else {
+                continue;
+            };
+            if dependency.kind != ModuleKind::Package
+                || source_preserved_packages.contains(&dependency_id)
+                || !ownership_proven_packages.contains(&dependency_id)
+                || !reachable.insert(dependency_id)
+            {
+                continue;
+            }
+            stack.push(dependency_id);
+        }
+    }
+
+    loop {
+        let removed = reachable
+            .iter()
+            .copied()
+            .filter(|module_id| !seed_modules.contains(module_id))
+            .filter(|module_id| {
+                let Some(module) = modules_by_id.get(module_id).copied() else {
+                    return false;
+                };
+                incoming_dependencies
+                    .get(module_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|consumer_id| {
+                        modules_by_id.get(consumer_id).is_some_and(|consumer| {
+                            !reachable.contains(consumer_id)
+                                && !source_suppressed_consumer_is_boundary(module, consumer)
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            break;
+        }
+        for module_id in removed {
+            reachable.remove(&module_id);
+        }
+    }
+
+    reachable
+}
+
+fn source_suppressed_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    match consumer.kind {
+        ModuleKind::Application => true,
+        ModuleKind::Package => !source_suppressed_same_package_consumer(module, consumer),
+        ModuleKind::Builtin => false,
+    }
+}
+
+fn source_suppressed_same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    !module_package.is_empty() && module_package == consumer_package
+}
+
+fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    program
+        .model()
+        .input()
+        .package_attributions
+        .iter()
+        .filter_map(|attribution| {
+            let module = modules_by_id.get(&attribution.module_id).copied()?;
+            package_attribution_proves_package_ownership(attribution, module)
+                .then_some(attribution.module_id)
+        })
+        .collect()
+}
+
+fn package_attribution_proves_package_ownership(
+    attribution: &PackageAttributionInput,
+    module: &ModuleInput,
+) -> bool {
+    if module.kind != ModuleKind::Package
+        || module.package_name.as_deref() != Some(attribution.package_name.as_str())
+    {
+        return false;
+    }
+    if let Some(attribution_version) = attribution.package_version.as_deref()
+        && module
+            .package_version
+            .as_deref()
+            .is_some_and(|module_version| {
+                !module_version.trim().is_empty() && module_version != attribution_version
+            })
+    {
+        return false;
+    }
+    (attribution.status == PackageAttributionStatus::Accepted
+        && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        && attribution.export_specifier.is_some())
+        || (attribution.status == PackageAttributionStatus::Rejected
+            && attribution.emission_mode == PackageEmissionMode::ApplicationSource
+            && attribution.package_version.is_some())
+}
+
+fn direct_module_dependency_indexes(
+    program: &EnrichedProgram,
+) -> (
+    BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+) {
+    let mut outgoing = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+    let mut incoming = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+    for dependency in &program.model().input().dependencies {
+        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
+            continue;
+        };
+        outgoing
+            .entry(dependency.from_module_id)
+            .or_default()
+            .insert(target_module_id);
+        incoming
+            .entry(target_module_id)
+            .or_default()
+            .insert(dependency.from_module_id);
+    }
+    (outgoing, incoming)
+}
+
 fn runtime_binding_has_blocking_non_snippet_use(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
@@ -10352,61 +10536,11 @@ fn top_level_statement_slices(source: &str) -> Vec<&str> {
 }
 
 fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
-    let bytes = source.as_bytes();
-    let mut statements = Vec::new();
-    let mut start = 0usize;
-    let mut cursor = 0usize;
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' => {
-                paren_depth += 1;
-                cursor += 1;
-            }
-            b'[' => {
-                bracket_depth += 1;
-                cursor += 1;
-            }
-            b'{' => {
-                brace_depth += 1;
-                cursor += 1;
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b'}' => {
-                brace_depth = brace_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b';' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
-                statements.push((start, cursor + 1));
-                cursor += 1;
-                start = cursor;
-            }
-            _ => cursor += 1,
-        }
-    }
-    if !source[start..].trim().is_empty() {
-        statements.push((start, source.len()));
-    }
-    statements
+    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
+        .expect("planner top-level statement facts require parseable generated TypeScript source")
+        .into_iter()
+        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
+        .collect()
 }
 
 fn variable_declaration_without_initializer(statement: &str) -> bool {
@@ -11205,7 +11339,7 @@ fn prune_orphan_runtime_bindings(
     source: &str,
     root_bindings: &BTreeSet<BindingName>,
 ) -> RuntimeOrphanPrune {
-    let spans = parsed_top_level_statement_spans(source);
+    let spans = top_level_statement_spans(source);
     if spans.is_empty() {
         return RuntimeOrphanPrune {
             source: source.to_string(),
@@ -11319,14 +11453,6 @@ fn prune_orphan_runtime_bindings(
         source: apply_text_edits(source, &expand_line_removal_edits(source, &edits)),
         dropped_bindings,
     }
-}
-
-fn parsed_top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
-    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
-        .expect("runtime binding graph requires parseable TypeScript source")
-        .into_iter()
-        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
-        .collect()
 }
 
 fn runtime_orphan_statement_is_prunable(
@@ -12154,7 +12280,7 @@ struct IdentifierReadUsage {
 
 fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
     collect_identifier_read_facts(source, None, ParseGoal::TypeScript)
-        .expect("planner identifier reads require parseable TypeScript source")
+        .expect("planner identifier reads require parseable generated TypeScript source")
         .into_iter()
         .map(|fact| IdentifierReadUsage {
             name: fact.name,
@@ -18526,7 +18652,7 @@ mod tests {
 
     use super::{
         CompilerRecoveryAction, EmitPlan, ExportMemberAdapterProofKind, ImportExportPlanner,
-        PlannedFile, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
+        PlannedFile, PlannerAnalysis, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
         RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
         RuntimeSourceReadIndex, SourceCompilerStrategy,
         coalesce_runtime_lazy_initializer_call_runs, compact_pure_static_runtime_literals,
@@ -18579,6 +18705,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn top_level_statement_spans_use_parser_statement_boundaries() {
+        let source =
+            "function first() { return 1; }function second() { return 2; }\nvar third = 3;\n";
+
+        let spans = super::top_level_statement_spans(source);
+
+        assert_eq!(spans.len(), 3);
+        assert_eq!(
+            &source[spans[0].0..spans[0].1],
+            "function first() { return 1; }"
+        );
+        assert_eq!(
+            &source[spans[1].0..spans[1].1],
+            "function second() { return 2; }"
+        );
+        assert_eq!(&source[spans[2].0..spans[2].1], "var third = 3;");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "planner identifier reads require parseable generated TypeScript source"
+    )]
+    fn identifier_read_scans_reject_unparseable_source() {
+        let _ = super::identifier_read_facts_in_source("function entry(");
+    }
+
     fn planned_source(plan: &EmitPlan, path: &str) -> String {
         plan.files
             .iter()
@@ -18613,6 +18766,17 @@ function orphanDep() { return 2; }\n";
         assert_eq!(
             pruned.dropped_bindings,
             BTreeSet::from([BindingName::new("orphan"), BindingName::new("orphanDep")])
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "planner top-level statement facts require parseable generated TypeScript source"
+    )]
+    fn runtime_binding_graph_rejects_unparseable_source() {
+        let _ = prune_orphan_runtime_bindings(
+            "function entry(",
+            &BTreeSet::from([BindingName::new("entry")]),
         );
     }
 
@@ -24282,6 +24446,247 @@ var init = lazyValue(() => {\n\
                 .body
                 .join("\n")
                 .contains("export { packageInit };")
+        );
+    }
+
+    #[test]
+    fn source_suppressed_package_closure_requires_private_ownership_proof() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "root.js",
+            Some("export const root = 1;".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "private.js",
+            Some("export const privateValue = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "root",
+                "modules/pkg-root.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "private",
+                "modules/pkg-private.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::rejected_source(
+                ModuleId(2),
+                "pkg",
+                "package matcher did not produce an accepted attribution for this package",
+            ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = PlannerAnalysis::from_program(&enriched);
+
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(1)));
+        assert!(
+            !analysis.source_suppressed_packages.contains(&ModuleId(2)),
+            "private package source must not be suppressed without an ownership proof row"
+        );
+    }
+
+    #[test]
+    fn accepted_external_package_suppresses_private_dependency_closure() {
+        let planner = ImportExportPlanner;
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "root.js",
+            Some("export const root = 1;".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "private.js",
+            Some("export const privateValue = 1;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "root",
+                "modules/pkg-root.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "private",
+                "modules/pkg-private.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            ));
+        let mut private_ownership = PackageAttributionInput::rejected_source(
+            ModuleId(2),
+            "pkg",
+            "private dependency is covered by externalized package closure",
+        );
+        private_ownership.package_version = Some("1.0.0".to_string());
+        rows.package_attributions.push(private_ownership);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = PlannerAnalysis::from_program(&enriched);
+        assert!(analysis.source_suppressed_packages.contains(&ModuleId(1)));
+        assert!(
+            analysis.source_suppressed_packages.contains(&ModuleId(2)),
+            "private package dependencies reachable only from an externalized package root should be suppressed as the same closure"
+        );
+
+        let plan = planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize");
+        assert!(
+            plan.files
+                .iter()
+                .all(|file| file.path != "modules/pkg-private.ts"),
+            "the private dependency closure must not be emitted as preserved source"
+        );
+    }
+
+    #[test]
+    fn source_suppressed_package_closure_allows_different_package_boundary_consumer() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "root.js",
+            Some("export const root = 1;".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "private.js",
+            Some("export const privateValue = 1;".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "consumer.js",
+            Some("export const consumer = privateValue;".to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "root",
+                "modules/pkg-a-root.ts",
+                "pkg-a",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "privateValue",
+                "modules/pkg-a-private.ts",
+                "pkg-a",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(2),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(3),
+                "consumer",
+                "modules/pkg-b-consumer.ts",
+                "pkg-b",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(3),
+        );
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(1),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(2)),
+        });
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "pkg-a",
+                "1.0.0",
+                "pkg-a",
+            ));
+        let mut private_ownership = PackageAttributionInput::rejected_source(
+            ModuleId(2),
+            "pkg-a",
+            "private dependency is covered by externalized package closure",
+        );
+        private_ownership.package_version = Some("1.0.0".to_string());
+        rows.package_attributions.push(private_ownership);
+        let mut boundary_consumer = PackageAttributionInput::rejected_source(
+            ModuleId(3),
+            "pkg-b",
+            "different package consumer is preserved source",
+        );
+        boundary_consumer.package_version = Some("1.0.0".to_string());
+        rows.package_attributions.push(boundary_consumer);
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+        let enriched = reverts_model::EnrichedProgram::new(
+            model,
+            reverts_model::SemanticNameMap::default(),
+            Vec::new(),
+            reverts_ir::BindingShapeSolution::default(),
+        );
+
+        let analysis = PlannerAnalysis::from_program(&enriched);
+
+        assert!(
+            analysis.source_suppressed_packages.contains(&ModuleId(2)),
+            "different-package source consumers are package boundaries; they must not block same-package source suppression"
         );
     }
 

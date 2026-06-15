@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use reverts_input::sqlite::SqliteInputError;
 use reverts_ir::ModuleId;
+use reverts_js::JsError;
 use reverts_pipeline::PipelineError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +54,28 @@ pub enum MatchPackagesError {
         path: PathBuf,
         source: io::Error,
     },
+    InvalidPackageMetadata {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     MaterializePackageSource {
         package_name: String,
         package_version: String,
         message: String,
     },
+    InvalidPackageSourceVersion {
+        package_name: String,
+        package_version: String,
+        source_path: String,
+    },
+    NormalizePackageSource {
+        package_name: String,
+        package_version: Option<String>,
+        source_path: String,
+        source: JsError,
+    },
     WritePackageSourceCache(rusqlite::Error),
+    WritePackageExternalizationHints(rusqlite::Error),
     WriteAttribution(rusqlite::Error),
     WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
@@ -98,6 +115,13 @@ impl fmt::Display for MatchPackagesError {
                     path.display()
                 )
             }
+            Self::InvalidPackageMetadata { path, source } => {
+                write!(
+                    formatter,
+                    "failed to parse package metadata {}: {source}",
+                    path.display()
+                )
+            }
             Self::MaterializePackageSource {
                 package_name,
                 package_version,
@@ -108,11 +132,45 @@ impl fmt::Display for MatchPackagesError {
                     "failed to materialize {package_name}@{package_version}: {message}"
                 )
             }
+            Self::InvalidPackageSourceVersion {
+                package_name,
+                package_version,
+                source_path,
+            } => {
+                write!(
+                    formatter,
+                    "invalid package source version {package_name}@{package_version} {source_path}"
+                )
+            }
+            Self::NormalizePackageSource {
+                package_name,
+                package_version,
+                source_path,
+                source,
+            } => {
+                if let Some(package_version) = package_version {
+                    write!(
+                        formatter,
+                        "failed to normalize package source {package_name}@{package_version} {source_path}: {source}"
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "failed to normalize package source {package_name} {source_path}: {source}"
+                    )
+                }
+            }
             Self::WriteAttribution(source) => {
                 write!(formatter, "failed to write package attribution: {source}")
             }
             Self::WritePackageSourceCache(source) => {
                 write!(formatter, "failed to write package source cache: {source}")
+            }
+            Self::WritePackageExternalizationHints(source) => {
+                write!(
+                    formatter,
+                    "failed to write package externalization hints: {source}"
+                )
             }
             Self::WritePackageSurface(source) => {
                 write!(formatter, "failed to write package surface: {source}")
@@ -161,12 +219,16 @@ impl Error for MatchPackagesError {
             | Self::ConfigureDatabase(source)
             | Self::QueryPackageSources(source)
             | Self::WritePackageSourceCache(source)
+            | Self::WritePackageExternalizationHints(source)
             | Self::WriteAttribution(source)
             | Self::WritePackageSurface(source) => Some(source),
+            Self::NormalizePackageSource { source, .. } => Some(source),
             Self::ReadPackageSourceRoot { source, .. } => Some(source),
+            Self::InvalidPackageMetadata { source, .. } => Some(source),
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)
             | Self::MaterializePackageSource { .. }
+            | Self::InvalidPackageSourceVersion { .. }
             | Self::MissingMatchEvidence { .. }
             | Self::MissingModuleForAttribution { .. }
             | Self::InvalidAttribution { .. }

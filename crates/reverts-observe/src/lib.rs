@@ -24,6 +24,7 @@ pub enum FindingCode {
     IifeClusterDegenerate,
     LowConfidenceAttribution,
     MissingPackageSource,
+    AmbiguousPackageSurfaceVersion,
     MissingParseableBody,
     OverlappingFunctionAttribution,
     UnreachableTopLevelCode,

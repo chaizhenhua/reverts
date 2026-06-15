@@ -118,9 +118,23 @@ pub fn is_json_source_path(source_path: &str) -> bool {
 #[must_use]
 pub fn package_semantic_path_prefixes(package_name: &str) -> Vec<String> {
     let mut prefixes = vec![package_name.to_string()];
+    let normalized_package = normalize_hint_text(package_name);
+    if normalized_package.len() >= 4 {
+        prefixes.push(normalized_package);
+    }
     if let Some(unscoped) = package_name.strip_prefix('@') {
         prefixes.push(unscoped.to_string());
         prefixes.push(unscoped.replace('/', "-"));
+        if let Some((_scope, leaf)) = unscoped.split_once('/') {
+            let leaf = leaf.trim();
+            if leaf.contains('-') || leaf.len() >= 6 {
+                prefixes.push(leaf.to_string());
+                let normalized_leaf = normalize_hint_text(leaf);
+                if normalized_leaf.len() >= 4 {
+                    prefixes.push(normalized_leaf);
+                }
+            }
+        }
     }
     prefixes.sort();
     prefixes.dedup();
@@ -180,7 +194,7 @@ pub enum SemanticPathHintMode {
     /// contains the path token.
     RelaxedImportProof,
     /// Broader hints used only after ownership has already been accepted and
-    /// the pipeline must pick the least bad no-fallback import target.
+    /// the pipeline must pick a forced external import target.
     ForcedExternal,
 }
 
@@ -287,11 +301,11 @@ fn module_semantic_filename_hint(semantic_path: &str, module_source: &str) -> Op
         return None;
     }
     let hint = rest.trim_matches('/').to_ascii_lowercase();
-    if hint.is_empty()
-        || (!source_contains_semantic_hint(module_source, hint.as_str())
-            && !(semantic_filename_hint_is_structured_export_path(hint.as_str())
-                && !hint.split('/').any(|segment| segment == "_internal")))
-    {
+    let source_contains_hint = source_contains_semantic_hint(module_source, hint.as_str());
+    let structured_public_export_hint =
+        semantic_filename_hint_is_structured_export_path(hint.as_str())
+            && !hint.split('/').any(|segment| segment == "_internal");
+    if hint.is_empty() || (!source_contains_hint && !structured_public_export_hint) {
         return None;
     }
     Some(hint)
@@ -543,13 +557,12 @@ fn public_path_segments_without_build_stripping(value: &str) -> Vec<String> {
         .trim_start_matches('/')
         .replace('\\', "/");
     let clean = strip_source_extension(clean.as_str()).trim_matches('/');
-    let segments = clean
+    clean
         .split('/')
         .map(str::trim)
         .map(normalize_hint_text)
         .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    segments
+        .collect::<Vec<_>>()
 }
 
 #[must_use]
@@ -745,6 +758,30 @@ mod tests {
             vec![
                 "color-convert/conversions".to_string(),
                 "conversions".to_string(),
+            ]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "highlight.js",
+                "modules/12-highlightjs/languages/perl.ts",
+                "function perl() {}",
+                SemanticPathHintMode::RelaxedImportProof,
+            ),
+            vec![
+                "highlightjs/languages/perl".to_string(),
+                "languages/perl".to_string(),
+            ]
+        );
+        assert_eq!(
+            module_package_semantic_path_hints(
+                "@azure/msal-common",
+                "modules/13-msal-common/request/AuthorizationCodeRequest.ts",
+                "function AuthorizationCodeRequest() {}",
+                SemanticPathHintMode::RelaxedImportProof,
+            ),
+            vec![
+                "msal-common/request/authorizationcoderequest".to_string(),
+                "request/authorizationcoderequest".to_string(),
             ]
         );
         assert_eq!(

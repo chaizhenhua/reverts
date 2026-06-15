@@ -12,7 +12,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use reverts_analyze::enrich_program;
@@ -21,23 +22,26 @@ use reverts_input::sqlite::{load_project_bundle_from_sqlite, load_project_rows_f
 use reverts_input::{
     AssetKind, InputBundle, InputRows, ModuleDependencyTarget, ModuleInput,
     PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput,
-    PackageAttributionStatus, PackageEmissionMode, SourceFileInput, SourceSpan,
+    PackageAttributionStatus, PackageEmissionMode, SourceFileInput,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
-use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
+use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 use reverts_js::{
-    ParseGoal, collect_top_level_statement_facts, normalize_source_for_pipeline, parse_source,
+    ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts,
+    normalize_source_for_pipeline,
 };
 use reverts_model::ProgramModel;
-use reverts_observe::AuditReport;
-use reverts_package::external_import_proof_label;
+use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::{external_import_proof_label, is_node_builtin};
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionMatchScore, VersionedPackageMatchReport, clean_package_semantic_path_hint,
     has_accepted_external_attribution, is_exact_package_version_hint, is_json_source_path,
     match_packages_with_pipeline, normalize_hint_text, ownership_by_module,
     package_import_names_from_sources, package_module_source_quality, package_source_entry_path,
-    package_source_semantic_surface_hint_score, strip_source_extension,
+    package_source_exported_members, package_source_normalized_hash,
+    package_source_public_export_proofs, package_source_semantic_surface_hint_score,
+    strip_source_extension,
 };
 use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
@@ -56,6 +60,154 @@ pub struct MatchPackagesArgs {
     pub package_names: Vec<String>,
     pub package_source_roots: Vec<PathBuf>,
     pub materialize_package_sources: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchPackagesReportArgs {
+    pub input: PathBuf,
+    pub all_projects: bool,
+    pub limit: Option<u32>,
+    pub newest: bool,
+    pub package_names: Vec<String>,
+    pub package_source_roots: Vec<PathBuf>,
+    pub materialize_package_sources: bool,
+}
+
+impl MatchPackagesReportArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut all_projects = false;
+        let mut limit = None;
+        let mut newest = false;
+        let mut package_names = Vec::new();
+        let mut package_source_roots = Vec::new();
+        let mut materialize_package_sources = false;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|argument| argument == help::MATCH_PACKAGES_REPORT_COMMAND)
+        {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--all-projects" => all_projects = true,
+                "--limit" => limit = Some(parse_limit(next_value(&mut args, "--limit")?)?),
+                "--newest" => newest = true,
+                "--package-name" => {
+                    let package_name = next_value(&mut args, "--package-name")?;
+                    if package_name.trim().is_empty() {
+                        return Err(CliError::InvalidPackageName(package_name));
+                    }
+                    package_names.push(package_name);
+                }
+                "--package-source-root" => {
+                    package_source_roots.push(next_path(&mut args, "--package-source-root")?);
+                }
+                "--materialize-package-sources" => materialize_package_sources = true,
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        if !all_projects {
+            return Err(CliError::MissingArgument("--all-projects"));
+        }
+
+        Ok(Self {
+            input: input.ok_or(CliError::MissingArgument("--input"))?,
+            all_projects,
+            limit,
+            newest,
+            package_names,
+            package_source_roots,
+            materialize_package_sources,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageCacheArgs {
+    pub input: PathBuf,
+    pub apply: bool,
+}
+
+impl PackageCacheArgs {
+    pub fn parse(
+        args: impl IntoIterator<Item = String>,
+        command: &'static str,
+    ) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut apply = false;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args.first().is_some_and(|argument| argument == command) {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--apply" => apply = true,
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        Ok(Self {
+            input: input.ok_or(CliError::MissingArgument("--input"))?,
+            apply,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageExternalizationHintsArgs {
+    pub input: PathBuf,
+    pub package_names: Vec<String>,
+    pub limit: Option<u32>,
+    pub apply: bool,
+}
+
+impl PackageExternalizationHintsArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut package_names = Vec::new();
+        let mut limit = None;
+        let mut apply = false;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|argument| argument == help::PACKAGE_EXTERNALIZATION_HINTS_COMMAND)
+        {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--package-name" => {
+                    let package_name = next_value(&mut args, "--package-name")?;
+                    if package_name.trim().is_empty() {
+                        return Err(CliError::InvalidPackageName(package_name));
+                    }
+                    package_names.push(package_name);
+                }
+                "--limit" => limit = Some(parse_limit(next_value(&mut args, "--limit")?)?),
+                "--apply" => apply = true,
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        Ok(Self {
+            input: input.ok_or(CliError::MissingArgument("--input"))?,
+            package_names,
+            limit,
+            apply,
+        })
+    }
 }
 
 impl MatchPackagesArgs {
@@ -227,6 +379,10 @@ pub enum CliCommand {
     Version,
     GenerateProjectV2(GenerateProjectV2Args),
     MatchPackages(MatchPackagesArgs),
+    MatchPackagesReport(MatchPackagesReportArgs),
+    PackageCacheAudit(PackageCacheArgs),
+    PackageCachePruneStale(PackageCacheArgs),
+    PackageExternalizationHints(PackageExternalizationHintsArgs),
     ExtractAssets(ExtractAssetsArgs),
     RuntimeInventory(RuntimeInventoryArgs),
 }
@@ -250,6 +406,20 @@ impl CliCommand {
                         }
                         HelpTopic::MatchPackages => {
                             Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?))
+                        }
+                        HelpTopic::MatchPackagesReport => Ok(Self::MatchPackagesReport(
+                            MatchPackagesReportArgs::parse(args)?,
+                        )),
+                        HelpTopic::PackageCacheAudit => Ok(Self::PackageCacheAudit(
+                            PackageCacheArgs::parse(args, help::PACKAGE_CACHE_AUDIT_COMMAND)?,
+                        )),
+                        HelpTopic::PackageCachePruneStale => Ok(Self::PackageCachePruneStale(
+                            PackageCacheArgs::parse(args, help::PACKAGE_CACHE_PRUNE_STALE_COMMAND)?,
+                        )),
+                        HelpTopic::PackageExternalizationHints => {
+                            Ok(Self::PackageExternalizationHints(
+                                PackageExternalizationHintsArgs::parse(args)?,
+                            ))
                         }
                         HelpTopic::ExtractAssets => {
                             Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
@@ -373,6 +543,10 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         }
         CliCommand::GenerateProjectV2(args) => commands::generate_project::run(args),
         CliCommand::MatchPackages(args) => run_match_packages(args),
+        CliCommand::MatchPackagesReport(args) => run_match_packages_report(args),
+        CliCommand::PackageCacheAudit(args) => run_package_cache_audit(args),
+        CliCommand::PackageCachePruneStale(args) => run_package_cache_prune_stale(args),
+        CliCommand::PackageExternalizationHints(args) => run_package_externalization_hints(args),
         CliCommand::ExtractAssets(args) => run_extract_assets(args),
         CliCommand::RuntimeInventory(args) => run_runtime_inventory(args),
     }
@@ -381,10 +555,20 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
 fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} package source(s): {} module attribution(s), {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
+        "matched packages for project {} from {} package source(s): {} module attribution(s), {} direct external import module attribution(s), {} private source-suppressed package module(s), {} package source eliminated ({:.2}%), {} package source remaining, {} external import candidate(s), {} unsafe external import candidate(s) removed, {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
         outcome.matched_modules,
+        outcome.external_import_modules,
+        outcome.private_source_suppressed_package_modules,
+        outcome.source_eliminated_package_modules,
+        pct(
+            outcome.source_eliminated_package_modules,
+            outcome.loaded_package_modules
+        ),
+        outcome.remaining_package_source_modules,
+        outcome.external_import_candidates,
+        outcome.unsafe_external_import_modules,
         outcome.matched_package_surfaces,
         outcome.written_attributions,
         outcome.written_surfaces,
@@ -400,7 +584,134 @@ fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     if !outcome.audit.is_clean() {
         println!("{}", format_audit_findings(&outcome.audit));
     }
+    print_external_import_blockers(&outcome.external_import_blockers);
     Ok(())
+}
+
+fn print_external_import_blockers(blockers: &[ExternalImportBlockerSummary]) {
+    if blockers.is_empty() {
+        return;
+    }
+    println!("external import blockers:");
+    for blocker in blockers.iter().take(12) {
+        println!(
+            "  {}: {} ({})",
+            blocker.reason, blocker.consumer, blocker.count
+        );
+    }
+}
+
+fn run_match_packages_report(args: MatchPackagesReportArgs) -> Result<(), CliRunError> {
+    let outcome = match_packages_report_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
+    println!(
+        "package match report: projects={}, package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
+        outcome.projects.len(),
+        outcome.totals.package_modules,
+        outcome.totals.matched_modules,
+        pct(
+            outcome.totals.matched_modules,
+            outcome.totals.package_modules
+        ),
+        outcome.totals.external_import_modules,
+        pct(
+            outcome.totals.external_import_modules,
+            outcome.totals.package_modules
+        ),
+        outcome.totals.private_source_suppressed_package_modules,
+        outcome.totals.source_eliminated_package_modules,
+        pct(
+            outcome.totals.source_eliminated_package_modules,
+            outcome.totals.package_modules
+        ),
+        outcome.totals.remaining_package_source_modules,
+        outcome.totals.external_import_candidates,
+        outcome.totals.unsafe_external_import_modules,
+        outcome.totals.package_surfaces,
+        outcome.totals.audit_findings,
+    );
+    for project in &outcome.projects {
+        println!(
+            "  project {}: package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
+            project.project_id,
+            project.loaded_package_modules,
+            project.matched_modules,
+            pct(project.matched_modules, project.loaded_package_modules),
+            project.external_import_modules,
+            pct(
+                project.external_import_modules,
+                project.loaded_package_modules
+            ),
+            project.private_source_suppressed_package_modules,
+            project.source_eliminated_package_modules,
+            pct(
+                project.source_eliminated_package_modules,
+                project.loaded_package_modules
+            ),
+            project.remaining_package_source_modules,
+            project.external_import_candidates,
+            project.unsafe_external_import_modules,
+            project.matched_package_surfaces,
+            project.audit.findings().len(),
+        );
+    }
+    print_external_import_blockers(&outcome.blockers);
+    Ok(())
+}
+
+fn run_package_cache_audit(args: PackageCacheArgs) -> Result<(), CliRunError> {
+    let outcome =
+        package_cache_audit_from_sqlite(&args, false).map_err(CliRunError::MatchPackages)?;
+    print_package_cache_audit(&outcome, false);
+    Ok(())
+}
+
+fn run_package_cache_prune_stale(args: PackageCacheArgs) -> Result<(), CliRunError> {
+    let outcome =
+        package_cache_audit_from_sqlite(&args, true).map_err(CliRunError::MatchPackages)?;
+    print_package_cache_audit(&outcome, args.apply);
+    Ok(())
+}
+
+fn run_package_externalization_hints(
+    args: PackageExternalizationHintsArgs,
+) -> Result<(), CliRunError> {
+    let outcome =
+        package_externalization_hints_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
+    println!(
+        "package externalization hints: scanned={}, verified={}, skipped_invalid_specifier={}, skipped_invalid_versions={}, skipped_hash_mismatch={}, skipped_normalize_errors={}, {}={}",
+        outcome.scanned_rows,
+        outcome.verified_rows,
+        outcome.invalid_export_specifier_rows,
+        outcome.invalid_version_rows,
+        outcome.content_hash_mismatch_rows,
+        outcome.normalize_error_rows,
+        if args.apply { "written" } else { "would_write" },
+        outcome.written_rows,
+    );
+    Ok(())
+}
+
+fn print_package_cache_audit(outcome: &PackageCacheAuditOutcome, applied: bool) {
+    println!(
+        "package source cache audit: rows={}, missing_identity={}, invalid_versions={}, stale_policy={}, missing_policy={}, missing_export_specifier={}, parse_errors={}, {}={}",
+        outcome.rows,
+        outcome.missing_identity_rows,
+        outcome.invalid_version_rows,
+        outcome.stale_policy_rows,
+        outcome.missing_import_policy_rows,
+        outcome.missing_export_specifier_rows,
+        outcome.parse_error_rows,
+        if applied { "deleted" } else { "would_delete" },
+        outcome.deleted_rows,
+    );
+}
+
+fn pct(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        (numerator as f64 * 100.0) / denominator as f64
+    }
 }
 
 fn run_extract_assets(args: ExtractAssetsArgs) -> Result<(), CliRunError> {
@@ -599,6 +910,20 @@ pub struct MatchPackagesOutcome {
     pub loaded_package_modules: usize,
     pub loaded_package_sources: usize,
     pub matched_modules: usize,
+    /// Accepted direct package-import modules in the loaded project rows,
+    /// including existing persisted external attributions and fresh matches.
+    pub external_import_modules: usize,
+    /// Backward-compatible alias for `source_eliminated_package_modules`.
+    ///
+    /// This counts package modules whose source can be eliminated because they
+    /// are either directly emitted as an external import or are private package
+    /// modules reachable only through such externalized public modules.
+    pub source_suppressed_package_modules: usize,
+    pub private_source_suppressed_package_modules: usize,
+    pub source_eliminated_package_modules: usize,
+    pub remaining_package_source_modules: usize,
+    pub external_import_candidates: usize,
+    pub unsafe_external_import_modules: usize,
     pub matched_package_surfaces: usize,
     pub written_attributions: usize,
     pub written_surfaces: usize,
@@ -616,6 +941,66 @@ pub struct MatchPackagesOutcome {
     pub package_source_quality_invalid: usize,
     pub package_source_quality_missing: usize,
     pub audit: AuditReport,
+    pub external_import_blockers: Vec<ExternalImportBlockerSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExternalImportSafetyReport {
+    pub removed_modules: usize,
+    pub blockers: Vec<ExternalImportBlockerSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalImportBlockerSummary {
+    pub reason: String,
+    pub consumer: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MatchPackagesReportOutcome {
+    pub projects: Vec<MatchPackagesOutcome>,
+    pub totals: MatchPackagesReportTotals,
+    pub blockers: Vec<ExternalImportBlockerSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MatchPackagesReportTotals {
+    pub package_modules: usize,
+    pub matched_modules: usize,
+    pub external_import_modules: usize,
+    /// Backward-compatible alias for `source_eliminated_package_modules`.
+    pub source_suppressed_package_modules: usize,
+    pub private_source_suppressed_package_modules: usize,
+    pub source_eliminated_package_modules: usize,
+    pub remaining_package_source_modules: usize,
+    pub external_import_candidates: usize,
+    pub unsafe_external_import_modules: usize,
+    pub package_surfaces: usize,
+    pub audit_findings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackageCacheAuditOutcome {
+    pub rows: usize,
+    pub missing_identity_rows: usize,
+    pub invalid_version_rows: usize,
+    pub stale_policy_rows: usize,
+    pub missing_export_specifier_rows: usize,
+    pub missing_import_policy_rows: usize,
+    pub parse_error_rows: usize,
+    pub deleted_rows: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackageExternalizationHintsOutcome {
+    pub scanned_rows: usize,
+    pub verified_rows: usize,
+    pub invalid_export_specifier_rows: usize,
+    pub invalid_version_rows: usize,
+    pub content_hash_mismatch_rows: usize,
+    pub normalize_error_rows: usize,
+    pub written_rows: usize,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -875,22 +1260,18 @@ fn runtime_helper_source_file_id(path: &str) -> Option<u32> {
 }
 
 fn runtime_setter_targets_in_source(source: &str) -> Vec<BindingName> {
-    const MARKER: &str = "function __reverts_set_";
-    let mut targets = Vec::new();
-    let mut cursor = 0usize;
-    while let Some(relative_start) = source[cursor..].find(MARKER) {
-        let binding_start = cursor + relative_start + MARKER.len();
-        let tail = &source[binding_start..];
-        let Some((binding, _rest)) = tail.split_once("(value)") else {
-            cursor = binding_start;
-            continue;
-        };
-        if !binding.is_empty() {
-            targets.push(BindingName::new(binding));
-        }
-        cursor = binding_start + binding.len();
-    }
-    targets
+    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
+        .expect("runtime setter inventory requires parseable generated TypeScript source")
+        .into_iter()
+        .filter(|fact| fact.kind == TopLevelStatementKind::Setter)
+        .flat_map(|fact| fact.bindings)
+        .filter_map(|binding| runtime_setter_target_from_binding(binding.as_str()))
+        .collect()
+}
+
+fn runtime_setter_target_from_binding(binding: &str) -> Option<BindingName> {
+    let target = binding.strip_prefix("__reverts_set_")?;
+    (!target.is_empty()).then(|| BindingName::new(target))
 }
 
 fn runtime_inventory_project_selections(
@@ -1026,44 +1407,44 @@ fn runtime_line_attribution_from_files(
         report.total_runtime_lines += runtime_lines;
         let mut covered_lines = BTreeSet::<usize>::new();
         let line_starts = line_start_offsets(file.source.as_str());
-        if let Ok(facts) = collect_top_level_statement_facts(
+        let facts = collect_top_level_statement_facts(
             file.source.as_str(),
             Some(Path::new(file.path.as_str())),
             ParseGoal::TypeScript,
-        ) {
-            for fact in facts {
-                let line_start = line_number_for_offset(&line_starts, fact.byte_start as usize);
-                let line_end = line_number_for_statement_end(&line_starts, fact.byte_end as usize);
-                if line_end < line_start {
-                    continue;
-                }
-                for line in line_start..=line_end {
-                    covered_lines.insert(line);
-                }
-                let lines = line_end - line_start + 1;
-                let binding = runtime_attribution_binding_label(&fact.bindings);
-                let kind = fact.kind.as_str().to_string();
-                let package = runtime_attribution_package_label(
-                    runtime_helper_source_file_id(file.path.as_str()),
-                    &fact.bindings,
-                    package_ownership,
-                );
-                let bucket = report.by_kind.entry(kind.clone()).or_default();
-                bucket.items += 1;
-                bucket.lines += lines;
-                let package_bucket = report.by_package.entry(package.clone()).or_default();
-                package_bucket.items += 1;
-                package_bucket.lines += lines;
-                report.items.push(RuntimeLineAttributionItem {
-                    path: file.path.clone(),
-                    line_start,
-                    line_end,
-                    lines,
-                    kind,
-                    binding,
-                    package,
-                });
+        )
+        .expect("runtime line attribution requires parseable generated TypeScript source");
+        for fact in facts {
+            let line_start = line_number_for_offset(&line_starts, fact.byte_start as usize);
+            let line_end = line_number_for_statement_end(&line_starts, fact.byte_end as usize);
+            if line_end < line_start {
+                continue;
             }
+            for line in line_start..=line_end {
+                covered_lines.insert(line);
+            }
+            let lines = line_end - line_start + 1;
+            let binding = runtime_attribution_binding_label(&fact.bindings);
+            let kind = fact.kind.as_str().to_string();
+            let package = runtime_attribution_package_label(
+                runtime_helper_source_file_id(file.path.as_str()),
+                &fact.bindings,
+                package_ownership,
+            );
+            let bucket = report.by_kind.entry(kind.clone()).or_default();
+            bucket.items += 1;
+            bucket.lines += lines;
+            let package_bucket = report.by_package.entry(package.clone()).or_default();
+            package_bucket.items += 1;
+            package_bucket.lines += lines;
+            report.items.push(RuntimeLineAttributionItem {
+                path: file.path.clone(),
+                line_start,
+                line_end,
+                lines,
+                kind,
+                binding,
+                package,
+            });
         }
         report.attributed_lines += covered_lines.len();
         report.unattributed_lines += runtime_lines.saturating_sub(covered_lines.len());
@@ -1367,6 +1748,463 @@ pub fn match_packages_from_sqlite(
     match_packages_from_connection(&mut connection, args)
 }
 
+pub fn match_packages_report_from_sqlite(
+    args: &MatchPackagesReportArgs,
+) -> Result<MatchPackagesReportOutcome, MatchPackagesError> {
+    let project_ids = match_package_report_project_ids(args)?;
+    let mut outcome = MatchPackagesReportOutcome::default();
+    let mut blocker_counts = BTreeMap::<(String, String), usize>::new();
+    for project_id in project_ids {
+        let project_outcome = match_packages_from_sqlite(&MatchPackagesArgs {
+            input: args.input.clone(),
+            project_id,
+            apply: false,
+            package_names: args.package_names.clone(),
+            package_source_roots: args.package_source_roots.clone(),
+            materialize_package_sources: args.materialize_package_sources,
+        })?;
+        outcome.totals.package_modules += project_outcome.loaded_package_modules;
+        outcome.totals.matched_modules += project_outcome.matched_modules;
+        outcome.totals.external_import_modules += project_outcome.external_import_modules;
+        outcome.totals.source_suppressed_package_modules +=
+            project_outcome.source_suppressed_package_modules;
+        outcome.totals.private_source_suppressed_package_modules +=
+            project_outcome.private_source_suppressed_package_modules;
+        outcome.totals.source_eliminated_package_modules +=
+            project_outcome.source_eliminated_package_modules;
+        outcome.totals.remaining_package_source_modules +=
+            project_outcome.remaining_package_source_modules;
+        outcome.totals.external_import_candidates += project_outcome.external_import_candidates;
+        outcome.totals.unsafe_external_import_modules +=
+            project_outcome.unsafe_external_import_modules;
+        outcome.totals.package_surfaces += project_outcome.matched_package_surfaces;
+        outcome.totals.audit_findings += project_outcome.audit.findings().len();
+        for blocker in &project_outcome.external_import_blockers {
+            *blocker_counts
+                .entry((blocker.reason.clone(), blocker.consumer.clone()))
+                .or_default() += blocker.count;
+        }
+        outcome.projects.push(project_outcome);
+    }
+    outcome.blockers = blocker_counts
+        .into_iter()
+        .map(|((reason, consumer), count)| ExternalImportBlockerSummary {
+            reason,
+            consumer,
+            count,
+        })
+        .collect();
+    outcome.blockers.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.reason.cmp(&right.reason))
+            .then_with(|| left.consumer.cmp(&right.consumer))
+    });
+    Ok(outcome)
+}
+
+fn match_package_report_project_ids(
+    args: &MatchPackagesReportArgs,
+) -> Result<Vec<u32>, MatchPackagesError> {
+    let connection =
+        Connection::open_with_flags(args.input.as_path(), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|source| MatchPackagesError::OpenDatabase {
+                path: args.input.clone(),
+                source,
+            })?;
+    let order = if args.newest { "DESC" } else { "ASC" };
+    let mut sql = format!("SELECT id FROM projects ORDER BY id {order}");
+    if let Some(limit) = args.limit {
+        use std::fmt::Write as _;
+        let _ = write!(sql, " LIMIT {limit}");
+    }
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, u32>(0))
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+}
+
+pub fn package_cache_audit_from_sqlite(
+    args: &PackageCacheArgs,
+    prune_stale: bool,
+) -> Result<PackageCacheAuditOutcome, MatchPackagesError> {
+    let flags = if prune_stale && args.apply {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let mut connection =
+        Connection::open_with_flags(args.input.as_path(), flags).map_err(|source| {
+            MatchPackagesError::OpenDatabase {
+                path: args.input.clone(),
+                source,
+            }
+        })?;
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .map_err(MatchPackagesError::ConfigureDatabase)?;
+    if !sqlite_table_exists(&connection, "package_source_cache")
+        .map_err(MatchPackagesError::QueryPackageSources)?
+    {
+        return Err(MatchPackagesError::MissingTable("package_source_cache"));
+    }
+    let audit = package_cache_audit_from_connection(&connection)?;
+    if prune_stale && args.apply && audit.deleted_rows > 0 {
+        prune_package_source_cache_rows(&mut connection)?;
+    }
+    Ok(audit)
+}
+
+pub fn package_externalization_hints_from_sqlite(
+    args: &PackageExternalizationHintsArgs,
+) -> Result<PackageExternalizationHintsOutcome, MatchPackagesError> {
+    let flags = if args.apply {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    };
+    let mut connection =
+        Connection::open_with_flags(args.input.as_path(), flags).map_err(|source| {
+            MatchPackagesError::OpenDatabase {
+                path: args.input.clone(),
+                source,
+            }
+        })?;
+    connection
+        .busy_timeout(Duration::from_secs(30))
+        .map_err(MatchPackagesError::ConfigureDatabase)?;
+    if !sqlite_table_exists(&connection, "package_source_cache")
+        .map_err(MatchPackagesError::QueryPackageSources)?
+    {
+        return Err(MatchPackagesError::MissingTable("package_source_cache"));
+    }
+    package_externalization_hints_from_connection(&mut connection, args)
+}
+
+fn package_externalization_hints_from_connection(
+    connection: &mut Connection,
+    args: &PackageExternalizationHintsArgs,
+) -> Result<PackageExternalizationHintsOutcome, MatchPackagesError> {
+    let package_names = args
+        .package_names
+        .iter()
+        .map(|package_name| package_name.trim().to_string())
+        .filter(|package_name| !package_name.is_empty())
+        .collect::<BTreeSet<_>>();
+    let candidates =
+        externalization_hint_candidates_from_cache(connection, &package_names, args.limit)?;
+    let mut outcome = PackageExternalizationHintsOutcome {
+        scanned_rows: candidates.len(),
+        ..PackageExternalizationHintsOutcome::default()
+    };
+    let mut hints = Vec::new();
+    let mut hint_keys = BTreeSet::<(String, String, String, String)>::new();
+    let mut verified_sources = Vec::<VerifiedExternalizationHintSource>::new();
+    for candidate in candidates {
+        if !is_exact_package_version_hint(candidate.package_version.as_str()) {
+            outcome.invalid_version_rows += 1;
+            continue;
+        }
+        if !hint_export_specifier_matches_package(
+            candidate.package_name.as_str(),
+            candidate.export_specifier.as_str(),
+        ) {
+            outcome.invalid_export_specifier_rows += 1;
+            continue;
+        }
+        let actual_content_hash = stable_hash(candidate.source_content.as_bytes());
+        if actual_content_hash != candidate.content_hash {
+            outcome.content_hash_mismatch_rows += 1;
+            continue;
+        }
+        let source_path = format!(
+            "{}@{}/{}",
+            candidate.package_name, candidate.package_version, candidate.entry_path
+        );
+        let Some(normalized_source_hash) =
+            package_source_normalized_hash(source_path.as_str(), candidate.source_content.as_str())
+        else {
+            outcome.normalize_error_rows += 1;
+            continue;
+        };
+        let public_members = package_source_exported_members(
+            source_path.as_str(),
+            candidate.source_content.as_str(),
+        );
+        let source = if candidate.external_importable {
+            PackageSource::external(
+                candidate.package_name.as_str(),
+                candidate.package_version.as_str(),
+                candidate.export_specifier.as_str(),
+                source_path.as_str(),
+                candidate.source_content.as_str(),
+            )
+        } else {
+            PackageSource::source_only(
+                candidate.package_name.as_str(),
+                candidate.package_version.as_str(),
+                candidate.export_specifier.as_str(),
+                source_path.as_str(),
+                candidate.source_content.as_str(),
+            )
+        };
+        let verified = VerifiedExternalizationHintSource {
+            package_name: candidate.package_name,
+            package_version: candidate.package_version,
+            entry_path: candidate.entry_path,
+            source,
+            content_hash: actual_content_hash,
+            normalized_source_hash,
+            public_members,
+        };
+        if verified.source.external_importable {
+            push_package_externalization_hint(
+                &mut hints,
+                &mut hint_keys,
+                PackageExternalizationHint {
+                    package_name: verified.package_name.clone(),
+                    package_version: verified.package_version.clone(),
+                    entry_path: verified.entry_path.clone(),
+                    export_specifier: verified.source.export_specifier.clone(),
+                    content_hash: Some(verified.content_hash.clone()),
+                    normalized_source_hash: Some(verified.normalized_source_hash.clone()),
+                    public_members: verified.public_members.clone(),
+                    proof_policy_version: Some(PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION),
+                },
+            );
+        }
+        verified_sources.push(verified);
+    }
+    let package_sources = verified_sources
+        .iter()
+        .map(|source| source.source.clone())
+        .collect::<Vec<_>>();
+    let verified_sources_by_path = verified_sources
+        .iter()
+        .map(|source| (source.source.source_path.clone(), source))
+        .collect::<BTreeMap<_, _>>();
+    for proof in package_source_public_export_proofs(&package_sources) {
+        if !hint_export_specifier_matches_package(
+            proof.package_name.as_str(),
+            proof.export_specifier.as_str(),
+        ) {
+            outcome.invalid_export_specifier_rows += 1;
+            continue;
+        }
+        let Some(source) = verified_sources_by_path.get(proof.source_path.as_str()) else {
+            continue;
+        };
+        if proof.public_members.is_empty() {
+            continue;
+        }
+        push_package_externalization_hint(
+            &mut hints,
+            &mut hint_keys,
+            PackageExternalizationHint {
+                package_name: source.package_name.clone(),
+                package_version: source.package_version.clone(),
+                entry_path: source.entry_path.clone(),
+                export_specifier: proof.export_specifier,
+                content_hash: Some(source.content_hash.clone()),
+                normalized_source_hash: Some(source.normalized_source_hash.clone()),
+                public_members: proof.public_members,
+                proof_policy_version: Some(PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION),
+            },
+        );
+    }
+    outcome.verified_rows = hints.len();
+    if args.apply && !hints.is_empty() {
+        outcome.written_rows = persist_package_externalization_hints(connection, &hints)?;
+    } else {
+        outcome.written_rows = hints.len();
+    }
+    Ok(outcome)
+}
+
+#[derive(Debug)]
+struct VerifiedExternalizationHintSource {
+    package_name: String,
+    package_version: String,
+    entry_path: String,
+    source: PackageSource,
+    content_hash: String,
+    normalized_source_hash: String,
+    public_members: BTreeSet<String>,
+}
+
+fn push_package_externalization_hint(
+    hints: &mut Vec<PackageExternalizationHint>,
+    keys: &mut BTreeSet<(String, String, String, String)>,
+    hint: PackageExternalizationHint,
+) {
+    let key = (
+        hint.package_name.clone(),
+        hint.package_version.clone(),
+        hint.entry_path.clone(),
+        hint.export_specifier.clone(),
+    );
+    if keys.insert(key) {
+        hints.push(hint);
+    }
+}
+
+fn package_cache_audit_from_connection(
+    connection: &Connection,
+) -> Result<PackageCacheAuditOutcome, MatchPackagesError> {
+    let rows = audited_package_source_cache_rows(connection)?;
+    let mut outcome = PackageCacheAuditOutcome {
+        rows: rows.len(),
+        ..PackageCacheAuditOutcome::default()
+    };
+    for row in rows {
+        if row.missing_identity {
+            outcome.missing_identity_rows += 1;
+        }
+        if !is_exact_package_version_hint(row.package_version.as_str()) {
+            outcome.invalid_version_rows += 1;
+        }
+        if row.missing_policy {
+            outcome.missing_import_policy_rows += 1;
+        }
+        if row.missing_export_specifier {
+            outcome.missing_export_specifier_rows += 1;
+        }
+        if row.stale_policy {
+            outcome.stale_policy_rows += 1;
+        }
+        let parse_error = normalize_source_for_pipeline(
+            row.source_content.as_str(),
+            Some(Path::new(row.source_path.as_str())),
+        )
+        .is_err();
+        if parse_error {
+            outcome.parse_error_rows += 1;
+        }
+        if row.prune_candidate || parse_error {
+            outcome.deleted_rows += 1;
+        }
+    }
+    Ok(outcome)
+}
+
+#[derive(Debug)]
+struct AuditedPackageSourceCacheRow {
+    rowid: i64,
+    package_version: String,
+    source_path: String,
+    source_content: String,
+    missing_identity: bool,
+    missing_policy: bool,
+    missing_export_specifier: bool,
+    stale_policy: bool,
+    prune_candidate: bool,
+}
+
+fn audited_package_source_cache_rows(
+    connection: &Connection,
+) -> Result<Vec<AuditedPackageSourceCacheRow>, MatchPackagesError> {
+    let has_policy = sqlite_table_has_column(
+        connection,
+        "package_source_cache",
+        "external_import_policy_version",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_export_specifier =
+        sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+    let policy_expr = if has_policy {
+        "external_import_policy_version"
+    } else {
+        "0"
+    };
+    let export_expr = if has_export_specifier {
+        "export_specifier"
+    } else {
+        "''"
+    };
+    let sql = format!(
+        r"
+        SELECT rowid, package_name, package_version, entry_path, source_content,
+               {policy_expr} AS policy_version,
+               {export_expr} AS export_specifier
+          FROM package_source_cache
+        "
+    );
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let rows = statement
+        .query_map([], |row| {
+            let rowid = row.get::<_, i64>(0)?;
+            let package_name = row.get::<_, Option<String>>(1)?.unwrap_or_default();
+            let package_version = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            let entry_path = row.get::<_, Option<String>>(3)?.unwrap_or_default();
+            let source_content = row.get::<_, Option<String>>(4)?.unwrap_or_default();
+            let policy_version = row.get::<_, Option<i64>>(5)?.unwrap_or_default();
+            let export_specifier = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+            let missing_identity = package_name.trim().is_empty()
+                || package_version.trim().is_empty()
+                || entry_path.trim().is_empty();
+            let missing_policy = !has_policy || policy_version == 0;
+            let missing_export_specifier =
+                !has_export_specifier || export_specifier.trim().is_empty();
+            let stale_policy = missing_policy
+                || policy_version != PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION
+                || missing_export_specifier;
+            let invalid_version = !is_exact_package_version_hint(package_version.as_str());
+            Ok(AuditedPackageSourceCacheRow {
+                rowid,
+                source_path: format!("{package_name}@{package_version}/{entry_path}"),
+                package_version,
+                source_content,
+                missing_identity,
+                missing_policy,
+                missing_export_specifier,
+                stale_policy,
+                prune_candidate: missing_identity || invalid_version || stale_policy,
+            })
+        })
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+}
+
+fn prune_package_source_cache_rows(connection: &mut Connection) -> Result<(), MatchPackagesError> {
+    let mut rowids_to_delete = Vec::<i64>::new();
+    for row in audited_package_source_cache_rows(connection)? {
+        let parse_error = normalize_source_for_pipeline(
+            row.source_content.as_str(),
+            Some(Path::new(row.source_path.as_str())),
+        )
+        .is_err();
+        if row.prune_candidate || parse_error {
+            rowids_to_delete.push(row.rowid);
+        }
+    }
+    if rowids_to_delete.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    {
+        let mut statement = transaction
+            .prepare("DELETE FROM package_source_cache WHERE rowid = ?1")
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+        for rowid in rowids_to_delete {
+            statement
+                .execute([rowid])
+                .map_err(MatchPackagesError::WritePackageSourceCache)?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WritePackageSourceCache)
+}
+
 pub fn match_packages_from_connection(
     connection: &mut Connection,
     args: &MatchPackagesArgs,
@@ -1392,19 +2230,9 @@ pub fn match_packages_from_connection(
         .map_err(MatchPackagesError::LoadInput)?;
     mark_timing!("load_project_rows");
 
-    let requested_package_filter = (!args.package_names.is_empty())
-        .then(|| args.package_names.iter().cloned().collect::<BTreeSet<_>>());
-    let repaired_single_module_source_files =
-        repair_package_module_source_slices(&mut rows, requested_package_filter.as_ref());
-    mark_timing!("repair_initial_slices");
-
-    // Bundle-aware module extraction (Phase α): split recognised bundle
-    // wrappers into per-module rows before the matcher sees them. Source files
-    // that were already repaired as single package modules are not bundle
-    // candidates; skipping them keeps repair and extraction in a single
-    // ordered path instead of suppressing parse findings after the fact.
-    let extraction_input = bundle_extraction_rows(&rows, &repaired_single_module_source_files);
-    let extraction = reverts_bundle::extract(&extraction_input);
+    // Bundle-aware module extraction (Phase alpha): split recognised bundle
+    // wrappers into per-module rows before the matcher sees them.
+    let extraction = reverts_bundle::extract(&rows);
     let extraction_audit = extraction.audit.clone();
     // Snapshot new_modules before merge_into consumes the extraction —
     // we need them later to persist synthetic rows into the SQLite
@@ -1414,13 +2242,10 @@ pub fn match_packages_from_connection(
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
     mark_timing!("bundle_extract_enrich");
 
-    remove_package_attributions_for_revalidation(&mut rows, &args.package_names);
-    let package_names = package_source_load_scope(&rows, &args.package_names);
-    repair_package_module_source_slices(
-        &mut rows,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
-    mark_timing!("scope_revalidation_repair");
+    let mut source_import_audit = AuditReport::default();
+    let package_names =
+        package_source_load_scope(&rows, &args.package_names, &mut source_import_audit);
+    remove_package_attributions_for_revalidation(&mut rows, &package_names);
     let mut package_sources = load_package_sources(
         connection,
         &rows,
@@ -1431,7 +2256,11 @@ pub fn match_packages_from_connection(
     )?;
     mark_timing!("load_package_sources");
     let package_versions_before_resolution = package_versions_by_module(&rows);
-    resolve_package_version_hints_to_available_sources(&mut rows, &package_sources, &package_names);
+    resolve_package_version_hints_to_available_sources(
+        &mut rows,
+        &package_sources,
+        &package_names,
+    )?;
     let package_version_resolutions =
         package_version_resolution_evidence(&package_versions_before_resolution, &rows);
     mark_timing!("resolve_versions");
@@ -1449,7 +2278,10 @@ pub fn match_packages_from_connection(
     );
     mark_timing!("match_pipeline");
     let mut report = pipeline_report.package_report;
-    filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+    report.audit.extend(source_import_audit);
+    let external_import_candidates = report.attributions.len();
+    let external_import_safety =
+        filter_unsafe_interpackage_external_attributions(&rows, &mut report);
     let function_attributions = pipeline_report.function_attributions;
     let function_ownership_matches = pipeline_report.function_ownership_matches;
 
@@ -1502,6 +2334,13 @@ pub fn match_packages_from_connection(
     }
 
     let matched_modules = report.matches.len();
+    let loaded_package_modules = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .count();
+    let source_elimination =
+        package_source_elimination_stats_for_report(&rows, &report, loaded_package_modules);
     let matched_package_surfaces = report.surfaces.len();
     let mut audit = extraction_audit;
     audit.extend(report.audit);
@@ -1509,13 +2348,17 @@ pub fn match_packages_from_connection(
 
     Ok(MatchPackagesOutcome {
         project_id: args.project_id,
-        loaded_package_modules: rows
-            .modules
-            .iter()
-            .filter(|module| module.kind == ModuleKind::Package)
-            .count(),
+        loaded_package_modules,
         loaded_package_sources: package_sources.len(),
         matched_modules,
+        external_import_modules: source_elimination.direct_external_import_modules,
+        source_suppressed_package_modules: source_elimination.source_eliminated_package_modules,
+        private_source_suppressed_package_modules: source_elimination
+            .private_source_suppressed_package_modules,
+        source_eliminated_package_modules: source_elimination.source_eliminated_package_modules,
+        remaining_package_source_modules: source_elimination.remaining_package_source_modules,
+        external_import_candidates,
+        unsafe_external_import_modules: external_import_safety.removed_modules,
         matched_package_surfaces,
         written_attributions,
         written_surfaces,
@@ -1527,224 +2370,21 @@ pub fn match_packages_from_connection(
         package_source_quality_invalid: source_quality_counts.invalid,
         package_source_quality_missing: source_quality_counts.missing,
         audit,
+        external_import_blockers: external_import_safety.blockers,
     })
 }
 
 fn remove_package_attributions_for_revalidation(
     rows: &mut InputRows,
-    requested_package_names: &[String],
+    requested_package_names: &BTreeSet<String>,
 ) -> usize {
-    let requested = requested_package_names.iter().collect::<BTreeSet<_>>();
     let before = rows.package_attributions.len();
     rows.package_attributions.retain(|attribution| {
-        (!requested.is_empty() && !requested.contains(&attribution.package_name))
+        (!requested_package_names.is_empty()
+            && !requested_package_names.contains(&attribution.package_name))
             || attribution.emission_mode != PackageEmissionMode::ExternalImport
     });
     before.saturating_sub(rows.package_attributions.len())
-}
-
-fn repair_package_module_source_slices(
-    rows: &mut InputRows,
-    package_filter: Option<&BTreeSet<String>>,
-) -> BTreeSet<u32> {
-    let module_count_by_source_file = rows
-        .modules
-        .iter()
-        .filter_map(|module| module.source_file_id)
-        .fold(
-            BTreeMap::<u32, usize>::new(),
-            |mut counts, source_file_id| {
-                *counts.entry(source_file_id).or_default() += 1;
-                counts
-            },
-        );
-    let source_files = &rows.source_files;
-    let mut repaired_single_module_source_files = BTreeSet::new();
-    for module in &mut rows.modules {
-        if module.kind != ModuleKind::Package {
-            continue;
-        }
-        if let Some(package_filter) = package_filter
-            && !module
-                .package_name
-                .as_deref()
-                .is_some_and(|package_name| package_filter.contains(package_name))
-        {
-            continue;
-        }
-        let Some(source_file_id) = module.source_file_id else {
-            continue;
-        };
-        let Some(source_file) = source_files
-            .iter()
-            .find(|source_file| source_file.id == source_file_id)
-        else {
-            continue;
-        };
-        let Some(source) = source_file.source.as_deref() else {
-            continue;
-        };
-        let Some((start, end)) = module_source_repair_range(
-            module,
-            source,
-            module_count_by_source_file
-                .get(&source_file_id)
-                .copied()
-                .unwrap_or_default(),
-        ) else {
-            continue;
-        };
-        let Some(slice) = source.get(start..end) else {
-            continue;
-        };
-        if package_module_source_quality(module, source_file.path.as_str(), slice)
-            != PackageModuleSourceQuality::Invalid
-        {
-            continue;
-        }
-        let Some(repaired_span) =
-            repaired_package_source_span(source_file.path.as_str(), source, start, end)
-        else {
-            continue;
-        };
-        module.source_span = Some(repaired_span);
-        if module_count_by_source_file
-            .get(&source_file_id)
-            .copied()
-            .unwrap_or_default()
-            == 1
-        {
-            repaired_single_module_source_files.insert(source_file_id);
-        }
-    }
-    repaired_single_module_source_files
-}
-
-fn bundle_extraction_rows(rows: &InputRows, skipped_source_file_ids: &BTreeSet<u32>) -> InputRows {
-    if skipped_source_file_ids.is_empty() {
-        return rows.clone();
-    }
-
-    let mut extraction_rows = rows.clone();
-    extraction_rows
-        .source_files
-        .retain(|source_file| !skipped_source_file_ids.contains(&source_file.id));
-    extraction_rows
-}
-
-fn module_source_repair_range(
-    module: &ModuleInput,
-    source: &str,
-    module_count_for_source: usize,
-) -> Option<(usize, usize)> {
-    if let Some(span) = module.source_span {
-        return Some((span.byte_start as usize, span.byte_end as usize));
-    }
-    (module_count_for_source == 1).then_some((0, source.len()))
-}
-
-fn repaired_package_source_span(
-    source_path: &str,
-    source: &str,
-    start: usize,
-    end: usize,
-) -> Option<SourceSpan> {
-    let (trimmed_start, trimmed_end) = trim_source_range(source, start, end)?;
-    let trimmed_source = source.get(trimmed_start..trimmed_end)?;
-    if package_source_candidate_parses(source_path, trimmed_source) {
-        return source_span_from_usize(trimmed_start, trimmed_end);
-    }
-
-    let mut best = None::<(usize, usize)>;
-    let local_source = source.get(trimmed_start..trimmed_end)?;
-    let starts = package_source_repair_starts(local_source);
-    let ends = package_source_repair_ends(local_source);
-    for local_start in starts {
-        for local_end in ends.iter().rev().copied() {
-            if local_end <= local_start {
-                continue;
-            }
-            let abs_start = trimmed_start + local_start;
-            let abs_end = trimmed_start + local_end;
-            let Some((candidate_start, candidate_end)) =
-                trim_source_range(source, abs_start, abs_end)
-            else {
-                continue;
-            };
-            if candidate_end <= candidate_start || candidate_end - candidate_start < 8 {
-                continue;
-            }
-            let Some(candidate) = source.get(candidate_start..candidate_end) else {
-                continue;
-            };
-            if !package_source_candidate_parses(source_path, candidate) {
-                continue;
-            }
-            let candidate_len = candidate_end - candidate_start;
-            let best_len = best
-                .map(|(best_start, best_end)| best_end - best_start)
-                .unwrap_or_default();
-            if candidate_len > best_len {
-                best = Some((candidate_start, candidate_end));
-            }
-            break;
-        }
-    }
-    best.and_then(|(candidate_start, candidate_end)| {
-        source_span_from_usize(candidate_start, candidate_end)
-    })
-}
-
-fn trim_source_range(source: &str, start: usize, end: usize) -> Option<(usize, usize)> {
-    let slice = source.get(start..end)?;
-    let trimmed_start = start + (slice.len() - slice.trim_start().len());
-    let trimmed_end = end - (slice.len() - slice.trim_end().len());
-    (trimmed_start < trimmed_end).then_some((trimmed_start, trimmed_end))
-}
-
-fn package_source_repair_starts(source: &str) -> Vec<usize> {
-    const START_TOKENS: &[&str] = &[
-        "export ",
-        "import ",
-        "function ",
-        "class ",
-        "const ",
-        "let ",
-        "var ",
-        "Object.",
-        "module.",
-        "exports",
-    ];
-    let mut starts = BTreeSet::from([0usize]);
-    for token in START_TOKENS {
-        for (idx, _) in source.match_indices(token) {
-            if idx <= 512 && source.is_char_boundary(idx) {
-                starts.insert(idx);
-            }
-        }
-    }
-    starts.into_iter().collect()
-}
-
-fn package_source_repair_ends(source: &str) -> Vec<usize> {
-    let mut ends = BTreeSet::from([source.len()]);
-    for (idx, ch) in source.char_indices() {
-        if matches!(ch, ';' | '}' | ')' | ']') {
-            ends.insert(idx + ch.len_utf8());
-        }
-    }
-    ends.into_iter().collect()
-}
-
-fn package_source_candidate_parses(source_path: &str, source: &str) -> bool {
-    parse_source(source, Some(Path::new(source_path)), ParseGoal::TypeScript).is_ok()
-}
-
-fn source_span_from_usize(start: usize, end: usize) -> Option<SourceSpan> {
-    Some(SourceSpan::new(
-        u32::try_from(start).ok()?,
-        u32::try_from(end).ok()?,
-    ))
 }
 
 fn package_module_source_quality_counts(
@@ -2595,9 +3235,10 @@ fn set_materialized_executable_bit(_path: &Path, _executable: bool) -> io::Resul
 fn package_source_load_scope(
     rows: &InputRows,
     requested_package_names: &[String],
+    audit: &mut AuditReport,
 ) -> BTreeSet<String> {
     if !requested_package_names.is_empty() {
-        return requested_package_names.iter().cloned().collect();
+        return package_graph_component_scope(rows, requested_package_names);
     }
 
     let mut package_names = rows
@@ -2607,8 +3248,97 @@ fn package_source_load_scope(
         .filter(|module| !has_accepted_external_attribution(rows, module.id))
         .filter_map(|module| module.package_name.clone())
         .collect::<BTreeSet<_>>();
-    package_names.extend(package_import_names_from_sources(rows));
+    match package_import_names_from_sources(rows) {
+        Ok(source_import_packages) => package_names.extend(source_import_packages),
+        Err(source) => {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::AstFactExtractionFailed,
+                    format!(
+                        "failed to parse source-backed package import sites: {}",
+                        source.source
+                    ),
+                )
+                .with_module(source.source_file_path),
+            );
+        }
+    }
     package_names
+}
+
+fn package_graph_component_scope(
+    rows: &InputRows,
+    requested_package_names: &[String],
+) -> BTreeSet<String> {
+    let requested = requested_package_names
+        .iter()
+        .map(|package_name| package_name.trim())
+        .filter(|package_name| !package_name.is_empty())
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    if requested.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let package_by_module = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .filter_map(|module| {
+            module
+                .package_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|package_name| !package_name.is_empty())
+                .map(|package_name| (module.id, package_name.to_string()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if package_by_module.is_empty() {
+        return requested;
+    }
+
+    let mut neighbors = BTreeMap::<String, BTreeSet<String>>::new();
+    for package_name in package_by_module.values() {
+        neighbors.entry(package_name.clone()).or_default();
+    }
+    for dependency in &rows.dependencies {
+        let ModuleDependencyTarget::Module(target_id) = dependency.target else {
+            continue;
+        };
+        let Some(from_package) = package_by_module.get(&dependency.from_module_id) else {
+            continue;
+        };
+        let Some(to_package) = package_by_module.get(&target_id) else {
+            continue;
+        };
+        if from_package == to_package {
+            continue;
+        }
+        neighbors
+            .entry(from_package.clone())
+            .or_default()
+            .insert(to_package.clone());
+        neighbors
+            .entry(to_package.clone())
+            .or_default()
+            .insert(from_package.clone());
+    }
+
+    let mut scope = requested.clone();
+    let mut stack = requested.into_iter().collect::<Vec<_>>();
+    while let Some(package_name) = stack.pop() {
+        for neighbor in neighbors
+            .get(package_name.as_str())
+            .into_iter()
+            .flatten()
+            .cloned()
+        {
+            if scope.insert(neighbor.clone()) {
+                stack.push(neighbor);
+            }
+        }
+    }
+    scope
 }
 
 fn load_package_sources(
@@ -2649,6 +3379,20 @@ fn load_package_sources(
         let has_export_specifier_column =
             sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
                 .map_err(MatchPackagesError::QueryPackageSources)?;
+        let current_import_policy_predicate = if has_external_import_policy_version_column
+            && has_export_specifier_column
+        {
+            format!(
+                "external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION}"
+            )
+        } else {
+            "0".to_string()
+        };
+        let cache_import_policy_predicate = if materialize_package_sources {
+            current_import_policy_predicate
+        } else {
+            "1".to_string()
+        };
         let external_importable_expr = if has_external_importable_column {
             if has_external_import_policy_version_column && has_export_specifier_column {
                 format!(
@@ -2680,6 +3424,7 @@ fn load_package_sources(
                AND TRIM(COALESCE(package_version, '')) != ''
                AND TRIM(COALESCE(entry_path, '')) != ''
                AND TRIM(COALESCE(source_content, '')) != ''
+               AND ({cache_import_policy_predicate})
             "
             )
             .as_str(),
@@ -2730,6 +3475,11 @@ fn load_package_sources(
         }
         package_sources.extend(materialized_sources);
     }
+    promote_package_sources_with_externalization_hints(
+        connection,
+        package_names,
+        &mut package_sources,
+    )?;
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
     filter_package_sources_to_relevant_path_hints(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
@@ -2746,9 +3496,14 @@ fn stale_package_source_cache_versions(
         "external_import_policy_version",
     )
     .map_err(MatchPackagesError::QueryPackageSources)?;
-    let stale_predicate = if has_external_import_policy_version_column {
+    let has_export_specifier_column =
+        sqlite_table_has_column(connection, "package_source_cache", "export_specifier")
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+    let stale_predicate = if has_external_import_policy_version_column
+        && has_export_specifier_column
+    {
         format!(
-            "external_import_policy_version != {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION}"
+            "external_import_policy_version != {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} OR TRIM(COALESCE(export_specifier, '')) = ''"
         )
     } else {
         "1".to_string()
@@ -2821,6 +3576,423 @@ fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageS
             source,
         ))
     }
+}
+
+const PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION: i64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PackageExternalizationHint {
+    package_name: String,
+    package_version: String,
+    entry_path: String,
+    export_specifier: String,
+    content_hash: Option<String>,
+    normalized_source_hash: Option<String>,
+    public_members: BTreeSet<String>,
+    proof_policy_version: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExternalizationHintCandidate {
+    package_name: String,
+    package_version: String,
+    entry_path: String,
+    source_content: String,
+    content_hash: String,
+    export_specifier: String,
+    external_importable: bool,
+}
+
+fn externalization_hint_candidates_from_cache(
+    connection: &Connection,
+    package_names: &BTreeSet<String>,
+    limit: Option<u32>,
+) -> Result<Vec<ExternalizationHintCandidate>, MatchPackagesError> {
+    for required in [
+        "external_importable",
+        "external_import_policy_version",
+        "export_specifier",
+    ] {
+        if !sqlite_table_has_column(connection, "package_source_cache", required)
+            .map_err(MatchPackagesError::QueryPackageSources)?
+        {
+            return Ok(Vec::new());
+        }
+    }
+
+    let mut sql = format!(
+        r"
+        SELECT package_name, package_version, entry_path, source_content,
+               content_hash, export_specifier, external_importable
+          FROM package_source_cache
+         WHERE TRIM(COALESCE(package_name, '')) != ''
+           AND TRIM(COALESCE(package_version, '')) != ''
+           AND TRIM(COALESCE(entry_path, '')) != ''
+           AND TRIM(COALESCE(source_content, '')) != ''
+           AND TRIM(COALESCE(content_hash, '')) != ''
+           AND TRIM(COALESCE(export_specifier, '')) != ''
+           AND external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION}
+        "
+    );
+    if !package_names.is_empty() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            sql,
+            " AND package_name IN ({})",
+            sqlite_placeholders(package_names.len())
+        );
+    }
+    sql.push_str(" ORDER BY package_name, package_version, entry_path");
+    if let Some(limit) = limit {
+        use std::fmt::Write as _;
+        let _ = write!(sql, " LIMIT {limit}");
+    }
+
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<ExternalizationHintCandidate> {
+        Ok(ExternalizationHintCandidate {
+            package_name: row.get::<_, String>(0)?.trim().to_string(),
+            package_version: row.get::<_, String>(1)?.trim().to_string(),
+            entry_path: clean_package_entry_path(row.get::<_, String>(2)?.as_str()),
+            source_content: row.get(3)?,
+            content_hash: row.get::<_, String>(4)?.trim().to_string(),
+            export_specifier: row.get::<_, String>(5)?.trim().to_string(),
+            external_importable: row.get::<_, i64>(6)? != 0,
+        })
+    };
+    if package_names.is_empty() {
+        let rows = statement
+            .query_map([], map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    } else {
+        let rows = statement
+            .query_map(params_from_iter(package_names.iter()), map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    }
+}
+
+fn promote_package_sources_with_externalization_hints(
+    connection: &Connection,
+    package_names: &BTreeSet<String>,
+    package_sources: &mut Vec<PackageSource>,
+) -> Result<usize, MatchPackagesError> {
+    let hints = load_package_externalization_hints(connection, package_names)?;
+    if hints.is_empty() || package_sources.is_empty() {
+        return Ok(0);
+    }
+    let mut promoted = Vec::new();
+    for hint in hints {
+        if hint
+            .proof_policy_version
+            .is_some_and(|version| version != PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION)
+        {
+            continue;
+        }
+        if !hint_export_specifier_matches_package(
+            hint.package_name.as_str(),
+            hint.export_specifier.as_str(),
+        ) {
+            continue;
+        }
+        if hint.content_hash.is_none()
+            && hint.normalized_source_hash.is_none()
+            && hint.public_members.is_empty()
+        {
+            continue;
+        }
+        let Some(source) = package_sources.iter().find(|source| {
+            source.package_name == hint.package_name
+                && source.package_version == hint.package_version
+                && package_source_entry_path(source) == hint.entry_path
+        }) else {
+            continue;
+        };
+        if source.external_importable {
+            continue;
+        }
+        let direct_specifier_match = source.export_specifier == hint.export_specifier;
+        if !direct_specifier_match && hint.public_members.is_empty() {
+            continue;
+        }
+        if let Some(content_hash) = hint.content_hash.as_deref()
+            && stable_hash(source.source.as_bytes()) != content_hash
+        {
+            continue;
+        }
+        if let Some(normalized_source_hash) = hint.normalized_source_hash.as_deref()
+            && package_source_normalized_hash(source.source_path.as_str(), source.source.as_str())
+                .as_deref()
+                != Some(normalized_source_hash)
+        {
+            continue;
+        }
+        if !hint.public_members.is_empty() {
+            let exported_members = package_source_exported_members(
+                source.source_path.as_str(),
+                source.source.as_str(),
+            );
+            if !hint.public_members.is_subset(&exported_members) {
+                continue;
+            }
+        }
+        promoted.push(PackageSource::external(
+            source.package_name.as_str(),
+            source.package_version.as_str(),
+            hint.export_specifier.as_str(),
+            source.source_path.as_str(),
+            source.source.as_str(),
+        ));
+    }
+    let promoted_len = promoted.len();
+    package_sources.extend(promoted);
+    Ok(promoted_len)
+}
+
+fn load_package_externalization_hints(
+    connection: &Connection,
+    package_names: &BTreeSet<String>,
+) -> Result<Vec<PackageExternalizationHint>, MatchPackagesError> {
+    if !sqlite_table_exists(connection, "package_externalization_hints")
+        .map_err(MatchPackagesError::QueryPackageSources)?
+    {
+        return Ok(Vec::new());
+    }
+    let has_content_hash =
+        sqlite_table_has_column(connection, "package_externalization_hints", "content_hash")
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_normalized_source_hash = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "normalized_source_hash",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_public_members = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "public_members_json",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_policy_version = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "proof_policy_version",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    for required in [
+        "package_name",
+        "package_version",
+        "entry_path",
+        "export_specifier",
+    ] {
+        if !sqlite_table_has_column(connection, "package_externalization_hints", required)
+            .map_err(MatchPackagesError::QueryPackageSources)?
+        {
+            return Ok(Vec::new());
+        }
+    }
+    let content_hash_expr = if has_content_hash {
+        "content_hash"
+    } else {
+        "NULL"
+    };
+    let normalized_hash_expr = if has_normalized_source_hash {
+        "normalized_source_hash"
+    } else {
+        "NULL"
+    };
+    let public_members_expr = if has_public_members {
+        "public_members_json"
+    } else {
+        "NULL"
+    };
+    let policy_version_expr = if has_policy_version {
+        "proof_policy_version"
+    } else {
+        "NULL"
+    };
+    let mut sql = format!(
+        r"
+        SELECT package_name, package_version, entry_path, export_specifier,
+               {content_hash_expr}, {normalized_hash_expr},
+               {public_members_expr}, {policy_version_expr}
+          FROM package_externalization_hints
+         WHERE TRIM(COALESCE(package_name, '')) != ''
+           AND TRIM(COALESCE(package_version, '')) != ''
+           AND TRIM(COALESCE(entry_path, '')) != ''
+           AND TRIM(COALESCE(export_specifier, '')) != ''
+        "
+    );
+    if !package_names.is_empty() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            sql,
+            " AND package_name IN ({})",
+            sqlite_placeholders(package_names.len())
+        );
+    }
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PackageExternalizationHint> {
+        let package_name = row.get::<_, String>(0)?.trim().to_string();
+        let package_version = row.get::<_, String>(1)?.trim().to_string();
+        let raw_entry_path = row.get::<_, String>(2)?;
+        Ok(PackageExternalizationHint {
+            package_name: package_name.clone(),
+            package_version: package_version.clone(),
+            entry_path: clean_package_entry_path(
+                hint_entry_path(
+                    package_name.as_str(),
+                    package_version.as_str(),
+                    raw_entry_path.as_str(),
+                )
+                .trim()
+                .trim_matches('/'),
+            ),
+            export_specifier: row.get::<_, String>(3)?.trim().to_string(),
+            content_hash: row
+                .get::<_, Option<String>>(4)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            normalized_source_hash: row
+                .get::<_, Option<String>>(5)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            public_members: parse_public_members_hint(row.get::<_, Option<String>>(6)?.as_deref()),
+            proof_policy_version: row.get::<_, Option<i64>>(7)?,
+        })
+    };
+    if package_names.is_empty() {
+        let rows = statement
+            .query_map([], map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    } else {
+        let rows = statement
+            .query_map(params_from_iter(package_names.iter()), map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    }
+}
+
+fn hint_entry_path<'a>(package_name: &str, package_version: &str, entry_path: &'a str) -> &'a str {
+    let clean = entry_path.trim();
+    clean
+        .strip_prefix(format!("{package_name}@{package_version}/").as_str())
+        .unwrap_or(clean)
+}
+
+fn parse_public_members_hint(value: Option<&str>) -> BTreeSet<String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return BTreeSet::new();
+    };
+    serde_json::from_str::<Vec<String>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|member| member.trim().to_string())
+        .filter(|member| !member.is_empty())
+        .collect()
+}
+
+fn persist_package_externalization_hints(
+    connection: &mut Connection,
+    hints: &[PackageExternalizationHint],
+) -> Result<usize, MatchPackagesError> {
+    ensure_package_externalization_hints_table(connection)?;
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
+    let mut written = 0usize;
+    for hint in hints {
+        let public_members_json = serde_json::to_string(
+            &hint.public_members.iter().collect::<Vec<_>>(),
+        )
+        .map_err(|source| {
+            MatchPackagesError::WritePackageExternalizationHints(
+                rusqlite::Error::ToSqlConversionFailure(Box::new(source)),
+            )
+        })?;
+        written += transaction
+            .execute(
+                r"
+                INSERT INTO package_externalization_hints
+                    (package_name, package_version, entry_path, export_specifier,
+                     content_hash, normalized_source_hash, public_members_json,
+                     proof_policy_version, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
+                ON CONFLICT(package_name, package_version, entry_path, export_specifier)
+                DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    normalized_source_hash = excluded.normalized_source_hash,
+                    public_members_json = excluded.public_members_json,
+                    proof_policy_version = excluded.proof_policy_version,
+                    updated_at = datetime('now')
+                ",
+                params![
+                    hint.package_name.as_str(),
+                    hint.package_version.as_str(),
+                    hint.entry_path.as_str(),
+                    hint.export_specifier.as_str(),
+                    hint.content_hash.as_deref(),
+                    hint.normalized_source_hash.as_deref(),
+                    public_members_json.as_str(),
+                    hint.proof_policy_version
+                        .unwrap_or(PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION),
+                ],
+            )
+            .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
+    Ok(written)
+}
+
+fn ensure_package_externalization_hints_table(
+    connection: &Connection,
+) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(PACKAGE_EXTERNALIZATION_HINTS_CREATE_SQL)
+        .map_err(MatchPackagesError::WritePackageExternalizationHints)
+}
+
+const PACKAGE_EXTERNALIZATION_HINTS_CREATE_SQL: &str = r"
+CREATE TABLE IF NOT EXISTS package_externalization_hints (
+    package_name TEXT NOT NULL,
+    package_version TEXT NOT NULL,
+    entry_path TEXT NOT NULL,
+    export_specifier TEXT NOT NULL,
+    content_hash TEXT,
+    normalized_source_hash TEXT,
+    public_members_json TEXT NOT NULL DEFAULT '[]',
+    proof_policy_version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (package_name, package_version, entry_path, export_specifier),
+    CHECK (TRIM(package_name) != ''),
+    CHECK (TRIM(package_version) != ''),
+    CHECK (TRIM(entry_path) != ''),
+    CHECK (TRIM(export_specifier) != ''),
+    CHECK (content_hash IS NULL OR TRIM(content_hash) != ''),
+    CHECK (normalized_source_hash IS NULL OR TRIM(normalized_source_hash) != ''),
+    CHECK (
+        content_hash IS NOT NULL
+        OR normalized_source_hash IS NOT NULL
+        OR TRIM(public_members_json) NOT IN ('', '[]')
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_package_externalization_hints_package
+    ON package_externalization_hints(package_name, package_version);
+";
+
+fn hint_export_specifier_matches_package(package_name: &str, export_specifier: &str) -> bool {
+    split_bare_specifier(export_specifier).is_some_and(|(specifier_package, _subpath)| {
+        specifier_package == package_name && !is_node_builtin(specifier_package.as_str())
+    })
 }
 
 fn filter_package_sources_to_referenced_package_versions(
@@ -3159,8 +4331,8 @@ impl PackageVersionResolutionPlan {
         rows: &InputRows,
         package_names: &BTreeSet<String>,
         existing_sources: &[PackageSource],
-    ) -> Self {
-        let available_versions = exact_package_source_versions_by_package(existing_sources);
+    ) -> Result<Self, MatchPackagesError> {
+        let available_versions = exact_package_source_versions_by_package(existing_sources)?;
         let project_exact_versions = exact_project_version_counts_by_package(rows, package_names);
         let source_identity_versions = source_identity_versions_by_module(
             rows,
@@ -3168,12 +4340,12 @@ impl PackageVersionResolutionPlan {
             package_names,
             &available_versions,
             &project_exact_versions,
-        );
-        Self {
+        )?;
+        Ok(Self {
             available_versions,
             project_exact_versions,
             source_identity_versions,
-        }
+        })
     }
 
     fn materialization_hints(
@@ -3333,9 +4505,6 @@ impl PackageVersionResolutionPlan {
                 Version::parse(requested_version)
                     .ok()
                     .filter(|version| versions.contains(version))
-                    .or_else(|| {
-                        nearest_package_version_by_binary_search(requested_version, versions)
-                    })
             } else {
                 self.best_project_version_candidate(package_name, requested_version, Some(versions))
                     .or_else(|| {
@@ -3372,34 +4541,19 @@ impl PackageVersionResolutionPlan {
             };
             let source_identity_version = self.source_identity_versions.get(&module.id).cloned();
             let selected = match requested_version {
-                Some(package_version) if is_exact_package_version_hint(package_version) => {
-                    if package_source_versions_contain(
-                        &self.available_versions,
-                        package_name.as_str(),
-                        package_version,
-                    ) {
-                        None
-                    } else {
-                        source_identity_version.or_else(|| {
-                            nearest_package_version_by_binary_search(package_version, versions)
-                        })
-                    }
-                }
+                Some(package_version) if is_exact_package_version_hint(package_version) => None,
                 Some(package_version) => self
                     .best_project_version_candidate(
                         package_name.as_str(),
                         package_version,
                         Some(versions),
                     )
-                    .or(source_identity_version)
                     .or_else(|| {
-                        best_matching_package_version_by_binary_search(package_version, versions)
+                        source_identity_version
+                            .filter(|version| version_hint_matches(package_version, version))
                     })
                     .or_else(|| {
-                        self.best_project_exact_version_candidate(
-                            package_name.as_str(),
-                            Some(versions),
-                        )
+                        best_matching_package_version_by_binary_search(package_version, versions)
                     }),
                 None => source_identity_version
                     .or_else(|| {
@@ -3433,18 +4587,6 @@ impl PackageVersionResolutionPlan {
         )
     }
 
-    fn best_project_exact_version_candidate(
-        &self,
-        package_name: &str,
-        available_versions: Option<&BTreeSet<Version>>,
-    ) -> Option<Version> {
-        best_project_exact_version_candidate(
-            package_name,
-            &self.project_exact_versions,
-            available_versions,
-        )
-    }
-
     fn package_source_versions_contain(
         &self,
         package_name: &str,
@@ -3473,7 +4615,7 @@ fn materialize_package_sources_from_hints(
     existing_sources: &[PackageSource],
     stale_cache_versions: &BTreeSet<(String, String)>,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
-    let plan = PackageVersionResolutionPlan::build(rows, package_names, existing_sources);
+    let plan = PackageVersionResolutionPlan::build(rows, package_names, existing_sources)?;
     let mut hints = plan.materialization_hints(rows, package_names);
     hints.extend(plan.stale_cache_materialization_hints(rows, package_names, stale_cache_versions));
     for (package_name, requested_version) in plan.network_resolution_hints(rows, package_names) {
@@ -3485,18 +4627,9 @@ fn materialize_package_sources_from_hints(
                 hints.insert((package_name, resolved_version));
             }
             Ok(None) => {
-                if let Some(resolved_version) =
-                    plan.best_project_exact_version_candidate(package_name.as_str(), None)
-                {
-                    eprintln!(
-                        "falling back to project exact package version for {package_name}@{requested_version}: {resolved_version}"
-                    );
-                    hints.insert((package_name, resolved_version.to_string()));
-                } else {
-                    eprintln!(
-                        "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
-                    );
-                }
+                eprintln!(
+                    "skipping package source materialization for {package_name}@{requested_version}: no matching npm version"
+                );
             }
             Err(error) => {
                 eprintln!(
@@ -3530,7 +4663,7 @@ fn materialize_package_sources_from_hints(
             }
         })?;
 
-        let result = materialize_one_package_source_with_nearest_fallback(
+        let result = materialize_one_package_source(
             temp_root.as_path(),
             package_name.as_str(),
             package_version.as_str(),
@@ -3552,57 +4685,6 @@ fn materialize_package_sources_from_hints(
     Ok(sources)
 }
 
-fn materialize_one_package_source_with_nearest_fallback(
-    temp_root: &Path,
-    package_name: &str,
-    package_version: &str,
-    sources: &mut Vec<PackageSource>,
-) -> Result<(), MatchPackagesError> {
-    let source_len_before = sources.len();
-    match materialize_one_package_source(temp_root, package_name, package_version, sources) {
-        Ok(()) => Ok(()),
-        Err(primary_error) => {
-            sources.truncate(source_len_before);
-            if !is_exact_package_version_hint(package_version) {
-                return Err(primary_error);
-            }
-            let Some(nearest_version) =
-                nearest_package_version_hint_from_network(package_name, package_version)?
-            else {
-                return Err(primary_error);
-            };
-            if nearest_version == package_version {
-                return Err(primary_error);
-            }
-            reset_package_materialization_root(temp_root)?;
-            eprintln!(
-                "falling back to nearest available package source for {package_name}@{package_version}: {nearest_version}"
-            );
-            materialize_one_package_source(
-                temp_root,
-                package_name,
-                nearest_version.as_str(),
-                sources,
-            )
-        }
-    }
-}
-
-fn reset_package_materialization_root(temp_root: &Path) -> Result<(), MatchPackagesError> {
-    if temp_root.exists() {
-        fs::remove_dir_all(temp_root).map_err(|source| {
-            MatchPackagesError::ReadPackageSourceRoot {
-                path: temp_root.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-    fs::create_dir_all(temp_root).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
-        path: temp_root.to_path_buf(),
-        source,
-    })
-}
-
 #[cfg(test)]
 fn stale_cache_version_hints_for_materialization(
     rows: &InputRows,
@@ -3611,6 +4693,7 @@ fn stale_cache_version_hints_for_materialization(
     stale_cache_versions: &BTreeSet<(String, String)>,
 ) -> BTreeSet<(String, String)> {
     PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .expect("package version resolution plan should build")
         .stale_cache_materialization_hints(rows, package_names, stale_cache_versions)
 }
 
@@ -3621,7 +4704,8 @@ fn materialize_one_package_source(
     sources: &mut Vec<PackageSource>,
 ) -> Result<(), MatchPackagesError> {
     let package_spec = format!("{package_name}@{package_version}");
-    let output = Command::new("npm")
+    let mut command = Command::new("npm");
+    command
         .arg("install")
         .arg(package_spec.as_str())
         .arg("--prefix")
@@ -3629,12 +4713,14 @@ fn materialize_one_package_source(
         .arg("--ignore-scripts")
         .arg("--package-lock=false")
         .arg("--no-audit")
-        .arg("--no-fund")
-        .output()
-        .map_err(|source| MatchPackagesError::MaterializePackageSource {
-            package_name: package_name.to_string(),
-            package_version: package_version.to_string(),
-            message: format!("failed to run npm install: {source}"),
+        .arg("--no-fund");
+    let output =
+        run_command_with_timeout(&mut command, npm_install_timeout()).map_err(|message| {
+            MatchPackagesError::MaterializePackageSource {
+                package_name: package_name.to_string(),
+                package_version: package_version.to_string(),
+                message,
+            }
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -3669,6 +4755,46 @@ fn materialize_one_package_source(
     Ok(())
 }
 
+fn npm_install_timeout() -> Duration {
+    std::env::var("REVERTS_NPM_INSTALL_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(120))
+}
+
+fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| format!("failed to run command: {source}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|source| format!("failed to collect command output: {source}"));
+            }
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("command timed out after {}s", timeout.as_secs()));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(source) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to wait for command: {source}"));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 fn package_version_hints_for_materialization(
     rows: &InputRows,
@@ -3676,6 +4802,7 @@ fn package_version_hints_for_materialization(
     existing_sources: &[PackageSource],
 ) -> BTreeSet<(String, String)> {
     PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .expect("package version resolution plan should build")
         .materialization_hints(rows, package_names)
 }
 
@@ -3686,6 +4813,7 @@ fn network_package_version_resolution_hints(
     existing_sources: &[PackageSource],
 ) -> BTreeSet<(String, String)> {
     PackageVersionResolutionPlan::build(rows, package_names, existing_sources)
+        .expect("package version resolution plan should build")
         .network_resolution_hints(rows, package_names)
 }
 
@@ -3693,9 +4821,9 @@ fn resolve_package_version_hints_to_available_sources(
     rows: &mut InputRows,
     package_sources: &[PackageSource],
     package_names: &BTreeSet<String>,
-) -> usize {
-    let plan = PackageVersionResolutionPlan::build(rows, package_names, package_sources);
-    plan.apply_to_rows(rows, package_names)
+) -> Result<usize, MatchPackagesError> {
+    let plan = PackageVersionResolutionPlan::build(rows, package_names, package_sources)?;
+    Ok(plan.apply_to_rows(rows, package_names))
 }
 
 fn source_identity_versions_by_module(
@@ -3704,46 +4832,62 @@ fn source_identity_versions_by_module(
     package_names: &BTreeSet<String>,
     available_versions: &BTreeMap<String, BTreeSet<Version>>,
     project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
-) -> BTreeMap<ModuleId, Version> {
-    let index = PackageSourceIdentityIndex::build(package_sources);
+) -> Result<BTreeMap<ModuleId, Version>, MatchPackagesError> {
+    let index = PackageSourceIdentityIndex::build(package_sources)?;
     if index.is_empty() {
-        return BTreeMap::new();
+        return Ok(BTreeMap::new());
     }
-    rows.modules
+    let mut versions_by_module = BTreeMap::<ModuleId, Version>::new();
+    for module in rows
+        .modules
         .iter()
         .filter(|module| module.kind == ModuleKind::Package)
-        .filter_map(|module| {
-            let package_name = module.package_name.as_deref()?.trim();
-            if package_name.is_empty()
-                || !is_valid_package_name(package_name)
-                || (!package_names.is_empty() && !package_names.contains(package_name))
-                || !index.contains_package(package_name)
-            {
-                return None;
-            }
-            let versions = available_versions.get(package_name)?;
-            if !module_needs_source_identity_version(
-                module,
-                package_name,
-                versions,
-                available_versions,
-                project_exact_versions,
-            ) {
-                return None;
-            }
-            let slice = rows.module_source_slice(module.id)?;
-            index
-                .best_version_for_source(package_name, slice.source_file_path, slice.source)
-                .map(|version| (module.id, version))
-        })
-        .collect()
+    {
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        if package_name.is_empty()
+            || !is_valid_package_name(package_name)
+            || (!package_names.is_empty() && !package_names.contains(package_name))
+            || !index.contains_package(package_name)
+        {
+            continue;
+        }
+        let Some(versions) = available_versions.get(package_name) else {
+            continue;
+        };
+        if !module_needs_source_identity_version(
+            module,
+            package_name,
+            versions,
+            project_exact_versions,
+        ) {
+            continue;
+        }
+        let Some(slice) = rows.module_source_slice(module.id) else {
+            continue;
+        };
+        if package_module_source_quality(module, slice.source_file_path, slice.source)
+            == PackageModuleSourceQuality::Invalid
+        {
+            continue;
+        }
+        if let Some(version) = index.best_version_for_source(
+            package_name,
+            module.package_version.as_deref().map(str::trim),
+            slice.source_file_path,
+            slice.source,
+        )? {
+            versions_by_module.insert(module.id, version);
+        }
+    }
+    Ok(versions_by_module)
 }
 
 fn module_needs_source_identity_version(
     module: &ModuleInput,
     package_name: &str,
     versions: &BTreeSet<Version>,
-    available_versions: &BTreeMap<String, BTreeSet<Version>>,
     project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
 ) -> bool {
     let requested_version = module
@@ -3752,9 +4896,7 @@ fn module_needs_source_identity_version(
         .map(str::trim)
         .filter(|version| !version.is_empty());
     match requested_version {
-        Some(package_version) if is_exact_package_version_hint(package_version) => {
-            !package_source_versions_contain(available_versions, package_name, package_version)
-        }
+        Some(package_version) if is_exact_package_version_hint(package_version) => false,
         Some(package_version) => best_project_version_candidate(
             package_name,
             package_version,
@@ -3772,20 +4914,23 @@ struct PackageSourceIdentityIndex {
 }
 
 impl PackageSourceIdentityIndex {
-    fn build(package_sources: &[PackageSource]) -> Self {
+    fn build(package_sources: &[PackageSource]) -> Result<Self, MatchPackagesError> {
         let mut versions_by_package_hash =
             BTreeMap::<String, BTreeMap<String, BTreeMap<Version, usize>>>::new();
         for package_source in package_sources {
-            let Ok(package_version) = Version::parse(package_source.package_version.as_str())
-            else {
-                continue;
-            };
-            let Ok(normalized) = normalize_source_for_pipeline(
+            let package_version = package_source_version(package_source)?;
+            let normalized = normalize_source_for_pipeline(
                 package_source.source.as_str(),
                 Some(Path::new(package_source.source_path.as_str())),
-            ) else {
-                continue;
-            };
+            )
+            .map_err(|source| {
+                package_source_normalization_error(
+                    package_source.package_name.as_str(),
+                    Some(package_source.package_version.as_str()),
+                    package_source.source_path.as_str(),
+                    source,
+                )
+            })?;
             let normalized_source_hash = stable_hash(normalized.as_bytes());
             *versions_by_package_hash
                 .entry(package_source.package_name.clone())
@@ -3795,9 +4940,9 @@ impl PackageSourceIdentityIndex {
                 .entry(package_version)
                 .or_default() += 1;
         }
-        Self {
+        Ok(Self {
             versions_by_package_hash,
-        }
+        })
     }
 
     fn is_empty(&self) -> bool {
@@ -3811,35 +4956,72 @@ impl PackageSourceIdentityIndex {
     fn best_version_for_source(
         &self,
         package_name: &str,
+        package_version: Option<&str>,
         source_file_path: &str,
         source: &str,
-    ) -> Option<Version> {
+    ) -> Result<Option<Version>, MatchPackagesError> {
         let normalized =
-            normalize_source_for_pipeline(source, Some(Path::new(source_file_path))).ok()?;
+            match normalize_source_for_pipeline(source, Some(Path::new(source_file_path))) {
+                Ok(normalized) => normalized,
+                Err(source) => {
+                    return Err(package_source_normalization_error(
+                        package_name,
+                        package_version,
+                        source_file_path,
+                        source,
+                    ));
+                }
+            };
         let normalized_source_hash = stable_hash(normalized.as_bytes());
-        self.versions_by_package_hash
-            .get(package_name)?
-            .get(normalized_source_hash.as_str())?
+        let Some(versions_by_hash) = self.versions_by_package_hash.get(package_name) else {
+            return Ok(None);
+        };
+        let Some(versions) = versions_by_hash.get(normalized_source_hash.as_str()) else {
+            return Ok(None);
+        };
+        Ok(versions
             .iter()
             .max_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
-            .map(|(version, _count)| version.clone())
+            .map(|(version, _count)| version.clone()))
+    }
+}
+
+fn package_source_normalization_error(
+    package_name: &str,
+    package_version: Option<&str>,
+    source_path: &str,
+    source: reverts_js::JsError,
+) -> MatchPackagesError {
+    MatchPackagesError::NormalizePackageSource {
+        package_name: package_name.to_string(),
+        package_version: package_version.map(str::to_string),
+        source_path: source_path.to_string(),
+        source,
     }
 }
 
 fn exact_package_source_versions_by_package(
     package_sources: &[PackageSource],
-) -> BTreeMap<String, BTreeSet<Version>> {
+) -> Result<BTreeMap<String, BTreeSet<Version>>, MatchPackagesError> {
     let mut versions = BTreeMap::<String, BTreeSet<Version>>::new();
     for source in package_sources {
-        let Ok(version) = Version::parse(source.package_version.as_str()) else {
-            continue;
-        };
+        let version = package_source_version(source)?;
         versions
             .entry(source.package_name.clone())
             .or_default()
             .insert(version);
     }
-    versions
+    Ok(versions)
+}
+
+fn package_source_version(source: &PackageSource) -> Result<Version, MatchPackagesError> {
+    Version::parse(source.package_version.as_str()).map_err(|_| {
+        MatchPackagesError::InvalidPackageSourceVersion {
+            package_name: source.package_name.clone(),
+            package_version: source.package_version.clone(),
+            source_path: source.source_path.clone(),
+        }
+    })
 }
 
 fn exact_project_version_counts_by_package(
@@ -3914,35 +5096,6 @@ fn best_project_version_candidate(
         .next()
 }
 
-fn best_project_exact_version_candidate(
-    package_name: &str,
-    project_exact_versions: &BTreeMap<String, BTreeMap<Version, usize>>,
-    available_versions: Option<&BTreeSet<Version>>,
-) -> Option<Version> {
-    let versions = project_exact_versions.get(package_name)?;
-    let mut candidates = versions
-        .iter()
-        .filter(|(version, _count)| {
-            available_versions.is_none_or(|available| available.contains(version))
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by(|left, right| {
-        left.1
-            .cmp(right.1)
-            .then_with(|| left.0.cmp(right.0))
-            .reverse()
-    });
-    let (selected, selected_count) = candidates.first()?;
-    let selected_count = **selected_count;
-    if candidates
-        .get(1)
-        .is_some_and(|(_version, count)| **count == selected_count)
-    {
-        return None;
-    }
-    Some((*selected).clone())
-}
-
 fn version_hint_matches(requested_version: &str, version: &Version) -> bool {
     let requested_version = requested_version.trim();
     if requested_version.eq_ignore_ascii_case("latest") {
@@ -3977,23 +5130,6 @@ fn best_matching_package_version_by_binary_search(
         .rev()
         .find(|version| requirement.matches(version))
         .cloned()
-}
-
-fn nearest_package_version_by_binary_search(
-    requested_version: &str,
-    versions: &BTreeSet<Version>,
-) -> Option<Version> {
-    if versions.is_empty() {
-        return None;
-    }
-    let requested = Version::parse(requested_version.trim()).ok()?;
-    let sorted_versions = versions.iter().cloned().collect::<Vec<_>>();
-    let insertion_point = sorted_versions.partition_point(|version| version <= &requested);
-    if insertion_point > 0 {
-        sorted_versions.get(insertion_point - 1).cloned()
-    } else {
-        sorted_versions.first().cloned()
-    }
 }
 
 fn version_req_upper_bound(requirement: &VersionReq) -> Option<(Version, bool)> {
@@ -4083,22 +5219,7 @@ fn resolve_package_version_hint_from_versions(
     requested_version: &str,
     versions: &BTreeSet<Version>,
 ) -> Option<Version> {
-    best_matching_package_version_by_binary_search(requested_version, versions).or_else(|| {
-        is_exact_package_version_hint(requested_version)
-            .then(|| nearest_package_version_by_binary_search(requested_version, versions))
-            .flatten()
-    })
-}
-
-fn nearest_package_version_hint_from_network(
-    package_name: &str,
-    requested_version: &str,
-) -> Result<Option<String>, MatchPackagesError> {
-    let versions = npm_package_versions(package_name, requested_version)?;
-    Ok(
-        nearest_package_version_by_binary_search(requested_version, &versions)
-            .map(|version| version.to_string()),
-    )
+    best_matching_package_version_by_binary_search(requested_version, versions)
 }
 
 fn npm_package_versions(
@@ -4145,19 +5266,49 @@ fn parse_npm_versions_json(
     match value {
         serde_json::Value::Array(items) => {
             for item in items {
-                if let Some(version) = item.as_str().and_then(|value| Version::parse(value).ok()) {
-                    versions.insert(version);
-                }
+                let Some(version_text) = item.as_str() else {
+                    return Err(MatchPackagesError::MaterializePackageSource {
+                        package_name: package_name.to_string(),
+                        package_version: requested_version.to_string(),
+                        message: "npm versions JSON contained a non-string version entry"
+                            .to_string(),
+                    });
+                };
+                versions.insert(parse_npm_version_entry(
+                    package_name,
+                    requested_version,
+                    version_text,
+                )?);
             }
         }
         serde_json::Value::String(version) => {
-            if let Ok(version) = Version::parse(version.as_str()) {
-                versions.insert(version);
-            }
+            versions.insert(parse_npm_version_entry(
+                package_name,
+                requested_version,
+                version.as_str(),
+            )?);
         }
-        _ => {}
+        _ => {
+            return Err(MatchPackagesError::MaterializePackageSource {
+                package_name: package_name.to_string(),
+                package_version: requested_version.to_string(),
+                message: "npm versions JSON must be a string or an array of strings".to_string(),
+            });
+        }
     }
     Ok(versions)
+}
+
+fn parse_npm_version_entry(
+    package_name: &str,
+    requested_version: &str,
+    version: &str,
+) -> Result<Version, MatchPackagesError> {
+    Version::parse(version).map_err(|source| MatchPackagesError::MaterializePackageSource {
+        package_name: package_name.to_string(),
+        package_version: requested_version.to_string(),
+        message: format!("npm versions JSON contained invalid semver {version}: {source}"),
+    })
 }
 
 fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<PathBuf> {
@@ -4314,9 +5465,12 @@ fn local_package_metadata(
             source,
         }
     })?;
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(content.as_str()) else {
-        return Ok(None);
-    };
+    let value = serde_json::from_str::<serde_json::Value>(content.as_str()).map_err(|source| {
+        MatchPackagesError::InvalidPackageMetadata {
+            path: package_json_path.clone(),
+            source,
+        }
+    })?;
     let Some(package_name) = value.get("name").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };
@@ -5001,10 +6155,11 @@ fn package_source_body_semantic_hint_score(source: &str, hint: &str) -> usize {
         return 0;
     }
     let source_normalized = normalize_hint_text(source);
-    source_normalized
-        .contains(hint_last_normalized.as_str())
-        .then_some(2)
-        .unwrap_or(0)
+    if source_normalized.contains(hint_last_normalized.as_str()) {
+        2
+    } else {
+        0
+    }
 }
 
 fn package_path_hints_by_version(rows: &InputRows) -> BTreeMap<(String, String), BTreeSet<String>> {
@@ -5247,16 +6402,13 @@ fn package_version_resolution_reason(
     let Some(requested_version) = requested_version else {
         return "missing_hint_resolved_to_available_source";
     };
-    if is_exact_package_version_hint(requested_version) {
-        return "unavailable_exact_resolved_to_nearest_or_source_identity";
-    }
     if Version::parse(resolved_version)
         .ok()
         .is_some_and(|version| version_hint_matches(requested_version, &version))
     {
         "range_resolved_to_available_source"
     } else {
-        "impossible_or_inconsistent_range_resolved_to_project_exact_source"
+        "non_matching_version_resolution"
     }
 }
 
@@ -5280,6 +6432,7 @@ fn persist_package_attributions(
         .iter()
         .map(|module_match| (module_match.module_id, module_match))
         .collect::<BTreeMap<_, _>>();
+    let chain_proofs = externalization_chain_proofs(rows, report);
     let diagnostics_context = PackageDiagnosticsContext::new(rows, report);
     let modules_by_id = rows
         .modules
@@ -5308,6 +6461,7 @@ fn persist_package_attributions(
             attribution,
             module_match,
             version_resolutions.get(&attribution.module_id),
+            chain_proofs.get(&attribution.module_id),
         )?;
         written += 1;
     }
@@ -5563,10 +6717,20 @@ fn rejected_package_attributions_for_unaccepted_modules(
             continue;
         }
 
-        let source_only_match = report.matches.iter().find(|package_match| {
-            package_match.module_id == module.id && !package_match.external_importable
-        });
-        let reason = source_only_match
+        let match_evidence = report
+            .matches
+            .iter()
+            .find(|package_match| package_match.module_id == module.id);
+        let external_import_match =
+            match_evidence.filter(|package_match| package_match.external_importable);
+        let source_only_match =
+            match_evidence.filter(|package_match| !package_match.external_importable);
+        let reason = external_import_match
+            .map(|_| {
+                "matched package external import, but at least one non-externalized consumer still depends on this module"
+            })
+            .or_else(|| {
+                source_only_match
             .filter(|package_match| {
                 matches!(
                     package_match.strategy,
@@ -5581,6 +6745,7 @@ fn rejected_package_attributions_for_unaccepted_modules(
             .map(|_| {
                 "matched package ownership, but the evidence does not prove a safe single external import"
             })
+            })
             .or_else(|| {
                 package_source_quality_rejection_reason(
                     rows,
@@ -5594,8 +6759,12 @@ fn rejected_package_attributions_for_unaccepted_modules(
             .unwrap_or("package matcher did not produce an accepted attribution for this package");
         let mut attribution =
             PackageAttributionInput::rejected_source(module.id, package_name, reason);
-        if let Some(package_match) = source_only_match {
+        if let Some(package_match) = match_evidence {
             attribution.package_version = Some(package_match.package_version.clone());
+            if package_match.external_importable {
+                attribution.export_specifier = Some(package_match.export_specifier.clone());
+                attribution.resolved_file = Some(package_match.source_path.clone());
+            }
         }
         rejected.push(attribution);
     }
@@ -5605,13 +6774,14 @@ fn rejected_package_attributions_for_unaccepted_modules(
 fn filter_unsafe_interpackage_external_attributions(
     rows: &InputRows,
     report: &mut VersionedPackageMatchReport,
-) -> usize {
+) -> ExternalImportSafetyReport {
     let modules_by_id = rows
         .modules
         .iter()
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
-    let incoming_dependencies = incoming_dependency_index(rows);
+    let (outgoing_dependencies, incoming_dependencies) = dependency_indexes(rows);
+    let ownership_proven_modules = package_ownership_proven_modules(rows, report, &modules_by_id);
     let report_external_modules = report
         .attributions
         .iter()
@@ -5619,7 +6789,7 @@ fn filter_unsafe_interpackage_external_attributions(
         .map(|attribution| attribution.module_id)
         .collect::<BTreeSet<_>>();
     if report_external_modules.is_empty() {
-        return 0;
+        return ExternalImportSafetyReport::default();
     }
     let mut accepted_external_modules = rows
         .package_attributions
@@ -5632,6 +6802,19 @@ fn filter_unsafe_interpackage_external_attributions(
 
     loop {
         let mut changed = false;
+        let source_suppressed_closure = external_import_source_suppressed_package_closure(
+            &accepted_external_modules,
+            &ownership_proven_modules,
+            &modules_by_id,
+            &outgoing_dependencies,
+            &incoming_dependencies,
+        );
+        let source_boundary_modules = external_import_source_boundary_modules(
+            &accepted_external_modules,
+            &source_suppressed_closure,
+            &modules_by_id,
+            &incoming_dependencies,
+        );
         for module_id in &report_external_modules {
             if rejected.contains(module_id) {
                 continue;
@@ -5639,6 +6822,8 @@ fn filter_unsafe_interpackage_external_attributions(
             if external_attribution_has_unexternalized_consumer(
                 *module_id,
                 &accepted_external_modules,
+                &source_suppressed_closure,
+                &source_boundary_modules,
                 &modules_by_id,
                 &incoming_dependencies,
             ) {
@@ -5653,13 +6838,172 @@ fn filter_unsafe_interpackage_external_attributions(
     }
 
     if rejected.is_empty() {
-        return 0;
+        return ExternalImportSafetyReport::default();
     }
+    let source_suppressed_closure = external_import_source_suppressed_package_closure(
+        &accepted_external_modules,
+        &ownership_proven_modules,
+        &modules_by_id,
+        &outgoing_dependencies,
+        &incoming_dependencies,
+    );
+    let blockers = external_import_blocker_summaries(
+        &rejected,
+        &accepted_external_modules,
+        &source_suppressed_closure,
+        &external_import_source_boundary_modules(
+            &accepted_external_modules,
+            &source_suppressed_closure,
+            &modules_by_id,
+            &incoming_dependencies,
+        ),
+        &ownership_proven_modules,
+        &modules_by_id,
+        &incoming_dependencies,
+    );
     let before = report.attributions.len();
     report
         .attributions
         .retain(|attribution| !rejected.contains(&attribution.module_id));
-    before.saturating_sub(report.attributions.len())
+    ExternalImportSafetyReport {
+        removed_modules: before.saturating_sub(report.attributions.len()),
+        blockers,
+    }
+}
+
+#[cfg(test)]
+fn source_suppressed_package_modules_for_report(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> usize {
+    let loaded_package_modules = rows
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+        .count();
+    package_source_elimination_stats_for_report(rows, report, loaded_package_modules)
+        .source_eliminated_package_modules
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PackageSourceEliminationStats {
+    direct_external_import_modules: usize,
+    private_source_suppressed_package_modules: usize,
+    source_eliminated_package_modules: usize,
+    remaining_package_source_modules: usize,
+}
+
+fn package_source_elimination_stats_for_report(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+    loaded_package_modules: usize,
+) -> PackageSourceEliminationStats {
+    let accepted_external_modules = rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    if accepted_external_modules.is_empty() {
+        return PackageSourceEliminationStats {
+            remaining_package_source_modules: loaded_package_modules,
+            ..PackageSourceEliminationStats::default()
+        };
+    }
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let (outgoing_dependencies, incoming_dependencies) = dependency_indexes(rows);
+    let ownership_proven_modules = package_ownership_proven_modules(rows, report, &modules_by_id);
+    let source_eliminated_modules = external_import_source_suppressed_package_closure(
+        &accepted_external_modules,
+        &ownership_proven_modules,
+        &modules_by_id,
+        &outgoing_dependencies,
+        &incoming_dependencies,
+    );
+    let direct_external_import_modules = accepted_external_modules
+        .iter()
+        .filter(|module_id| {
+            modules_by_id
+                .get(module_id)
+                .is_some_and(|module| module.kind == ModuleKind::Package)
+        })
+        .count();
+    let source_eliminated_package_modules = source_eliminated_modules.len();
+    PackageSourceEliminationStats {
+        direct_external_import_modules,
+        private_source_suppressed_package_modules: source_eliminated_package_modules
+            .saturating_sub(direct_external_import_modules),
+        source_eliminated_package_modules,
+        remaining_package_source_modules: loaded_package_modules
+            .saturating_sub(source_eliminated_package_modules),
+    }
+}
+
+fn package_ownership_proven_modules(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+) -> BTreeSet<ModuleId> {
+    let mut proven = BTreeSet::new();
+    for attribution in &rows.package_attributions {
+        if let Some(module) = modules_by_id.get(&attribution.module_id).copied()
+            && package_attribution_proves_module_ownership(attribution, module)
+        {
+            proven.insert(attribution.module_id);
+        }
+    }
+    for package_match in &report.matches {
+        if let Some(module) = modules_by_id.get(&package_match.module_id).copied()
+            && package_match_proves_module_ownership(package_match, module)
+        {
+            proven.insert(package_match.module_id);
+        }
+    }
+    proven
+}
+
+fn package_attribution_proves_module_ownership(
+    attribution: &PackageAttributionInput,
+    module: &ModuleInput,
+) -> bool {
+    if module.kind != ModuleKind::Package
+        || module.package_name.as_deref() != Some(attribution.package_name.as_str())
+    {
+        return false;
+    }
+    if let Some(attribution_version) = attribution.package_version.as_deref()
+        && module
+            .package_version
+            .as_deref()
+            .is_some_and(|module_version| {
+                !module_version.trim().is_empty() && module_version != attribution_version
+            })
+    {
+        return false;
+    }
+    is_accepted_external_attribution(attribution)
+        || (attribution.status == PackageAttributionStatus::Rejected
+            && attribution.emission_mode == PackageEmissionMode::ApplicationSource
+            && attribution.package_version.is_some())
+}
+
+fn package_match_proves_module_ownership(
+    package_match: &PackageMatch,
+    module: &ModuleInput,
+) -> bool {
+    module.kind == ModuleKind::Package
+        && module.package_name.as_deref() == Some(package_match.package_name.as_str())
+        && module
+            .package_version
+            .as_deref()
+            .is_none_or(|module_version| {
+                module_version.trim().is_empty() || module_version == package_match.package_version
+            })
 }
 
 fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bool {
@@ -5667,35 +7011,406 @@ fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bo
         && attribution.emission_mode == PackageEmissionMode::ExternalImport
 }
 
-fn incoming_dependency_index(rows: &InputRows) -> BTreeMap<ModuleId, Vec<ModuleId>> {
-    let mut incoming = BTreeMap::<ModuleId, Vec<ModuleId>>::new();
-    for dependency in &rows.dependencies {
-        let ModuleDependencyTarget::Module(target) = dependency.target else {
+fn external_import_blocker_summaries(
+    rejected: &BTreeSet<ModuleId>,
+    accepted_external_modules: &BTreeSet<ModuleId>,
+    source_suppressed_closure: &BTreeSet<ModuleId>,
+    source_boundary_modules: &BTreeSet<ModuleId>,
+    ownership_proven_modules: &BTreeSet<ModuleId>,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    incoming_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+) -> Vec<ExternalImportBlockerSummary> {
+    let mut counts = BTreeMap::<(String, String), usize>::new();
+    for module_id in rejected {
+        let Some(module) = modules_by_id.get(module_id).copied() else {
             continue;
         };
-        incoming
-            .entry(target)
-            .or_default()
-            .push(dependency.from_module_id);
+        for consumer_id in incoming_dependencies.get(module_id).into_iter().flatten() {
+            if accepted_external_modules.contains(consumer_id)
+                || source_suppressed_closure.contains(consumer_id)
+                || source_boundary_modules.contains(consumer_id)
+            {
+                continue;
+            }
+            let Some(consumer) = modules_by_id.get(consumer_id).copied() else {
+                continue;
+            };
+            if external_import_consumer_is_boundary(module, consumer) {
+                continue;
+            }
+            let reason = match consumer.kind {
+                ModuleKind::Application => continue,
+                ModuleKind::Package if !ownership_proven_modules.contains(consumer_id) => {
+                    "package consumer ownership not proven"
+                }
+                ModuleKind::Package => "package consumer not externalized",
+                ModuleKind::Builtin => "builtin consumer not externalized",
+            };
+            let label = module_consumer_label(consumer);
+            *counts.entry((reason.to_string(), label)).or_default() += 1;
+        }
     }
-    incoming
+    let mut blockers = counts
+        .into_iter()
+        .map(|((reason, consumer), count)| ExternalImportBlockerSummary {
+            reason,
+            consumer,
+            count,
+        })
+        .collect::<Vec<_>>();
+    blockers.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.reason.cmp(&right.reason))
+            .then_with(|| left.consumer.cmp(&right.consumer))
+    });
+    blockers
+}
+
+fn module_consumer_label(module: &ModuleInput) -> String {
+    match module.kind {
+        ModuleKind::Package => {
+            let package = module
+                .package_name
+                .as_deref()
+                .unwrap_or("<unknown-package>");
+            let version = module
+                .package_version
+                .as_deref()
+                .unwrap_or("<unknown-version>");
+            format!(
+                "{package}@{version} module={} path={}",
+                module.id.0, module.semantic_path
+            )
+        }
+        ModuleKind::Application => {
+            format!(
+                "application module={} path={}",
+                module.id.0, module.semantic_path
+            )
+        }
+        ModuleKind::Builtin => {
+            format!(
+                "builtin module={} path={}",
+                module.id.0, module.semantic_path
+            )
+        }
+    }
 }
 
 fn external_attribution_has_unexternalized_consumer(
     module_id: ModuleId,
     accepted_external_modules: &BTreeSet<ModuleId>,
+    source_suppressed_closure: &BTreeSet<ModuleId>,
+    source_boundary_modules: &BTreeSet<ModuleId>,
     modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
     incoming_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
 ) -> bool {
+    let Some(module) = modules_by_id.get(&module_id).copied() else {
+        return false;
+    };
     for consumer_id in incoming_dependencies.get(&module_id).into_iter().flatten() {
-        if accepted_external_modules.contains(consumer_id) {
+        if accepted_external_modules.contains(consumer_id)
+            || source_suppressed_closure.contains(consumer_id)
+            || source_boundary_modules.contains(consumer_id)
+        {
             continue;
         }
-        if modules_by_id.contains_key(consumer_id) {
+        if modules_by_id
+            .get(consumer_id)
+            .is_some_and(|consumer| !external_import_consumer_is_boundary(module, consumer))
+        {
             return true;
         }
     }
     false
+}
+
+fn external_import_source_boundary_modules(
+    accepted_external_modules: &BTreeSet<ModuleId>,
+    source_suppressed_closure: &BTreeSet<ModuleId>,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    incoming_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+) -> BTreeSet<ModuleId> {
+    let mut boundary = modules_by_id
+        .iter()
+        .filter_map(|(module_id, module)| {
+            (module.kind == ModuleKind::Package
+                && !accepted_external_modules.contains(module_id)
+                && !source_suppressed_closure.contains(module_id))
+            .then_some(*module_id)
+        })
+        .collect::<BTreeSet<_>>();
+    loop {
+        let mut removed = Vec::new();
+        for module_id in &boundary {
+            let Some(module) = modules_by_id.get(module_id).copied() else {
+                continue;
+            };
+            let has_unresolved_same_package_consumer = incoming_dependencies
+                .get(module_id)
+                .into_iter()
+                .flatten()
+                .any(|consumer_id| {
+                    modules_by_id.get(consumer_id).is_some_and(|consumer| {
+                        consumer.kind == ModuleKind::Package
+                            && same_package_consumer(module, consumer)
+                            && !accepted_external_modules.contains(consumer_id)
+                            && !source_suppressed_closure.contains(consumer_id)
+                            && !boundary.contains(consumer_id)
+                    })
+                });
+            if has_unresolved_same_package_consumer {
+                removed.push(*module_id);
+            }
+        }
+        if removed.is_empty() {
+            break;
+        }
+        for module_id in removed {
+            boundary.remove(&module_id);
+        }
+    }
+    boundary
+}
+
+fn external_import_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    match consumer.kind {
+        ModuleKind::Application => true,
+        ModuleKind::Package => !same_package_consumer(module, consumer),
+        ModuleKind::Builtin => true,
+    }
+}
+
+fn source_suppressed_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    match consumer.kind {
+        ModuleKind::Application => true,
+        ModuleKind::Package => !same_package_consumer(module, consumer),
+        ModuleKind::Builtin => false,
+    }
+}
+
+fn same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    !module_package.is_empty() && module_package == consumer_package
+}
+
+fn external_import_source_suppressed_package_closure(
+    accepted_external_modules: &BTreeSet<ModuleId>,
+    ownership_proven_modules: &BTreeSet<ModuleId>,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    outgoing_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+    incoming_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+) -> BTreeSet<ModuleId> {
+    let mut reachable = accepted_external_modules
+        .iter()
+        .copied()
+        .filter(|module_id| {
+            modules_by_id
+                .get(module_id)
+                .is_some_and(|module| module.kind == ModuleKind::Package)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut stack = reachable.iter().copied().collect::<Vec<_>>();
+    while let Some(module_id) = stack.pop() {
+        for dependency_id in outgoing_dependencies
+            .get(&module_id)
+            .into_iter()
+            .flatten()
+            .copied()
+        {
+            let Some(dependency) = modules_by_id.get(&dependency_id) else {
+                continue;
+            };
+            if dependency.kind != ModuleKind::Package
+                || !ownership_proven_modules.contains(&dependency_id)
+                || !reachable.insert(dependency_id)
+            {
+                continue;
+            }
+            stack.push(dependency_id);
+        }
+    }
+
+    let seed_modules = accepted_external_modules.clone();
+    loop {
+        let mut removed = Vec::new();
+        for module_id in &reachable {
+            if seed_modules.contains(module_id) {
+                continue;
+            }
+            let Some(module) = modules_by_id.get(module_id).copied() else {
+                continue;
+            };
+            let has_external_consumer = incoming_dependencies
+                .get(module_id)
+                .into_iter()
+                .flatten()
+                .any(|consumer_id| {
+                    modules_by_id.get(consumer_id).is_some_and(|consumer| {
+                        !reachable.contains(consumer_id)
+                            && !source_suppressed_consumer_is_boundary(module, consumer)
+                    })
+                });
+            if has_external_consumer {
+                removed.push(*module_id);
+            }
+        }
+        if removed.is_empty() {
+            break;
+        }
+        for module_id in removed {
+            reachable.remove(&module_id);
+        }
+    }
+    reachable
+}
+
+fn externalization_chain_proofs(
+    rows: &InputRows,
+    report: &VersionedPackageMatchReport,
+) -> BTreeMap<ModuleId, serde_json::Value> {
+    let modules_by_id = rows
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let (outgoing_dependencies, incoming_dependencies) = dependency_indexes(rows);
+    let accepted_external_modules = rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
+    let ownership_proven_modules = package_ownership_proven_modules(rows, report, &modules_by_id);
+    let source_suppressed_closure = external_import_source_suppressed_package_closure(
+        &accepted_external_modules,
+        &ownership_proven_modules,
+        &modules_by_id,
+        &outgoing_dependencies,
+        &incoming_dependencies,
+    );
+    let source_boundary_modules = external_import_source_boundary_modules(
+        &accepted_external_modules,
+        &source_suppressed_closure,
+        &modules_by_id,
+        &incoming_dependencies,
+    );
+    report
+        .attributions
+        .iter()
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .filter_map(|attribution| {
+            let module = modules_by_id.get(&attribution.module_id).copied()?;
+            let suppressed_dependencies = source_suppressed_dependencies_for_seed(
+                attribution.module_id,
+                &accepted_external_modules,
+                &source_suppressed_closure,
+                &outgoing_dependencies,
+            );
+            let incoming_consumers = incoming_dependencies
+                .get(&attribution.module_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|consumer_id| {
+                    let consumer = modules_by_id.get(consumer_id).copied()?;
+                    let resolution = if accepted_external_modules.contains(consumer_id) {
+                        "direct_externalized"
+                    } else if source_suppressed_closure.contains(consumer_id) {
+                        "source_suppressed"
+                    } else if consumer.kind == ModuleKind::Application {
+                        "application_boundary"
+                    } else if consumer.kind == ModuleKind::Builtin {
+                        "builtin_boundary"
+                    } else if external_import_consumer_is_boundary(module, consumer) {
+                        "package_boundary"
+                    } else if source_boundary_modules.contains(consumer_id) {
+                        "source_boundary"
+                    } else {
+                        "unresolved"
+                    };
+                    Some(serde_json::json!({
+                        "module_id": consumer_id.0,
+                        "kind": module_kind_label(consumer.kind),
+                        "package_name": consumer.package_name.as_deref(),
+                        "package_version": consumer.package_version.as_deref(),
+                        "semantic_path": consumer.semantic_path.as_str(),
+                        "resolution": resolution,
+                    }))
+                })
+                .take(64)
+                .collect::<Vec<_>>();
+            Some((
+                attribution.module_id,
+                serde_json::json!({
+                    "proof_model": "externalization_chain_v1",
+                    "direct_seed_module_id": attribution.module_id.0,
+                    "direct_seed_kind": module_kind_label(module.kind),
+                    "ownership_proof": "direct_external_import",
+                    "all_incoming_consumers_resolved": incoming_consumers
+                        .iter()
+                        .all(|consumer| consumer
+                            .get("resolution")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|resolution| resolution != "unresolved")),
+                    "incoming_consumers": incoming_consumers,
+                    "source_suppressed_dependency_count": suppressed_dependencies.len(),
+                    "source_suppressed_dependency_module_ids": suppressed_dependencies
+                        .iter()
+                        .take(64)
+                        .map(|module_id| module_id.0)
+                        .collect::<Vec<_>>(),
+                }),
+            ))
+        })
+        .collect()
+}
+
+fn source_suppressed_dependencies_for_seed(
+    seed: ModuleId,
+    accepted_external_modules: &BTreeSet<ModuleId>,
+    source_suppressed_closure: &BTreeSet<ModuleId>,
+    outgoing_dependencies: &BTreeMap<ModuleId, Vec<ModuleId>>,
+) -> BTreeSet<ModuleId> {
+    let mut dependencies = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut stack = outgoing_dependencies
+        .get(&seed)
+        .into_iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    while let Some(module_id) = stack.pop() {
+        if !visited.insert(module_id) || !source_suppressed_closure.contains(&module_id) {
+            continue;
+        }
+        if !accepted_external_modules.contains(&module_id) {
+            dependencies.insert(module_id);
+        }
+        stack.extend(
+            outgoing_dependencies
+                .get(&module_id)
+                .into_iter()
+                .flatten()
+                .copied(),
+        );
+    }
+    dependencies
+}
+
+const fn module_kind_label(kind: ModuleKind) -> &'static str {
+    match kind {
+        ModuleKind::Application => "application",
+        ModuleKind::Package => "package",
+        ModuleKind::Builtin => "builtin",
+    }
 }
 
 fn package_source_quality_rejection_reason(
@@ -6052,6 +7767,7 @@ fn persist_package_attribution(
     attribution: &PackageAttributionInput,
     module_match: &PackageMatch,
     version_resolution: Option<&PackageVersionResolutionEvidence>,
+    externalization_chain: Option<&serde_json::Value>,
 ) -> Result<(), MatchPackagesError> {
     let package_version =
         attribution
@@ -6091,6 +7807,7 @@ fn persist_package_attribution(
         "string_anchor_matches": module_match.string_anchor_matches,
         "writes_package_version": true,
         "external_import_policy_version": PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
+        "externalization_chain": externalization_chain,
     })
     .to_string();
     connection
@@ -6696,15 +8413,18 @@ pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use reverts_input::{
-        InputRows, ModuleInput, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, ProjectInput,
+        InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
+        PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION, PackageAttributionInput, ProjectInput,
         SourceFileInput,
     };
-    use reverts_ir::{BindingName, ModuleId};
+    use reverts_ir::{BindingName, ModuleId, ModuleKind};
     use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-    use reverts_package_matcher::PackageSource;
+    use reverts_package_matcher::{
+        ModuleMatchStrategy, PackageMatch, PackageSource, VersionedPackageMatchReport,
+    };
     use reverts_pipeline::{
         EmittedAsset, EmittedFile, RuntimeDependency, RuntimeSetterMigrationBlockerReason,
         RuntimeSetterMigrationBlockerReport,
@@ -6714,21 +8434,26 @@ mod tests {
     use super::commands::generate_project::{checked_output_path, write_emitted_project};
     use super::{
         CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic,
-        MatchPackagesArgs, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
-        RuntimeInventoryArgs, RuntimeSourceSpanOwner,
-        best_matching_package_version_by_binary_search, best_project_exact_version_candidate,
-        collect_local_package_sources, dedup_audit_report, exact_project_version_counts_by_package,
+        MatchPackagesArgs, MatchPackagesError, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+        PackageExternalizationHintsArgs, PackageVersionResolutionPlan, RuntimeInventoryArgs,
+        RuntimeSourceSpanOwner, best_matching_package_version_by_binary_search,
+        collect_local_package_sources, dedup_audit_report, externalization_chain_proofs,
         extract_bun_embedded_asset_from_bytes, filter_package_sources_to_best_build_variants,
-        filter_package_sources_to_relevant_path_hints, help_text, json_package_source_module,
+        filter_package_sources_to_relevant_path_hints,
+        filter_unsafe_interpackage_external_attributions, help_text, json_package_source_module,
         load_package_sources, local_package_metadata, match_packages_from_connection,
-        nearest_package_version_by_binary_search, network_package_version_resolution_hints,
-        package_export_specifier, package_version_hints_for_materialization,
+        network_package_version_resolution_hints, package_export_specifier,
+        package_externalization_hints_from_connection, package_graph_component_scope,
+        package_source_elimination_stats_for_report, package_version_hints_for_materialization,
         package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
-        persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
+        persist_package_source_cache, promote_package_sources_with_externalization_hints,
+        remove_package_attributions_for_revalidation,
+        resolve_package_version_hints_to_available_sources, run,
         runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
         runtime_inventory_project_selections, runtime_line_attribution_from_files,
         runtime_module_owner_label, runtime_original_name_owners_by_binding,
-        runtime_source_span_owner_label_for_range, stale_cache_version_hints_for_materialization,
+        runtime_source_span_owner_label_for_range, source_suppressed_package_modules_for_report,
+        stable_hash, stale_cache_version_hints_for_materialization,
         stale_package_source_cache_versions, version_text,
     };
 
@@ -6795,6 +8520,37 @@ mod tests {
         assert!(
             matches!(old_command, Err(CliError::UnknownCommand(command)) if command == "match-packages-v2")
         );
+    }
+
+    #[test]
+    fn parses_package_externalization_hints_command() {
+        let args = PackageExternalizationHintsArgs::parse([
+            "package-externalization-hints".to_string(),
+            "--input".to_string(),
+            "input.db".to_string(),
+            "--package-name".to_string(),
+            "pkg".to_string(),
+            "--limit".to_string(),
+            "50".to_string(),
+            "--apply".to_string(),
+        ])
+        .expect("args should parse");
+
+        assert_eq!(args.input, PathBuf::from("input.db"));
+        assert_eq!(args.package_names, vec!["pkg"]);
+        assert_eq!(args.limit, Some(50));
+        assert!(args.apply);
+
+        let command = CliCommand::parse([
+            "package-externalization-hints".to_string(),
+            "--input".to_string(),
+            "input.db".to_string(),
+        ])
+        .expect("command should parse");
+        assert!(matches!(
+            command,
+            CliCommand::PackageExternalizationHints(parsed) if parsed.input.as_path() == Path::new("input.db")
+        ));
     }
 
     #[test]
@@ -6932,6 +8688,7 @@ mod tests {
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
         assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
+        assert!(help_text(HelpTopic::MatchPackagesReport).contains("source_eliminated"));
         assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
         assert!(help_text(HelpTopic::RuntimeInventory).contains("--all-projects"));
         assert!(version_text().starts_with("reverts-cli "));
@@ -6963,6 +8720,21 @@ mod tests {
         assert_eq!(counts.reverts_internal_occurrences, 4);
         assert_eq!(counts.named_import_statements, 1);
         assert_eq!(counts.named_export_statements, 1);
+    }
+
+    #[test]
+    fn runtime_inventory_counts_only_real_setter_declarations() {
+        let files = vec![EmittedFile {
+            path: "modules/runtime/source-1-helpers.ts".to_string(),
+            source: "// function __reverts_set_comment(value) {}\n\
+                     const text = 'function __reverts_set_string(value) {}';\n\
+                     function __reverts_set_X(value) { return X = value; }function __reverts_set_Y(value) { return Y = value; }\n"
+                .to_string(),
+        }];
+
+        let counts = runtime_inventory_counts_from_files(&files);
+
+        assert_eq!(counts.setter_function_definitions, 2);
     }
 
     #[test]
@@ -7315,14 +9087,55 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.3.1"));
     }
 
     #[test]
-    fn impossible_non_exact_versions_resolve_to_best_project_exact_cached_version() {
+    fn package_version_resolution_rejects_invalid_package_source_version() {
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let package_sources = [PackageSource::source_only(
+            "pkg",
+            "not-semver",
+            "pkg",
+            "pkg@not-semver/index.js",
+            "export {};",
+        )];
+
+        let error = PackageVersionResolutionPlan::build(&rows, &BTreeSet::new(), &package_sources)
+            .expect_err("invalid package source version should fail");
+
+        assert!(matches!(
+            error,
+            MatchPackagesError::InvalidPackageSourceVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn package_version_resolution_rejects_unparseable_package_source() {
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let package_sources = [PackageSource::source_only(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "pkg@1.0.0/index.js",
+            "const =",
+        )];
+
+        let error = PackageVersionResolutionPlan::build(&rows, &BTreeSet::new(), &package_sources)
+            .expect_err("unparseable package source should fail");
+
+        assert!(matches!(
+            error,
+            MatchPackagesError::NormalizePackageSource { .. }
+        ));
+    }
+
+    #[test]
+    fn impossible_non_exact_versions_do_not_resolve_to_project_exact_cached_version() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
@@ -7372,24 +9185,25 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
-        assert_eq!(resolved, 1);
-        assert_eq!(rows.modules[0].package_version.as_deref(), Some("0.211.0"));
+        assert_eq!(resolved, 0);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.x"));
     }
 
     #[test]
-    fn package_version_resolution_evidence_records_impossible_range_fallback() {
+    fn package_version_resolution_evidence_records_matching_range_resolution() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
-            "otelImpossibleRange",
-            "node_modules/@opentelemetry/otlp-exporter-base/index.js",
-            "@opentelemetry/otlp-exporter-base",
+            "pkgRange",
+            "node_modules/pkg/index.js",
+            "pkg",
             Some("1.x".to_string()),
         ));
         let before = package_versions_by_module(&rows);
-        rows.modules[0].package_version = Some("0.211.0".to_string());
+        rows.modules[0].package_version = Some("1.2.3".to_string());
 
         let evidence = package_version_resolution_evidence(&before, &rows);
         let evidence = evidence
@@ -7397,15 +9211,12 @@ mod tests {
             .expect("resolution should be recorded");
 
         assert_eq!(evidence.requested_version.as_deref(), Some("1.x"));
-        assert_eq!(evidence.resolved_version.as_str(), "0.211.0");
-        assert_eq!(
-            evidence.reason,
-            "impossible_or_inconsistent_range_resolved_to_project_exact_source"
-        );
+        assert_eq!(evidence.resolved_version.as_str(), "1.2.3");
+        assert_eq!(evidence.reason, "range_resolved_to_available_source");
     }
 
     #[test]
-    fn impossible_non_exact_versions_do_not_resolve_when_project_exact_versions_tie() {
+    fn impossible_non_exact_versions_do_not_resolve_when_project_exact_versions_exist() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
@@ -7454,31 +9265,19 @@ mod tests {
             ),
             None
         );
-        let available_versions = BTreeSet::from([
-            semver::Version::parse("0.208.0").expect("fixture version should parse"),
-            semver::Version::parse("0.211.0").expect("fixture version should parse"),
-        ]);
-        assert_eq!(
-            best_project_exact_version_candidate(
-                "@opentelemetry/otlp-exporter-base",
-                &exact_project_version_counts_by_package(&rows, &BTreeSet::new()),
-                Some(&available_versions),
-            ),
-            None
-        );
-
         let resolved = resolve_package_version_hints_to_available_sources(
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
         assert_eq!(resolved, 0);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.x"));
     }
 
     #[test]
-    fn unavailable_exact_package_versions_resolve_to_nearest_cached_version() {
+    fn unavailable_exact_package_versions_remain_unchanged_when_exact_source_missing() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.modules.push(ModuleInput::package(
             ModuleId(10),
@@ -7515,14 +9314,15 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
-        assert_eq!(resolved, 1);
-        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.711.0"));
+        assert_eq!(resolved, 0);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.712.0"));
     }
 
     #[test]
-    fn unavailable_exact_package_versions_prefer_source_identity_over_nearest_cached_version() {
+    fn unavailable_exact_package_versions_do_not_rewrite_from_source_identity() {
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         let bundled_source = "export function add(a,b){return a+b}";
         rows.source_files.push(SourceFileInput::new(
@@ -7561,10 +9361,11 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
-        assert_eq!(resolved, 1);
-        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.720.0"));
+        assert_eq!(resolved, 0);
+        assert_eq!(rows.modules[0].package_version.as_deref(), Some("3.712.0"));
     }
 
     #[test]
@@ -7607,7 +9408,8 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("1.0.0"));
@@ -7674,7 +9476,8 @@ mod tests {
             &mut rows,
             &package_sources,
             &BTreeSet::new(),
-        );
+        )
+        .expect("resolve package version hints");
 
         assert_eq!(resolved, 1);
         assert_eq!(rows.modules[0].package_version.as_deref(), Some("5.2.1"));
@@ -7699,23 +9502,7 @@ mod tests {
     }
 
     #[test]
-    fn nearest_package_version_uses_binary_search_floor_for_missing_exact() {
-        let versions = BTreeSet::from([
-            semver::Version::parse("3.700.0").expect("fixture version should parse"),
-            semver::Version::parse("3.711.0").expect("fixture version should parse"),
-            semver::Version::parse("3.720.0").expect("fixture version should parse"),
-        ]);
-
-        let selected = nearest_package_version_by_binary_search("3.712.0", &versions);
-
-        assert_eq!(
-            selected.as_ref().map(ToString::to_string).as_deref(),
-            Some("3.711.0")
-        );
-    }
-
-    #[test]
-    fn network_version_resolution_falls_back_to_nearest_for_missing_exact() {
+    fn network_version_resolution_requires_exact_match_for_exact_requests() {
         let versions = BTreeSet::from([
             semver::Version::parse("3.354.0").expect("fixture version should parse"),
             semver::Version::parse("3.370.0").expect("fixture version should parse"),
@@ -7724,10 +9511,7 @@ mod tests {
 
         let selected = super::resolve_package_version_hint_from_versions("3.712.0", &versions);
 
-        assert_eq!(
-            selected.as_ref().map(ToString::to_string).as_deref(),
-            Some("3.374.0")
-        );
+        assert_eq!(selected, None);
     }
 
     #[test]
@@ -7750,8 +9534,78 @@ mod tests {
     }
 
     #[test]
+    fn requested_package_scope_expands_to_dependency_graph_component() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        for (module_id, package_name) in [(10, "alpha"), (11, "beta"), (12, "gamma"), (13, "delta")]
+        {
+            rows.modules.push(ModuleInput::package(
+                ModuleId(module_id),
+                package_name,
+                format!("node_modules/{package_name}/index.js"),
+                package_name,
+                Some("1.0.0".to_string()),
+            ));
+        }
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(12),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+
+        let scope = package_graph_component_scope(&rows, &["alpha".to_string()]);
+
+        assert_eq!(
+            scope,
+            BTreeSet::from(["alpha".to_string(), "beta".to_string(), "gamma".to_string(),]),
+            "requested package matching must see the whole package dependency component, including reverse consumers"
+        );
+    }
+
+    #[test]
+    fn revalidation_removes_external_attributions_for_expanded_component() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "alpha",
+                "1.0.0",
+                "alpha",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(11),
+                "beta",
+                "1.0.0",
+                "beta",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(12),
+                "delta",
+                "1.0.0",
+                "delta",
+            ));
+
+        let removed = remove_package_attributions_for_revalidation(
+            &mut rows,
+            &BTreeSet::from(["alpha".to_string(), "beta".to_string()]),
+        );
+
+        assert_eq!(removed, 2);
+        assert_eq!(rows.package_attributions.len(), 1);
+        assert_eq!(
+            rows.package_attributions[0].package_name.as_str(),
+            "delta",
+            "external imports outside the expanded package component stay as existing proof"
+        );
+    }
+
+    #[test]
     fn npm_versions_json_parser_accepts_arrays_and_single_versions() {
-        let array_versions = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","1.2.3","bad"]"#)
+        let array_versions = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","1.2.3"]"#)
             .expect("array versions should parse");
         let single_version = parse_npm_versions_json("pkg", "latest", br#""2.0.0""#)
             .expect("single version should parse");
@@ -7768,6 +9622,17 @@ mod tests {
                 .as_deref(),
             Some("2.0.0")
         );
+    }
+
+    #[test]
+    fn npm_versions_json_parser_rejects_invalid_version_entries() {
+        let error = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","bad"]"#)
+            .expect_err("invalid semver entry should fail");
+
+        assert!(matches!(
+            error,
+            MatchPackagesError::MaterializePackageSource { .. }
+        ));
     }
 
     #[test]
@@ -7911,6 +9776,340 @@ mod tests {
     }
 
     #[test]
+    fn externalization_hints_promote_source_only_cache_rows_when_proof_matches() {
+        let connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_externalization_hints (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    export_specifier TEXT NOT NULL,
+                    content_hash TEXT,
+                    normalized_source_hash TEXT,
+                    public_members_json TEXT,
+                    proof_policy_version INTEGER NOT NULL
+                );
+                ",
+            )
+            .expect("create hints table");
+        let source = "exports.Widget = function Widget(){ return 1; };";
+        let content_hash = stable_hash(source.as_bytes());
+        connection
+            .execute(
+                r#"
+                INSERT INTO package_externalization_hints
+                    (package_name, package_version, entry_path, export_specifier,
+                     content_hash, public_members_json, proof_policy_version)
+                VALUES ('pkg', '1.2.3', 'dist/index.cjs', 'pkg',
+                        ?1, '["Widget"]', 1)
+                "#,
+                [content_hash],
+            )
+            .expect("insert hint");
+        let mut sources = vec![PackageSource::source_only(
+            "pkg",
+            "1.2.3",
+            "pkg",
+            "pkg@1.2.3/dist/index.cjs",
+            source,
+        )];
+
+        let promoted = promote_package_sources_with_externalization_hints(
+            &connection,
+            &BTreeSet::from(["pkg".to_string()]),
+            &mut sources,
+        )
+        .expect("promote hints");
+
+        assert_eq!(promoted, 1);
+        assert!(sources.iter().any(|source| source.external_importable));
+    }
+
+    #[test]
+    fn package_externalization_hints_command_persists_verified_cache_rows() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        let source = "export const Widget = 1;";
+        let content_hash = stable_hash(source.as_bytes());
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                ",
+            )
+            .expect("create cache table");
+        connection
+            .execute(
+                r"
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, external_importable, external_import_policy_version,
+                     export_specifier, fetched_at, expires_at)
+                VALUES ('pkg', '1.2.3', 'dist/index.js', ?1, ?2, 1, ?3,
+                        'pkg/dist/index.js', 'now', 'later')
+                ",
+                params![
+                    source,
+                    content_hash.as_str(),
+                    PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+                ],
+            )
+            .expect("insert cache row");
+
+        let outcome = package_externalization_hints_from_connection(
+            &mut connection,
+            &PackageExternalizationHintsArgs {
+                input: PathBuf::from("input.db"),
+                package_names: vec!["pkg".to_string()],
+                limit: None,
+                apply: true,
+            },
+        )
+        .expect("write hints");
+
+        assert_eq!(outcome.scanned_rows, 1);
+        assert_eq!(outcome.verified_rows, 1);
+        assert_eq!(outcome.written_rows, 1);
+        let (stored_hash, normalized_hash, members, policy): (String, String, String, i64) =
+            connection
+                .query_row(
+                    r"
+                SELECT content_hash, normalized_source_hash, public_members_json,
+                       proof_policy_version
+                  FROM package_externalization_hints
+                 WHERE package_name = 'pkg'
+                   AND package_version = '1.2.3'
+                   AND entry_path = 'dist/index.js'
+                ",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .expect("hint row");
+        assert_eq!(stored_hash, content_hash);
+        assert!(!normalized_hash.is_empty());
+        assert!(members.contains("Widget"));
+        assert_eq!(policy, 1);
+    }
+
+    #[test]
+    fn package_externalization_hints_command_persists_public_export_proofs() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                ",
+            )
+            .expect("create cache table");
+        let public_source = "export { Widget } from './internal/widget.js';";
+        let private_source = "export class Widget { method(){ return 1; } }";
+        for (entry_path, source, external_importable, export_specifier) in [
+            ("dist/index.js", public_source, 1_i64, "pkg"),
+            (
+                "dist/internal/widget.js",
+                private_source,
+                0_i64,
+                "pkg/dist/internal/widget.js",
+            ),
+        ] {
+            connection
+                .execute(
+                    r"
+                    INSERT INTO package_source_cache
+                        (package_name, package_version, entry_path, source_content,
+                         content_hash, external_importable, external_import_policy_version,
+                         export_specifier, fetched_at, expires_at)
+                    VALUES ('pkg', '1.2.3', ?1, ?2, ?3, ?4, ?5, ?6, 'now', 'later')
+                    ",
+                    params![
+                        entry_path,
+                        source,
+                        stable_hash(source.as_bytes()),
+                        external_importable,
+                        PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
+                        export_specifier,
+                    ],
+                )
+                .expect("insert cache row");
+        }
+
+        let outcome = package_externalization_hints_from_connection(
+            &mut connection,
+            &PackageExternalizationHintsArgs {
+                input: PathBuf::from("input.db"),
+                package_names: vec!["pkg".to_string()],
+                limit: None,
+                apply: true,
+            },
+        )
+        .expect("write hints");
+
+        assert_eq!(outcome.scanned_rows, 2);
+        assert_eq!(outcome.verified_rows, 2);
+        let (export_specifier, members): (String, String) = connection
+            .query_row(
+                r"
+                SELECT export_specifier, public_members_json
+                  FROM package_externalization_hints
+                 WHERE package_name = 'pkg'
+                   AND package_version = '1.2.3'
+                   AND entry_path = 'dist/internal/widget.js'
+                ",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("public proof hint row");
+        assert_eq!(export_specifier, "pkg");
+        assert!(members.contains("Widget"));
+
+        let mut sources = vec![PackageSource::source_only(
+            "pkg",
+            "1.2.3",
+            "pkg/dist/internal/widget.js",
+            "pkg@1.2.3/dist/internal/widget.js",
+            private_source,
+        )];
+        let promoted = promote_package_sources_with_externalization_hints(
+            &connection,
+            &BTreeSet::from(["pkg".to_string()]),
+            &mut sources,
+        )
+        .expect("promote public proof hint");
+        assert_eq!(promoted, 1);
+        assert!(
+            sources
+                .iter()
+                .any(|source| source.external_importable && source.export_specifier == "pkg")
+        );
+    }
+
+    #[test]
+    fn source_suppressed_metric_counts_externalized_private_closure() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "root",
+            "pkg/root.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "private",
+            "pkg/private.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        let mut private_ownership = PackageAttributionInput::rejected_source(
+            ModuleId(11),
+            "pkg",
+            "matched package ownership, but the evidence does not prove a safe single external import",
+        );
+        private_ownership.package_version = Some("1.0.0".to_string());
+        rows.package_attributions.push(private_ownership);
+        let report = VersionedPackageMatchReport {
+            attributions: vec![PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            )],
+            surfaces: Vec::new(),
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        assert_eq!(
+            source_suppressed_package_modules_for_report(&rows, &report),
+            2
+        );
+        let stats = package_source_elimination_stats_for_report(&rows, &report, 2);
+        assert_eq!(stats.direct_external_import_modules, 1);
+        assert_eq!(stats.private_source_suppressed_package_modules, 1);
+        assert_eq!(stats.source_eliminated_package_modules, 2);
+        assert_eq!(stats.remaining_package_source_modules, 0);
+    }
+
+    #[test]
+    fn materialize_mode_uses_only_current_policy_cache_rows_as_match_sources() {
+        let mut connection = Connection::open_in_memory().expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_source_cache (
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    entry_path TEXT NOT NULL,
+                    source_content TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    external_importable INTEGER NOT NULL DEFAULT 1,
+                    external_import_policy_version INTEGER NOT NULL DEFAULT 0,
+                    export_specifier TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    PRIMARY KEY (package_name, package_version, entry_path)
+                );
+                INSERT INTO package_source_cache
+                    (package_name, package_version, entry_path, source_content,
+                     content_hash, external_importable, external_import_policy_version,
+                     export_specifier, fetched_at, expires_at)
+                VALUES
+                    ('pkg', '1.x', 'internal.js', 'export const stale = 1;',
+                     'stale', 1, 0, '', 'now', 'later'),
+                    ('pkg', '1.2.3', 'public.js', 'export const current = 1;',
+                     'current', 1, 4, 'pkg/public', 'now', 'later');
+                ",
+            )
+            .expect("create package source cache");
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+
+        let loaded = load_package_sources(
+            &mut connection,
+            &rows,
+            &BTreeSet::from(["pkg".to_string()]),
+            &[],
+            true,
+            false,
+        )
+        .expect("load cache");
+
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].package_version, "1.2.3");
+        assert_eq!(loaded[0].export_specifier, "pkg/public");
+        assert!(loaded[0].external_importable);
+    }
+
+    #[test]
     fn package_source_cache_stale_policy_versions_are_materialization_hints() {
         let connection = Connection::open_in_memory().expect("open sqlite");
         connection
@@ -7931,15 +10130,15 @@ mod tests {
                 );
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
-                     content_hash, external_importable, external_import_policy_version,
+                     content_hash, external_importable, external_import_policy_version, export_specifier,
                      fetched_at, expires_at)
                 VALUES
                     ('pkg', '1.2.3', 'index.js', 'export const oldValue = 1;',
-                     'hash-a', 1, 0, 'now', 'later'),
+                     'hash-a', 1, 0, '', 'now', 'later'),
                     ('pkg', '1.2.4', 'index.js', 'export const newValue = 1;',
-                     'hash-b', 1, 4, 'now', 'later'),
+                     'hash-b', 1, 4, 'pkg', 'now', 'later'),
                     ('other', '9.9.9', 'index.js', 'export const other = 1;',
-                     'hash-c', 1, 0, 'now', 'later');
+                     'hash-c', 1, 0, '', 'now', 'later');
                 ",
             )
             .expect("create mixed policy package source cache");
@@ -8038,6 +10237,23 @@ mod tests {
         assert_eq!(sources.len(), 1);
         assert!(sources[0].source_path.ends_with("dist/index.js"));
         assert!(sources[0].external_importable);
+    }
+
+    #[test]
+    fn local_package_metadata_rejects_unparseable_package_json() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let package_dir = tempdir.path().join("node_modules/pkg");
+        fs::create_dir_all(package_dir.as_path()).expect("create package dir");
+        fs::write(package_dir.join("package.json"), r#"{"name":"pkg","#)
+            .expect("write invalid package json");
+
+        let error = local_package_metadata(package_dir.as_path())
+            .expect_err("invalid package metadata should fail");
+
+        assert!(matches!(
+            error,
+            MatchPackagesError::InvalidPackageMetadata { .. }
+        ));
     }
 
     #[test]
@@ -9029,7 +11245,7 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_repairs_trailing_garbage_package_module_slice() {
+    fn match_packages_rejects_trailing_garbage_package_module_slice() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let mut connection = package_match_connection(
             tempdir.path().join("bundle.js"),
@@ -9053,13 +11269,17 @@ mod tests {
         let outcome =
             match_packages_from_connection(&mut connection, &args).expect("match should run");
 
-        assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-        assert_eq!(
-            outcome.package_source_quality_trusted, 1,
-            "repair should make the package slice parseable before quality counting"
+        assert!(
+            outcome.audit.has(FindingCode::AstFactExtractionFailed),
+            "{:?}",
+            outcome.audit.findings()
         );
-        assert_eq!(outcome.package_source_quality_invalid, 0);
-        assert_eq!(outcome.matched_modules, 1);
+        assert_eq!(
+            outcome.package_source_quality_trusted, 0,
+            "invalid package slices must not be rewritten before quality counting"
+        );
+        assert_eq!(outcome.package_source_quality_invalid, 1);
+        assert_eq!(outcome.matched_modules, 0);
     }
 
     #[test]
@@ -9266,7 +11486,7 @@ mod tests {
     }
 
     #[test]
-    fn match_packages_does_not_externalize_package_needed_by_nonexternal_consumer() {
+    fn match_packages_externalizes_package_needed_by_different_package_consumer() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let first_module = "export function init(){return 1;}";
         let second_module = "\nexport const consumer = init();";
@@ -9335,8 +11555,507 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .expect("count accepted external"),
-            0,
-            "externalizing one package must not strand a non-external consumer"
+            1,
+            "a different-package source consumer is a package boundary; the consumer remains source while the producer can be imported externally"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_preserves_unproven_same_package_source_boundary() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "root",
+            "pkg/root.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "unprovenConsumer",
+            "pkg/private-consumer.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "leaf",
+            "pkg/leaf.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![
+                PackageAttributionInput::accepted_external(ModuleId(10), "pkg", "1.0.0", "pkg"),
+                PackageAttributionInput::accepted_external(
+                    ModuleId(12),
+                    "pkg",
+                    "1.0.0",
+                    "pkg/leaf",
+                ),
+            ],
+            surfaces: Vec::new(),
+            matches: vec![
+                package_match(ModuleId(10), "pkg"),
+                package_match(ModuleId(12), "pkg/leaf"),
+            ],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        assert!(safety.blockers.is_empty());
+        assert_eq!(
+            report
+                .attributions
+                .iter()
+                .map(|attribution| attribution.module_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ModuleId(10), ModuleId(12)]),
+            "unproven same-package consumers are preserved as source boundaries rather than source-suppressed"
+        );
+        assert_eq!(
+            source_suppressed_package_modules_for_report(&rows, &report),
+            2,
+            "only the two direct external imports are eliminated; the unproven consumer is not source-suppressed"
+        );
+        let proofs = externalization_chain_proofs(&rows, &report);
+        let leaf_proof = proofs.get(&ModuleId(12)).expect("leaf chain proof");
+        assert!(
+            leaf_proof
+                .get("incoming_consumers")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("source_boundary")
+                }),
+            "chain proof should record preserved same-package consumers as source boundaries"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_preserves_cyclic_same_package_source_boundary() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "public",
+            "pkg/public.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "runtimeA",
+            "pkg/runtime-a.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "runtimeB",
+            "pkg/runtime-b.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(12),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "pkg",
+                "1.0.0",
+                "pkg/public",
+            )],
+            surfaces: Vec::new(),
+            matches: vec![package_match(ModuleId(10), "pkg/public")],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        let proofs = externalization_chain_proofs(&rows, &report);
+        assert!(
+            proofs
+                .get(&ModuleId(10))
+                .and_then(|proof| proof.get("incoming_consumers"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("source_boundary")
+                }),
+            "closed same-package source cycles are preserved as source boundaries, not blockers"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_allows_source_suppressed_package_closure_consumers() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "root",
+            "pkg/root.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "privateConsumer",
+            "pkg/private-consumer.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "leaf",
+            "pkg/leaf.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions
+            .push(rejected_package_ownership(ModuleId(11), "pkg", "1.0.0"));
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![
+                PackageAttributionInput::accepted_external(ModuleId(10), "pkg", "1.0.0", "pkg"),
+                PackageAttributionInput::accepted_external(
+                    ModuleId(12),
+                    "pkg",
+                    "1.0.0",
+                    "pkg/leaf",
+                ),
+            ],
+            surfaces: Vec::new(),
+            matches: vec![
+                package_match(ModuleId(10), "pkg"),
+                package_match(ModuleId(12), "pkg/leaf"),
+            ],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        assert_eq!(
+            report
+                .attributions
+                .iter()
+                .map(|attribution| attribution.module_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ModuleId(10), ModuleId(12)]),
+            "a private package consumer that is only reachable from an externalized root is suppressed with that closure"
+        );
+        let proofs = externalization_chain_proofs(&rows, &report);
+        let root_proof = proofs.get(&ModuleId(10)).expect("root chain proof");
+        assert_eq!(
+            root_proof
+                .get("source_suppressed_dependency_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1)
+        );
+        let leaf_proof = proofs.get(&ModuleId(12)).expect("leaf chain proof");
+        assert!(
+            leaf_proof
+                .get("incoming_consumers")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("source_suppressed")
+                }),
+            "leaf proof should record that its private consumer is source-suppressed"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_allows_application_boundary_consumers() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "root",
+            "pkg/root.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "privateConsumer",
+            "pkg/private-consumer.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(12),
+            "leaf",
+            "pkg/leaf.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(20), "app", "app.ts"));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(11),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(20),
+            target: ModuleDependencyTarget::Module(ModuleId(12)),
+        });
+        rows.package_attributions
+            .push(rejected_package_ownership(ModuleId(11), "pkg", "1.0.0"));
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![
+                PackageAttributionInput::accepted_external(ModuleId(10), "pkg", "1.0.0", "pkg"),
+                PackageAttributionInput::accepted_external(
+                    ModuleId(12),
+                    "pkg",
+                    "1.0.0",
+                    "pkg/leaf",
+                ),
+            ],
+            surfaces: Vec::new(),
+            matches: vec![
+                package_match(ModuleId(10), "pkg"),
+                package_match(ModuleId(12), "pkg/leaf"),
+            ],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        assert_eq!(
+            report
+                .attributions
+                .iter()
+                .map(|attribution| attribution.module_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([ModuleId(10), ModuleId(12)]),
+            "application modules are a boundary consumer: package consumers still need chain proof, but app code may consume the external package adapter"
+        );
+        let proofs = externalization_chain_proofs(&rows, &report);
+        let leaf_proof = proofs.get(&ModuleId(12)).expect("leaf chain proof");
+        assert!(
+            leaf_proof
+                .get("incoming_consumers")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("application_boundary")
+                }),
+            "chain proof should record application consumers as boundary consumers"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_allows_builtin_source_boundary_consumers() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "public",
+            "pkg/public.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut builtin = ModuleInput::application(ModuleId(20), "node", "node/module.ts");
+        builtin.kind = ModuleKind::Builtin;
+        rows.modules.push(builtin);
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(20),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "pkg",
+                "1.0.0",
+                "pkg/public",
+            )],
+            surfaces: Vec::new(),
+            matches: vec![package_match(ModuleId(10), "pkg/public")],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        let proofs = externalization_chain_proofs(&rows, &report);
+        assert!(
+            proofs
+                .get(&ModuleId(10))
+                .and_then(|proof| proof.get("incoming_consumers"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("builtin_boundary")
+                }),
+            "builtin shim modules are preserved source boundaries for direct external imports"
+        );
+    }
+
+    #[test]
+    fn source_suppression_does_not_eliminate_private_package_needed_by_builtin_consumer() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "root",
+            "pkg/root.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(11),
+            "private",
+            "pkg/private.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        ));
+        let mut builtin = ModuleInput::application(ModuleId(20), "node", "node/module.ts");
+        builtin.kind = ModuleKind::Builtin;
+        rows.modules.push(builtin);
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(10),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(20),
+            target: ModuleDependencyTarget::Module(ModuleId(11)),
+        });
+        rows.package_attributions
+            .push(rejected_package_ownership(ModuleId(11), "pkg", "1.0.0"));
+
+        let report = VersionedPackageMatchReport {
+            attributions: vec![PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            )],
+            surfaces: Vec::new(),
+            matches: vec![package_match(ModuleId(10), "pkg")],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        assert_eq!(
+            source_suppressed_package_modules_for_report(&rows, &report),
+            1,
+            "private transitive package sources are only suppressed when every consumer can be removed or is an application/package boundary"
+        );
+    }
+
+    #[test]
+    fn external_import_safety_allows_different_package_boundary_consumers() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(10),
+            "public",
+            "pkg-a/public.ts",
+            "pkg-a",
+            Some("1.0.0".to_string()),
+        ));
+        rows.modules.push(ModuleInput::package(
+            ModuleId(20),
+            "consumer",
+            "pkg-b/consumer.ts",
+            "pkg-b",
+            Some("1.0.0".to_string()),
+        ));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(20),
+            target: ModuleDependencyTarget::Module(ModuleId(10)),
+        });
+
+        let mut report = VersionedPackageMatchReport {
+            attributions: vec![PackageAttributionInput::accepted_external(
+                ModuleId(10),
+                "pkg-a",
+                "1.0.0",
+                "pkg-a",
+            )],
+            surfaces: Vec::new(),
+            matches: vec![package_match(ModuleId(10), "pkg-a")],
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let safety = filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+
+        assert_eq!(safety.removed_modules, 0);
+        let proofs = externalization_chain_proofs(&rows, &report);
+        assert!(
+            proofs
+                .get(&ModuleId(10))
+                .and_then(|proof| proof.get("incoming_consumers"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|consumer| {
+                    consumer
+                        .get("resolution")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("package_boundary")
+                }),
+            "different package source consumers are boundary consumers; only same-package consumers must be externalized or source-suppressed"
         );
     }
 
@@ -10006,7 +12725,10 @@ mod tests {
 
         assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
         assert_eq!(outcome.matched_modules, 1);
-        assert_eq!(outcome.written_attributions, 1);
+        assert_eq!(
+            outcome.written_attributions, 2,
+            "component-scoped package matching also writes the dependency package rejection"
+        );
         let (status, emission_mode, package_version, rejection_reason, evidence_json): (
             String,
             String,
@@ -10978,6 +13700,35 @@ mod tests {
 
     fn minimal_wasm_bytes() -> Vec<u8> {
         b"\0asm\x01\0\0\0".to_vec()
+    }
+
+    fn package_match(module_id: ModuleId, export_specifier: &str) -> PackageMatch {
+        PackageMatch {
+            module_id,
+            package_name: "pkg".to_string(),
+            package_version: "1.0.0".to_string(),
+            export_specifier: export_specifier.to_string(),
+            source_path: format!("pkg@1.0.0/{export_specifier}.js"),
+            normalized_source_hash: format!("hash-{}", module_id.0),
+            strategy: ModuleMatchStrategy::NormalizedSourceHash,
+            function_signature_matches: 0,
+            string_anchor_matches: 0,
+            external_importable: true,
+        }
+    }
+
+    fn rejected_package_ownership(
+        module_id: ModuleId,
+        package_name: &str,
+        package_version: &str,
+    ) -> PackageAttributionInput {
+        let mut attribution = PackageAttributionInput::rejected_source(
+            module_id,
+            package_name,
+            "matched package ownership, but the evidence does not prove a safe single external import",
+        );
+        attribution.package_version = Some(package_version.to_string());
+        attribution
     }
 
     fn package_match_connection(
