@@ -467,12 +467,32 @@ function compareSmallExtensionVm() {
 
 function runExtensionScriptVm(scriptPath) {
   const { chrome, listenerLog, callLog } = makeChromeMock();
+  const activeTimeouts = new Set();
+  const activeIntervals = new Set();
+  const trackedSetTimeout = (callback, delay, ...args) => {
+    const timer = setTimeout(callback, delay, ...args);
+    activeTimeouts.add(timer);
+    return timer;
+  };
+  const trackedClearTimeout = (timer) => {
+    activeTimeouts.delete(timer);
+    clearTimeout(timer);
+  };
+  const trackedSetInterval = (callback, delay, ...args) => {
+    const timer = setInterval(callback, delay, ...args);
+    activeIntervals.add(timer);
+    return timer;
+  };
+  const trackedClearInterval = (timer) => {
+    activeIntervals.delete(timer);
+    clearInterval(timer);
+  };
   const sandbox = {
     console: makeQuietConsole(),
-    setTimeout,
-    clearTimeout,
-    setInterval,
-    clearInterval,
+    setTimeout: trackedSetTimeout,
+    clearTimeout: trackedClearTimeout,
+    setInterval: trackedSetInterval,
+    clearInterval: trackedClearInterval,
     queueMicrotask,
     TextEncoder,
     TextDecoder,
@@ -491,6 +511,7 @@ function runExtensionScriptVm(scriptPath) {
     addEventListener: (type) => listenerLog.push(['global', String(type)]),
     removeEventListener: () => {},
     dispatchEvent: () => true,
+    close() {},
     attachEvent: (type) => listenerLog.push(['global', String(type)]),
     detachEvent: () => {},
     chrome,
@@ -505,6 +526,11 @@ function runExtensionScriptVm(scriptPath) {
     vm.runInNewContext(readFileSync(scriptPath, 'utf8'), sandbox, { filename: scriptPath, timeout: 5000 });
   } catch (error) {
     status = { ok: false, error: { name: error?.name, message: normalizeCliText(String(error?.message ?? error)) } };
+  } finally {
+    for (const timer of activeTimeouts) clearTimeout(timer);
+    for (const timer of activeIntervals) clearInterval(timer);
+    activeTimeouts.clear();
+    activeIntervals.clear();
   }
 
   return {
