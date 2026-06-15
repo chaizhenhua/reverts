@@ -10,7 +10,8 @@ use reverts_input::{ModuleDependencyTarget, ModuleInput, PackageAttributionInput
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
-    format_source_pretty, is_ascii_identifier_continue as is_identifier_continue,
+    collect_top_level_statement_facts, format_source_pretty,
+    is_ascii_identifier_continue as is_identifier_continue,
     is_ascii_identifier_start as is_identifier_start, is_js_keyword, parse_error_message,
     sanitize_identifier, skip_block_comment, skip_line_comment,
     verify_only_immediate_call_references,
@@ -2382,6 +2383,27 @@ impl ImportExportPlanner {
             );
             helper_closure.source =
                 coalesce_top_level_import_declarations(helper_closure.source.as_str());
+            let runtime_setter_bindings = used_runtime_helper_setters
+                .get(source_file_id)
+                .cloned()
+                .unwrap_or_default();
+            // Phase 14a: after all runtime-local rewrites, rebuild a binding
+            // graph from the emitted helper source and delete private helper
+            // declarations that are no longer reachable from the public
+            // runtime surface, setter targets, or top-level side effects. This
+            // is deliberately structural (no symbol-name allowlist): only
+            // top-level declarations whose initializer/declaration is
+            // side-effect-free are pruned.
+            let mut runtime_binding_roots = public_helper_bindings.clone();
+            runtime_binding_roots.extend(runtime_setter_bindings.iter().cloned());
+            let orphan_prune = prune_orphan_runtime_bindings(
+                helper_closure.source.as_str(),
+                &runtime_binding_roots,
+            );
+            helper_closure.source = orphan_prune.source;
+            for binding in &orphan_prune.dropped_bindings {
+                helper_closure.emitted_bindings.remove(binding);
+            }
             let runtime_externalized_binding_scan = scan_runtime_externalized_bindings(
                 program,
                 helper_closure.source.as_str(),
@@ -2433,13 +2455,9 @@ impl ImportExportPlanner {
             if !helper_closure.source.trim().is_empty() {
                 file.push_source(helper_closure.source);
             }
-            let setter_bindings = used_runtime_helper_setters
-                .get(source_file_id)
-                .cloned()
-                .unwrap_or_default();
             // Phase 10b: skip setter functions for migrated primary bindings;
             // the writer module now mutates them via direct assignment.
-            let setter_bindings: BTreeSet<BindingName> = setter_bindings
+            let setter_bindings: BTreeSet<BindingName> = runtime_setter_bindings
                 .difference(
                     &migrations_for_source
                         .keys()
@@ -4204,6 +4222,14 @@ fn emit_package_runtime_helper_files(
         );
         helper_closure.source =
             coalesce_top_level_import_declarations(helper_closure.source.as_str());
+        let mut runtime_binding_roots = usage.public_bindings.clone();
+        runtime_binding_roots.extend(usage.setter_bindings.iter().cloned());
+        let orphan_prune =
+            prune_orphan_runtime_bindings(helper_closure.source.as_str(), &runtime_binding_roots);
+        helper_closure.source = orphan_prune.source;
+        for binding in &orphan_prune.dropped_bindings {
+            helper_closure.emitted_bindings.remove(binding);
+        }
         let helper_path = package_runtime_helpers_path(&key.owner, key.source_file_id);
         let runtime_externalized_binding_scan = scan_runtime_externalized_bindings(
             program,
@@ -10733,6 +10759,215 @@ fn drop_bare_void_zero_top_level_statements(source: &str) -> String {
     } else {
         apply_text_edits(source, &expand_line_removal_edits(source, &edits))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeOrphanPrune {
+    source: String,
+    dropped_bindings: BTreeSet<BindingName>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeBindingGraphStatement {
+    start: usize,
+    end: usize,
+    definitions: BTreeSet<BindingName>,
+    dependencies: BTreeSet<BindingName>,
+    prunable: bool,
+}
+
+fn prune_orphan_runtime_bindings(
+    source: &str,
+    root_bindings: &BTreeSet<BindingName>,
+) -> RuntimeOrphanPrune {
+    let spans = parsed_top_level_statement_spans(source);
+    if spans.is_empty() {
+        return RuntimeOrphanPrune {
+            source: source.to_string(),
+            dropped_bindings: BTreeSet::new(),
+        };
+    }
+
+    let mut all_definitions = BTreeSet::<BindingName>::new();
+    for (start, end) in &spans {
+        all_definitions.extend(top_level_definitions_in_source(&source[*start..*end]));
+    }
+    if all_definitions.is_empty() {
+        return RuntimeOrphanPrune {
+            source: source.to_string(),
+            dropped_bindings: BTreeSet::new(),
+        };
+    }
+
+    let mut statements = Vec::<RuntimeBindingGraphStatement>::new();
+    let mut roots = root_bindings.clone();
+    let mut statements_by_definition = BTreeMap::<BindingName, Vec<usize>>::new();
+
+    for (start, end) in spans {
+        let statement = &source[start..end];
+        let definitions = top_level_definitions_in_source(statement);
+        let dependencies = identifier_read_facts_in_source(statement)
+            .into_iter()
+            .map(|fact| BindingName::new(fact.name.as_str()))
+            .filter(|binding| all_definitions.contains(binding))
+            .collect::<BTreeSet<_>>();
+        let prunable = !definitions.is_empty()
+            && runtime_orphan_statement_is_prunable(statement, &definitions);
+
+        if definitions.is_empty() || !prunable {
+            roots.extend(definitions.iter().cloned());
+            roots.extend(dependencies.iter().cloned());
+        }
+
+        let index = statements.len();
+        for definition in &definitions {
+            statements_by_definition
+                .entry(definition.clone())
+                .or_default()
+                .push(index);
+        }
+        statements.push(RuntimeBindingGraphStatement {
+            start,
+            end,
+            definitions,
+            dependencies,
+            prunable,
+        });
+    }
+
+    let mut reachable_bindings = BTreeSet::<BindingName>::new();
+    let mut reachable_statements = BTreeSet::<usize>::new();
+    let mut stack = roots
+        .into_iter()
+        .filter(|binding| all_definitions.contains(binding))
+        .collect::<Vec<_>>();
+
+    while let Some(binding) = stack.pop() {
+        if !reachable_bindings.insert(binding.clone()) {
+            continue;
+        }
+        let Some(statement_indices) = statements_by_definition.get(&binding) else {
+            continue;
+        };
+        for statement_index in statement_indices {
+            let statement = &statements[*statement_index];
+            if !reachable_statements.insert(*statement_index) {
+                continue;
+            }
+            for definition in statement
+                .definitions
+                .iter()
+                .chain(statement.dependencies.iter())
+            {
+                if all_definitions.contains(definition) && !reachable_bindings.contains(definition)
+                {
+                    stack.push(definition.clone());
+                }
+            }
+        }
+    }
+
+    let mut dropped_bindings = BTreeSet::<BindingName>::new();
+    let edits = statements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, statement)| {
+            if !statement.prunable
+                || statement.definitions.is_empty()
+                || reachable_statements.contains(&index)
+            {
+                return None;
+            }
+            dropped_bindings.extend(statement.definitions.iter().cloned());
+            Some((statement.start, statement.end, String::new()))
+        })
+        .collect::<Vec<_>>();
+
+    if edits.is_empty() {
+        return RuntimeOrphanPrune {
+            source: source.to_string(),
+            dropped_bindings,
+        };
+    }
+
+    RuntimeOrphanPrune {
+        source: apply_text_edits(source, &expand_line_removal_edits(source, &edits)),
+        dropped_bindings,
+    }
+}
+
+fn parsed_top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
+    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
+        .expect("runtime binding graph requires parseable TypeScript source")
+        .into_iter()
+        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
+        .collect()
+}
+
+fn runtime_orphan_statement_is_prunable(
+    statement: &str,
+    definitions: &BTreeSet<BindingName>,
+) -> bool {
+    let trimmed = statement.trim().trim_end_matches(';').trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if runtime_orphan_function_declaration_is_prunable(trimmed) {
+        return true;
+    }
+    if keyword_at(trimmed, 0, "class") {
+        return pure_class_expression(trimmed);
+    }
+    runtime_orphan_variable_declaration_is_prunable(trimmed, definitions)
+}
+
+fn runtime_orphan_function_declaration_is_prunable(source: &str) -> bool {
+    if keyword_at(source, 0, "function") {
+        return true;
+    }
+    if !keyword_at(source, 0, "async") {
+        return false;
+    }
+    let cursor = skip_ws(source.as_bytes(), "async".len());
+    keyword_at(source, cursor, "function")
+}
+
+fn runtime_orphan_variable_declaration_is_prunable(
+    source: &str,
+    definitions: &BTreeSet<BindingName>,
+) -> bool {
+    let Some((_keyword, after_keyword)) = declaration_keyword_at(source, 0) else {
+        return false;
+    };
+    let body = source[skip_ws(source.as_bytes(), after_keyword)..].trim();
+    if body.is_empty() {
+        return false;
+    }
+    let mut parsed_bindings = BTreeSet::<BindingName>::new();
+    for declarator in split_top_level_properties(body) {
+        let declarator = declarator.trim();
+        let Some((binding, after_binding)) = parse_identifier(declarator, 0) else {
+            return false;
+        };
+        let binding = BindingName::new(binding);
+        if !definitions.contains(&binding) || !parsed_bindings.insert(binding) {
+            return false;
+        }
+        let rest = declarator[skip_ws(declarator.as_bytes(), after_binding)..].trim();
+        if rest.is_empty() {
+            continue;
+        }
+        let Some(value) = rest.strip_prefix('=') else {
+            return false;
+        };
+        if value.starts_with('=') || value.starts_with('>') {
+            return false;
+        }
+        if !is_pure_initializer_expression(value.trim()) {
+            return false;
+        }
+    }
+    parsed_bindings == *definitions
 }
 
 fn source_reads_binding_only_as_erasable_noop_calls(source: &str, binding: &BindingName) -> bool {
@@ -17864,7 +18099,7 @@ mod tests {
         export_member_adapter_proof, inline_internal_setter_calls,
         inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
         merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
-        purify_private_runtime_lazy_initializers,
+        prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
     };
 
     fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -17923,6 +18158,67 @@ mod tests {
             .iter()
             .find(|file| file.path == path)
             .map(|file| file.body.join("\n"))
+    }
+
+    #[test]
+    fn runtime_binding_graph_prunes_unreachable_private_function_closure() {
+        let source = "\
+function entry() { return dep(); }\n\
+function dep() { return 1; }\n\
+function orphan() { return dep(); }\n\
+function orphanDep() { return 2; }\n";
+        let roots = BTreeSet::from([BindingName::new("entry")]);
+
+        let pruned = prune_orphan_runtime_bindings(source, &roots);
+
+        assert!(pruned.source.contains("function entry()"));
+        assert!(pruned.source.contains("function dep()"));
+        assert!(!pruned.source.contains("function orphan()"));
+        assert!(!pruned.source.contains("function orphanDep()"));
+        assert_eq!(
+            pruned.dropped_bindings,
+            BTreeSet::from([BindingName::new("orphan"), BindingName::new("orphanDep")])
+        );
+    }
+
+    #[test]
+    fn runtime_binding_graph_keeps_side_effect_dependencies() {
+        let source = "\
+function dep() { return 1; }\n\
+function orphan() { return 2; }\n\
+dep();\n";
+        let pruned = prune_orphan_runtime_bindings(source, &BTreeSet::new());
+
+        assert!(pruned.source.contains("function dep()"));
+        assert!(!pruned.source.contains("function orphan()"));
+        assert!(pruned.source.contains("dep();"));
+    }
+
+    #[test]
+    fn runtime_binding_graph_does_not_prune_effectful_var_initializer() {
+        let source = "\
+function dep() { return 1; }\n\
+var orphan = build(dep());\n";
+        let pruned = prune_orphan_runtime_bindings(source, &BTreeSet::new());
+
+        assert!(pruned.source.contains("function dep()"));
+        assert!(pruned.source.contains("var orphan = build(dep());"));
+        assert!(pruned.dropped_bindings.is_empty());
+    }
+
+    #[test]
+    fn runtime_binding_graph_prunes_pure_var_initializer_and_dependencies() {
+        let source = "\
+function dep() { return 1; }\n\
+var orphan = () => dep();\n";
+        let pruned = prune_orphan_runtime_bindings(source, &BTreeSet::new());
+
+        assert!(!pruned.source.contains("function dep()"));
+        assert!(!pruned.source.contains("var orphan"));
+        assert_eq!(
+            pruned.dropped_bindings,
+            BTreeSet::from([BindingName::new("dep"), BindingName::new("orphan")])
+        );
     }
 
     #[test]
