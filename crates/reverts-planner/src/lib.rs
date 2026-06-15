@@ -9712,28 +9712,26 @@ fn compact_pure_static_runtime_literals(source: &str) -> String {
             cursor = next;
             continue;
         }
-        if bytes[cursor] != b'=' || !assignment_rhs_can_start_static_literal(source, cursor) {
-            cursor += 1;
-            continue;
+        if matches!(bytes[cursor], b'{' | b'[')
+            && container_literal_can_start_runtime_compaction(source, cursor)
+        {
+            let literal_end = match bytes[cursor] {
+                b'{' => find_matching_brace(source, cursor),
+                b'[' => find_matching_bracket(source, cursor),
+                _ => None,
+            };
+            let Some(literal_end) = literal_end else {
+                cursor += 1;
+                continue;
+            };
+            let literal = &source[cursor..=literal_end];
+            if let Some(replacement) = compact_static_container_literal(literal) {
+                edits.push((cursor, literal_end + 1, replacement));
+                cursor = literal_end + 1;
+                continue;
+            }
         }
-        let literal_start = skip_ws(bytes, cursor + 1);
-        let Some(open) = bytes.get(literal_start).copied() else {
-            break;
-        };
-        let literal_end = match open {
-            b'{' => find_matching_brace(source, literal_start),
-            b'[' => find_matching_bracket(source, literal_start),
-            _ => None,
-        };
-        let Some(literal_end) = literal_end else {
-            cursor += 1;
-            continue;
-        };
-        let literal = &source[literal_start..=literal_end];
-        if let Some(replacement) = compact_pure_static_literal(literal) {
-            edits.push((literal_start, literal_end + 1, replacement));
-        }
-        cursor = literal_end + 1;
+        cursor += 1;
     }
     if edits.is_empty() {
         source.to_string()
@@ -9742,19 +9740,26 @@ fn compact_pure_static_runtime_literals(source: &str) -> String {
     }
 }
 
-fn assignment_rhs_can_start_static_literal(source: &str, equals: usize) -> bool {
+fn container_literal_can_start_runtime_compaction(source: &str, literal_start: usize) -> bool {
     let bytes = source.as_bytes();
-    let previous = previous_non_ws(bytes, equals);
-    if previous.is_some_and(|index| matches!(bytes[index], b'=' | b'!' | b'<' | b'>')) {
+    let Some(previous) = previous_non_ws(bytes, literal_start) else {
         return false;
+    };
+    match bytes[previous] {
+        b'=' => {
+            !matches!(
+                previous_non_ws(bytes, previous).map(|index| bytes[index]),
+                Some(b'=' | b'!' | b'<' | b'>')
+            ) && !matches!(bytes.get(previous + 1), Some(b'=') | Some(b'>'))
+        }
+        b':' | b'(' | b'[' | b',' | b'?' => true,
+        _ => false,
     }
-    let next = skip_ws(bytes, equals + 1);
-    !matches!(bytes.get(next), Some(b'=') | Some(b'>'))
 }
 
-fn compact_pure_static_literal(literal: &str) -> Option<String> {
+fn compact_static_container_literal(literal: &str) -> Option<String> {
     if literal.lines().count() < 6
-        || !is_pure_initializer_expression(literal)
+        || !static_container_literal_is_compaction_safe(literal)
         || !static_literal_is_text_compaction_safe(literal)
     {
         return None;
@@ -9829,6 +9834,11 @@ fn compact_static_literal_text(literal: &str) -> String {
                 }
                 cursor = next;
             }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                let next = skip_regex_literal(bytes, cursor);
+                output.push_str(&literal[cursor..next]);
+                cursor = next;
+            }
             byte if byte.is_ascii_whitespace() => {
                 let next = skip_ws(bytes, cursor);
                 if compact_removed_separator_needs_space(&output, literal, next) {
@@ -9852,7 +9862,121 @@ fn compact_removed_separator_needs_space(output: &str, source: &str, next: usize
     let Some(next) = source.as_bytes().get(next).copied() else {
         return false;
     };
-    is_identifier_continue(previous) && is_identifier_continue(next)
+    (is_identifier_continue(previous) && is_identifier_continue(next))
+        || matches!(
+            (previous, next),
+            (b'+', b'+') | (b'-', b'-') | (b'/', b'/') | (b'/', b'*')
+        )
+}
+
+fn static_container_literal_is_compaction_safe(literal: &str) -> bool {
+    match literal.as_bytes().first().copied() {
+        Some(b'{') => compactable_object_container_literal(literal),
+        Some(b'[') => compactable_array_container_literal(literal),
+        _ => false,
+    }
+}
+
+fn compactable_object_container_literal(source: &str) -> bool {
+    let Some(close) = find_matching_brace(source, 0) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    split_top_level_properties(&source[1..close])
+        .into_iter()
+        .all(compactable_object_container_property)
+}
+
+fn compactable_object_container_property(property: &str) -> bool {
+    let property = property.trim();
+    if property.is_empty() {
+        return false;
+    }
+    if let Some(spread) = property.strip_prefix("...") {
+        return simple_runtime_reference_expression(spread.trim());
+    }
+    if let Some(colon) = find_top_level_byte(property, b':') {
+        if !pure_object_property_key(property[..colon].trim()) {
+            return false;
+        }
+        return compactable_container_value_expression(property[colon + 1..].trim());
+    }
+    simple_runtime_reference_expression(property)
+}
+
+fn compactable_array_container_literal(source: &str) -> bool {
+    let Some(close) = find_matching_bracket(source, 0) else {
+        return false;
+    };
+    if skip_ws(source.as_bytes(), close + 1) != source.len() {
+        return false;
+    }
+    split_top_level_properties(&source[1..close])
+        .into_iter()
+        .all(|element| {
+            let element = element.trim();
+            if element.is_empty() {
+                return false;
+            }
+            if let Some(spread) = element.strip_prefix("...") {
+                return simple_runtime_reference_expression(spread.trim());
+            }
+            compactable_container_value_expression(element)
+        })
+}
+
+fn compactable_container_value_expression(source: &str) -> bool {
+    let source = source.trim();
+    if source.is_empty() {
+        return false;
+    }
+    if matches!(source, "void 0")
+        || is_literal_expression(source)
+        || regex_literal_covers_source(source)
+    {
+        return true;
+    }
+    if source.as_bytes().first() == Some(&b'{') {
+        return compactable_object_container_literal(source);
+    }
+    if source.as_bytes().first() == Some(&b'[') {
+        return compactable_array_container_literal(source);
+    }
+    simple_runtime_reference_expression(source)
+}
+
+fn regex_literal_covers_source(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    bytes.first() == Some(&b'/')
+        && looks_like_regex_literal(bytes, 0)
+        && skip_regex_literal(bytes, 0) == bytes.len()
+}
+
+fn simple_runtime_reference_expression(source: &str) -> bool {
+    let source = source.trim();
+    let bytes = source.as_bytes();
+    let Some((first, mut cursor)) = parse_identifier(source, 0) else {
+        return false;
+    };
+    if is_js_keyword(first) {
+        return false;
+    }
+    while cursor < bytes.len() {
+        if bytes.get(cursor) != Some(&b'.') || bytes.get(cursor + 1) == Some(&b'.') {
+            return false;
+        }
+        cursor += 1;
+        let Some((member, next)) = parse_identifier(source, cursor) else {
+            return false;
+        };
+        if is_js_keyword(member) {
+            return false;
+        }
+        cursor = next;
+    }
+    true
 }
 
 fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -> String {
@@ -18874,6 +18998,63 @@ var init = lazyValue(() => {\n\
         assert!(
             compacted.contains("kept = build({\n\t\tvalue: 1\n\t});"),
             "call argument literals are not assignment RHS values and must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn runtime_static_literal_compaction_allows_data_spreads_and_references() {
+        let source = "\
+var init = lazyValue(() => {\n\
+\tbase = {\n\
+\t\t'--all': 'none',\n\
+\t\t'--tags': 'none'\n\
+\t};\n\
+\tconfig = {\n\
+\t\t...base,\n\
+\t\tmode: defaultMode,\n\
+\t\tnested: {\n\
+\t\t\tname: 'alpha',\n\
+\t\t\tflags: [\n\
+\t\t\t\t'A',\n\
+\t\t\t\t'B'\n\
+\t\t\t]\n\
+\t\t}\n\
+\t};\n\
+});\n";
+
+        let compacted = compact_pure_static_runtime_literals(source);
+
+        assert!(
+            compacted.contains(
+                "config = {...base,mode:defaultMode,nested:{name:'alpha',flags:['A','B']}}"
+            )
+        );
+    }
+
+    #[test]
+    fn runtime_static_literal_compaction_preserves_regex_and_skips_arrow_values() {
+        let source = "\
+var init = lazyValue(() => {\n\
+\tpatterns = [\n\
+\t\t/a b+/g,\n\
+\t\t'keep space',\n\
+\t\t/another pattern/,\n\
+\t\t'end'\n\
+\t];\n\
+\thandlers = {\n\
+\t\tfirst: () => {\n\
+\t\t\treturn 1;\n\
+\t\t},\n\
+\t\tsecond: value\n\
+\t};\n\
+});\n";
+
+        let compacted = compact_pure_static_runtime_literals(source);
+
+        assert!(compacted.contains("patterns = [/a b+/g,'keep space',/another pattern/,'end']"));
+        assert!(
+            compacted.contains("handlers = {\n\t\tfirst: () => {"),
+            "function-bearing object literals stay expanded"
         );
     }
 
