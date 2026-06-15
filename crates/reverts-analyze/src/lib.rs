@@ -1,3 +1,5 @@
+pub mod rollup;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstFactKind, AstWrapperKind, FunctionExtractor};
