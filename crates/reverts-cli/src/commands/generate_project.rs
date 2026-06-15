@@ -60,10 +60,20 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         .map_err(CliRunError::LoadInput)?;
     let run = generate_project_from_input(input).map_err(CliRunError::Pipeline)?;
 
-    if !run.audit.is_clean() {
+    // Only errors block writing the output. Warnings (e.g. duplicate
+    // top-level binding, ambiguous binding shape) describe input-bundle
+    // conditions per ADR 0002: surface them, don't strand the user.
+    if run.audit.has_errors() {
         return Err(CliRunError::AuditRejected(format_audit_findings(
             &run.audit,
         )));
+    }
+    if !run.audit.is_clean() {
+        eprintln!(
+            "warning: generated project carries {} audit warning(s):\n{}",
+            run.audit.warning_count(),
+            format_audit_findings(&run.audit)
+        );
     }
 
     let written = write_emitted_project(

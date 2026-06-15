@@ -939,7 +939,6 @@ name = "reverts-cli"
 version = "0.1.0"
 dependencies = [
  "reverts-analyze",
- "reverts-bundle",
  "reverts-graph",
  "reverts-input",
  "reverts-ir",
@@ -1071,6 +1070,7 @@ name = "reverts-pipeline"
 version = "0.1.0"
 dependencies = [
  "reverts-analyze",
+ "reverts-bundle",
  "reverts-emitter",
  "reverts-fixtures",
  "reverts-input",

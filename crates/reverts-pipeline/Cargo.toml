@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 reverts-analyze = { path = "../reverts-analyze" }
+reverts-bundle = { path = "../reverts-bundle" }
 reverts-emitter = { path = "../reverts-emitter" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }

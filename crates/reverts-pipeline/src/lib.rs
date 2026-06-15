@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
@@ -7,7 +7,8 @@ use std::path::{Component, Path};
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_project};
 use reverts_input::{
-    InputBundle, InputRows, ModuleInput, PackageAttributionStatus, SourceFileInput,
+    InputBundle, InputBundleError, InputRows, ModuleInput, PackageAttributionStatus,
+    SourceFileInput,
 };
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
@@ -54,26 +55,136 @@ pub struct AssetReference {
     pub logical_path: String,
 }
 
+/// Result of bundle-aware row preparation for the matcher path. The
+/// matcher needs `synthetic_modules` separately so it can persist them
+/// into SQLite alongside `INSERT OR IGNORE` deduplication.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedInputRows {
+    pub rows: InputRows,
+    pub synthetic_modules: Vec<ModuleInput>,
+    pub audit: AuditReport,
+}
+
+/// Enriched program plus the bundle-extraction audit that ran ahead of
+/// it. Lets `generate_project_from_prepared` and
+/// `runtime_setter_migration_blocker_report_from_prepared` share a single
+/// enrichment when the same project needs both outputs (the CLI inventory
+/// flow with `--setter-blockers`).
+#[derive(Debug)]
+pub struct PreparedProgram {
+    pub program: EnrichedProgram,
+    pub bundle_audit: AuditReport,
+    pub enrichment_audit: AuditReport,
+}
+
+/// Bundle-aware row preparation for the matcher.
+///
+/// Always runs `reverts_bundle::extract`. At match time the loaded rows
+/// have the bundle wrapper attached as a top-level module on the source
+/// file, so the missing-modules filter used by the generator path would
+/// incorrectly skip extraction here. Idempotency relies on
+/// `reverts_bundle::extract`'s synthetic-id allocator starting past
+/// `max_real_id`, so re-runs after persistence produce no new modules.
 #[must_use]
+pub fn prepare_input_rows_for_pipeline(mut rows: InputRows) -> PreparedInputRows {
+    let extraction = reverts_bundle::extract(&rows.source_files, &rows.modules);
+    let synthetic_modules = extraction.new_modules.clone();
+    let audit = extraction.audit.clone();
+    extraction.merge_into(&mut rows);
+    PreparedInputRows {
+        rows,
+        synthetic_modules,
+        audit,
+    }
+}
+
+/// Bundle-aware bundle preparation for the generator.
+///
+/// When called after the matcher has persisted synthetic modules and the
+/// bundle has been reloaded, every bundle source file already has its
+/// inner modules attached; in that case extraction is skipped. When
+/// called standalone (no prior matcher run) on a bundle where no module
+/// points at a source file, extraction runs on those source files only
+/// and the resulting synthetic modules are appended via
+/// `InputBundle::with_appended_modules` — no full row re-validation.
+pub fn prepare_input_bundle_for_generation(
+    input: InputBundle,
+) -> Result<(InputBundle, AuditReport), PipelineError> {
+    let candidates = missing_module_source_file_ids(&input);
+    if candidates.is_empty() {
+        return Ok((input, AuditReport::default()));
+    }
+    let candidate_source_files: Vec<&SourceFileInput> = input
+        .source_files
+        .iter()
+        .filter(|sf| candidates.contains(&sf.id))
+        .collect();
+    // `reverts_bundle::extract` wants a slice; build a tiny owned vec of
+    // refs by cloning only the candidate source files — modules and the
+    // remaining unrelated source files are not touched.
+    let candidate_source_files: Vec<SourceFileInput> =
+        candidate_source_files.into_iter().cloned().collect();
+    let extraction = reverts_bundle::extract(&candidate_source_files, &input.modules);
+    let audit = extraction.audit.clone();
+    let new_modules = extraction.new_modules;
+    let input = input
+        .with_appended_modules(new_modules)
+        .map_err(PipelineError::Input)?;
+    Ok((input, audit))
+}
+
 pub fn runtime_setter_migration_blocker_report_from_input(
     input: InputBundle,
+) -> Result<RuntimeSetterMigrationBlockerReport, PipelineError> {
+    let prepared = prepare_and_enrich(input)?;
+    Ok(runtime_setter_migration_blocker_report_from_prepared(
+        &prepared,
+    ))
+}
+
+#[must_use]
+pub fn runtime_setter_migration_blocker_report_from_prepared(
+    prepared: &PreparedProgram,
 ) -> RuntimeSetterMigrationBlockerReport {
+    ImportExportPlanner.runtime_setter_migration_blocker_report(&prepared.program)
+}
+
+pub fn prepare_and_enrich(input: InputBundle) -> Result<PreparedProgram, PipelineError> {
+    let (input, bundle_audit) = prepare_input_bundle_for_generation(input)?;
     let model = ProgramModel::from_input(input);
     let enrichment = enrich_program(model);
-    ImportExportPlanner.runtime_setter_migration_blocker_report(&enrichment.program)
+    Ok(PreparedProgram {
+        program: enrichment.program,
+        bundle_audit,
+        enrichment_audit: enrichment.audit,
+    })
 }
 
 pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, PipelineError> {
-    let model = ProgramModel::from_input(input);
-    let enrichment = enrich_program(model);
-    let mut audit = enrichment.audit;
-    let input = enrichment.program.model().input();
+    let prepared = prepare_and_enrich(input)?;
+    generate_project_from_prepared(prepared)
+}
+
+pub fn generate_project_from_prepared(
+    prepared: PreparedProgram,
+) -> Result<OutputRun, PipelineError> {
+    let PreparedProgram {
+        program,
+        bundle_audit,
+        enrichment_audit,
+    } = prepared;
+    let mut audit = bundle_audit;
+    audit.extend(enrichment_audit);
+    let input = program.model().input();
     let runtime_dependencies = collect_runtime_dependencies(input);
     let asset_references = collect_required_asset_references(input);
     let assets = collect_emitted_assets(input, &asset_references);
-    audit.extend(audit_required_sources(&enrichment.program));
+    audit.extend(audit_required_sources(&program));
     audit.extend(audit_required_assets(input, &asset_references));
-    if !audit.is_clean() {
+    // Only errors zero-out emission. Warnings (e.g. UnprotectedNullableMemberRead
+    // by design per ADR 0002 — surfaced rather than repaired) must not strand
+    // the entire project at files=0.
+    if audit.has_errors() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
             audit,
@@ -84,10 +195,10 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
 
     let planner = ImportExportPlanner;
     let plan = planner
-        .plan_enriched_program(&enrichment.program)
+        .plan_enriched_program(&program)
         .map_err(PipelineError::Plan)?;
     audit.extend(audit_emit_plan_synthesis(&plan));
-    if !audit.is_clean() {
+    if audit.has_errors() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
             audit,
@@ -96,7 +207,7 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
         });
     }
 
-    let module_output_paths = module_output_paths(&enrichment.program);
+    let module_output_paths = module_output_paths(&program);
     let mut project = emit_project(&plan).map_err(PipelineError::Emit)?;
     canonicalize_emitted_source_locations(&mut project);
     rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
@@ -153,6 +264,19 @@ fn collect_runtime_dependencies(input: &InputBundle) -> Vec<RuntimeDependency> {
             package_name,
             package_version,
         })
+        .collect()
+}
+
+fn missing_module_source_file_ids(input: &InputBundle) -> HashSet<u32> {
+    let attached: HashSet<u32> = input
+        .modules
+        .iter()
+        .filter_map(|module| module.source_file_id)
+        .collect();
+    input
+        .source_files
+        .iter()
+        .filter_map(|source_file| (!attached.contains(&source_file.id)).then_some(source_file.id))
         .collect()
 }
 
@@ -1012,6 +1136,7 @@ fn audit_emitted_project_parse(project: &EmittedProject) -> AuditReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
+    Input(InputBundleError),
     Plan(PlanError),
     Emit(EmitError),
 }
@@ -1019,6 +1144,7 @@ pub enum PipelineError {
 impl fmt::Display for PipelineError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Input(error) => write!(formatter, "{error}"),
             Self::Plan(error) => write!(formatter, "{error}"),
             Self::Emit(error) => write!(formatter, "{error}"),
         }
@@ -1028,6 +1154,7 @@ impl fmt::Display for PipelineError {
 impl Error for PipelineError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Input(source) => Some(source),
             Self::Plan(source) => Some(source),
             Self::Emit(source) => Some(source),
         }
@@ -1061,6 +1188,7 @@ mod tests {
         OutputRun, audit_emit_plan_synthesis, audit_namespace_object_member_consistency,
         collect_dynamic_asset_references, current_node_platform_dir,
         fold_multiline_static_template_literals_in_source, generate_project_from_input,
+        prepare_input_bundle_for_generation, prepare_input_rows_for_pipeline,
     };
 
     fn rows_with_application_module() -> InputRows {
@@ -2204,6 +2332,91 @@ mod tests {
         assert_eq!(run.project.files.len(), 2);
         assert!(run.project.files[0].source.contains("export const one = 1"));
         assert!(run.project.files[1].source.contains("export const two = 2"));
+    }
+
+    #[test]
+    fn shared_pipeline_preparation_extracts_bundle_modules_once() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
+var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 42; }});"#
+                    .to_string(),
+            ),
+        ));
+
+        let prepared = prepare_input_rows_for_pipeline(rows);
+
+        assert!(prepared.audit.is_clean());
+        assert_eq!(prepared.synthetic_modules.len(), 1);
+        assert_eq!(prepared.rows.modules.len(), 1);
+        assert_eq!(prepared.rows.modules[0].semantic_path, "src/inner.js");
+
+        let prepared_again = prepare_input_rows_for_pipeline(prepared.rows);
+        assert!(
+            prepared_again.synthetic_modules.is_empty(),
+            "bundle preparation must be idempotent so match and generate can share it"
+        );
+        assert_eq!(prepared_again.rows.modules.len(), 1);
+    }
+
+    #[test]
+    fn prepare_input_bundle_for_generation_is_noop_when_modules_already_attached() {
+        // Simulate the post-matcher state: rows reloaded from SQLite where
+        // every source file already has at least one module pointing at
+        // it (top-level + bundle-extracted inner). The generator-side
+        // prep must observe this and skip extraction entirely.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
+var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 42; }});"#
+                    .to_string(),
+            ),
+        ));
+        let prepared = prepare_input_rows_for_pipeline(rows);
+        let input =
+            InputBundle::from_rows(prepared.rows).expect("matcher-prepared rows should be valid");
+        let module_count_before = input.modules.len();
+
+        let (input_after, audit) =
+            prepare_input_bundle_for_generation(input).expect("generation prep should succeed");
+
+        assert!(audit.is_clean());
+        assert_eq!(
+            input_after.modules.len(),
+            module_count_before,
+            "second-pass extraction must add no modules"
+        );
+    }
+
+    #[test]
+    fn generate_project_reuses_bundle_preparation_for_inner_modules() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
+var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 42; }});"#
+                    .to_string(),
+            ),
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "{:?}", run.audit.findings());
+        assert_eq!(run.project.files.len(), 1);
+        assert!(
+            run.project.files[0].source.contains("exports.answer = 42"),
+            "generated project should use bundle-extracted inner module source, got:\n{}",
+            run.project.files[0].source
+        );
     }
 
     #[test]

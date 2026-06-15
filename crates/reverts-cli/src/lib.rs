@@ -47,7 +47,8 @@ use reverts_pipeline::{
     AssetReference, EmittedFile, RuntimeSetterMigrationBindingKey,
     RuntimeSetterMigrationBindingStatus, RuntimeSetterMigrationBlockerReason,
     RuntimeSetterMigrationBlockerReport, collect_required_asset_references_from_rows,
-    generate_project_from_input, runtime_setter_migration_blocker_report_from_input,
+    generate_project_from_prepared, prepare_and_enrich, prepare_input_rows_for_pipeline,
+    runtime_setter_migration_blocker_report_from_prepared,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use semver::{BuildMetadata, Comparator, Op, Version, VersionReq};
@@ -1152,22 +1153,20 @@ pub fn runtime_inventory_from_sqlite(
 
         let input = load_project_bundle_from_sqlite(args.input.as_path(), selection.project_id)
             .map_err(RuntimeInventoryError::LoadInput)?;
-        let project_setter_blockers = if args.setter_blockers {
-            Some(runtime_setter_migration_blocker_report_from_input(
-                input.clone(),
-            ))
-        } else {
-            None
-        };
         let runtime_package_ownership = args
             .runtime_attribution
             .then(|| runtime_package_ownership_by_binding(&input));
+        let prepared = prepare_and_enrich(input).map_err(RuntimeInventoryError::Pipeline)?;
+        let project_setter_blockers = args
+            .setter_blockers
+            .then(|| runtime_setter_migration_blocker_report_from_prepared(&prepared));
         if let (Some(total), Some(project_report)) =
             (setter_blockers.as_mut(), project_setter_blockers.as_ref())
         {
             total.add(project_report);
         }
-        let run = generate_project_from_input(input).map_err(RuntimeInventoryError::Pipeline)?;
+        let run =
+            generate_project_from_prepared(prepared).map_err(RuntimeInventoryError::Pipeline)?;
         let counts = runtime_inventory_counts_from_files(&run.project.files);
         let project_runtime_attribution = runtime_package_ownership
             .as_ref()
@@ -2223,15 +2222,15 @@ pub fn match_packages_from_connection(
         .map_err(MatchPackagesError::LoadInput)?;
     mark_timing!("load_project_rows");
 
-    // Bundle-aware module extraction (Phase alpha): split recognised bundle
-    // wrappers into per-module rows before the matcher sees them.
-    let extraction = reverts_bundle::extract(&rows);
-    let extraction_audit = extraction.audit.clone();
-    // Snapshot new_modules before merge_into consumes the extraction —
-    // we need them later to persist synthetic rows into the SQLite
-    // modules table so function-level attributions can FK them.
-    let synthetic_modules: Vec<reverts_input::ModuleInput> = extraction.new_modules.clone();
-    extraction.merge_into(&mut rows);
+    // Shared bundle-aware row preparation: split recognised bundle wrappers
+    // into per-module rows before either matcher or generator sees them.
+    let prepared = prepare_input_rows_for_pipeline(rows);
+    let extraction_audit = prepared.audit;
+    // Snapshot new_modules from the shared preparation — we need them later
+    // to persist synthetic rows into the SQLite modules table so
+    // function-level attributions can FK them.
+    let synthetic_modules = prepared.synthetic_modules;
+    rows = prepared.rows;
     enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
     mark_timing!("bundle_extract_enrich");
 
@@ -7940,8 +7939,8 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
 /// Uses `INSERT OR IGNORE` to allow idempotent re-runs: if a previous
 /// run already wrote a row with the same `(file_id, original_name)`,
 /// the duplicate is silently skipped. Synthetic-id collisions across
-/// runs are avoided by `reverts_bundle::extract`'s allocator starting
-/// past the max real module id at load time.
+/// runs are avoided by the shared pipeline preparation allocator starting past
+/// the max real module id at load time.
 fn persist_synthetic_modules(
     connection: &mut Connection,
     synthetic_modules: &[reverts_input::ModuleInput],
