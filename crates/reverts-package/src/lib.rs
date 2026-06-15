@@ -204,6 +204,194 @@ impl PackageResolution {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalImportProofKind {
+    DirectSource,
+    ExportSpecifierSource,
+    RootExportSource,
+    NormalizedSourceExport,
+    NormalizedSourceAdapter,
+    OwnershipSourceMatch,
+    SemanticExport,
+    SemanticSource,
+    SourceMatch,
+    DependencyGraphSource,
+    DependencyEdgePath,
+    CrossPackageSource,
+    ExportMembers,
+    SemanticPath,
+    PackageRoot,
+    Unknown,
+}
+
+impl ExternalImportProofKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DirectSource => "matched_package_source",
+            Self::ExportSpecifierSource => "export_specifier_source",
+            Self::RootExportSource => "root_export_source",
+            Self::NormalizedSourceExport => "normalized_source_export",
+            Self::NormalizedSourceAdapter => "normalized_source_adapter",
+            Self::OwnershipSourceMatch => "ownership_source_match",
+            Self::SemanticExport => "semantic_export",
+            Self::SemanticSource => "semantic_source",
+            Self::SourceMatch => "source_match_fallback",
+            Self::DependencyGraphSource => "dependency_graph_source",
+            Self::DependencyEdgePath => "dependency_edge_path",
+            Self::CrossPackageSource => "cross_package_source",
+            Self::ExportMembers => "export_members_adapter",
+            Self::SemanticPath => "semantic_path_fallback",
+            Self::PackageRoot => "package_root_fallback",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[must_use]
+pub fn external_import_proof_kind(source_path: &str) -> ExternalImportProofKind {
+    if source_path.starts_with("export-specifier-source:") {
+        ExternalImportProofKind::ExportSpecifierSource
+    } else if source_path.starts_with("root-export-source:") {
+        ExternalImportProofKind::RootExportSource
+    } else if source_path.starts_with("normalized-source-export:") {
+        ExternalImportProofKind::NormalizedSourceExport
+    } else if source_path.starts_with("normalized-source-adapter:") {
+        ExternalImportProofKind::NormalizedSourceAdapter
+    } else if source_path.starts_with("ownership-source-match:") {
+        ExternalImportProofKind::OwnershipSourceMatch
+    } else if source_path.starts_with("forced-external:semantic-export:") {
+        ExternalImportProofKind::SemanticExport
+    } else if source_path.starts_with("forced-external:semantic-source:") {
+        ExternalImportProofKind::SemanticSource
+    } else if source_path.starts_with("forced-external:source-match:") {
+        ExternalImportProofKind::SourceMatch
+    } else if source_path.starts_with("forced-external:dependency-graph-source:") {
+        ExternalImportProofKind::DependencyGraphSource
+    } else if source_path.starts_with("forced-external:dependency-edge-path:") {
+        ExternalImportProofKind::DependencyEdgePath
+    } else if source_path.starts_with("forced-external:cross-package-source:") {
+        ExternalImportProofKind::CrossPackageSource
+    } else if source_path.starts_with("forced-external:export-members:") {
+        ExternalImportProofKind::ExportMembers
+    } else if source_path.starts_with("forced-external:semantic-path:") {
+        ExternalImportProofKind::SemanticPath
+    } else if source_path.starts_with("forced-external:package-root:") {
+        ExternalImportProofKind::PackageRoot
+    } else {
+        ExternalImportProofKind::DirectSource
+    }
+}
+
+#[must_use]
+pub fn external_import_proof_label(source_path: &str) -> &'static str {
+    external_import_proof_kind(source_path).label()
+}
+
+#[must_use]
+pub fn external_import_concrete_source_path(proof_path: &str) -> Option<String> {
+    if let Some(rest) = proof_path.strip_prefix("normalized-source-export:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:source-match:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-source:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-export:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-path:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:package-root:") {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-graph-source:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-package-source:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
+        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    }
+    None
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportMembersImportProof {
+    pub proof_kind: String,
+    pub exported_members: BTreeSet<String>,
+    pub aliases: BTreeMap<String, String>,
+    pub source_path: String,
+}
+
+#[must_use]
+pub fn parse_export_members_import_proof(resolved_file: &str) -> Option<ExportMembersImportProof> {
+    let rest = resolved_file.strip_prefix("forced-external:export-members:")?;
+    let mut parts = rest.splitn(3, ':');
+    let proof_kind = parts.next()?.to_string();
+    let members = parts.next()?;
+    let tail = parts.next().unwrap_or_default();
+    let exported_members = members
+        .split(',')
+        .map(str::trim)
+        .filter(|member| is_identifier_like(member))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    let aliases = export_member_import_proof_aliases(tail);
+    let source_path = tail
+        .strip_prefix("aliases=")
+        .and_then(|rest| {
+            rest.split_once(':')
+                .map(|(_aliases, source_path)| source_path)
+        })
+        .unwrap_or(tail)
+        .to_string();
+    (!proof_kind.is_empty() && !exported_members.is_empty() && !source_path.is_empty()).then_some(
+        ExportMembersImportProof {
+            proof_kind,
+            exported_members,
+            aliases,
+            source_path,
+        },
+    )
+}
+
+fn export_member_import_proof_aliases(tail: &str) -> BTreeMap<String, String> {
+    let Some(alias_tail) = tail.strip_prefix("aliases=") else {
+        return BTreeMap::new();
+    };
+    let aliases = alias_tail
+        .split_once(':')
+        .map(|(aliases, _source_path)| aliases)
+        .unwrap_or(alias_tail);
+    aliases
+        .split(',')
+        .filter_map(|alias| {
+            let (local, exported) = alias.split_once('=')?;
+            let local = local.trim();
+            let exported = exported.trim();
+            (is_identifier_like(local) && is_identifier_like(exported))
+                .then(|| (local.to_string(), exported.to_string()))
+        })
+        .collect()
+}
+
+fn is_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+}
+
 fn record_import_attribute_candidate(
     candidates: &mut BTreeMap<String, Option<BTreeMap<String, String>>>,
     conflicts: &mut BTreeMap<String, ()>,
@@ -368,8 +556,10 @@ mod tests {
     use reverts_ir::{ModuleId, PackageSurface};
 
     use super::{
-        PackageResolution, PackageSurfaceIndex, accepted_external_attribution_for_module,
-        accepted_external_module_ids, is_accepted_external_attribution, is_node_builtin,
+        ExternalImportProofKind, PackageResolution, PackageSurfaceIndex,
+        accepted_external_attribution_for_module, accepted_external_module_ids,
+        external_import_concrete_source_path, external_import_proof_kind,
+        is_accepted_external_attribution, is_node_builtin, parse_export_members_import_proof,
     };
 
     #[test]
@@ -603,5 +793,52 @@ mod tests {
             Some("pkg")
         );
         assert!(accepted_external_attribution_for_module(&attributions, ModuleId(2)).is_none());
+    }
+
+    #[test]
+    fn external_import_proof_parser_classifies_and_extracts_concrete_source_paths() {
+        let proof = "forced-external:dependency-graph-source:string-graph:graph=1/1:functions=0:strings=8:pkg@1.0.0/lib/source.js";
+
+        assert_eq!(
+            external_import_proof_kind(proof),
+            ExternalImportProofKind::DependencyGraphSource
+        );
+        assert_eq!(
+            external_import_concrete_source_path(proof).as_deref(),
+            Some("pkg@1.0.0/lib/source.js")
+        );
+        assert_eq!(
+            external_import_proof_kind(
+                "forced-external:cross-package-source:source-hash:hint=wrong@1.0.0:graph=0/0:functions=1:strings=2:real@2.0.0/index.js"
+            ),
+            ExternalImportProofKind::CrossPackageSource
+        );
+        assert_eq!(
+            external_import_concrete_source_path("normalized-source-export:pkg@1.0.0/index.js")
+                .as_deref(),
+            Some("pkg@1.0.0/index.js")
+        );
+    }
+
+    #[test]
+    fn export_member_proof_parser_preserves_members_aliases_and_source() {
+        let proof = parse_export_members_import_proof(
+            "forced-external:export-members:commonjs-reexport:PublicError,ErrorCode:aliases=C=PublicError,q=ErrorCode:pkg@1.0.0/index.js",
+        )
+        .expect("export member proof should parse");
+
+        assert_eq!(proof.proof_kind.as_str(), "commonjs-reexport");
+        assert_eq!(
+            proof.exported_members,
+            BTreeSet::from(["ErrorCode".to_string(), "PublicError".to_string()])
+        );
+        assert_eq!(
+            proof.aliases,
+            BTreeMap::from([
+                ("C".to_string(), "PublicError".to_string()),
+                ("q".to_string(), "ErrorCode".to_string())
+            ])
+        );
+        assert_eq!(proof.source_path.as_str(), "pkg@1.0.0/index.js");
     }
 }

@@ -67,7 +67,7 @@ use reverts_js::{
     parse_options_for, source_type_candidates,
 };
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-use reverts_package::is_node_builtin;
+use reverts_package::{external_import_concrete_source_path, is_node_builtin};
 use semver::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2386,6 +2386,7 @@ enum ExportMemberSourceProof {
     BuildVariantPeer,
     CommonJsReexport,
     ExportAllReexport,
+    NamedReexport,
     SourceEquivalent,
 }
 
@@ -2396,6 +2397,7 @@ impl ExportMemberSourceProof {
             Self::BuildVariantPeer => "build-variant-peer",
             Self::CommonJsReexport => "commonjs-reexport",
             Self::ExportAllReexport => "export-all-reexport",
+            Self::NamedReexport => "named-reexport",
             Self::SourceEquivalent => "source-equivalent",
         }
     }
@@ -2406,6 +2408,7 @@ impl ExportMemberSourceProof {
             Self::BuildVariantPeer => 2,
             Self::CommonJsReexport => 2,
             Self::ExportAllReexport => 2,
+            Self::NamedReexport => 2,
             Self::SourceEquivalent => 3,
         }
     }
@@ -2585,6 +2588,13 @@ fn export_member_source_proof(
         external_source_index,
     ) {
         return Some(ExportMemberSourceProof::ExportAllReexport);
+    }
+    if external_source_reexports_matched_source_transitively(
+        external,
+        matched,
+        external_source_index,
+    ) {
+        return Some(ExportMemberSourceProof::NamedReexport);
     }
     if external_source_commonjs_reexports_matched_source(external, matched) {
         return Some(ExportMemberSourceProof::CommonJsReexport);
@@ -2779,6 +2789,72 @@ fn package_source_export_all_reexport_entries(source: &PackageSource) -> BTreeSe
         .collect()
 }
 
+fn external_source_reexports_matched_source_transitively(
+    external: &PackageSource,
+    matched: &PackageSource,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+) -> bool {
+    let matched_entry = package_source_entry_path(matched);
+    let mut visited = BTreeSet::<String>::new();
+    external_source_reexports_entry_transitively(
+        external,
+        matched_entry.as_str(),
+        external_source_index,
+        &mut visited,
+    )
+}
+
+fn external_source_reexports_entry_transitively(
+    source: &PackageSource,
+    matched_entry: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    let source_key = format!(
+        "{}@{}:{}",
+        source.package_name, source.package_version, source.source_path
+    );
+    if !visited.insert(source_key) {
+        return false;
+    }
+    for entry in package_source_reexport_entries(source) {
+        if source_entry_paths_match(entry.as_str(), matched_entry) {
+            return true;
+        }
+        for next in sources_matching_entry(
+            source.package_name.as_str(),
+            source.package_version.as_str(),
+            entry.as_str(),
+            external_source_index,
+        ) {
+            if external_source_reexports_entry_transitively(
+                next,
+                matched_entry,
+                external_source_index,
+                visited,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn package_source_reexport_entries(source: &PackageSource) -> BTreeSet<String> {
+    reexport_targets(source.source.as_str())
+        .into_iter()
+        .filter_map(|target| {
+            resolve_package_relative_require(package_source_entry_path(source).as_str(), &target)
+        })
+        .map(|entry| {
+            strip_source_extension(entry.as_str())
+                .trim_matches('/')
+                .to_ascii_lowercase()
+        })
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
 fn package_source_dependency_entries(source: &PackageSource) -> BTreeSet<String> {
     relative_module_specifier_targets(source.source.as_str())
         .into_iter()
@@ -2843,6 +2919,15 @@ fn export_all_reexport_targets(source: &str) -> BTreeSet<String> {
     targets
 }
 
+fn reexport_targets(source: &str) -> BTreeSet<String> {
+    let compact = compact_ascii_ws(source);
+    let mut targets = BTreeSet::new();
+    collect_export_all_declaration_targets(compact.as_str(), &mut targets);
+    collect_export_named_declaration_targets(compact.as_str(), &mut targets);
+    collect_export_star_helper_targets(compact.as_str(), &mut targets);
+    targets
+}
+
 fn collect_export_all_declaration_targets(source: &str, targets: &mut BTreeSet<String>) {
     let needle = "export*from";
     let mut cursor = 0;
@@ -2850,6 +2935,27 @@ fn collect_export_all_declaration_targets(source: &str, targets: &mut BTreeSet<S
         let start = cursor + relative + needle.len();
         let Some((target, end)) = read_quoted_string_at(source, start) else {
             cursor = start;
+            continue;
+        };
+        if target.starts_with('.') {
+            targets.insert(target);
+        }
+        cursor = end;
+    }
+}
+
+fn collect_export_named_declaration_targets(source: &str, targets: &mut BTreeSet<String>) {
+    let needle = "export{";
+    let mut cursor = 0;
+    while let Some(relative) = source[cursor..].find(needle) {
+        let start = cursor + relative + needle.len();
+        let Some(close_relative) = source[start..].find("}from") else {
+            cursor = start;
+            continue;
+        };
+        let quote_start = start + close_relative + "}from".len();
+        let Some((target, end)) = read_quoted_string_at(source, quote_start) else {
+            cursor = quote_start;
             continue;
         };
         if target.starts_with('.') {
@@ -4207,29 +4313,8 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
     {
         return None;
     }
-    if let Some(rest) = proof_path.strip_prefix("normalized-source-export:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:source-match:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-source:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-export:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-graph-source:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-package-source:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
+    if let Some(source_path) = external_import_concrete_source_path(proof_path) {
+        return Some(source_path);
     }
     Some(proof_path.to_string())
 }
@@ -9325,6 +9410,62 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             package_match
                 .source_path
                 .starts_with("forced-external:export-members:export-all-reexport:"),
+            "{}",
+            package_match.source_path
+        );
+        assert!(
+            package_match.source_path.contains("PublicWidget")
+                && package_match.source_path.contains("makePublicWidget"),
+            "{}",
+            package_match.source_path
+        );
+    }
+
+    #[test]
+    fn source_only_match_promotes_when_named_reexport_chain_reaches_matched_source() {
+        let source = r#"
+            function PublicWidget() { return "widget-anchor"; }
+            function makePublicWidget() { return new PublicWidget(); }
+            exports.PublicWidget = PublicWidget;
+            exports.makePublicWidget = makePublicWidget;
+        "#;
+        let mut rows = rows_with_package_source_at_version(source, "1.0.0");
+        rows.modules[0].semantic_path = "pkg/widget.js".to_string();
+        let package_sources = [
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/internal/widget",
+                "pkg@1.0.0/dist/internal/widget.js",
+                source,
+            ),
+            PackageSource::source_only(
+                "pkg",
+                "1.0.0",
+                "pkg/public",
+                "pkg@1.0.0/dist/public.js",
+                "export { PublicWidget, makePublicWidget } from './internal/widget.js';",
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg",
+                "pkg@1.0.0/dist/index.js",
+                "export { PublicWidget, makePublicWidget } from './public.js';",
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg");
+        assert!(
+            package_match
+                .source_path
+                .starts_with("forced-external:export-members:named-reexport:"),
             "{}",
             package_match.source_path
         );

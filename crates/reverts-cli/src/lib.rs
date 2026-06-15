@@ -26,6 +26,7 @@ use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
 use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
 use reverts_observe::AuditReport;
+use reverts_package::external_import_proof_label;
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionMatchScore, VersionedPackageMatchReport, clean_package_semantic_path_hint,
@@ -5696,37 +5697,7 @@ fn persist_rejected_package_attribution(
 }
 
 fn external_import_proof_kind(source_path: &str) -> &'static str {
-    if source_path.starts_with("export-specifier-source:") {
-        "export_specifier_source"
-    } else if source_path.starts_with("root-export-source:") {
-        "root_export_source"
-    } else if source_path.starts_with("normalized-source-export:") {
-        "normalized_source_export"
-    } else if source_path.starts_with("normalized-source-adapter:") {
-        "normalized_source_adapter"
-    } else if source_path.starts_with("ownership-source-match:") {
-        "ownership_source_match"
-    } else if source_path.starts_with("forced-external:export-members:") {
-        "export_members_adapter"
-    } else if source_path.starts_with("forced-external:semantic-export:") {
-        "semantic_export"
-    } else if source_path.starts_with("forced-external:semantic-source:") {
-        "semantic_source"
-    } else if source_path.starts_with("forced-external:source-match:") {
-        "source_match_fallback"
-    } else if source_path.starts_with("forced-external:dependency-graph-source:") {
-        "dependency_graph_source"
-    } else if source_path.starts_with("forced-external:dependency-edge-path:") {
-        "dependency_edge_path"
-    } else if source_path.starts_with("forced-external:cross-package-source:") {
-        "cross_package_source"
-    } else if source_path.starts_with("forced-external:semantic-path:") {
-        "semantic_path_fallback"
-    } else if source_path.starts_with("forced-external:package-root:") {
-        "package_root_fallback"
-    } else {
-        "matched_package_source"
-    }
+    external_import_proof_label(source_path)
 }
 
 /// Persist bundle-extraction synthetic modules into the SQLite `modules`

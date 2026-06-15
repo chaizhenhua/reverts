@@ -18,7 +18,7 @@ use reverts_js::{
 use reverts_model::{CompilerEvidence, CompilerKind, EnrichedProgram, ModuleCompilerProfile};
 use reverts_package::{
     PackageResolution, accepted_external_attribution_for_module, accepted_external_module_ids,
-    import_attributes_for_attribution,
+    import_attributes_for_attribution, parse_export_members_import_proof,
 };
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -9027,6 +9027,7 @@ enum ExportMemberAdapterProofKind {
     BuildVariantPeer,
     CommonJsReexport,
     ExportAllReexport,
+    NamedReexport,
     SourceEquivalent,
     Unknown,
 }
@@ -9038,6 +9039,7 @@ impl ExportMemberAdapterProofKind {
             "build-variant-peer" => Self::BuildVariantPeer,
             "commonjs-reexport" => Self::CommonJsReexport,
             "export-all-reexport" => Self::ExportAllReexport,
+            "named-reexport" => Self::NamedReexport,
             "source-equivalent" => Self::SourceEquivalent,
             _ => Self::Unknown,
         }
@@ -9066,46 +9068,17 @@ fn export_member_adapter_proof(
     attribution: &PackageAttributionInput,
 ) -> Option<ExportMemberAdapterProof> {
     let resolved_file = attribution.resolved_file.as_deref()?;
-    let rest = resolved_file.strip_prefix("forced-external:export-members:")?;
-    let mut parts = rest.splitn(3, ':');
-    let proof_kind = ExportMemberAdapterProofKind::parse(parts.next()?);
-    let members = parts.next()?;
-    let tail = parts.next().unwrap_or_default();
-    let exported_members = members
-        .split(',')
-        .map(str::trim)
-        .filter(|member| is_identifier_like(member))
-        .map(ToOwned::to_owned)
-        .collect::<BTreeSet<_>>();
-    let aliases = export_member_adapter_aliases(tail.as_bytes());
-    (!exported_members.is_empty()).then_some(ExportMemberAdapterProof {
-        kind: proof_kind,
-        exported_members,
+    let proof = parse_export_members_import_proof(resolved_file)?;
+    let aliases = proof
+        .aliases
+        .into_iter()
+        .map(|(local, exported)| (BindingName::new(local), exported))
+        .collect();
+    Some(ExportMemberAdapterProof {
+        kind: ExportMemberAdapterProofKind::parse(proof.proof_kind.as_str()),
+        exported_members: proof.exported_members,
         aliases,
     })
-}
-
-fn export_member_adapter_aliases(tail: &[u8]) -> BTreeMap<BindingName, String> {
-    let Some(rest) = std::str::from_utf8(tail).ok() else {
-        return BTreeMap::new();
-    };
-    let Some(alias_tail) = rest.strip_prefix("aliases=") else {
-        return BTreeMap::new();
-    };
-    let aliases = alias_tail
-        .split_once(':')
-        .map(|(aliases, _source_path)| aliases)
-        .unwrap_or(alias_tail);
-    aliases
-        .split(',')
-        .filter_map(|alias| {
-            let (local, exported) = alias.split_once('=')?;
-            let local = local.trim();
-            let exported = exported.trim();
-            (is_identifier_like(local) && is_identifier_like(exported))
-                .then(|| (BindingName::new(local), exported.to_string()))
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
