@@ -24,7 +24,9 @@ use reverts_input::{
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{BindingName, ModuleId, ModuleKind, is_valid_package_name};
-use reverts_js::{ParseGoal, normalize_source_for_pipeline, parse_source};
+use reverts_js::{
+    ParseGoal, collect_top_level_statement_facts, normalize_source_for_pipeline, parse_source,
+};
 use reverts_observe::AuditReport;
 use reverts_package::external_import_proof_label;
 use reverts_package_matcher::{
@@ -157,6 +159,7 @@ pub struct RuntimeInventoryArgs {
     pub newest: bool,
     pub max_source_bytes: Option<u64>,
     pub setter_blockers: bool,
+    pub runtime_attribution: bool,
 }
 
 impl RuntimeInventoryArgs {
@@ -168,6 +171,7 @@ impl RuntimeInventoryArgs {
         let mut newest = false;
         let mut max_source_bytes = None;
         let mut setter_blockers = false;
+        let mut runtime_attribution = false;
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -187,6 +191,7 @@ impl RuntimeInventoryArgs {
                 "--limit" => limit = Some(parse_limit(next_value(&mut args, "--limit")?)?),
                 "--newest" => newest = true,
                 "--setter-blockers" => setter_blockers = true,
+                "--runtime-attribution" => runtime_attribution = true,
                 "--max-source-bytes" => {
                     max_source_bytes = Some(parse_byte_limit(next_value(
                         &mut args,
@@ -208,6 +213,7 @@ impl RuntimeInventoryArgs {
                 newest,
                 max_source_bytes,
                 setter_blockers,
+                runtime_attribution,
             }),
         }
     }
@@ -442,6 +448,9 @@ fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> 
         if let Some(report) = &project.emitted_setter_blockers {
             print_runtime_setter_blocker_report("  emitted_setter_blockers", report);
         }
+        if let Some(report) = &project.runtime_attribution {
+            print_runtime_line_attribution_report("  runtime_line_attribution", report);
+        }
     }
     println!(
         "total: files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}, skipped_source_bytes={}",
@@ -466,6 +475,9 @@ fn run_runtime_inventory(args: RuntimeInventoryArgs) -> Result<(), CliRunError> 
     }
     if let Some(report) = &outcome.emitted_setter_blockers {
         print_runtime_setter_blocker_report("total emitted_setter_blockers", report);
+    }
+    if let Some(report) = &outcome.runtime_attribution {
+        print_runtime_line_attribution_report("total runtime_line_attribution", report);
     }
     Ok(())
 }
@@ -505,6 +517,47 @@ fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrat
                 println!("    examples: {}", examples.join(", "));
             }
         }
+    }
+}
+
+fn print_runtime_line_attribution_report(label: &str, report: &RuntimeLineAttributionReport) {
+    println!(
+        "{label}: runtime_lines={}, attributed_lines={}, unattributed_lines={}, items={}",
+        report.total_runtime_lines,
+        report.attributed_lines,
+        report.unattributed_lines,
+        report.items.len()
+    );
+    let mut buckets = report
+        .by_kind
+        .iter()
+        .map(|(kind, bucket)| (kind.as_str(), *bucket))
+        .collect::<Vec<_>>();
+    buckets.sort_by(|(left_kind, left_bucket), (right_kind, right_bucket)| {
+        right_bucket
+            .lines
+            .cmp(&left_bucket.lines)
+            .then_with(|| left_kind.cmp(right_kind))
+    });
+    for (kind, bucket) in buckets {
+        println!(
+            "  kind {kind}: lines={}, items={}",
+            bucket.lines, bucket.items
+        );
+    }
+    let mut items = report.items.clone();
+    items.sort_by(|left, right| {
+        right
+            .lines
+            .cmp(&left.lines)
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.binding.cmp(&right.binding))
+    });
+    for item in items.iter().take(20) {
+        println!(
+            "  top {} {} {}:{}-{} lines={}",
+            item.kind, item.binding, item.path, item.line_start, item.line_end, item.lines
+        );
     }
 }
 
@@ -566,6 +619,7 @@ pub struct RuntimeInventoryOutcome {
     pub skipped_source_bytes: u64,
     pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
+    pub runtime_attribution: Option<RuntimeLineAttributionReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -577,6 +631,7 @@ pub struct RuntimeInventoryProject {
     pub audit_findings: usize,
     pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
+    pub runtime_attribution: Option<RuntimeLineAttributionReport>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -594,6 +649,31 @@ pub struct RuntimeInventoryCounts {
     pub reverts_internal_occurrences: usize,
     pub named_import_statements: usize,
     pub named_export_statements: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RuntimeLineAttributionReport {
+    pub total_runtime_lines: usize,
+    pub attributed_lines: usize,
+    pub unattributed_lines: usize,
+    pub items: Vec<RuntimeLineAttributionItem>,
+    pub by_kind: BTreeMap<String, RuntimeLineAttributionBucket>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLineAttributionBucket {
+    pub items: usize,
+    pub lines: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLineAttributionItem {
+    pub path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub lines: usize,
+    pub kind: String,
+    pub binding: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,6 +712,9 @@ pub fn runtime_inventory_from_sqlite(
     let mut emitted_setter_blockers = args
         .setter_blockers
         .then(RuntimeSetterMigrationBlockerReport::default);
+    let mut runtime_attribution = args
+        .runtime_attribution
+        .then(RuntimeLineAttributionReport::default);
 
     for selection in selections {
         if args
@@ -648,6 +731,7 @@ pub fn runtime_inventory_from_sqlite(
                 audit_findings: 0,
                 setter_blockers: None,
                 emitted_setter_blockers: None,
+                runtime_attribution: None,
             });
             continue;
         }
@@ -668,6 +752,15 @@ pub fn runtime_inventory_from_sqlite(
         }
         let run = generate_project_from_input(input).map_err(RuntimeInventoryError::Pipeline)?;
         let counts = runtime_inventory_counts_from_files(&run.project.files);
+        let project_runtime_attribution = args
+            .runtime_attribution
+            .then(|| runtime_line_attribution_from_files(&run.project.files));
+        if let (Some(total), Some(project_report)) = (
+            runtime_attribution.as_mut(),
+            project_runtime_attribution.as_ref(),
+        ) {
+            total.add(project_report);
+        }
         let project_emitted_setter_blockers = project_setter_blockers
             .as_ref()
             .map(|report| runtime_emitted_setter_blockers_from_files(&run.project.files, report));
@@ -688,6 +781,7 @@ pub fn runtime_inventory_from_sqlite(
             audit_findings: project_audit_findings,
             setter_blockers: project_setter_blockers,
             emitted_setter_blockers: project_emitted_setter_blockers,
+            runtime_attribution: project_runtime_attribution,
         });
     }
 
@@ -699,6 +793,7 @@ pub fn runtime_inventory_from_sqlite(
         skipped_source_bytes,
         setter_blockers,
         emitted_setter_blockers,
+        runtime_attribution,
     })
 }
 
@@ -875,6 +970,81 @@ fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> RuntimeInventor
     counts
 }
 
+fn runtime_line_attribution_from_files(files: &[EmittedFile]) -> RuntimeLineAttributionReport {
+    let mut report = RuntimeLineAttributionReport::default();
+    for file in files {
+        if !file.path.starts_with("modules/runtime/") {
+            continue;
+        }
+        let runtime_lines = file.source.lines().count();
+        report.total_runtime_lines += runtime_lines;
+        let mut covered_lines = BTreeSet::<usize>::new();
+        let line_starts = line_start_offsets(file.source.as_str());
+        if let Ok(facts) = collect_top_level_statement_facts(
+            file.source.as_str(),
+            Some(Path::new(file.path.as_str())),
+            ParseGoal::TypeScript,
+        ) {
+            for fact in facts {
+                let line_start = line_number_for_offset(&line_starts, fact.byte_start as usize);
+                let line_end = line_number_for_statement_end(&line_starts, fact.byte_end as usize);
+                if line_end < line_start {
+                    continue;
+                }
+                for line in line_start..=line_end {
+                    covered_lines.insert(line);
+                }
+                let lines = line_end - line_start + 1;
+                let binding = runtime_attribution_binding_label(&fact.bindings);
+                let kind = fact.kind.as_str().to_string();
+                let bucket = report.by_kind.entry(kind.clone()).or_default();
+                bucket.items += 1;
+                bucket.lines += lines;
+                report.items.push(RuntimeLineAttributionItem {
+                    path: file.path.clone(),
+                    line_start,
+                    line_end,
+                    lines,
+                    kind,
+                    binding,
+                });
+            }
+        }
+        report.attributed_lines += covered_lines.len();
+        report.unattributed_lines += runtime_lines.saturating_sub(covered_lines.len());
+    }
+    report
+}
+
+fn runtime_attribution_binding_label(bindings: &[String]) -> String {
+    match bindings {
+        [] => "<anonymous>".to_string(),
+        [binding] => binding.clone(),
+        [first, rest @ ..] => format!("{first}+{}", rest.len()),
+    }
+}
+
+fn line_start_offsets(source: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    for (index, byte) in source.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(index + 1);
+        }
+    }
+    starts
+}
+
+fn line_number_for_offset(line_starts: &[usize], offset: usize) -> usize {
+    match line_starts.binary_search(&offset) {
+        Ok(index) => index + 1,
+        Err(index) => index.max(1),
+    }
+}
+
+fn line_number_for_statement_end(line_starts: &[usize], end_offset: usize) -> usize {
+    line_number_for_offset(line_starts, end_offset.saturating_sub(1))
+}
+
 fn is_runtime_reexport_only_source(source: &str) -> bool {
     let mut saw_relevant_line = false;
     for line in source.lines() {
@@ -913,6 +1083,20 @@ impl RuntimeInventoryCounts {
         self.reverts_internal_occurrences += other.reverts_internal_occurrences;
         self.named_import_statements += other.named_import_statements;
         self.named_export_statements += other.named_export_statements;
+    }
+}
+
+impl RuntimeLineAttributionReport {
+    fn add(&mut self, other: &Self) {
+        self.total_runtime_lines += other.total_runtime_lines;
+        self.attributed_lines += other.attributed_lines;
+        self.unattributed_lines += other.unattributed_lines;
+        self.items.extend(other.items.iter().cloned());
+        for (kind, bucket) in &other.by_kind {
+            let target = self.by_kind.entry(kind.clone()).or_default();
+            target.items += bucket.items;
+            target.lines += bucket.lines;
+        }
     }
 }
 
@@ -6199,8 +6383,8 @@ mod tests {
         package_version_resolution_evidence, package_versions_by_module, parse_npm_versions_json,
         persist_package_source_cache, resolve_package_version_hints_to_available_sources, run,
         runtime_inventory_counts_from_files, runtime_inventory_project_selections,
-        stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
-        version_text,
+        runtime_line_attribution_from_files, stale_cache_version_hints_for_materialization,
+        stale_package_source_cache_versions, version_text,
     };
 
     #[test]
@@ -6306,6 +6490,7 @@ mod tests {
             "--max-source-bytes".to_string(),
             "1000000".to_string(),
             "--setter-blockers".to_string(),
+            "--runtime-attribution".to_string(),
         ])
         .expect("args should parse");
 
@@ -6316,6 +6501,7 @@ mod tests {
         assert!(args.newest);
         assert_eq!(args.max_source_bytes, Some(1_000_000));
         assert!(args.setter_blockers);
+        assert!(args.runtime_attribution);
 
         let command = CliCommand::parse([
             "runtime-inventory".to_string(),
@@ -6435,6 +6621,53 @@ mod tests {
     }
 
     #[test]
+    fn runtime_line_attribution_reports_runtime_lines_by_kind_and_binding() {
+        let files = vec![
+            EmittedFile {
+                path: "modules/runtime/source-1-helpers.ts".to_string(),
+                source: "import { dep } from '../dep.js';\n\
+                         var cached = lazyValue(() => ({ dep }));\n\
+                         function __reverts_set_cached(value) { cached = value; return value; }\n\
+                         function run() {\n  return cached();\n}\n\
+                         class Box {}\n\
+                         export { cached, run };\n"
+                    .to_string(),
+            },
+            EmittedFile {
+                path: "modules/consumer.ts".to_string(),
+                source: "import { run } from './runtime/source-1-helpers.js';\nrun();\n"
+                    .to_string(),
+            },
+        ];
+
+        let report = runtime_line_attribution_from_files(&files);
+
+        assert_eq!(report.total_runtime_lines, 8);
+        assert_eq!(report.unattributed_lines, 0);
+        assert_eq!(report.by_kind["import"].lines, 1);
+        assert_eq!(report.by_kind["lazy_value"].lines, 1);
+        assert_eq!(report.by_kind["setter"].lines, 1);
+        assert_eq!(report.by_kind["function"].lines, 3);
+        assert_eq!(report.by_kind["class"].lines, 1);
+        assert_eq!(report.by_kind["export"].lines, 1);
+        assert!(
+            report
+                .items
+                .iter()
+                .any(|item| item.kind == "function" && item.binding == "run" && item.lines == 3),
+            "top-level function span should be attributed to run: {:?}",
+            report.items
+        );
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|item| item.path.starts_with("modules/runtime/")),
+            "only runtime files should be attributed"
+        );
+    }
+
+    #[test]
     fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let database_path = tempdir.path().join("input.db");
@@ -6467,6 +6700,7 @@ mod tests {
             newest: true,
             max_source_bytes: Some(10),
             setter_blockers: false,
+            runtime_attribution: false,
         };
         let selections =
             runtime_inventory_project_selections(&newest_args).expect("select newest projects");
@@ -6485,6 +6719,7 @@ mod tests {
             newest: false,
             max_source_bytes: None,
             setter_blockers: false,
+            runtime_attribution: false,
         };
         let selections = runtime_inventory_project_selections(&single_project_args)
             .expect("select single project");

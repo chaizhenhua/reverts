@@ -138,6 +138,44 @@ pub struct StaticTemplateLiteralFact {
     pub byte_end: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TopLevelStatementKind {
+    Import,
+    Export,
+    Setter,
+    Function,
+    Class,
+    LazyValue,
+    LazyModule,
+    Variable,
+    Other,
+}
+
+impl TopLevelStatementKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Export => "export",
+            Self::Setter => "setter",
+            Self::Function => "function",
+            Self::Class => "class",
+            Self::LazyValue => "lazy_value",
+            Self::LazyModule => "lazy_module",
+            Self::Variable => "variable",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopLevelStatementFact {
+    pub kind: TopLevelStatementKind,
+    pub bindings: Vec<String>,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceLocationRewriteFact {
     pub value: String,
@@ -265,6 +303,37 @@ pub fn collect_static_template_literals(
         let mut collector = StaticTemplateLiteralCollector::default();
         collector.visit_program(&parsed.program);
         return Ok(collector.literals);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_top_level_statement_facts(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<TopLevelStatementFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        return Ok(parsed
+            .program
+            .body
+            .iter()
+            .map(top_level_statement_fact)
+            .collect());
     }
 
     Err(JsError::ParseFailed(errors))
@@ -419,6 +488,130 @@ impl<'a> Visit<'a> for StaticTemplateLiteralCollector {
         }
         walk_expression(self, expression);
     }
+}
+
+fn top_level_statement_fact(statement: &Statement<'_>) -> TopLevelStatementFact {
+    let span = statement.span();
+    let (kind, bindings) = top_level_statement_kind_and_bindings(statement);
+    TopLevelStatementFact {
+        kind,
+        bindings,
+        byte_start: span.start,
+        byte_end: span.end,
+    }
+}
+
+fn top_level_statement_kind_and_bindings(
+    statement: &Statement<'_>,
+) -> (TopLevelStatementKind, Vec<String>) {
+    match statement {
+        Statement::ImportDeclaration(_) => (TopLevelStatementKind::Import, Vec::new()),
+        Statement::FunctionDeclaration(function) => {
+            let bindings = function
+                .id
+                .as_ref()
+                .map(|id| id.name.as_str().to_string())
+                .into_iter()
+                .collect::<Vec<_>>();
+            let kind = if bindings
+                .first()
+                .is_some_and(|binding| binding.starts_with("__reverts_set_"))
+            {
+                TopLevelStatementKind::Setter
+            } else {
+                TopLevelStatementKind::Function
+            };
+            (kind, bindings)
+        }
+        Statement::ClassDeclaration(class) => (
+            TopLevelStatementKind::Class,
+            class
+                .id
+                .as_ref()
+                .map(|id| id.name.as_str().to_string())
+                .into_iter()
+                .collect(),
+        ),
+        Statement::VariableDeclaration(declaration) => {
+            let bindings = declaration_binding_names(declaration);
+            let kind = declaration
+                .declarations
+                .iter()
+                .find_map(|declarator| {
+                    let init = declarator.init.as_ref()?;
+                    let Expression::CallExpression(call) = init else {
+                        return None;
+                    };
+                    match expression_identifier(&call.callee) {
+                        Some("lazyValue") => Some(TopLevelStatementKind::LazyValue),
+                        Some("lazyModule") => Some(TopLevelStatementKind::LazyModule),
+                        _ => None,
+                    }
+                })
+                .unwrap_or(TopLevelStatementKind::Variable);
+            (kind, bindings)
+        }
+        Statement::ExportNamedDeclaration(export) => {
+            let bindings = export
+                .declaration
+                .as_ref()
+                .map(export_declaration_binding_names)
+                .unwrap_or_default();
+            (TopLevelStatementKind::Export, bindings)
+        }
+        Statement::ExportDefaultDeclaration(export) => {
+            let bindings = match &export.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(function) => function
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .into_iter()
+                    .collect(),
+                ExportDefaultDeclarationKind::ClassDeclaration(class) => class
+                    .id
+                    .as_ref()
+                    .map(|id| id.name.as_str().to_string())
+                    .into_iter()
+                    .collect(),
+                _ => Vec::new(),
+            };
+            (TopLevelStatementKind::Export, bindings)
+        }
+        Statement::ExportAllDeclaration(_) => (TopLevelStatementKind::Export, Vec::new()),
+        _ => (TopLevelStatementKind::Other, Vec::new()),
+    }
+}
+
+fn export_declaration_binding_names(declaration: &Declaration<'_>) -> Vec<String> {
+    match declaration {
+        Declaration::FunctionDeclaration(function) => function
+            .id
+            .as_ref()
+            .map(|id| id.name.as_str().to_string())
+            .into_iter()
+            .collect(),
+        Declaration::ClassDeclaration(class) => class
+            .id
+            .as_ref()
+            .map(|id| id.name.as_str().to_string())
+            .into_iter()
+            .collect(),
+        Declaration::VariableDeclaration(declaration) => declaration_binding_names(declaration),
+        _ => Vec::new(),
+    }
+}
+
+fn declaration_binding_names(declaration: &oxc_ast::ast::VariableDeclaration<'_>) -> Vec<String> {
+    declaration
+        .declarations
+        .iter()
+        .filter_map(|declarator| match &declarator.id.kind {
+            BindingPatternKind::BindingIdentifier(binding) => {
+                Some(binding.name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Default)]
@@ -5967,11 +6160,12 @@ mod tests {
 
     use super::{
         CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename, ImportUsageScope,
-        JsError, LazyBodyClassification, ParseGoal, classify_import_usage_scope,
-        classify_lazy_module_body, collect_file_url_source_location_rewrites,
-        collect_identifier_read_facts, collect_path_builder_calls,
-        collect_static_resource_specifiers, collect_static_template_literals,
-        collect_string_literals, extract_lazy_module_eager_value, format_source_pretty,
+        JsError, LazyBodyClassification, ParseGoal, TopLevelStatementKind,
+        classify_import_usage_scope, classify_lazy_module_body,
+        collect_file_url_source_location_rewrites, collect_identifier_read_facts,
+        collect_path_builder_calls, collect_static_resource_specifiers,
+        collect_static_template_literals, collect_string_literals,
+        collect_top_level_statement_facts, extract_lazy_module_eager_value, format_source_pretty,
         format_source_with_module_items, format_source_with_module_items_and_renames,
         format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
         parse_error_message, parse_options_for, parse_source, sanitize_identifier,
@@ -6052,6 +6246,45 @@ value`;
             literals
                 .iter()
                 .all(|literal| literal.byte_end > literal.byte_start)
+        );
+    }
+
+    #[test]
+    fn collects_top_level_statement_facts_for_runtime_attribution() {
+        let source = "import { dep } from './dep.js';\n\
+                      var data = lazyValue(() => ({ dep }));\n\
+                      var regular = 1;\n\
+                      function __reverts_set_data(value) { data = value; return value; }\n\
+                      async function run() { return data(); }\n\
+                      class Box {}\n\
+                      export { data, run };\n";
+
+        let facts = collect_top_level_statement_facts(
+            source,
+            Some(Path::new("runtime.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("runtime statements should parse");
+
+        let kinds = facts.iter().map(|fact| fact.kind).collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                TopLevelStatementKind::Import,
+                TopLevelStatementKind::LazyValue,
+                TopLevelStatementKind::Variable,
+                TopLevelStatementKind::Setter,
+                TopLevelStatementKind::Function,
+                TopLevelStatementKind::Class,
+                TopLevelStatementKind::Export,
+            ]
+        );
+        assert_eq!(facts[1].bindings, vec!["data"]);
+        assert_eq!(facts[3].bindings, vec!["__reverts_set_data"]);
+        assert_eq!(facts[4].bindings, vec!["run"]);
+        assert!(
+            facts.iter().all(|fact| fact.byte_end > fact.byte_start),
+            "statement spans must be non-empty: {facts:?}"
         );
     }
 
