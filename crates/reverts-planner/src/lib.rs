@@ -6668,33 +6668,35 @@ fn add_global_owned_runtime_snippet_migrations(
             let Some(owner_module) = owner_module else {
                 continue;
             };
-            if modules_by_id.get(&owner_module).is_some_and(|module| {
-                module.kind == ModuleKind::Package && externalized_packages.contains(&owner_module)
-            }) {
+            if runtime_owner_candidate_can_emit(
+                binding,
+                owner_module,
+                &modules_by_id,
+                externalized_packages,
+                &owner_local_definitions,
+                &owner_available_bindings,
+                &folded_modules,
+            ) {
+                candidate_owners.insert(binding.clone(), owner_module);
+            }
+        }
+        for (binding, owner_module) in
+            runtime_adjacent_snippet_owners(prelude, &eligible_movable_bindings, &candidate_owners)
+        {
+            if candidate_owners.contains_key(&binding) {
                 continue;
             }
-            if owner_local_definitions
-                .get(&owner_module)
-                .is_some_and(|definitions| definitions.contains(binding))
-            {
-                // The owner source already emits this exact top-level
-                // definition. Re-emitting the runtime snippet there would
-                // create duplicate declarations, including for folded lazy
-                // modules whose source body is still materialized.
-                continue;
+            if runtime_owner_candidate_can_emit(
+                &binding,
+                owner_module,
+                &modules_by_id,
+                externalized_packages,
+                &owner_local_definitions,
+                &owner_available_bindings,
+                &folded_modules,
+            ) {
+                candidate_owners.insert(binding, owner_module);
             }
-            if !folded_modules.contains(&owner_module)
-                && owner_available_bindings
-                    .get(&owner_module)
-                    .is_some_and(|available| available.contains(binding))
-            {
-                // The owner source already emits this name. Re-emitting the
-                // runtime snippet there would create a duplicate declaration;
-                // keep the runtime copy until a source-span-aware replacement
-                // pass can delete the original definition.
-                continue;
-            }
-            candidate_owners.insert(binding.clone(), owner_module);
         }
         propagate_runtime_reader_owned_snippet_candidates(
             prelude,
@@ -6721,6 +6723,78 @@ fn add_global_owned_runtime_snippet_migrations(
             plan.insert_owned_snippet(binding, migration);
         }
     }
+}
+
+fn runtime_owner_candidate_can_emit(
+    binding: &BindingName,
+    owner_module: ModuleId,
+    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
+    externalized_packages: &BTreeSet<ModuleId>,
+    owner_local_definitions: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    owner_available_bindings: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    folded_modules: &BTreeSet<ModuleId>,
+) -> bool {
+    if modules_by_id.get(&owner_module).is_some_and(|module| {
+        module.kind == ModuleKind::Package && externalized_packages.contains(&owner_module)
+    }) {
+        return false;
+    }
+    if owner_local_definitions
+        .get(&owner_module)
+        .is_some_and(|definitions| definitions.contains(binding))
+    {
+        // The owner source already emits this exact top-level definition.
+        // Re-emitting the runtime snippet there would create duplicate
+        // declarations, including for folded lazy modules whose source body is
+        // still materialized.
+        return false;
+    }
+    if !folded_modules.contains(&owner_module)
+        && owner_available_bindings
+            .get(&owner_module)
+            .is_some_and(|available| available.contains(binding))
+    {
+        // The owner source already emits this name. Re-emitting the runtime
+        // snippet there would create a duplicate declaration; keep the runtime
+        // copy until a source-span-aware replacement pass can delete the
+        // original definition.
+        return false;
+    }
+    true
+}
+
+fn runtime_adjacent_snippet_owners(
+    prelude: &RuntimePrelude,
+    eligible_movable_bindings: &BTreeSet<BindingName>,
+    known_owners: &BTreeMap<BindingName, ModuleId>,
+) -> BTreeMap<BindingName, ModuleId> {
+    let ordered = prelude
+        .snippets
+        .iter()
+        .filter(|(binding, _snippet)| eligible_movable_bindings.contains(*binding))
+        .map(|(binding, snippet)| (snippet.byte_start, binding.clone()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut owners = BTreeMap::<BindingName, ModuleId>::new();
+    for (index, (_byte_start, binding)) in ordered.iter().enumerate() {
+        if known_owners.contains_key(binding) {
+            continue;
+        }
+        let previous_owner = ordered[..index]
+            .iter()
+            .rev()
+            .find_map(|(_, previous)| known_owners.get(previous).copied());
+        let next_owner = ordered[index + 1..]
+            .iter()
+            .find_map(|(_, next)| known_owners.get(next).copied());
+        if let (Some(previous_owner), Some(next_owner)) = (previous_owner, next_owner)
+            && previous_owner == next_owner
+        {
+            owners.insert(binding.clone(), previous_owner);
+        }
+    }
+    owners
 }
 
 fn global_runtime_snippet_owner(
@@ -21774,6 +21848,86 @@ function ownedSmall() { return 1; }\n";
             target_owners.get(&BindingName::new("exportedOnly")),
             Some(&Some(ModuleId(7)))
         );
+    }
+
+    #[test]
+    fn global_owner_rebuild_infers_adjacent_owner_between_matching_known_neighbors() {
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: "\
+function before() { return 1; }\n\
+function missing() { return before(); }\n\
+function after() { return missing(); }\n"
+                .to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("before"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("missing"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("after"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("before"),
+                    RuntimePreludeSnippet {
+                        source: "function before() { return 1; }".to_string(),
+                        byte_start: 0,
+                    },
+                ),
+                (
+                    BindingName::new("missing"),
+                    RuntimePreludeSnippet {
+                        source: "function missing() { return before(); }".to_string(),
+                        byte_start: 32,
+                    },
+                ),
+                (
+                    BindingName::new("after"),
+                    RuntimePreludeSnippet {
+                        source: "function after() { return missing(); }".to_string(),
+                        byte_start: 75,
+                    },
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let eligible = BTreeSet::from([
+            BindingName::new("before"),
+            BindingName::new("missing"),
+            BindingName::new("after"),
+        ]);
+        let inferred = super::runtime_adjacent_snippet_owners(
+            &prelude,
+            &eligible,
+            &BTreeMap::from([
+                (BindingName::new("before"), ModuleId(7)),
+                (BindingName::new("after"), ModuleId(7)),
+            ]),
+        );
+
+        assert_eq!(
+            inferred.get(&BindingName::new("missing")),
+            Some(&ModuleId(7))
+        );
+
+        let ambiguous = super::runtime_adjacent_snippet_owners(
+            &prelude,
+            &eligible,
+            &BTreeMap::from([
+                (BindingName::new("before"), ModuleId(7)),
+                (BindingName::new("after"), ModuleId(8)),
+            ]),
+        );
+        assert!(!ambiguous.contains_key(&BindingName::new("missing")));
     }
 
     #[test]
