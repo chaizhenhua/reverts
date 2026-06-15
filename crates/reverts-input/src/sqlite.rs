@@ -168,13 +168,14 @@ fn load_module_symbols(
             s.module_id,
             s.original_name AS symbol_name,
             NULLIF(TRIM(s.semantic_name), '') AS semantic_name,
-            NULLIF(TRIM(s.export_name), '') AS export_name
+            NULLIF(TRIM(s.export_name), '') AS export_name,
+            NULLIF(TRIM(s.scope_level), '') AS scope_level
         FROM symbols s
         JOIN modules m ON m.id = s.module_id
         JOIN project_files pf ON pf.file_id = m.file_id
         WHERE pf.project_id = ?1
           AND s.module_id IS NOT NULL
-          AND s.scope_level = 'module'
+          AND s.scope_level IN ('module', 'global')
           AND TRIM(s.original_name) != ''
         ORDER BY s.module_id, symbol_name, semantic_name, export_name
         ",
@@ -185,6 +186,7 @@ fn load_module_symbols(
             name: row.get(1)?,
             semantic_name: row.get(2)?,
             export_name: row.get(3)?,
+            scope_level: row.get(4)?,
         })
     })?;
 

@@ -30,7 +30,7 @@ use oxc_syntax::{
     operator::{AssignmentOperator, LogicalOperator},
     scope::ScopeFlags,
 };
-use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput};
+use reverts_input::{InputBundle, ModuleDependencyTarget, ModuleInput, SymbolScope};
 use reverts_ir::{
     BindingConstraint, BindingConstraintKind, BindingName, ControlFlowEdgeKind, ControlFlowGraph,
     ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, split_bare_specifier,
@@ -418,7 +418,9 @@ impl RevertsGraph {
             .map(|module| module.id)
             .collect::<BTreeSet<_>>();
         for symbol in &input.symbols {
-            if source_backed_modules.contains(&symbol.module_id) {
+            if symbol.scope != SymbolScope::Module
+                || source_backed_modules.contains(&symbol.module_id)
+            {
                 continue;
             }
             def_use.define(symbol.module_id, symbol.name.clone());

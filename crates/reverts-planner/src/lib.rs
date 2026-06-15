@@ -866,6 +866,26 @@ impl ImportExportPlanner {
             }
 
             if let Some(folded) = runtime_lazy_folds.modules.get(&module.id) {
+                let migrated_extra_snippets =
+                    runtime_var_migrations.extra_snippets_for_owner(module.id);
+                let migrated_extra_namespace_exports =
+                    runtime_var_migrations.extra_namespace_exports_for_owner(module.id);
+                let migrated_extra_namespace_bindings = migrated_extra_namespace_exports
+                    .iter()
+                    .map(|(_, binding)| binding.clone())
+                    .collect::<BTreeSet<_>>();
+                let migrated_extra_runtime_deps_by_source =
+                    runtime_var_migrations.extra_runtime_deps_by_source_for_owner(module.id);
+                let migrated_extra_runtime_owner_deps =
+                    runtime_var_migrations.migrated_extra_runtime_deps_for_owner(module.id);
+                let migrated_extra_runtime_owner_dep_aliases =
+                    runtime_var_migrations.migrated_aliased_extra_runtime_deps_for_owner(module.id);
+                let migrated_extra_runtime_dep_aliases =
+                    runtime_var_migrations.extra_runtime_dep_aliases_for_owner(module.id);
+                let migrated_runtime_extra_runtime_dep_aliases =
+                    runtime_var_migrations.runtime_extra_runtime_dep_aliases_for_owner(module.id);
+                let migrated_local_bindings =
+                    runtime_var_migrations.local_bindings_for_owner(module.id);
                 let mut runtime_stub_exports = BTreeSet::<BindingName>::new();
                 let mut direct_stub_exports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
                 for binding in &folded.stub_exports {
@@ -904,7 +924,9 @@ impl ImportExportPlanner {
                 // binding directly from the runtime helper, omit that shim
                 // entirely. Modules with no internal consumers keep their stub
                 // file so an explicit/source export surface is still visible.
-                if omitted_folded_stub_modules.contains(&module.id) {
+                if omitted_folded_stub_modules.contains(&module.id)
+                    && migrated_local_bindings.is_empty()
+                {
                     continue;
                 }
                 if !runtime_stub_exports.is_empty() {
@@ -935,6 +957,173 @@ impl ImportExportPlanner {
                         specifier.as_str(),
                     ));
                 }
+                if !migrated_extra_runtime_owner_deps.is_empty() {
+                    emit_direct_owner_imports(
+                        program,
+                        module.id,
+                        path,
+                        &mut file,
+                        &mut planned_bindings,
+                        &migrated_extra_runtime_owner_deps,
+                    );
+                }
+                if !migrated_extra_runtime_owner_dep_aliases.is_empty() {
+                    emit_direct_owner_import_aliases(
+                        program,
+                        path,
+                        &mut file,
+                        &mut planned_bindings,
+                        &migrated_extra_runtime_owner_dep_aliases,
+                    );
+                }
+                for (source_file_id, aliases) in &migrated_runtime_extra_runtime_dep_aliases {
+                    if aliases.is_empty() {
+                        continue;
+                    }
+                    let original_bindings = aliases.keys().cloned().collect::<BTreeSet<_>>();
+                    used_runtime_helper_files
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(original_bindings.iter().cloned());
+                    exported_runtime_helper_bindings
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(original_bindings.iter().cloned());
+                    required_runtime_helper_bindings
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(original_bindings.iter().cloned());
+                    let specifier = relative_import_specifier(
+                        path,
+                        runtime_helpers_path(*source_file_id).as_str(),
+                    );
+                    file.push_source(named_import_alias_statement(
+                        aliases
+                            .iter()
+                            .map(|(original, alias)| (original.as_str(), alias)),
+                        specifier.as_str(),
+                    ));
+                    for alias in aliases.values() {
+                        if planned_bindings.insert(alias.clone()) {
+                            file.add_binding(PlannedBinding::new(
+                                alias.clone(),
+                                alias.clone(),
+                                BindingShape::Unknown,
+                                true,
+                            ));
+                        }
+                    }
+                }
+                for (source_file_id, bindings) in &migrated_extra_runtime_deps_by_source {
+                    if bindings.is_empty() {
+                        continue;
+                    }
+                    used_runtime_helper_files
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(bindings.iter().cloned());
+                    exported_runtime_helper_bindings
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(bindings.iter().cloned());
+                    required_runtime_helper_bindings
+                        .entry(*source_file_id)
+                        .or_default()
+                        .extend(bindings.iter().cloned());
+                    let specifier = relative_import_specifier(
+                        path,
+                        runtime_helpers_path(*source_file_id).as_str(),
+                    );
+                    file.push_source(runtime_helper_import_statement(
+                        bindings,
+                        &BTreeSet::new(),
+                        &[],
+                        specifier.as_str(),
+                    ));
+                    for binding in bindings {
+                        if planned_bindings.contains(binding) {
+                            continue;
+                        }
+                        planned_bindings.insert(binding.clone());
+                        file.add_binding(plan_binding_from_program(
+                            program,
+                            module.id,
+                            binding.clone(),
+                            binding.clone(),
+                            true,
+                            None,
+                        ));
+                    }
+                }
+                if !migrated_extra_snippets.is_empty()
+                    || !migrated_extra_namespace_exports.is_empty()
+                {
+                    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+                    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
+                        .values()
+                        .flat_map(|aliases| aliases.iter())
+                        .map(|(original, alias)| (original.clone(), alias.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    for (source_file_id, binding) in &migrated_extra_snippets {
+                        let Some(prelude) =
+                            program.model().graph().runtime_prelude(*source_file_id)
+                        else {
+                            continue;
+                        };
+                        let Some(snippet) = prelude.snippets.get(binding) else {
+                            continue;
+                        };
+                        migrated_chunks.push((
+                            snippet.byte_start,
+                            0,
+                            rename_identifier_reads_in_source(
+                                snippet.source.as_str(),
+                                &migrated_runtime_dep_aliases,
+                            ),
+                        ));
+                    }
+                    for (source_file_id, namespace) in &migrated_extra_namespace_exports {
+                        let Some(prelude) =
+                            program.model().graph().runtime_prelude(*source_file_id)
+                        else {
+                            continue;
+                        };
+                        let Some(namespace_export) = prelude
+                            .namespace_exports
+                            .iter()
+                            .find(|export| export.namespace == *namespace)
+                        else {
+                            continue;
+                        };
+                        migrated_chunks.push((
+                            namespace_export.byte_start,
+                            1,
+                            rename_identifier_reads_in_source(
+                                runtime_namespace_export_statement(namespace_export).as_str(),
+                                &migrated_runtime_dep_aliases,
+                            ),
+                        ));
+                    }
+                    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
+                    for (_, _, source) in migrated_chunks {
+                        file.push_source(source);
+                    }
+                }
+                let already_exported = runtime_stub_exports
+                    .iter()
+                    .cloned()
+                    .chain(direct_stub_exports.values().flatten().cloned())
+                    .collect::<BTreeSet<_>>();
+                let migrated_exports = migrated_local_bindings
+                    .difference(&already_exported)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if !migrated_exports.is_empty() {
+                    file.push_source(named_export_statement(migrated_exports.iter()));
+                    for binding in &migrated_exports {
+                        file.add_export_with_source_backed(binding.clone(), true);
+                    }
+                }
                 for export in &folded.stub_exports {
                     file.add_binding(PlannedBinding::new(
                         export.clone(),
@@ -943,6 +1132,21 @@ impl ImportExportPlanner {
                         true,
                     ));
                     file.add_export_with_source_backed(export.clone(), true);
+                }
+                for binding in &migrated_local_bindings {
+                    if planned_bindings.insert(binding.clone()) {
+                        let binding_shape = if migrated_extra_namespace_bindings.contains(binding) {
+                            BindingShape::Unknown
+                        } else {
+                            BindingShape::Callable
+                        };
+                        file.add_binding(PlannedBinding::new(
+                            binding.clone(),
+                            binding.clone(),
+                            binding_shape,
+                            true,
+                        ));
+                    }
                 }
                 plan.push_file(file);
                 continue;
@@ -1938,6 +2142,115 @@ impl ImportExportPlanner {
                 ));
             }
 
+            if lowered_source.is_none() && !migrated_local_bindings.is_empty() {
+                for binding in &migrated_local_bindings {
+                    planned_bindings.insert(binding.clone());
+                    let binding_shape = if migrated_locally.contains(binding)
+                        || migrated_extra_namespace_bindings.contains(binding)
+                    {
+                        BindingShape::Unknown
+                    } else {
+                        BindingShape::Callable
+                    };
+                    file.add_binding(PlannedBinding::new(
+                        binding.clone(),
+                        binding.clone(),
+                        binding_shape,
+                        true,
+                    ));
+                }
+                if !migrated_locally.is_empty() {
+                    let bare: BTreeSet<&BindingName> = migrated_locally
+                        .iter()
+                        .filter(|binding| {
+                            runtime_var_migrations
+                                .migrations_by_binding
+                                .get(*binding)
+                                .and_then(|m| m.initializer.as_deref())
+                                .is_none()
+                        })
+                        .collect();
+                    if !bare.is_empty() {
+                        file.push_source(variable_declaration_statement(bare.into_iter()));
+                    }
+                    for binding in &migrated_locally {
+                        let Some(migration) =
+                            runtime_var_migrations.migrations_by_binding.get(binding)
+                        else {
+                            continue;
+                        };
+                        let Some(initializer) = migration.initializer.as_deref() else {
+                            continue;
+                        };
+                        file.push_source(format!(
+                            "var {name} = {initializer};",
+                            name = binding.as_str()
+                        ));
+                    }
+                }
+                if !migrated_extra_snippets.is_empty()
+                    || !migrated_extra_namespace_exports.is_empty()
+                {
+                    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+                    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
+                        .values()
+                        .flat_map(|aliases| aliases.iter())
+                        .map(|(original, alias)| (original.clone(), alias.clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    for (source_file_id, binding) in &migrated_extra_snippets {
+                        let Some(prelude) =
+                            program.model().graph().runtime_prelude(*source_file_id)
+                        else {
+                            continue;
+                        };
+                        let Some(snippet) = prelude.snippets.get(binding) else {
+                            continue;
+                        };
+                        let mut source = snippet.source.clone();
+                        if let Some(setter_deps) =
+                            migrated_extra_runtime_setter_deps_by_source.get(source_file_id)
+                            && !setter_deps.is_empty()
+                        {
+                            source = rewrite_runtime_helper_writes(source.as_str(), setter_deps);
+                        }
+                        migrated_chunks.push((
+                            snippet.byte_start,
+                            0,
+                            rename_identifier_reads_in_source(
+                                source.as_str(),
+                                &migrated_runtime_dep_aliases,
+                            ),
+                        ));
+                    }
+                    for (source_file_id, namespace) in &migrated_extra_namespace_exports {
+                        let Some(prelude) =
+                            program.model().graph().runtime_prelude(*source_file_id)
+                        else {
+                            continue;
+                        };
+                        let Some(namespace_export) = prelude
+                            .namespace_exports
+                            .iter()
+                            .find(|export| export.namespace == *namespace)
+                        else {
+                            continue;
+                        };
+                        migrated_chunks.push((
+                            namespace_export.byte_start,
+                            1,
+                            rename_identifier_reads_in_source(
+                                runtime_namespace_export_statement(namespace_export).as_str(),
+                                &migrated_runtime_dep_aliases,
+                            ),
+                        ));
+                    }
+                    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
+                    for (_, _, source) in migrated_chunks {
+                        file.push_source(source);
+                    }
+                }
+            }
+
             if let Some(lowered_source) = lowered_source {
                 let source_file_path = lowered_source.source_file_path.as_str();
                 let mut source = localized_lazy_value_source.clone().unwrap_or_else(|| {
@@ -2797,6 +3110,14 @@ struct RuntimeVarMigrationPlan {
     /// This index contains primary runtime vars only; extra moved
     /// snippets are derived from `migrations_by_binding`.
     migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    /// Source-backed runtime snippets whose owner can be rebuilt without a
+    /// writable primary var. These are whole closed helper components (for
+    /// example private functions/classes and their namespace export objects)
+    /// that no retained runtime snippet, folded chunk, namespace export, or
+    /// entrypoint side effect reads.
+    owned_snippets_by_binding: BTreeMap<(u32, BindingName), RuntimeOwnedSnippetMigration>,
+    /// Reverse index for `owned_snippets_by_binding`.
+    owned_snippets_by_owner: BTreeMap<ModuleId, BTreeSet<(u32, BindingName)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2848,6 +3169,24 @@ struct RuntimeVarMigration {
     initializer: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeOwnedSnippetMigration {
+    owner_module: ModuleId,
+    source_file_id: u32,
+    /// Runtime helper bindings read by this moved standalone snippet/namespace
+    /// component but not moved with it. The owner imports these back from the
+    /// helper file (or from a different rebuilt owner if that dep also moved).
+    extra_runtime_deps: BTreeSet<BindingName>,
+    /// Import aliases for `extra_runtime_deps` whose original names collide
+    /// with existing bindings in the owner module. Moved snippets are rewritten
+    /// to reference the alias.
+    extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
+    /// Whether the snippet is the namespace object side of a recovered
+    /// `Object.defineProperties(ns, { ... })` export initializer. When true,
+    /// move the namespace initializer statement with the object declaration.
+    moves_namespace_export: bool,
+}
+
 impl RuntimeVarMigrationPlan {
     fn insert(&mut self, binding: BindingName, migration: RuntimeVarMigration) {
         self.migrations_by_owner
@@ -2857,8 +3196,22 @@ impl RuntimeVarMigrationPlan {
         self.migrations_by_binding.insert(binding, migration);
     }
 
+    fn insert_owned_snippet(
+        &mut self,
+        binding: BindingName,
+        migration: RuntimeOwnedSnippetMigration,
+    ) {
+        self.owned_snippets_by_owner
+            .entry(migration.owner_module)
+            .or_default()
+            .insert((migration.source_file_id, binding.clone()));
+        self.owned_snippets_by_binding
+            .insert((migration.source_file_id, binding), migration);
+    }
+
     fn extra_snippets_for_owner(&self, owner_module: ModuleId) -> BTreeSet<(u32, BindingName)> {
-        self.migrations_by_binding
+        let mut snippets = self
+            .migrations_by_binding
             .values()
             .filter(|migration| migration.owner_module == owner_module)
             .flat_map(|migration| {
@@ -2868,11 +3221,20 @@ impl RuntimeVarMigrationPlan {
                     .cloned()
                     .map(|binding| (migration.source_file_id, binding))
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        snippets.extend(
+            self.owned_snippets_by_owner
+                .get(&owner_module)
+                .into_iter()
+                .flatten()
+                .cloned(),
+        );
+        snippets
     }
 
     fn extra_runtime_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
-        self.migrations_by_binding
+        let mut deps = self
+            .migrations_by_binding
             .values()
             .filter(|migration| migration.owner_module == owner_module)
             .flat_map(|migration| {
@@ -2883,7 +3245,67 @@ impl RuntimeVarMigrationPlan {
                     .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
                     .cloned()
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        deps.extend(
+            self.owned_snippets_by_binding
+                .values()
+                .filter(|migration| migration.owner_module == owner_module)
+                .flat_map(|migration| {
+                    migration
+                        .extra_runtime_deps
+                        .iter()
+                        .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
+                        .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
+                        .cloned()
+                }),
+        );
+        deps
+    }
+
+    fn extra_runtime_deps_by_source_for_owner(
+        &self,
+        owner_module: ModuleId,
+    ) -> BTreeMap<u32, BTreeSet<BindingName>> {
+        let mut deps_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+        for migration in self
+            .migrations_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            let deps = migration
+                .extra_runtime_deps
+                .iter()
+                .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
+                .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !deps.is_empty() {
+                deps_by_source
+                    .entry(migration.source_file_id)
+                    .or_default()
+                    .extend(deps);
+            }
+        }
+        for migration in self
+            .owned_snippets_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            let deps = migration
+                .extra_runtime_deps
+                .iter()
+                .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
+                .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !deps.is_empty() {
+                deps_by_source
+                    .entry(migration.source_file_id)
+                    .or_default()
+                    .extend(deps);
+            }
+        }
+        deps_by_source
     }
 
     fn extra_runtime_setter_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
@@ -2942,6 +3364,24 @@ impl RuntimeVarMigrationPlan {
                 deps.entry(dep_owner).or_default().insert(dep.clone());
             }
         }
+        for migration in self
+            .owned_snippets_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            for dep in &migration.extra_runtime_deps {
+                if migration.extra_runtime_dep_aliases.contains_key(dep) {
+                    continue;
+                }
+                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
+                    continue;
+                };
+                if dep_owner == owner_module {
+                    continue;
+                }
+                deps.entry(dep_owner).or_default().insert(dep.clone());
+            }
+        }
         deps
     }
 
@@ -2952,6 +3392,23 @@ impl RuntimeVarMigrationPlan {
         let mut deps = BTreeMap::<ModuleId, BTreeMap<BindingName, BindingName>>::new();
         for migration in self
             .migrations_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            for (dep, alias) in &migration.extra_runtime_dep_aliases {
+                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
+                    continue;
+                };
+                if dep_owner == owner_module {
+                    continue;
+                }
+                deps.entry(dep_owner)
+                    .or_default()
+                    .insert(dep.clone(), alias.clone());
+            }
+        }
+        for migration in self
+            .owned_snippets_by_binding
             .values()
             .filter(|migration| migration.owner_module == owner_module)
         {
@@ -2988,6 +3445,19 @@ impl RuntimeVarMigrationPlan {
                 .or_default()
                 .extend(migration.extra_runtime_dep_aliases.clone());
         }
+        for migration in self
+            .owned_snippets_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            if migration.extra_runtime_dep_aliases.is_empty() {
+                continue;
+            }
+            aliases
+                .entry(migration.source_file_id)
+                .or_default()
+                .extend(migration.extra_runtime_dep_aliases.clone());
+        }
         aliases
     }
 
@@ -2998,6 +3468,29 @@ impl RuntimeVarMigrationPlan {
         let mut aliases = BTreeMap::<u32, BTreeMap<BindingName, BindingName>>::new();
         for migration in self
             .migrations_by_binding
+            .values()
+            .filter(|migration| migration.owner_module == owner_module)
+        {
+            if migration.extra_runtime_dep_aliases.is_empty() {
+                continue;
+            }
+            let runtime_aliases = migration
+                .extra_runtime_dep_aliases
+                .iter()
+                .filter(|(dep, _alias)| {
+                    self.migrated_owner(migration.source_file_id, dep).is_none()
+                })
+                .map(|(dep, alias)| (dep.clone(), alias.clone()))
+                .collect::<BTreeMap<_, _>>();
+            if !runtime_aliases.is_empty() {
+                aliases
+                    .entry(migration.source_file_id)
+                    .or_default()
+                    .extend(runtime_aliases);
+            }
+        }
+        for migration in self
+            .owned_snippets_by_binding
             .values()
             .filter(|migration| migration.owner_module == owner_module)
         {
@@ -3111,7 +3604,8 @@ impl RuntimeVarMigrationPlan {
         &self,
         owner_module: ModuleId,
     ) -> BTreeSet<(u32, BindingName)> {
-        self.migrations_by_binding
+        let mut exports = self
+            .migrations_by_binding
             .values()
             .filter(|migration| migration.owner_module == owner_module)
             .flat_map(|migration| {
@@ -3121,26 +3615,55 @@ impl RuntimeVarMigrationPlan {
                     .cloned()
                     .map(|binding| (migration.source_file_id, binding))
             })
-            .collect()
+            .collect::<BTreeSet<_>>();
+        exports.extend(
+            self.owned_snippets_by_binding
+                .iter()
+                .filter(|(_, migration)| {
+                    migration.owner_module == owner_module && migration.moves_namespace_export
+                })
+                .map(|((source_file_id, binding), _)| (*source_file_id, binding.clone())),
+        );
+        exports
     }
 
     fn extra_namespace_export_bindings_for_source(
         &self,
         source_file_id: u32,
     ) -> BTreeSet<BindingName> {
-        self.migrations_by_binding
+        let mut exports = self
+            .migrations_by_binding
             .values()
             .filter(|migration| migration.source_file_id == source_file_id)
             .flat_map(|migration| migration.extra_namespace_exports.iter().cloned())
-            .collect()
+            .collect::<BTreeSet<_>>();
+        exports.extend(
+            self.owned_snippets_by_binding
+                .iter()
+                .filter(|((owned_source_file_id, _), migration)| {
+                    *owned_source_file_id == source_file_id && migration.moves_namespace_export
+                })
+                .map(|((_, binding), _)| binding.clone()),
+        );
+        exports
     }
 
     fn extra_snippet_bindings_for_source(&self, source_file_id: u32) -> BTreeSet<BindingName> {
-        self.migrations_by_binding
+        let mut snippets = self
+            .migrations_by_binding
             .values()
             .filter(|migration| migration.source_file_id == source_file_id)
             .flat_map(|migration| migration.extra_snippets.iter().cloned())
-            .collect()
+            .collect::<BTreeSet<_>>();
+        snippets.extend(
+            self.owned_snippets_by_binding
+                .keys()
+                .filter(|(snippet_source_file_id, _binding)| {
+                    *snippet_source_file_id == source_file_id
+                })
+                .map(|(_, binding)| binding.clone()),
+        );
+        snippets
     }
 
     fn local_bindings_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
@@ -3181,6 +3704,12 @@ impl RuntimeVarMigrationPlan {
             {
                 return Some(migration.owner_module);
             }
+        }
+        if let Some(migration) = self
+            .owned_snippets_by_binding
+            .get(&(source_file_id, binding.clone()))
+        {
+            return Some(migration.owner_module);
         }
         None
     }
@@ -3223,7 +3752,7 @@ fn runtime_singleton_inline_plan(
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
     let source_definition_modules =
-        unique_source_definition_modules(program, externalized_packages);
+        runtime_owner_definition_modules(program, externalized_packages);
     let source_exported_bindings_by_module =
         source_exported_bindings_by_module(program, source_module_wiring);
     let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
@@ -4470,6 +4999,14 @@ impl BindingOwnerPlan {
                 );
             }
         }
+        for ((source_file_id, binding), migration) in
+            &runtime_var_migrations.owned_snippets_by_binding
+        {
+            owners_by_binding.insert(
+                (*source_file_id, binding.clone()),
+                BindingOwner::Module(migration.owner_module),
+            );
+        }
 
         Self { owners_by_binding }
     }
@@ -5617,7 +6154,7 @@ fn compute_runtime_var_migration_plan(
     // declaration or to absorb same-module assignments. Skip them.
     let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
     let source_definition_modules =
-        unique_source_definition_modules(program, externalized_packages);
+        runtime_owner_definition_modules(program, externalized_packages);
     let all_source_definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
     let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
     let runtime_source_consumers =
@@ -5999,7 +6536,455 @@ fn compute_runtime_var_migration_plan(
             }
         }
     }
+    add_global_owned_runtime_snippet_migrations(
+        program,
+        source_module_wiring,
+        lowered_runtime_sources,
+        runtime_lazy_folds,
+        externalized_packages,
+        &mut plan,
+    );
     plan
+}
+
+fn add_global_owned_runtime_snippet_migrations(
+    program: &EnrichedProgram,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    externalized_packages: &BTreeSet<ModuleId>,
+    plan: &mut RuntimeVarMigrationPlan,
+) {
+    let folded_modules = runtime_lazy_folds
+        .modules
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let source_definition_modules =
+        runtime_owner_definition_modules(program, externalized_packages);
+    let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
+    let owner_available_bindings = runtime_reader_owner_available_bindings(
+        program,
+        source_module_wiring,
+        lowered_runtime_sources,
+        lowered_runtime_sources.keys().copied(),
+    );
+    let modules_by_id = program
+        .model()
+        .modules()
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+
+    for (source_file_id, prelude) in program.model().graph().runtime_preludes() {
+        let folded_chunks = runtime_lazy_folds
+            .chunks_by_source_file
+            .get(source_file_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let read_index = runtime_source_read_index(prelude, folded_chunks);
+        let mut candidate_owners = BTreeMap::<BindingName, ModuleId>::new();
+        for (binding, snippet) in &prelude.snippets {
+            if plan.migrated_owner(*source_file_id, binding).is_some()
+                || !matches!(
+                    prelude.binding_kind(binding),
+                    Some(RuntimePreludeBindingKind::SourceBacked)
+                )
+                || !global_owner_movable_runtime_snippet(
+                    &read_index,
+                    binding,
+                    snippet.source.as_str(),
+                )
+                || read_index.entrypoint_callee.as_ref() == Some(binding)
+                || read_index.non_snippet_runtime_reads.contains(binding)
+            {
+                continue;
+            }
+            let owner_module = source_definition_modules
+                .get(binding)
+                .and_then(|module_id| *module_id)
+                .or_else(|| {
+                    read_index
+                        .namespace_exports_by_namespace
+                        .get(binding)
+                        .and_then(|namespace_export| {
+                            namespace_export_owner(namespace_export, &source_definition_modules)
+                        })
+                });
+            let span_owner = runtime_snippet_source_span_owner(
+                program.model().modules(),
+                prelude.source_file_id,
+                snippet.byte_start,
+                snippet.source.len(),
+                externalized_packages,
+            );
+            let owner_module = match (span_owner, owner_module) {
+                (Some(span_owner), Some(definition_owner))
+                    if span_owner != definition_owner
+                        && source_definition_modules
+                            .get(binding)
+                            .and_then(|module_id| *module_id)
+                            .is_some() =>
+                {
+                    None
+                }
+                (Some(span_owner), _) => Some(span_owner),
+                (None, owner_module) => owner_module,
+            };
+            let Some(owner_module) = owner_module else {
+                continue;
+            };
+            if modules_by_id.get(&owner_module).is_some_and(|module| {
+                module.kind == ModuleKind::Package && externalized_packages.contains(&owner_module)
+            }) {
+                continue;
+            }
+            if !folded_modules.contains(&owner_module)
+                && owner_available_bindings
+                    .get(&owner_module)
+                    .is_some_and(|available| available.contains(binding))
+            {
+                // The owner source already emits this name. Re-emitting the
+                // runtime snippet there would create a duplicate declaration;
+                // keep the runtime copy until a source-span-aware replacement
+                // pass can delete the original definition.
+                continue;
+            }
+            candidate_owners.insert(binding.clone(), owner_module);
+        }
+
+        for (binding, migration) in closed_global_owned_runtime_snippets(
+            prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &module_dependencies_by_owner,
+        ) {
+            plan.insert_owned_snippet(binding, migration);
+        }
+    }
+}
+
+fn namespace_export_owner(
+    namespace_export: &RuntimeNamespaceExport,
+    source_definition_modules: &BTreeMap<BindingName, Option<ModuleId>>,
+) -> Option<ModuleId> {
+    let mut owners = namespace_export
+        .exports
+        .values()
+        .filter_map(|binding| {
+            source_definition_modules
+                .get(binding)
+                .and_then(|owner| *owner)
+        })
+        .collect::<BTreeSet<_>>();
+    let owner = owners.pop_first()?;
+    owners.is_empty().then_some(owner)
+}
+
+fn runtime_snippet_source_span_owner<'a>(
+    modules: impl IntoIterator<Item = &'a ModuleInput>,
+    source_file_id: u32,
+    byte_start: u32,
+    source_len: usize,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> Option<ModuleId> {
+    let source_len = u32::try_from(source_len).unwrap_or(u32::MAX);
+    let mut byte_end = byte_start.saturating_add(source_len);
+    if byte_end == byte_start {
+        byte_end = byte_start.saturating_add(1);
+    }
+
+    let mut owners = modules
+        .into_iter()
+        .filter(|module| module.source_file_id == Some(source_file_id))
+        .filter(|module| {
+            !(module.kind == ModuleKind::Package && externalized_packages.contains(&module.id))
+        })
+        .filter_map(|module| {
+            let span = module.source_span?;
+            (span.byte_start < byte_end && byte_start < span.byte_end).then_some(module.id)
+        })
+        .collect::<BTreeSet<_>>();
+    let owner = owners.pop_first()?;
+    owners.is_empty().then_some(owner)
+}
+
+fn global_owner_movable_runtime_snippet(
+    read_index: &RuntimeSourceReadIndex,
+    binding: &BindingName,
+    source: &str,
+) -> bool {
+    if read_index
+        .namespace_exports_by_namespace
+        .contains_key(binding)
+    {
+        return is_migratable_namespace_reader_snippet(binding, source);
+    }
+    if runtime_prelude_snippet_is_noop(binding.as_str(), source) {
+        return false;
+    }
+    is_migratable_reader_function_snippet(binding, source)
+}
+
+fn closed_global_owned_runtime_snippets(
+    prelude: &RuntimePrelude,
+    read_index: &RuntimeSourceReadIndex,
+    candidate_owners: &BTreeMap<BindingName, ModuleId>,
+    owner_available_bindings: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    module_dependencies_by_owner: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+) -> BTreeMap<BindingName, RuntimeOwnedSnippetMigration> {
+    let mut selected = candidate_owners.clone();
+    loop {
+        let mut removed = Vec::<BindingName>::new();
+        for (binding, owner_module) in &selected {
+            let Some(snippet) = prelude.snippets.get(binding) else {
+                removed.push(binding.clone());
+                continue;
+            };
+            if read_index.entrypoint_callee.as_ref() == Some(binding)
+                || read_index.non_snippet_runtime_reads.contains(binding)
+                || read_index.namespace_export_helpers.contains(binding)
+            {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            let local_bindings = local_bindings_in_source(snippet.source.as_str());
+            let runtime_reads = runtime_import_identifiers_in_source(snippet.source.as_str())
+                .into_iter()
+                .map(BindingName::new)
+                .filter(|dep| prelude.defines(dep))
+                .collect::<BTreeSet<_>>();
+            if runtime_reads.iter().any(|dep| {
+                let Some(dep_owner) = selected.get(dep) else {
+                    return false;
+                };
+                dep_owner != owner_module
+                    && selected_owner_dependency_creates_cycle(
+                        &selected,
+                        read_index,
+                        module_dependencies_by_owner,
+                        *owner_module,
+                        *dep_owner,
+                    )
+            }) {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
+                .into_iter()
+                .filter(|write| !local_bindings.contains(write.as_str()))
+                .filter(|write| prelude.defines(write))
+                .collect::<BTreeSet<_>>();
+            if runtime_writes.iter().any(|dep| {
+                selected
+                    .get(dep)
+                    .is_none_or(|dep_owner| dep_owner != owner_module)
+            }) {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            let runtime_readers = runtime_readers_for_binding(read_index, binding);
+            if runtime_readers
+                .iter()
+                .any(|reader| !selected.contains_key(reader))
+            {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            let runtime_writers = read_index
+                .snippet_writers_by_binding
+                .get(binding)
+                .cloned()
+                .unwrap_or_default();
+            if runtime_writers.iter().any(|writer| {
+                selected
+                    .get(writer)
+                    .is_none_or(|writer_owner| writer_owner != owner_module)
+            }) {
+                removed.push(binding.clone());
+                continue;
+            }
+
+            if let Some(namespace_export) = read_index.namespace_exports_by_namespace.get(binding)
+                && namespace_export.exports.values().any(|target| {
+                    let Some(target_owner) = selected.get(target) else {
+                        return false;
+                    };
+                    target_owner != owner_module
+                        && selected_owner_dependency_creates_cycle(
+                            &selected,
+                            read_index,
+                            module_dependencies_by_owner,
+                            *owner_module,
+                            *target_owner,
+                        )
+                })
+            {
+                removed.push(binding.clone());
+            }
+        }
+        if removed.is_empty() {
+            break;
+        }
+        for binding in removed {
+            selected.remove(&binding);
+        }
+    }
+
+    let final_selected = selected.clone();
+    final_selected
+        .into_iter()
+        .filter_map(|(binding, owner_module)| {
+            let snippet = prelude.snippets.get(&binding)?;
+            let local_bindings = local_bindings_in_source(snippet.source.as_str());
+            let mut extra_runtime_deps =
+                runtime_import_identifiers_in_source(snippet.source.as_str())
+                    .into_iter()
+                    .map(BindingName::new)
+                    .filter(|dep| prelude.defines(dep))
+                    .filter(|dep| {
+                        selected
+                            .get(dep)
+                            .is_none_or(|dep_owner| *dep_owner != owner_module)
+                    })
+                    .collect::<BTreeSet<_>>();
+            let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
+                .into_iter()
+                .filter(|write| !local_bindings.contains(write.as_str()))
+                .filter(|write| prelude.defines(write))
+                .collect::<BTreeSet<_>>();
+            if runtime_writes.iter().any(|dep| {
+                selected
+                    .get(dep)
+                    .is_none_or(|dep_owner| *dep_owner != owner_module)
+            }) {
+                return None;
+            }
+            let moves_namespace_export = read_index
+                .namespace_exports_by_namespace
+                .contains_key(&binding);
+            if let Some(namespace_export) = read_index.namespace_exports_by_namespace.get(&binding)
+            {
+                for target in namespace_export.exports.values() {
+                    if selected
+                        .get(target)
+                        .is_some_and(|target_owner| *target_owner == owner_module)
+                    {
+                        continue;
+                    }
+                    if prelude.defines(target) {
+                        extra_runtime_deps.insert(target.clone());
+                    }
+                }
+            }
+            extra_runtime_deps.remove(&binding);
+            let owner_available = owner_available_bindings
+                .get(&owner_module)
+                .cloned()
+                .unwrap_or_default();
+            let extra_runtime_dep_aliases = global_owned_runtime_dep_aliases_for_owner_conflicts(
+                &binding,
+                &extra_runtime_deps,
+                &owner_available,
+            );
+            Some((
+                binding,
+                RuntimeOwnedSnippetMigration {
+                    owner_module,
+                    source_file_id: prelude.source_file_id,
+                    extra_runtime_deps,
+                    extra_runtime_dep_aliases,
+                    moves_namespace_export,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn global_owned_runtime_dep_aliases_for_owner_conflicts(
+    binding: &BindingName,
+    extra_runtime_deps: &BTreeSet<BindingName>,
+    owner_available_bindings: &BTreeSet<BindingName>,
+) -> BTreeMap<BindingName, BindingName> {
+    let mut aliases = BTreeMap::<BindingName, BindingName>::new();
+    let mut reserved = owner_available_bindings.clone();
+    reserved.insert(binding.clone());
+    reserved.extend(extra_runtime_deps.iter().cloned());
+    for dep in extra_runtime_deps
+        .iter()
+        .filter(|dep| owner_available_bindings.contains(*dep))
+    {
+        let alias = unique_runtime_dep_alias(dep, &mut reserved);
+        aliases.insert(dep.clone(), alias);
+    }
+    aliases
+}
+
+fn selected_owner_dependency_creates_cycle(
+    selected: &BTreeMap<BindingName, ModuleId>,
+    read_index: &RuntimeSourceReadIndex,
+    module_dependencies_by_owner: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    owner_module: ModuleId,
+    dep_owner: ModuleId,
+) -> bool {
+    module_dependency_path_exists(module_dependencies_by_owner, dep_owner, owner_module)
+        || selected_owner_path_exists(selected, read_index, dep_owner, owner_module)
+}
+
+fn selected_owner_path_exists(
+    selected: &BTreeMap<BindingName, ModuleId>,
+    read_index: &RuntimeSourceReadIndex,
+    from_owner: ModuleId,
+    target_owner: ModuleId,
+) -> bool {
+    if from_owner == target_owner {
+        return true;
+    }
+    let mut visited = BTreeSet::<ModuleId>::new();
+    let mut stack = vec![from_owner];
+    while let Some(owner) = stack.pop() {
+        if !visited.insert(owner) {
+            continue;
+        }
+        for (binding, _) in selected
+            .iter()
+            .filter(|(_, binding_owner)| **binding_owner == owner)
+        {
+            for dep in selected_runtime_dependencies_for_binding(read_index, binding) {
+                let Some(dep_owner) = selected.get(&dep) else {
+                    continue;
+                };
+                if *dep_owner == owner {
+                    continue;
+                }
+                if *dep_owner == target_owner {
+                    return true;
+                }
+                stack.push(*dep_owner);
+            }
+        }
+    }
+    false
+}
+
+fn selected_runtime_dependencies_for_binding(
+    read_index: &RuntimeSourceReadIndex,
+    binding: &BindingName,
+) -> BTreeSet<BindingName> {
+    let mut deps = read_index
+        .free_bindings_by_snippet
+        .get(binding)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(namespace_export) = read_index.namespace_exports_by_namespace.get(binding) {
+        deps.extend(namespace_export.exports.values().cloned());
+    }
+    deps
 }
 
 fn runtime_setter_migration_blocker_report(
@@ -6293,6 +7278,7 @@ enum RuntimeBindingReadProfile {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct RuntimeSourceReadIndex {
     snippet_readers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
+    snippet_writers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
     namespace_readers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
     namespace_exports_by_namespace: BTreeMap<BindingName, RuntimeNamespaceExport>,
     namespace_export_helpers: BTreeSet<BindingName>,
@@ -6318,6 +7304,7 @@ fn runtime_source_read_index(
         ..RuntimeSourceReadIndex::default()
     };
     for (key, snippet) in &prelude.snippets {
+        let local_bindings = local_bindings_in_source(snippet.source.as_str());
         let free_bindings = runtime_import_identifiers_in_source(snippet.source.as_str())
             .into_iter()
             .map(BindingName::new)
@@ -6332,6 +7319,17 @@ fn runtime_source_read_index(
         index
             .free_bindings_by_snippet
             .insert(key.clone(), free_bindings);
+        for write in implicit_global_writes_in_source(snippet.source.as_str())
+            .into_iter()
+            .filter(|write| !local_bindings.contains(write.as_str()))
+            .filter(|write| prelude.defines(write))
+        {
+            index
+                .snippet_writers_by_binding
+                .entry(write)
+                .or_default()
+                .insert(key.clone());
+        }
     }
 
     for chunk in folded_chunks {
@@ -6546,7 +7544,7 @@ type RuntimeReaderClusterResult =
 
 const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
 const MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES: usize = 10000;
-const MAX_LAZY_STAY_LOCAL_READER_CLUSTER_LINES: usize = 20;
+const MAX_LAZY_STAY_LOCAL_READER_CLUSTER_LINES: usize = MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES;
 
 fn merge_same_owner_overlapping_reader_migrations(
     ctx: &RuntimeReaderClusterContext<'_>,
@@ -15369,6 +16367,24 @@ fn unique_source_definition_modules(
     )
 }
 
+fn runtime_owner_definition_modules(
+    program: &EnrichedProgram,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeMap<BindingName, Option<ModuleId>> {
+    let mut definition_bindings_by_module = source_definition_bindings_by_module(program);
+    for symbol in program.model().symbols() {
+        definition_bindings_by_module
+            .entry(symbol.module_id)
+            .or_default()
+            .insert(BindingName::new(symbol.name.clone()));
+    }
+    unique_source_definition_modules_from_bindings(
+        program,
+        externalized_packages,
+        &definition_bindings_by_module,
+    )
+}
+
 fn source_definition_bindings_by_module(
     program: &EnrichedProgram,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
@@ -18761,7 +19777,9 @@ impl Error for PlanError {}
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use reverts_graph::{RuntimePrelude, RuntimePreludeBindingKind, RuntimePreludeSnippet};
+    use reverts_graph::{
+        RuntimeNamespaceExport, RuntimePrelude, RuntimePreludeBindingKind, RuntimePreludeSnippet,
+    };
     use reverts_input::{
         InputBundle, InputRows, ModuleDependencyInput, ModuleDependencyTarget, ModuleInput,
         PackageAttributionInput, PackageAttributionStatus, PackageSurfaceInput, ProjectInput,
@@ -19335,6 +20353,457 @@ var init = lazyValue(() => {\n\
         );
         assert!(partition.runtime_bindings.contains(&package_owned));
         assert!(partition.runtime_bindings.contains(&runtime_owned));
+    }
+
+    #[test]
+    fn global_owner_rebuild_selects_closed_runtime_snippet_component() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([
+            (BindingName::new("ownedA"), ModuleId(7)),
+            (BindingName::new("ownedB"), ModuleId(7)),
+        ]);
+        let owner_available_bindings = BTreeMap::from([(ModuleId(7), BTreeSet::new())]);
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            selected.keys().cloned().collect::<BTreeSet<_>>(),
+            candidate_owners.keys().cloned().collect::<BTreeSet<_>>()
+        );
+        assert!(selected.values().all(|migration| {
+            migration.owner_module == ModuleId(7) && migration.extra_runtime_deps.is_empty()
+        }));
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_runtime_reader_outside_component() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return 1; }\n\
+function runtimeReader() { return ownedA(); }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return 1; }"),
+                ),
+                (
+                    BindingName::new("runtimeReader"),
+                    snippet("function runtimeReader() { return ownedA(); }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([
+            (BindingName::new("ownedA"), ModuleId(7)),
+            (BindingName::new("ownedB"), ModuleId(7)),
+        ]);
+        let owner_available_bindings = BTreeMap::from([(ModuleId(7), BTreeSet::new())]);
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn global_owner_rebuild_imports_stable_runtime_deps() {
+        let source = "\
+function ownedA() { return runtimeDep(); }\n\
+function runtimeDep() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("runtimeDep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return runtimeDep(); }"),
+                ),
+                (
+                    BindingName::new("runtimeDep"),
+                    snippet("function runtimeDep() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]);
+        let owner_available_bindings = BTreeMap::from([(
+            ModuleId(7),
+            BTreeSet::from([BindingName::new("runtimeDep")]),
+        )]);
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &BTreeMap::new(),
+        );
+
+        let migration = selected
+            .get(&BindingName::new("ownedA"))
+            .expect("owned snippet should move with a runtime import");
+        assert_eq!(
+            migration.extra_runtime_deps,
+            BTreeSet::from([BindingName::new("runtimeDep")])
+        );
+        assert_eq!(
+            migration
+                .extra_runtime_dep_aliases
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([BindingName::new("runtimeDep")])
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_acyclic_cross_owner_runtime_deps() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([
+            (BindingName::new("ownedA"), ModuleId(7)),
+            (BindingName::new("ownedB"), ModuleId(8)),
+        ]);
+        let owner_available_bindings = BTreeMap::new();
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(
+            selected.keys().cloned().collect::<BTreeSet<_>>(),
+            candidate_owners.keys().cloned().collect::<BTreeSet<_>>()
+        );
+        assert_eq!(
+            selected
+                .get(&BindingName::new("ownedA"))
+                .expect("A should move")
+                .extra_runtime_deps,
+            BTreeSet::from([BindingName::new("ownedB")])
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_cross_owner_runtime_cycles() {
+        let source = "\
+function ownedA() { return ownedB(); }\n\
+function ownedB() { return ownedA(); }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return ownedB(); }"),
+                ),
+                (
+                    BindingName::new("ownedB"),
+                    snippet("function ownedB() { return ownedA(); }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([
+            (BindingName::new("ownedA"), ModuleId(7)),
+            (BindingName::new("ownedB"), ModuleId(8)),
+        ]);
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn global_owner_rebuild_moves_namespace_export_with_target() {
+        let source = "\
+var ns = {};\n\
+function ownedA() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ns"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (BindingName::new("ns"), snippet("var ns = {};")),
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: vec![RuntimeNamespaceExport {
+                namespace: BindingName::new("ns"),
+                helper: BindingName::new("__export"),
+                exports: BTreeMap::from([("ownedA".to_string(), BindingName::new("ownedA"))]),
+                byte_start: offset,
+            }],
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let candidate_owners = BTreeMap::from([
+            (BindingName::new("ns"), ModuleId(7)),
+            (BindingName::new("ownedA"), ModuleId(7)),
+        ]);
+        let owner_available_bindings = BTreeMap::from([(ModuleId(7), BTreeSet::new())]);
+
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &candidate_owners,
+            &owner_available_bindings,
+            &BTreeMap::new(),
+        );
+
+        assert!(selected.contains_key(&BindingName::new("ownedA")));
+        assert!(
+            selected
+                .get(&BindingName::new("ns"))
+                .is_some_and(|migration| migration.moves_namespace_export)
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_can_use_unique_source_span_owner() {
+        let modules = vec![
+            ModuleInput::application(ModuleId(7), "owner", "modules/owner")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(100, 200)),
+            ModuleInput::application(ModuleId(8), "other", "modules/other")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(250, 300)),
+        ];
+
+        let owner = super::runtime_snippet_source_span_owner(
+            &modules,
+            1,
+            120,
+            "function owned() { return 1; }".len(),
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(owner, Some(ModuleId(7)));
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_ambiguous_or_externalized_source_span_owner() {
+        let modules = vec![
+            ModuleInput::application(ModuleId(7), "left", "modules/left")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(100, 200)),
+            ModuleInput::application(ModuleId(8), "right", "modules/right")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(150, 250)),
+            ModuleInput::package(ModuleId(9), "pkg", "node_modules/pkg", "pkg", None)
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(300, 400)),
+        ];
+
+        assert_eq!(
+            super::runtime_snippet_source_span_owner(&modules, 1, 160, 10, &BTreeSet::new()),
+            None
+        );
+        assert_eq!(
+            super::runtime_snippet_source_span_owner(
+                &modules,
+                1,
+                320,
+                10,
+                &BTreeSet::from([ModuleId(9)])
+            ),
+            None
+        );
     }
 
     #[test]
@@ -28833,17 +30302,19 @@ var init = lazyValue(() => {\n\
 
         let plan = plan_from_rows(rows);
         let consumer_source = planned_source(&plan, "modules/consumer.ts");
-        let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
         assert!(
-            consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';"),
+            consumer_source.contains("var value = ns.value + shared;"),
             "{consumer_source}"
         );
-        assert!(consumer_source.contains("var value = ns.value + shared;"));
-        assert!(helper_source.contains("var ns = {};"), "{helper_source}");
         assert!(
-            helper_source.contains("Object.defineProperties(ns"),
-            "{helper_source}"
+            !consumer_source.contains("var value = __reverts_runtime_shared + shared;"),
+            "{consumer_source}"
+        );
+        assert!(
+            consumer_source.contains("import { ns } from './runtime/source-1-helpers.js';")
+                || consumer_source.contains("var ns = {};"),
+            "{consumer_source}"
         );
     }
 

@@ -268,6 +268,16 @@ pub struct SymbolInput {
     pub semantic_name: Option<String>,
     /// Optional export-name hint from the source database.
     pub export_name: Option<String>,
+    /// Symbol-table scope as recovered by ingestion. Module symbols are part of
+    /// the normal source surface; global symbols are only used by conservative
+    /// owner reconstruction passes and must not drive readability renames.
+    pub scope: SymbolScope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolScope {
+    Module,
+    Global,
 }
 
 impl SymbolInput {
@@ -278,6 +288,7 @@ impl SymbolInput {
             name: name.into(),
             semantic_name: None,
             export_name: None,
+            scope: SymbolScope::Module,
         }
     }
 
@@ -290,6 +301,12 @@ impl SymbolInput {
     #[must_use]
     pub fn with_export_name(mut self, export_name: impl Into<String>) -> Self {
         self.export_name = Some(export_name.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_scope(mut self, scope: SymbolScope) -> Self {
+        self.scope = scope;
         self
     }
 }
@@ -646,6 +663,7 @@ impl InputRows {
                 name: non_empty(row.name, "symbol.name")?,
                 semantic_name: normalize_optional(row.semantic_name),
                 export_name: normalize_optional(row.export_name),
+                scope: symbol_scope_from_storage(row.scope_level.as_deref()),
             });
         }
 
@@ -845,6 +863,13 @@ impl StoredModuleKind {
     }
 }
 
+fn symbol_scope_from_storage(value: Option<&str>) -> SymbolScope {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("global") => SymbolScope::Global,
+        _ => SymbolScope::Module,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleRow {
     pub id: i64,
@@ -864,6 +889,7 @@ pub struct SymbolRow {
     pub name: String,
     pub semantic_name: Option<String>,
     pub export_name: Option<String>,
+    pub scope_level: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1714,6 +1740,7 @@ mod tests {
             name: "answer".to_string(),
             semantic_name: Some("readableAnswer".to_string()),
             export_name: None,
+            scope_level: Some("module".to_string()),
         });
         rows.assets.push(AssetRow {
             id: 31,

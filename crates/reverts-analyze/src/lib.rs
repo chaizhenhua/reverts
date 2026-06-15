@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstFactKind, AstWrapperKind, FunctionExtractor};
-use reverts_input::ModuleDependencyTarget;
+use reverts_input::{ModuleDependencyTarget, SymbolScope};
 use reverts_ir::{
     BindingConstraintKind, BindingName, BindingShapeSolution, ControlFlowEdgeKind,
     ControlFlowNodeKind, FunctionFingerprint, ModuleId,
@@ -391,6 +391,9 @@ fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
     }
 
     for symbol in model.symbols() {
+        if symbol.scope != SymbolScope::Module {
+            continue;
+        }
         if !mapped_originals.insert((symbol.module_id, symbol.name.clone())) {
             continue;
         }
