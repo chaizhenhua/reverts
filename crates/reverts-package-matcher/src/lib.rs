@@ -42,12 +42,12 @@ use oxc_ast::{
         Class, ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclaration,
         ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, ImportDeclaration,
         ImportExpression, MethodDefinitionKind, ModuleExportName, ObjectExpression,
-        ObjectPropertyKind, PropertyKey, TemplateElement,
+        ObjectPropertyKind, PropertyKey, SwitchStatement, TemplateElement,
     },
     visit::walk::{
         walk_assignment_expression, walk_call_expression, walk_class, walk_export_all_declaration,
         walk_export_default_declaration, walk_export_named_declaration, walk_import_expression,
-        walk_object_expression, walk_template_element,
+        walk_object_expression, walk_switch_statement, walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -220,6 +220,10 @@ pub enum ModuleMatchStrategy {
     /// matched the package source after minification removed local class names
     /// and function bodies.
     ClassShapeAndStringAnchors,
+    /// Switch-case literal shape anchors plus string/property anchors uniquely
+    /// matched the package source after minification changed local control-flow
+    /// variable names but preserved public dispatch literals.
+    SwitchShapeAndStringAnchors,
     /// Function signatures plus string anchors matched the package version as
     /// an aggregate, but not one unique importable source file. This proves
     /// package ownership only.
@@ -256,6 +260,7 @@ impl ModuleMatchStrategy {
             Self::PropertyShapeAndStringAnchors => "property_shape_and_string_anchors",
             Self::ObjectShapeAndStringAnchors => "object_shape_and_string_anchors",
             Self::ClassShapeAndStringAnchors => "class_shape_and_string_anchors",
+            Self::SwitchShapeAndStringAnchors => "switch_shape_and_string_anchors",
             Self::AggregateFunctionSignatureAndStringAnchors => {
                 "aggregate_function_signature_and_string_anchors"
             }
@@ -1506,6 +1511,7 @@ fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) ->
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
             | ModuleMatchStrategy::ObjectShapeAndStringAnchors
             | ModuleMatchStrategy::ClassShapeAndStringAnchors
+            | ModuleMatchStrategy::SwitchShapeAndStringAnchors
     )
 }
 
@@ -1914,7 +1920,8 @@ fn dependency_exact_hint_source_match_external_package_source(
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::PropertyShapeAndStringAnchors
         | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-        | ModuleMatchStrategy::ClassShapeAndStringAnchors => {}
+        | ModuleMatchStrategy::ClassShapeAndStringAnchors
+        | ModuleMatchStrategy::SwitchShapeAndStringAnchors => {}
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -1987,6 +1994,15 @@ fn semantic_external_target_policies(
                 min_score: 1,
             }]
         }
+        ModuleMatchStrategy::SwitchShapeAndStringAnchors
+            if package_match.function_signature_matches > 0
+                && package_match.string_anchor_matches > 0 =>
+        {
+            vec![SemanticExternalTargetPolicy {
+                hint_mode: SemanticPathHintMode::ImportProof,
+                min_score: 1,
+            }]
+        }
         ModuleMatchStrategy::DependencyClosureOwnership => {
             if !package_match.source_path.starts_with("exact-hint:") {
                 return Vec::new();
@@ -2014,7 +2030,8 @@ fn semantic_external_target_policies(
         ModuleMatchStrategy::FunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::PropertyShapeAndStringAnchors
         | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-        | ModuleMatchStrategy::ClassShapeAndStringAnchors => Vec::new(),
+        | ModuleMatchStrategy::ClassShapeAndStringAnchors
+        | ModuleMatchStrategy::SwitchShapeAndStringAnchors => Vec::new(),
         ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -2229,6 +2246,7 @@ fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch
         | ModuleMatchStrategy::PropertyShapeAndStringAnchors
         | ModuleMatchStrategy::ObjectShapeAndStringAnchors
         | ModuleMatchStrategy::ClassShapeAndStringAnchors
+        | ModuleMatchStrategy::SwitchShapeAndStringAnchors
         | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
@@ -4521,6 +4539,7 @@ fn dependency_graph_source_fingerprint_policy_allows(strategy: ModuleMatchStrate
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
             | ModuleMatchStrategy::ObjectShapeAndStringAnchors
             | ModuleMatchStrategy::ClassShapeAndStringAnchors
+            | ModuleMatchStrategy::SwitchShapeAndStringAnchors
     )
 }
 
@@ -6076,6 +6095,11 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
         self.record_class_shape_anchor(class);
         walk_class(self, class);
     }
+
+    fn visit_switch_statement(&mut self, statement: &SwitchStatement<'a>) {
+        self.record_switch_shape_anchor(statement);
+        walk_switch_statement(self, statement);
+    }
 }
 
 impl FingerprintVisitor<'_> {
@@ -6195,6 +6219,26 @@ impl FingerprintVisitor<'_> {
         self.fingerprint
             .string_anchors
             .insert(format!("class-shape:{shape}"));
+    }
+
+    fn record_switch_shape_anchor(&mut self, statement: &SwitchStatement<'_>) {
+        let labels = switch_statement_shape_labels(statement);
+        if labels.len() < 3 {
+            return;
+        }
+        for label in &labels {
+            self.fingerprint
+                .string_anchors
+                .insert(format!("switch-case:{label}"));
+        }
+        let shape = labels
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.fingerprint
+            .string_anchors
+            .insert(format!("switch-shape:{shape}"));
     }
 
     fn finish(mut self) -> AstFingerprint {
@@ -6336,6 +6380,68 @@ fn is_usable_class_shape_member(member: &str) -> bool {
         )
 }
 
+fn switch_statement_shape_labels(statement: &SwitchStatement<'_>) -> BTreeSet<String> {
+    statement
+        .cases
+        .iter()
+        .filter_map(|case| {
+            let test = case.test.as_ref()?;
+            switch_case_static_label(test)
+        })
+        .filter(|label| is_usable_switch_shape_label(label.as_str()))
+        .collect()
+}
+
+fn switch_case_static_label(expression: &Expression<'_>) -> Option<String> {
+    match expression {
+        Expression::StringLiteral(literal) => Some(literal.value.as_str().trim().to_string()),
+        Expression::TemplateLiteral(literal) if literal.expressions.is_empty() => literal
+            .quasis
+            .first()
+            .map(|element| {
+                element
+                    .value
+                    .cooked
+                    .as_ref()
+                    .unwrap_or(&element.value.raw)
+                    .as_str()
+            })
+            .map(str::trim)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
+}
+
+fn is_usable_switch_shape_label(label: &str) -> bool {
+    if label.len() > 64 {
+        return false;
+    }
+    let normalized = normalize_hint_text(label);
+    normalized.len() >= 3
+        && !matches!(
+            normalized.as_str(),
+            "get"
+                | "set"
+                | "has"
+                | "map"
+                | "key"
+                | "keys"
+                | "add"
+                | "run"
+                | "main"
+                | "init"
+                | "name"
+                | "type"
+                | "types"
+                | "value"
+                | "values"
+                | "index"
+                | "default"
+                | "true"
+                | "false"
+        )
+}
+
 fn score_version<'a>(
     version: &PackageVersionCandidate<'a>,
     module_fingerprints: &[ModuleMatchFingerprint],
@@ -6443,23 +6549,30 @@ fn best_source_match(
                 class_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
             let class_anchor_matches =
                 class_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let switch_shape_matches =
+                switch_shape_anchor_matches(&source.string_anchors, &module.string_anchors);
+            let switch_anchor_matches =
+                switch_anchor_matches(&source.string_anchors, &module.string_anchors);
             let is_function_string_match = function_signature_matches
                 >= config.min_function_signature_matches
                 && string_anchor_matches >= config.min_string_anchor_matches;
             let is_property_shape_match = property_shape_matches >= 1 && string_anchor_matches >= 4;
             let is_object_shape_match = object_shape_matches >= 1 && string_anchor_matches >= 5;
             let is_class_shape_match = class_shape_matches >= 1 && string_anchor_matches >= 4;
+            let is_switch_shape_match = switch_shape_matches >= 1 && string_anchor_matches >= 4;
             if is_function_string_match
                 || is_property_shape_match
                 || is_object_shape_match
                 || is_class_shape_match
+                || is_switch_shape_match
             {
                 Some((
                     source,
                     function_signature_matches
                         .max(property_anchor_matches)
                         .max(object_anchor_matches)
-                        .max(class_anchor_matches),
+                        .max(class_anchor_matches)
+                        .max(switch_anchor_matches),
                     string_anchor_matches,
                     if is_function_string_match {
                         ModuleMatchStrategy::FunctionSignatureAndStringAnchors
@@ -6467,8 +6580,10 @@ fn best_source_match(
                         ModuleMatchStrategy::PropertyShapeAndStringAnchors
                     } else if is_object_shape_match {
                         ModuleMatchStrategy::ObjectShapeAndStringAnchors
-                    } else {
+                    } else if is_class_shape_match {
                         ModuleMatchStrategy::ClassShapeAndStringAnchors
+                    } else {
+                        ModuleMatchStrategy::SwitchShapeAndStringAnchors
                     },
                 ))
             } else {
@@ -6547,6 +6662,18 @@ fn class_shape_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>)
 fn class_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
     left.intersection(right)
         .filter(|anchor| anchor.starts_with("class-shape:") || anchor.starts_with("class-method:"))
+        .count()
+}
+
+fn switch_shape_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| anchor.starts_with("switch-shape:"))
+        .count()
+}
+
+fn switch_anchor_matches(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right)
+        .filter(|anchor| anchor.starts_with("switch-shape:") || anchor.starts_with("switch-case:"))
         .count()
 }
 
@@ -9646,6 +9773,127 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
                 .iter()
                 .any(|attribution| attribution.module_id == ModuleId(10)),
             "ambiguous class-shape source proof must not externalize"
+        );
+    }
+
+    #[test]
+    fn minified_switch_shape_matches_unique_external_source() {
+        let module_source = r#"
+            function c(t) {
+                switch (t.kind) {
+                    case "major": return 1;
+                    case "minor": return 2;
+                    case "patch": return 3;
+                    case "prerelease": return 4;
+                    default: return 0;
+                }
+            }
+            exports.classify = c;
+        "#;
+        let rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/classify",
+                "pkg@1.0.0/lib/classify.js",
+                r#"
+                    export function classify(token) {
+                        switch (token.type) {
+                            case "major": return "M";
+                            case "minor": return "m";
+                            case "patch": return "p";
+                            case "prerelease": return "pre";
+                            default: return "";
+                        }
+                    }
+                "#,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/format",
+                "pkg@1.0.0/lib/format.js",
+                r#"
+                    export function format(token) {
+                        switch (token.type) {
+                            case "start": return "S";
+                            case "stop": return "T";
+                            case "pause": return "P";
+                            case "resume": return "R";
+                            default: return "";
+                        }
+                    }
+                "#,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert_eq!(report.package_report.attributions.len(), 1);
+        let package_match = &report.package_report.matches[0];
+        assert_eq!(
+            package_match.strategy,
+            ModuleMatchStrategy::SwitchShapeAndStringAnchors
+        );
+        assert!(package_match.external_importable);
+        assert_eq!(package_match.export_specifier.as_str(), "pkg/classify");
+    }
+
+    #[test]
+    fn minified_switch_shape_rejects_ambiguous_external_sources() {
+        let module_source = r#"
+            function c(t) {
+                switch (t.kind) {
+                    case "major": return 1;
+                    case "minor": return 2;
+                    case "patch": return 3;
+                    case "prerelease": return 4;
+                    default: return 0;
+                }
+            }
+            exports.classify = c;
+        "#;
+        let rows = rows_with_package_source_at_version(module_source, "1.0.0");
+        let source = r#"
+            export function classify(token) {
+                switch (token.type) {
+                    case "major": return "M";
+                    case "minor": return "m";
+                    case "patch": return "p";
+                    case "prerelease": return "pre";
+                    default: return "";
+                }
+            }
+        "#;
+        let package_sources = [
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/classify-a",
+                "pkg@1.0.0/lib/classify-a.js",
+                source,
+            ),
+            PackageSource::external(
+                "pkg",
+                "1.0.0",
+                "pkg/classify-b",
+                "pkg@1.0.0/lib/classify-b.js",
+                source,
+            ),
+        ];
+
+        let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+        assert!(report.package_report.audit.is_clean());
+        assert!(
+            !report
+                .package_report
+                .attributions
+                .iter()
+                .any(|attribution| attribution.module_id == ModuleId(10)),
+            "ambiguous switch-shape source proof must not externalize"
         );
     }
 
