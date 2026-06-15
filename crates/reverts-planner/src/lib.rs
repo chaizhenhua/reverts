@@ -3862,6 +3862,7 @@ fn runtime_singleton_inline_plan(
         let singleton_ctx = RuntimeSingletonInlineContext {
             program,
             lowered_runtime_sources,
+            runtime_var_migrations,
             prelude,
             read_index,
             source_file_id: *source_file_id,
@@ -3887,6 +3888,7 @@ fn runtime_singleton_inline_plan(
 struct RuntimeSingletonInlineContext<'a> {
     program: &'a EnrichedProgram,
     lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    runtime_var_migrations: &'a RuntimeVarMigrationPlan,
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     source_file_id: u32,
@@ -3914,6 +3916,10 @@ fn resolve_runtime_singleton_inline_snippet(
         }
         let key = (ctx.source_file_id, binding.clone());
         if ctx.blocked_bindings.contains(&key)
+            || ctx
+                .runtime_var_migrations
+                .migrated_owner(ctx.source_file_id, &binding)
+                .is_some()
             || is_runtime_singleton_inline_excluded_binding(&binding)
         {
             return None;
@@ -6593,6 +6599,10 @@ fn add_global_owned_runtime_snippet_migrations(
         lowered_runtime_sources,
         lowered_runtime_sources.keys().copied(),
     );
+    let owner_local_definitions = lowered_runtime_sources
+        .iter()
+        .map(|(module_id, source)| (*module_id, source.local_definitions.clone()))
+        .collect::<BTreeMap<_, _>>();
     let modules_by_id = program
         .model()
         .modules()
@@ -6655,6 +6665,16 @@ fn add_global_owned_runtime_snippet_migrations(
             }) {
                 continue;
             }
+            if owner_local_definitions
+                .get(&owner_module)
+                .is_some_and(|definitions| definitions.contains(binding))
+            {
+                // The owner source already emits this exact top-level
+                // definition. Re-emitting the runtime snippet there would
+                // create duplicate declarations, including for folded lazy
+                // modules whose source body is still materialized.
+                continue;
+            }
             if !folded_modules.contains(&owner_module)
                 && owner_available_bindings
                     .get(&owner_module)
@@ -6674,6 +6694,7 @@ fn add_global_owned_runtime_snippet_migrations(
             &eligible_movable_bindings,
             &mut candidate_owners,
             &owner_available_bindings,
+            &owner_local_definitions,
             &folded_modules,
         );
         let owner_runtime_state = runtime_reader_owner_runtime_state(
@@ -6809,6 +6830,7 @@ fn propagate_runtime_reader_owned_snippet_candidates(
     eligible_movable_bindings: &BTreeSet<BindingName>,
     candidate_owners: &mut BTreeMap<BindingName, ModuleId>,
     owner_available_bindings: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    owner_local_definitions: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
     folded_modules: &BTreeSet<ModuleId>,
 ) {
     loop {
@@ -6837,6 +6859,12 @@ fn propagate_runtime_reader_owned_snippet_candidates(
                 .iter()
                 .next()
                 .expect("single reader owner should exist");
+            if owner_local_definitions
+                .get(&owner_module)
+                .is_some_and(|definitions| definitions.contains(binding))
+            {
+                continue;
+            }
             if !folded_modules.contains(&owner_module)
                 && owner_available_bindings
                     .get(&owner_module)
@@ -7220,7 +7248,12 @@ fn global_owned_runtime_edge_to_owner_is_safe(
     let Some(owner_state) = ctx.owner_runtime_state.get(&owner_module) else {
         return false;
     };
-    if owner_state.uses_lazy_module || !owner_state.written_helpers.is_empty() {
+    if owner_state.uses_lazy_module
+        || !owner_runtime_writes_are_lazy_safe(
+            owner_state.source.as_str(),
+            &owner_state.written_helpers,
+        )
+    {
         return false;
     }
 
@@ -9344,6 +9377,52 @@ fn owner_runtime_imports_are_lazy_safe(source: &str, runtime_deps: &BTreeSet<Bin
                     || fact.name == "lazyValue"
                     || fact.name == "lazyModule"
             })
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn owner_runtime_writes_are_lazy_safe(
+    source: &str,
+    written_helpers: &BTreeSet<BindingName>,
+) -> bool {
+    if written_helpers.is_empty() {
+        return true;
+    }
+
+    let statements = top_level_statement_slices(source);
+    let lazy_bindings = statements
+        .iter()
+        .filter_map(|statement| lowered_lazy_initializer_statement_binding(statement))
+        .collect::<BTreeSet<_>>();
+
+    for statement in statements {
+        let trimmed = statement.trim();
+        if trimmed.is_empty()
+            || trimmed.starts_with("import ")
+            || trimmed.starts_with("export ")
+            || keyword_at(trimmed, 0, "function")
+            || variable_declaration_without_initializer(trimmed)
+        {
+            continue;
+        }
+        if lowered_lazy_initializer_statement_binding(trimmed).is_some() {
+            continue;
+        }
+        if lazy_bindings
+            .iter()
+            .any(|binding| source_contains_top_level_call(trimmed, binding.as_str()))
+        {
+            return false;
+        }
+
+        let local_bindings = local_bindings_in_source(trimmed);
+        if implicit_global_writes_in_source(trimmed)
+            .into_iter()
+            .filter(|write| !local_bindings.contains(write.as_str()))
+            .any(|write| written_helpers.contains(&write))
         {
             return false;
         }
@@ -21267,6 +21346,7 @@ function leaf() { return 1; }\n";
             &eligible,
             &mut candidate_owners,
             &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
             &BTreeSet::new(),
         );
 
@@ -21287,6 +21367,67 @@ function leaf() { return 1; }\n";
             &BTreeMap::new(),
         );
         assert_eq!(selected.keys().cloned().collect::<BTreeSet<_>>(), eligible);
+    }
+
+    #[test]
+    fn global_owner_rebuild_does_not_duplicate_folded_owner_local_definitions() {
+        let source = "\
+function ownedA() { return localDep(); }\n\
+function localDep() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("localDep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("ownedA"),
+                    snippet("function ownedA() { return localDep(); }"),
+                ),
+                (
+                    BindingName::new("localDep"),
+                    snippet("function localDep() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let mut candidate_owners = BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]);
+
+        super::propagate_runtime_reader_owned_snippet_candidates(
+            &prelude,
+            &read_index,
+            &BTreeSet::from([BindingName::new("ownedA"), BindingName::new("localDep")]),
+            &mut candidate_owners,
+            &BTreeMap::from([(ModuleId(7), BTreeSet::from([BindingName::new("localDep")]))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::from([BindingName::new("localDep")]))]),
+            &BTreeSet::from([ModuleId(7)]),
+        );
+
+        assert_eq!(
+            candidate_owners,
+            BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            "folded owners still emit their local source definitions, so propagation must not re-inject them"
+        );
     }
 
     #[test]
@@ -21713,6 +21854,167 @@ class Owned {}\n";
         assert!(
             selected.contains_key(&BindingName::new("ownedA")),
             "lazy folded reads can be routed through runtime -> owner imports"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_allows_lazy_contained_owner_runtime_writes() {
+        let source = "function ownedA() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeSnippet {
+                    source: "function ownedA() { return 1; }".to_string(),
+                    byte_start: 0,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "var initUse = lazyValue(() => { ownedA(); });".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "var ownerInit = lazyValue(() => { runtimeWritten = 1; });".to_string(),
+                    remaining_helpers: BTreeSet::from([
+                        BindingName::new("lazyValue"),
+                        BindingName::new("runtimeWritten"),
+                    ]),
+                    written_helpers: BTreeSet::from([BindingName::new("runtimeWritten")]),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.contains_key(&BindingName::new("ownedA")),
+            "deferred lazy initializer writes do not make the runtime -> owner import eager"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_eager_owner_runtime_writes() {
+        let source = "function ownedA() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeSnippet {
+                    source: "function ownedA() { return 1; }".to_string(),
+                    byte_start: 0,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "var initUse = lazyValue(() => { ownedA(); });".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source: "runtimeWritten = 1;".to_string(),
+                    remaining_helpers: BTreeSet::from([BindingName::new("runtimeWritten")]),
+                    written_helpers: BTreeSet::from([BindingName::new("runtimeWritten")]),
+                    uses_lazy_module: false,
+                    uses_lazy_value: false,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.is_empty(),
+            "eager writes would execute while importing the owner from runtime"
+        );
+    }
+
+    #[test]
+    fn global_owner_rebuild_rejects_top_level_owner_lazy_write_call() {
+        let source = "function ownedA() { return 1; }\n";
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeBindingKind::SourceBacked,
+            )]),
+            snippets: BTreeMap::from([(
+                BindingName::new("ownedA"),
+                RuntimePreludeSnippet {
+                    source: "function ownedA() { return 1; }".to_string(),
+                    byte_start: 0,
+                },
+            )]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let folded_chunks = vec![super::RuntimeFoldedSourceChunk {
+            byte_start: source.len() as u32,
+            source: "var initUse = lazyValue(() => { ownedA(); });".to_string(),
+        }];
+        let read_index = super::runtime_source_read_index(&prelude, &folded_chunks);
+        let selected = super::closed_global_owned_runtime_snippets(
+            &prelude,
+            &read_index,
+            &BTreeMap::from([(BindingName::new("ownedA"), ModuleId(7))]),
+            &BTreeMap::from([(ModuleId(7), BTreeSet::new())]),
+            &BTreeMap::new(),
+            &BTreeMap::from([(
+                ModuleId(7),
+                super::RuntimeReaderOwnerRuntimeState {
+                    source:
+                        "var ownerInit = lazyValue(() => { runtimeWritten = 1; }); ownerInit();"
+                            .to_string(),
+                    remaining_helpers: BTreeSet::from([
+                        BindingName::new("lazyValue"),
+                        BindingName::new("runtimeWritten"),
+                    ]),
+                    written_helpers: BTreeSet::from([BindingName::new("runtimeWritten")]),
+                    uses_lazy_module: false,
+                    uses_lazy_value: true,
+                    can_localize_lazy_value: false,
+                },
+            )]),
+        );
+
+        assert!(
+            selected.is_empty(),
+            "calling a lazy initializer at top level would eagerly trigger its runtime writes"
         );
     }
 
@@ -26658,6 +26960,100 @@ function target() { return 1; }\n";
         assert!(entry_source.contains("function third()"));
         assert!(!entry_source.contains("source-1-helpers"));
         assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
+    }
+
+    #[test]
+    fn singleton_inline_rejects_dependency_already_owned_by_migration() {
+        let source = "\
+function root() { return migratedDep(); }\n\
+function migratedDep() { return 1; }\n";
+        let mut offset = 0u32;
+        let mut snippet = |text: &str| {
+            let byte_start = offset;
+            offset += text.len() as u32 + 1;
+            RuntimePreludeSnippet {
+                source: text.to_string(),
+                byte_start,
+            }
+        };
+        let prelude = RuntimePrelude {
+            source_file_id: 1,
+            source_file_path: "bundle.js".to_string(),
+            source: source.to_string(),
+            bindings: BTreeMap::from([
+                (
+                    BindingName::new("root"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+                (
+                    BindingName::new("migratedDep"),
+                    RuntimePreludeBindingKind::SourceBacked,
+                ),
+            ]),
+            snippets: BTreeMap::from([
+                (
+                    BindingName::new("root"),
+                    snippet("function root() { return migratedDep(); }"),
+                ),
+                (
+                    BindingName::new("migratedDep"),
+                    snippet("function migratedDep() { return 1; }"),
+                ),
+            ]),
+            namespace_exports: Vec::new(),
+            entrypoint: None,
+        };
+        let read_index = super::runtime_source_read_index(&prelude, &[]);
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(7), "consumer", "modules/consumer.ts")
+                .with_source_file(1),
+        );
+        let program = enriched_from_rows(rows);
+        let mut runtime_var_migrations = super::RuntimeVarMigrationPlan::default();
+        runtime_var_migrations.insert_owned_snippet(
+            BindingName::new("migratedDep"),
+            super::RuntimeOwnedSnippetMigration {
+                owner_module: ModuleId(7),
+                source_file_id: 1,
+                extra_runtime_deps: BTreeSet::new(),
+                extra_runtime_dep_aliases: BTreeMap::new(),
+                extra_noop_deps: BTreeSet::new(),
+                moves_namespace_export: false,
+            },
+        );
+        let consumers_by_binding =
+            BTreeMap::from([((1, BindingName::new("root")), BTreeSet::from([ModuleId(7)]))]);
+
+        let ctx = super::RuntimeSingletonInlineContext {
+            program: &program,
+            lowered_runtime_sources: &BTreeMap::new(),
+            runtime_var_migrations: &runtime_var_migrations,
+            prelude: &prelude,
+            read_index: &read_index,
+            source_file_id: 1,
+            consumers_by_binding: &consumers_by_binding,
+            blocked_bindings: &BTreeSet::new(),
+            direct_prelude_imports: None,
+            source_definition_modules: &BTreeMap::new(),
+            source_exported_bindings_by_module: &BTreeMap::new(),
+            module_dependencies_by_owner: &BTreeMap::new(),
+        };
+
+        assert!(
+            super::resolve_runtime_singleton_inline_snippet(
+                &ctx,
+                &BindingName::new("root"),
+                ModuleId(7)
+            )
+            .is_none(),
+            "singleton inlining must not duplicate a helper already owned by a runtime migration"
+        );
     }
 
     #[test]
