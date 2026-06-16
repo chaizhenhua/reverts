@@ -86,6 +86,70 @@ tests stayed green throughout.
 All workspace tests stayed green throughout (84 pipeline + 290 planner +
 376 matcher + analyze/observe/etc).
 
+### Session of 2026-05-23 (continuation — planner phase 3-A starts)
+
+Continuing the planner extraction with Phase 3-A "pure subsystem"
+extractions (4 commits, `lib.rs` 32,998 → 32,278 = -720 lines):
+
+- `29aa813` `runtime_namespace_rewrite.rs` —
+  `RuntimeNamespaceMemberAccessRewrite` + `rewrite_runtime_namespace_member_accesses`
+  + `runtime_namespace_member_access_site_is_read_only` (148 lines).
+  Bumps `apply_text_edits`, `previous_non_ws`, `collect_member_access_only`
+  to `pub(crate)`.
+- `991f36b` follow-up: qualifies the affected unit-test path to
+  `super::runtime_namespace_rewrite::…` so the lib-side `use` doesn't
+  warn in non-test build profile.
+- `a717af5` `pure_reexport_bypass.rs` — `PureReexportBypassPlan` +
+  `pure_reexport_bypass_plan` + `folded_stub_modules_with_internal_consumers`
+  (140 lines). Bumps `SourceModuleWiring`, `RuntimeLazyFoldPlan` and
+  their nested types/fields to `pub(crate)`; `pure_named_barrel_reexports`
+  similarly.
+- `50dff95` `runtime_helper_writes.rs` — `UpdateOperator`,
+  `UpdatePosition`, `update_operator_at`, `is_simple_update_target`,
+  `find_assignment_rhs_end`, `runtime_helper_update_expression`,
+  `rewrite_runtime_helper_writes` (280 lines). Bumps
+  `variable_declaration_binding_starts`,
+  `rewrite_object_destructuring_helper_writes`,
+  `rewrite_array_destructuring_helper_writes` to `pub(crate)`.
+- `22e7e76` `destructure_writes.rs` —
+  `object_destructuring_assignment_writes`,
+  `array_destructuring_assignment_writes`,
+  `rewrite_object_destructuring_helper_writes`,
+  `rewrite_array_destructuring_helper_writes`,
+  `bracket_starts_member_access`, `split_top_level_properties`,
+  `parse_object_pattern_bindings`, `parse_array_pattern_bindings`,
+  `parse_pattern_binding_identifier`, `property_access_source`
+  (260 lines).
+
+Phase 3-A remaining (6 of 10 done):
+
+- `eager_safe_analysis.rs` (needs 5 helper-fn `pub(crate)` bumps)
+- `runtime_prelude_imports.rs` (entangled with `BindingOwnerPlan` etc.)
+- `runtime_setter_migration.rs` (needs A-9 first — depends on
+  `compute_runtime_var_migration_plan`)
+- `runtime_singleton_inline.rs` (~500 lines, depends on
+  `SourceModuleWiring`, `LoweredRuntimeModuleSource`,
+  `RuntimeLazyFoldPlan`, `RuntimeVarMigrationPlan`)
+- `runtime_var_migration.rs` (~600 lines — central piece)
+- `package_runtime.rs` (~750 lines — biggest single subsystem)
+
+The remaining six all sit on top of `PlannerAnalysis` internals
+(`SourceModuleWiring`, `LoweredRuntimeModuleSource`,
+`BindingOwnerPlan`, `RuntimePreludeDirectImport`,
+`RuntimeVarMigrationPlan`, `PackageRuntimeIslandPlan`,
+`RuntimeSingletonInlinePlan`), which means each extraction needs
+either:
+
+1. Multiple `pub(crate)` bumps on the analysis types **and** the
+   middle-tier helpers they call, or
+2. Doing Phase 3-B (`analysis.rs`) first so those types have a stable
+   home before the subsystems reference them.
+
+Recommended next move: do Phase 3-B before continuing Phase 3-A so the
+later A-tier extractions all import `super::analysis::*` cleanly
+instead of relying on long `pub(crate)` chains scattered through
+lib.rs.
+
 Remaining in `reverts-cli` Phase 1 (~1 session):
 
 - `persist_package_attributions` cluster (~1500 lines, ~10 helper deps) into
