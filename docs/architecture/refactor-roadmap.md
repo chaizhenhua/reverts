@@ -25,8 +25,33 @@ refactored as they grew.
 
 ## Phase 0 (DONE)
 
-- `reverts-cli/src/args.rs` extracted (commit `a1ace2b`). 384 lines moved
-  out; lib.rs dropped 14,173 → 13,810 (-363 lines). All 1,401 tests green.
+### Session of 2026-05-23 (collaborative — concurrent with matcher Phase 2)
+
+`reverts-cli` Phase 1 — 7 commits, `lib.rs` 14,173 → 13,069 (-1,104 lines, -7.8%):
+
+1. `a1ace2b` `args.rs` — 6 arg structs + parsers + helpers (384 lines)
+2. `13f1200` `commands/runtime_inventory.rs` — runner + 2 print helpers (218 lines)
+3. `f4aa3d9` `commands/{package_cache,extract_assets}.rs` — 4 runners + 1 print
+4. `453fbb8` `commands/match_packages.rs` — 2 runners + blocker print
+5. `40cd251` `persistence/{synthetic_modules,function_attributions}.rs`
+6. `e6f8cff` `persistence/package_surfaces.rs`
+
+In parallel the user landed `reverts-package-matcher` Phase 2 (`9d763a9`,
+`02c3674`, `8ebf4c7`, `c63c1c3`, `375298e`, `6fdc187`, `0a02072`) — 7
+matcher strategies extracted into `strategies/` modules. `reverts-pipeline`
+also got `runtime_dependencies.rs` factored out (`5271087`). All 1,401
+tests stayed green throughout.
+
+Remaining in `reverts-cli` Phase 1 (~1 session):
+
+- `persist_package_attributions` cluster (~1500 lines, ~10 helper deps) into
+  `persistence/attributions.rs`
+- `persist_package_externalization_hints` + `persist_package_source_cache`
+  + `persist_project_assets` into `persistence/{hints,source_cache,assets}.rs`
+- `match_packages_from_sqlite` + ~80 helpers (~5000 lines) into
+  `commands/match_packages/` submodules
+- Package source loading + npm version resolution (~2500 lines) into
+  `pkg_sources/`
 
 ## Phase 1 — Finish splitting `reverts-cli` (estimated 1-2 sessions)
 
