@@ -11,5 +11,6 @@ workspace = true
 [dependencies]
 reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
+reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
 reverts-planner = { path = "../reverts-planner" }

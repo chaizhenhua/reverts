@@ -216,7 +216,11 @@ pub fn generate_project_from_prepared(
     }
 
     let module_output_paths = module_output_paths(&program);
-    let mut project = emit_project(&plan).map_err(PipelineError::Emit)?;
+    let outcome = emit_project(&plan).map_err(PipelineError::Emit)?;
+    for finding in outcome.findings {
+        audit.push(finding);
+    }
+    let mut project = outcome.project;
     canonicalize_emitted_source_locations(&mut project);
     rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
     fold_multiline_static_template_literals(&mut project);
@@ -1214,7 +1218,9 @@ mod tests {
                 .any(|export| export.binding.as_str() == "local" && export.source_backed)
         );
 
-        let project = emit_project(&plan).expect("paper-aligned fixture should emit");
+        let project = emit_project(&plan)
+            .expect("paper-aligned fixture should emit")
+            .project;
         let source = project.files[0].source.as_str();
         assert!(source.contains("import { factory } from 'pkg/factory';"));
         assert!(source.contains("function local()"));

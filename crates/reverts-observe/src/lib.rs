@@ -19,6 +19,13 @@ pub enum FindingCode {
     BundleDetectorAmbiguous,
     BundlerKindUnrecognised,
     UnparseableOutput,
+    /// Emitter could not inject planned imports / exports / renames into a
+    /// module body (e.g. unparseable `const X;` or JSX comma patterns). The
+    /// raw body is emitted unchanged; downstream `audit_emitted_project_parse`
+    /// still validates the bytes. We surface this as a Warning so consumers
+    /// see which planned synthesis was dropped instead of silently observing a
+    /// module that's missing imports.
+    EmitterFallbackToRawBody,
     UnparseablePackageSource,
     AmbiguousPackageMatch,
     IifeClusterDegenerate,

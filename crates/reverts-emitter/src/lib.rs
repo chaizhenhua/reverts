@@ -4,8 +4,9 @@ use std::fmt;
 use reverts_ir::BindingName;
 use reverts_js::{
     CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename,
-    format_source_with_module_items_and_renames, parse_source, sanitize_identifier,
+    format_source_with_module_items_and_renames, sanitize_identifier,
 };
+use reverts_observe::{AuditFinding, FindingCode};
 use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -19,15 +20,29 @@ pub struct EmittedFile {
     pub source: String,
 }
 
-pub fn emit_project(plan: &EmitPlan) -> Result<EmittedProject, EmitError> {
-    let mut files = Vec::with_capacity(plan.files.len());
-    for file in &plan.files {
-        files.push(emit_file(file)?);
-    }
-    Ok(EmittedProject { files })
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct EmitOutcome {
+    pub project: EmittedProject,
+    pub findings: Vec<AuditFinding>,
 }
 
-fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
+pub fn emit_project(plan: &EmitPlan) -> Result<EmitOutcome, EmitError> {
+    let mut files = Vec::with_capacity(plan.files.len());
+    let mut findings = Vec::new();
+    for file in &plan.files {
+        let (emitted, finding) = emit_file(file)?;
+        files.push(emitted);
+        if let Some(finding) = finding {
+            findings.push(finding);
+        }
+    }
+    Ok(EmitOutcome {
+        project: EmittedProject { files },
+        findings,
+    })
+}
+
+fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), EmitError> {
     let mut generated_imports = Vec::new();
 
     for import in &file.imports {
@@ -68,28 +83,25 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
         .collect::<Vec<_>>();
     let lowering = compiler_lowering(file.compiler_recovery.action);
 
-    // Per ADR 0002 the emitter is faithful, not corrective. When the
-    // parser refuses the body (`const X;` with no initializer, JSX comma
-    // patterns, etc.), we still emit the raw source. The downstream
-    // `audit_emitted_project_parse` pass surfaces the unparseable file as
-    // a finding so the consumer sees the broken module without stranding
-    // the rest of the project.
-    let formatted = if should_preserve_raw_source_body(
+    // Per ADR 0002 the emitter is faithful, not corrective. Two paths reach
+    // raw-body emission:
+    //   1. `should_preserve_raw_source_body` — template-literal preservation:
+    //      OXC codegen would normalize whitespace inside quasis. No finding;
+    //      this is deliberate preservation, not a fallback.
+    //   2. `format_source_with_module_items_and_renames` returns Err — the
+    //      injection pass refused the body (e.g. `const X;`, JSX comma
+    //      patterns). The raw body ships without the planned imports /
+    //      exports / renames, so we record a Warning finding listing what
+    //      was dropped. Downstream `audit_emitted_project_parse` still
+    //      reports the unparseable bytes as an Error.
+    let (formatted, finding) = if should_preserve_raw_source_body(
         body_source.as_str(),
         &generated_imports,
         &generated_exports,
         &generated_renames,
         lowering,
     ) {
-        // Parse-validate, but on failure fall back to raw body so the
-        // audit can speak to the unparseable module rather than the
-        // emitter aborting the whole project.
-        let _ = parse_source(
-            body_source.as_str(),
-            file.source_strategy().path_hint(file.path.as_str()),
-            file.source_strategy().parse_goal(),
-        );
-        body_source
+        (body_source, None)
     } else {
         match format_source_with_module_items_and_renames(
             &body_source,
@@ -100,21 +112,33 @@ fn emit_file(file: &PlannedFile) -> Result<EmittedFile, EmitError> {
             file.source_strategy().parse_goal(),
             lowering,
         ) {
-            Ok(formatted) => formatted,
-            // Parse failure here means the rename/import insertion pass
-            // can't transform the source. Emit the raw body; downstream
-            // audit surfaces it.
-            Err(_) => body_source,
+            Ok(formatted) => (formatted, None),
+            Err(error) => {
+                let finding = AuditFinding::warning(
+                    FindingCode::EmitterFallbackToRawBody,
+                    format!(
+                        "dropped {} import / {} export / {} rename injection(s); raw body retained ({error})",
+                        generated_imports.len(),
+                        generated_exports.len(),
+                        generated_renames.len(),
+                    ),
+                )
+                .with_module(file.path.clone());
+                (body_source, Some(finding))
+            }
         }
     };
 
-    Ok(EmittedFile {
-        path: file.path.clone(),
-        source: add_typescript_compat_header(
-            formatted,
-            file.compiler_recovery.action.recovery_banner(),
-        ),
-    })
+    Ok((
+        EmittedFile {
+            path: file.path.clone(),
+            source: add_typescript_compat_header(
+                formatted,
+                file.compiler_recovery.action.recovery_banner(),
+            ),
+        },
+        finding,
+    ))
 }
 
 fn should_preserve_raw_source_body(
@@ -210,7 +234,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         assert_eq!(project.files[0].path, "src/index.ts");
         assert!(project.files[0].source.starts_with("// @ts-nocheck"));
@@ -235,7 +261,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         let source = project.files[0].source.as_str();
         assert!(source.contains("import * as pkg from 'pkg';"));
@@ -259,7 +287,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         let source = project.files[0].source.as_str();
         assert!(
@@ -286,7 +316,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         let source = project.files[0].source.as_str();
         assert_eq!(source.matches("from 'pkg'").count(), 1);
@@ -303,7 +335,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         let source = project.files[0].source.as_str();
         assert!(
@@ -329,12 +363,40 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         let source = project.files[0].source.as_str();
         assert!(source.contains("import * as pkg_name_value from 'pkg-name/value';"));
         assert!(source.contains("console.log(pkg_name_value);"));
         assert!(source.contains("export { _class };"));
+    }
+
+    #[test]
+    fn unparseable_body_with_planned_export_emits_raw_body_plus_audit_finding() {
+        use reverts_observe::{FindingCode, Severity};
+
+        let mut file = PlannedFile::new("src/broken.ts");
+        file.push_source("const X;");
+        file.add_export(BindingName::new("X"));
+        let mut plan = EmitPlan::default();
+        plan.push_file(file);
+
+        let outcome = emit_project(&plan).expect("emitter never aborts on body parse failure");
+
+        // Raw body still ships; planned export injection is dropped.
+        let source = outcome.project.files[0].source.as_str();
+        assert!(source.contains("const X;"), "{source}");
+        assert!(!source.contains("export { X };"), "{source}");
+
+        // Audit finding tells the consumer one export injection was dropped.
+        assert_eq!(outcome.findings.len(), 1, "{:?}", outcome.findings);
+        let finding = &outcome.findings[0];
+        assert_eq!(finding.code, FindingCode::EmitterFallbackToRawBody);
+        assert_eq!(finding.severity, Severity::Warning);
+        assert_eq!(finding.module.as_deref(), Some("src/broken.ts"));
+        assert!(finding.message.contains("1 export"), "{}", finding.message);
     }
 
     #[test]
@@ -344,7 +406,9 @@ mod tests {
         let mut plan = EmitPlan::default();
         plan.push_file(file);
 
-        let project = emit_project(&plan).expect("planned file should emit");
+        let project = emit_project(&plan)
+            .expect("planned file should emit")
+            .project;
 
         assert!(
             project.files[0]
