@@ -332,6 +332,92 @@ pub fn collect_static_template_literals(
     Err(JsError::ParseFailed(errors))
 }
 
+/// A statement-level slice of a `lazyValue(() => { ... })` body. Each
+/// slice carries its source text and offsets relative to the surrounding
+/// snippet, so the planner can evaluate migration of individual
+/// statements (e.g. a single `class X = ...` inside the lazy body)
+/// independently from the rest of the lazy block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LazyValueSubSnippet {
+    pub source: String,
+    /// Offset into the *enclosing* snippet's source text (not the global
+    /// helper file).
+    pub byte_start: u32,
+    pub byte_end: u32,
+    /// Top-level statement kind inside the lazy body.
+    pub kind: TopLevelStatementKind,
+    pub bindings: Vec<String>,
+}
+
+/// Try to slice `source` (the body of one `RuntimePreludeSnippet`) into
+/// per-statement sub-snippets, when the snippet matches the
+/// `var X = lazyValue(() => { ... });` (or `var X = lazyModule(...)`)
+/// shape. Returns `None` for any other shape so callers fall back to the
+/// whole snippet as one unit.
+pub fn lazy_value_sub_snippets(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Option<Vec<LazyValueSubSnippet>> {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            continue;
+        }
+        // Only one top-level statement expected (a single `var X = lazyValue(...);`).
+        let [Statement::VariableDeclaration(declaration)] = parsed.program.body.as_slice() else {
+            return None;
+        };
+        let [declarator] = declaration.declarations.as_slice() else {
+            return None;
+        };
+        let Some(Expression::CallExpression(call)) = declarator.init.as_ref() else {
+            return None;
+        };
+        let callee = expression_identifier(&call.callee)?;
+        if callee != "lazyValue" && callee != "lazyModule" {
+            return None;
+        }
+        // The single argument must be an arrow function (`() => { BODY }`).
+        let [argument] = call.arguments.as_slice() else {
+            return None;
+        };
+        let Argument::ArrowFunctionExpression(arrow) = argument else {
+            return None;
+        };
+        // Arrow body must be a function-body block; expression-only
+        // arrows (`() => 1`) are single-statement lazies that aren't
+        // worth slicing.
+        if arrow.expression || arrow.body.statements.is_empty() {
+            return None;
+        }
+        let slices = arrow
+            .body
+            .statements
+            .iter()
+            .map(|statement| {
+                let span = statement.span();
+                let (kind, bindings) = top_level_statement_kind_and_bindings(statement);
+                LazyValueSubSnippet {
+                    source: source
+                        .get(span.start as usize..span.end as usize)
+                        .unwrap_or("")
+                        .to_string(),
+                    byte_start: span.start,
+                    byte_end: span.end,
+                    kind,
+                    bindings,
+                }
+            })
+            .collect();
+        return Some(slices);
+    }
+    None
+}
+
 pub fn collect_top_level_statement_facts(
     source: &str,
     path_hint: Option<&Path>,
@@ -6211,9 +6297,10 @@ mod tests {
         collect_top_level_statement_facts, extract_lazy_module_eager_value, format_source_minified,
         format_source_pretty, format_source_with_module_items,
         format_source_with_module_items_and_renames,
-        format_source_with_module_items_and_renames_with_report, normalize_source_for_pipeline,
-        parse_error_message, parse_options_for, parse_source, sanitize_identifier,
-        skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
+        format_source_with_module_items_and_renames_with_report, lazy_value_sub_snippets,
+        normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
+        sanitize_identifier, skip_block_comment, skip_line_comment,
+        verify_only_immediate_call_references,
     };
     use std::collections::BTreeSet;
 
@@ -8535,5 +8622,50 @@ value`;
         );
         assert_eq!(scope.get("eager"), Some(&ImportUsageScope::TopLevel));
         assert_eq!(scope.get("lazy"), Some(&ImportUsageScope::NestedOnly));
+    }
+
+    #[test]
+    fn lazy_value_sub_snippets_slices_arrow_body_statements() {
+        let source = "var X = lazyValue(() => {\n\
+                      \tvar a = 1;\n\
+                      \tvar b = a + 1;\n\
+                      \tfunction c() { return a; }\n\
+                      });";
+
+        let slices = lazy_value_sub_snippets(source, None, ParseGoal::TypeScript)
+            .expect("recognised lazyValue shape");
+
+        assert_eq!(slices.len(), 3, "{slices:?}");
+        assert_eq!(slices[0].kind, TopLevelStatementKind::Variable);
+        assert_eq!(slices[0].bindings, vec!["a".to_string()]);
+        assert_eq!(slices[1].kind, TopLevelStatementKind::Variable);
+        assert_eq!(slices[1].bindings, vec!["b".to_string()]);
+        assert_eq!(slices[2].kind, TopLevelStatementKind::Function);
+        assert_eq!(slices[2].bindings, vec!["c".to_string()]);
+        assert!(slices[0].source.contains("var a = 1;"));
+        assert!(slices[1].source.contains("var b = a + 1;"));
+        assert!(slices[2].source.contains("function c()"));
+    }
+
+    #[test]
+    fn lazy_value_sub_snippets_returns_none_for_non_lazy_shape() {
+        assert!(
+            lazy_value_sub_snippets("var X = 1;", None, ParseGoal::TypeScript).is_none(),
+            "plain var declaration is not a lazyValue"
+        );
+        assert!(
+            lazy_value_sub_snippets("var X = lazyValue(() => 42);", None, ParseGoal::TypeScript)
+                .is_none(),
+            "expression-only arrow body is not slice-able"
+        );
+        assert!(
+            lazy_value_sub_snippets(
+                "var X = otherFn(() => { var a = 1; });",
+                None,
+                ParseGoal::TypeScript
+            )
+            .is_none(),
+            "non-lazyValue callee is not a lazy block"
+        );
     }
 }

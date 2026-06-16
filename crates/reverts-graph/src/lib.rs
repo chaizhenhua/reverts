@@ -38,8 +38,8 @@ use reverts_ir::{
     ControlFlowNodeKind, DefUseGraph, FlowNodeId, ModuleId, ModuleKind, split_bare_specifier,
 };
 use reverts_js::{
-    JsError, ParseError, ParseGoal, collect_identifier_read_facts, parse_error_message,
-    parse_options_for, source_type_candidates,
+    JsError, ParseError, ParseGoal, collect_identifier_read_facts, lazy_value_sub_snippets,
+    parse_error_message, parse_options_for, source_type_candidates,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -809,13 +809,33 @@ fn collect_runtime_prelude_declarations(
             continue;
         }
         for declaration in declarations {
+            let sub_snippets =
+                lazy_value_sub_snippets(declaration.source.as_str(), None, ParseGoal::TypeScript)
+                    .map(|slices| {
+                        slices
+                            .into_iter()
+                            .map(|slice| RuntimePreludeSubSnippet {
+                                source: slice.source,
+                                byte_start: slice.byte_start,
+                                byte_end: slice.byte_end,
+                                defines: slice
+                                    .bindings
+                                    .iter()
+                                    .map(|name| BindingName::new(name.clone()))
+                                    .collect(),
+                                reads: BTreeSet::new(),
+                                writes: BTreeSet::new(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
             bindings.insert(declaration.binding.clone(), declaration.kind);
             snippets_by_binding.insert(
                 declaration.binding,
                 RuntimePreludeSnippet {
                     source: declaration.source.clone(),
                     byte_start: declaration.byte_start,
-                    sub_snippets: Vec::new(),
+                    sub_snippets,
                 },
             );
             snippets.push(declaration.source);
