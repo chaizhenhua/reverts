@@ -57,6 +57,16 @@ pub(crate) fn parse_identifier_after_function_keyword(
     parse_identifier(source, cursor)
 }
 
+/// Identifies binding names that the planner emits as synthetic scaffolding
+/// (lazy wrap temporaries, cross-module setters, createRequire alias). Such
+/// names must never be treated as user-defined bindings during import or
+/// implicit-write analysis. `__reverts_*` covers module-scope synthetics
+/// (setters, createRequire alias); `_$*` covers closure-local temporaries
+/// inside lazy wraps and update/destructure lowerings.
+pub(crate) fn is_planner_synthetic_binding(name: &str) -> bool {
+    name.starts_with("__reverts_") || name.starts_with("_$")
+}
+
 pub(crate) fn keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
     source
         .get(cursor..)

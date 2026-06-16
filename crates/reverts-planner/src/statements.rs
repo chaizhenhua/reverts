@@ -16,7 +16,12 @@
 
 use std::collections::BTreeSet;
 
+use reverts_graph::RuntimeNamespaceExport;
 use reverts_ir::BindingName;
+use reverts_js::{
+    is_ascii_identifier_continue as is_identifier_continue,
+    is_ascii_identifier_start as is_identifier_start, is_js_keyword,
+};
 
 pub(crate) fn named_import_statement<'a>(
     bindings: impl Iterator<Item = &'a BindingName>,
@@ -151,6 +156,48 @@ pub(crate) fn runtime_helper_import_statement(
 pub(crate) fn node_require_prelude_statement() -> String {
     "import { createRequire } from 'node:module';\nvar require = createRequire(import.meta.url);"
         .to_string()
+}
+
+pub(crate) fn noop_function_statement(binding: &BindingName) -> String {
+    format!("function {}() {{}}", binding.as_str())
+}
+
+pub(crate) fn runtime_namespace_export_statement(
+    namespace_export: &RuntimeNamespaceExport,
+) -> String {
+    let properties = namespace_export
+        .exports
+        .iter()
+        .map(|(export_name, binding)| {
+            format!(
+                "{}: {{ enumerable: true, get: () => {} }}",
+                property_key_source(export_name),
+                binding.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Object.defineProperties({}, {{ {} }});",
+        namespace_export.namespace.as_str(),
+        properties
+    )
+}
+
+fn property_key_source(key: &str) -> String {
+    if key
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| is_identifier_start(*byte))
+        && key.as_bytes()[1..]
+            .iter()
+            .all(|byte| is_identifier_continue(*byte))
+        && !is_js_keyword(key)
+    {
+        key.to_string()
+    } else {
+        format!("{key:?}")
+    }
 }
 
 pub(crate) fn lazy_module_helper_source() -> &'static str {

@@ -266,6 +266,69 @@ pub(crate) fn looks_like_regex_literal(bytes: &[u8], slash: usize) -> bool {
     true
 }
 
+/// Step past any non-code byte sequence starting at `cursor` — strings,
+/// template literals, line/block comments, regex literals. Returns
+/// `None` when `cursor` doesn't begin one of those (so callers can fall
+/// back to normal byte processing).
+pub(crate) fn skip_non_code_at(source: &str, cursor: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let byte = *bytes.get(cursor)?;
+    match byte {
+        b'\'' | b'"' => Some(skip_quoted(bytes, cursor, byte)),
+        b'`' => Some(skip_template_literal(bytes, cursor)),
+        b'/' if bytes.get(cursor + 1) == Some(&b'/') => Some(skip_line_comment(bytes, cursor + 2)),
+        b'/' if bytes.get(cursor + 1) == Some(&b'*') => Some(skip_block_comment(bytes, cursor + 2)),
+        b'/' if looks_like_regex_literal(bytes, cursor) => Some(skip_regex_literal(bytes, cursor)),
+        _ => None,
+    }
+}
+
+/// Walk `source` (the bytes between a call's `(` and `)`) and return
+/// `true` iff it contains exactly one top-level expression — i.e., no
+/// top-level comma outside nested parens/brackets/braces/strings. Used
+/// to gate the setter-call inliner: multi-argument setter calls have
+/// different semantics from a comma-folded assignment expression, so
+/// they stay as function calls.
+pub(crate) fn arg_text_is_single_expression(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                let Some(close) = find_matching_paren(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b'[' => {
+                let Some(close) = find_matching_bracket(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b'{' => {
+                let Some(close) = find_matching_brace(source, cursor) else {
+                    return false;
+                };
+                cursor = close + 1;
+            }
+            b',' => return false,
+            _ => cursor += 1,
+        }
+    }
+    true
+}
+
 pub(crate) fn skip_regex_literal(bytes: &[u8], start: usize) -> usize {
     let mut cursor = start + 1;
     let mut in_class = false;

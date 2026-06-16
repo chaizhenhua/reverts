@@ -1,15 +1,23 @@
+mod binding_owner;
 mod byte_lexer;
 mod compiler_recovery;
 mod destructure_writes;
 mod identifiers;
+mod import_coalesce;
 mod plan_error;
 mod pure_reexport_bypass;
 mod relative_paths;
+mod runtime_helper_strip;
 mod runtime_helper_writes;
 mod runtime_namespace_rewrite;
 mod runtime_setter_migration_blocker;
+mod source_module_facts;
 mod statement_parsers;
 mod statements;
+
+use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition};
+
+use source_module_facts::SourceModuleFacts;
 
 use destructure_writes::{
     array_destructuring_assignment_writes, object_destructuring_assignment_writes,
@@ -17,7 +25,12 @@ use destructure_writes::{
     split_top_level_properties,
 };
 
+use runtime_helper_strip::{
+    classify_migratable_var_declaration, strip_runtime_namespace_export_sources,
+    strip_runtime_snippet_sources, strip_runtime_var_declarations,
+};
 use runtime_helper_writes::{
+    inline_internal_setter_calls, inline_internal_setter_calls_for_bindings,
     is_simple_update_target, rewrite_runtime_helper_writes, update_operator_at,
 };
 
@@ -34,12 +47,17 @@ use statement_parsers::{
 
 use byte_lexer::{
     expect_arrow, find_byte, find_matching_brace, find_matching_bracket, find_matching_paren,
-    looks_like_regex_literal, skip_quoted, skip_regex_literal, skip_template_literal, skip_ws,
-    skip_ws_and_comments,
+    looks_like_regex_literal, skip_non_code_at, skip_quoted, skip_regex_literal,
+    skip_template_literal, skip_ws, skip_ws_and_comments,
 };
 use identifiers::{
-    is_identifier_like, keyword_at, parse_identifier, parse_identifier_after_function_keyword,
-    parse_identifier_after_keyword,
+    is_identifier_like, is_planner_synthetic_binding, keyword_at, parse_identifier,
+    parse_identifier_after_function_keyword, parse_identifier_after_keyword,
+};
+use import_coalesce::{
+    coalesce_top_level_import_declarations, first_local_for_import,
+    import_statement_local_bindings, parse_named_import_clause,
+    parse_runtime_prelude_direct_import, split_import_clause_and_specifier,
 };
 
 pub use plan_error::PlanError;
@@ -57,9 +75,9 @@ use statements::{
     default_import_statement, default_named_import_alias_statement, lazy_module_helper_source,
     lazy_value_helper_source, named_export_statement, named_import_alias_statement,
     named_import_statement, named_reexport_statement, namespace_import_statement,
-    node_require_prelude_statement, runtime_helper_import_statement,
+    node_require_prelude_statement, noop_function_statement, runtime_helper_import_statement,
     runtime_helper_setter_declarations, runtime_helper_setter_name, runtime_helpers_path,
-    variable_declaration_statement,
+    runtime_namespace_export_statement, variable_declaration_statement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -407,45 +425,6 @@ pub struct PlannedExport {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ImportExportPlanner;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct SourceModuleFacts {
-    candidate_reads_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    exportable_bindings_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    definition_modules_all: BTreeMap<BindingName, Option<ModuleId>>,
-}
-
-impl SourceModuleFacts {
-    fn from_program(program: &EnrichedProgram) -> Self {
-        let mut definition_bindings_by_module = BTreeMap::new();
-        let mut exportable_bindings_by_module = BTreeMap::new();
-        for module in program.model().modules() {
-            let definitions = source_definition_bindings(program, module.id);
-            let mut exportable = definitions.clone();
-            exportable.extend(program.model().graph().ast_imports_for(module.id));
-            if let Some(source) = program.model().input().module_source_slice(module.id) {
-                exportable.extend(named_reexported_bindings(source.source));
-            }
-            definition_bindings_by_module.insert(module.id, definitions);
-            exportable_bindings_by_module.insert(module.id, exportable);
-        }
-        let candidate_reads_by_module = candidate_source_reads_by_module_with_exportable(
-            program,
-            &exportable_bindings_by_module,
-        );
-        let definition_modules_all = unique_source_definition_modules_from_bindings(
-            program,
-            &BTreeSet::new(),
-            &definition_bindings_by_module,
-        );
-
-        Self {
-            candidate_reads_by_module,
-            exportable_bindings_by_module,
-            definition_modules_all,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlannerAnalysis {
@@ -2800,93 +2779,94 @@ pub(crate) struct RuntimeLazyFoldPlan {
 /// file strips the migrated declaration and setter instead of emitting a
 /// compatibility re-export barrel.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeVarMigrationPlan {
+pub(crate) struct RuntimeVarMigrationPlan {
     /// Binding name → (owner module id, runtime source file id the
     /// binding originally lived in).
-    migrations_by_binding: BTreeMap<BindingName, RuntimeVarMigration>,
+    pub(crate) migrations_by_binding: BTreeMap<BindingName, RuntimeVarMigration>,
     /// Reverse index: owner module → set of bindings it now owns.
     /// This index contains primary runtime vars only; extra moved
     /// snippets are derived from `migrations_by_binding`.
-    migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     /// Source-backed runtime snippets whose owner can be rebuilt without a
     /// writable primary var. These are whole closed helper components (for
     /// example private functions/classes and their namespace export objects)
     /// that no retained runtime snippet, folded chunk, namespace export, or
     /// entrypoint side effect reads.
-    owned_snippets_by_binding: BTreeMap<(u32, BindingName), RuntimeOwnedSnippetMigration>,
+    pub(crate) owned_snippets_by_binding:
+        BTreeMap<(u32, BindingName), RuntimeOwnedSnippetMigration>,
     /// Reverse index for `owned_snippets_by_binding`.
-    owned_snippets_by_owner: BTreeMap<ModuleId, BTreeSet<(u32, BindingName)>>,
+    pub(crate) owned_snippets_by_owner: BTreeMap<ModuleId, BTreeSet<(u32, BindingName)>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeVarMigration {
-    owner_module: ModuleId,
-    source_file_id: u32,
+pub(crate) struct RuntimeVarMigration {
+    pub(crate) owner_module: ModuleId,
+    pub(crate) source_file_id: u32,
     /// Additional runtime prelude snippets that must move with the
     /// primary var. The first conservative use is the single reader
     /// function that is the var's only runtime read.
-    extra_snippets: BTreeSet<BindingName>,
+    pub(crate) extra_snippets: BTreeSet<BindingName>,
     /// Runtime namespace export initializers whose namespace object
     /// snippet moved with the primary var. These are emitted in the
     /// writer module as `Object.defineProperties(...)` statements so the
     /// namespace getter no longer reads the migrated var from runtime.
-    extra_namespace_exports: BTreeSet<BindingName>,
+    pub(crate) extra_namespace_exports: BTreeSet<BindingName>,
     /// Runtime helper bindings read by `extra_snippets` after excluding
     /// the migrated primary var. The writer module imports these back
     /// from the helper file.
-    extra_runtime_deps: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_deps: BTreeSet<BindingName>,
     /// Runtime helper bindings written by moved reader snippets but not
     /// moved with the cluster. The moved source is rewritten to call the
     /// helper setter (`__reverts_set_X(value)`) and the owner imports that
     /// setter from runtime.
-    extra_runtime_setter_deps: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_setter_deps: BTreeSet<BindingName>,
     /// Import aliases for `extra_runtime_deps` whose original names collide
     /// with existing bindings in the writer module. Moved snippets are
     /// rewritten to reference the alias.
-    extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
+    pub(crate) extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
     /// Source-module bindings read by `extra_snippets` that are already
     /// represented by a source dependency edge from the writer. The writer
     /// imports these from their source module instead of forcing the reader
     /// cluster to stay in runtime.
-    extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     /// Source-module bindings read by `extra_snippets` where a direct
     /// writer -> source import would create a source-module cycle. The
     /// runtime helper imports and re-exports these bindings, preserving the
     /// existing writer -> runtime -> source route while still allowing the
     /// migrated var/reader/setter cluster to leave runtime.
-    extra_runtime_reexport_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) extra_runtime_reexport_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     /// No-op package initializer shims referenced by moved readers. These
     /// mirror the runtime helper's externalized-package init shims locally so
     /// the reader can move without importing runtime only for a stub call.
-    extra_noop_deps: BTreeSet<BindingName>,
+    pub(crate) extra_noop_deps: BTreeSet<BindingName>,
     /// Optional initializer expression preserved from the runtime
     /// declaration. `None` means the original `var X;` had no
     /// initializer; `Some(text)` carries a side-effect-free literal
     /// (`null`, `0`, `!1`, `void 0`, etc.) to be emitted alongside the
     /// writer module's `var X = INIT;`.
-    initializer: Option<String>,
+    pub(crate) initializer: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeOwnedSnippetMigration {
-    owner_module: ModuleId,
-    source_file_id: u32,
+pub(crate) struct RuntimeOwnedSnippetMigration {
+    pub(crate) owner_module: ModuleId,
+    pub(crate) source_file_id: u32,
     /// Runtime helper bindings read by this moved standalone snippet/namespace
     /// component but not moved with it. The owner imports these back from the
     /// helper file (or from a different rebuilt owner if that dep also moved).
-    extra_runtime_deps: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_deps: BTreeSet<BindingName>,
     /// Import aliases for `extra_runtime_deps` whose original names collide
     /// with existing bindings in the owner module. Moved snippets are rewritten
     /// to reference the alias.
-    extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
+    pub(crate) extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
     /// No-op runtime helpers read by this moved snippet. Runtime helper
     /// emission erases private no-ops, so owners get local stubs instead of
     /// importing bindings that may disappear.
-    extra_noop_deps: BTreeSet<BindingName>,
+    pub(crate) extra_noop_deps: BTreeSet<BindingName>,
     /// Whether the snippet is the namespace object side of a recovered
     /// `Object.defineProperties(ns, { ... })` export initializer. When true,
     /// move the namespace initializer statement with the object declaration.
-    moves_namespace_export: bool,
+    pub(crate) moves_namespace_export: bool,
 }
 
 impl RuntimeVarMigrationPlan {
@@ -3940,9 +3920,9 @@ fn emit_runtime_singleton_inline_helpers(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PackageRuntimeOwner {
-    name: String,
-    version: String,
+pub(crate) struct PackageRuntimeOwner {
+    pub(crate) name: String,
+    pub(crate) version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -3960,8 +3940,8 @@ struct PackageRuntimeHelperUsage {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct PackageRuntimeIslandPlan {
-    owners_by_binding: BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
+pub(crate) struct PackageRuntimeIslandPlan {
+    pub(crate) owners_by_binding: BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
 }
 
 fn package_runtime_owner_for_module(
@@ -4653,164 +4633,15 @@ fn packed_named_import_statements(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BindingOwner {
-    Module(ModuleId),
-    Runtime,
-    PackageRuntime(PackageRuntimeOwner),
-    PreludeImport(RuntimePreludeDirectImport),
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct BindingOwnerPlan {
-    owners_by_binding: BTreeMap<(u32, BindingName), BindingOwner>,
-}
-
-impl BindingOwnerPlan {
-    // Rebuild one canonical owner table for runtime-defined bindings. The
-    // insertion order is intentional: package islands are the broadest owner,
-    // direct prelude imports are more specific, and runtime var migrations
-    // (including their moved reader snippets/namespace exports) are the final
-    // authority.
-    fn from_parts(
-        runtime_var_migrations: &RuntimeVarMigrationPlan,
-        runtime_prelude_direct_imports: &BTreeMap<
-            u32,
-            BTreeMap<BindingName, RuntimePreludeDirectImport>,
-        >,
-        package_runtime_islands: &PackageRuntimeIslandPlan,
-    ) -> Self {
-        let mut owners_by_binding = BTreeMap::<(u32, BindingName), BindingOwner>::new();
-
-        for ((source_file_id, binding), owner) in &package_runtime_islands.owners_by_binding {
-            owners_by_binding.insert(
-                (*source_file_id, binding.clone()),
-                BindingOwner::PackageRuntime(owner.clone()),
-            );
-        }
-
-        for (source_file_id, imports) in runtime_prelude_direct_imports {
-            for (binding, import) in imports {
-                owners_by_binding.insert(
-                    (*source_file_id, binding.clone()),
-                    BindingOwner::PreludeImport(import.clone()),
-                );
-            }
-        }
-
-        for (binding, migration) in &runtime_var_migrations.migrations_by_binding {
-            owners_by_binding.insert(
-                (migration.source_file_id, binding.clone()),
-                BindingOwner::Module(migration.owner_module),
-            );
-            for extra in &migration.extra_snippets {
-                owners_by_binding.insert(
-                    (migration.source_file_id, extra.clone()),
-                    BindingOwner::Module(migration.owner_module),
-                );
-            }
-            for namespace in &migration.extra_namespace_exports {
-                owners_by_binding.insert(
-                    (migration.source_file_id, namespace.clone()),
-                    BindingOwner::Module(migration.owner_module),
-                );
-            }
-        }
-        for ((source_file_id, binding), migration) in
-            &runtime_var_migrations.owned_snippets_by_binding
-        {
-            owners_by_binding.insert(
-                (*source_file_id, binding.clone()),
-                BindingOwner::Module(migration.owner_module),
-            );
-        }
-
-        Self { owners_by_binding }
-    }
-
-    fn owner_for(&self, source_file_id: u32, binding: &BindingName) -> BindingOwner {
-        self.owners_by_binding
-            .get(&(source_file_id, binding.clone()))
-            .cloned()
-            .unwrap_or(BindingOwner::Runtime)
-    }
-
-    fn module_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
-        match self.owner_for(source_file_id, binding) {
-            BindingOwner::Module(owner) => Some(owner),
-            BindingOwner::Runtime
-            | BindingOwner::PackageRuntime(_)
-            | BindingOwner::PreludeImport(_) => None,
-        }
-    }
-
-    fn module_owners_for_source(&self, source_file_id: u32) -> BTreeMap<BindingName, ModuleId> {
-        self.owners_by_binding
-            .iter()
-            .filter_map(|((owner_source_file_id, binding), owner)| {
-                if *owner_source_file_id != source_file_id {
-                    return None;
-                }
-                match owner {
-                    BindingOwner::Module(owner_module) => Some((binding.clone(), *owner_module)),
-                    BindingOwner::Runtime
-                    | BindingOwner::PackageRuntime(_)
-                    | BindingOwner::PreludeImport(_) => None,
-                }
-            })
-            .collect()
-    }
-
-    fn package_runtime_owner(
-        &self,
-        source_file_id: u32,
-        binding: &BindingName,
-    ) -> Option<&PackageRuntimeOwner> {
-        match self
-            .owners_by_binding
-            .get(&(source_file_id, binding.clone()))
-        {
-            Some(BindingOwner::PackageRuntime(owner)) => Some(owner),
-            Some(
-                BindingOwner::Module(_) | BindingOwner::Runtime | BindingOwner::PreludeImport(_),
-            )
-            | None => None,
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeOwnerImportPartition {
-    runtime_bindings: BTreeSet<BindingName>,
-    direct_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    direct_prelude_imports: BTreeMap<BindingName, RuntimePreludeDirectImport>,
-}
-
-impl RuntimeOwnerImportPartition {
-    fn route_prelude_imports_through_runtime_except(
-        &mut self,
-        keep_direct: Option<&BTreeSet<BindingName>>,
-    ) {
-        let direct_prelude_imports = std::mem::take(&mut self.direct_prelude_imports);
-        for (binding, import) in direct_prelude_imports {
-            if keep_direct.is_some_and(|bindings| bindings.contains(&binding)) {
-                self.direct_prelude_imports.insert(binding, import);
-            } else {
-                self.runtime_bindings.insert(binding);
-            }
-        }
-    }
+pub(crate) struct RuntimePreludeDirectImport {
+    pub(crate) source: String,
+    pub(crate) snippet_source: String,
+    pub(crate) snippet_byte_start: u32,
+    pub(crate) kind: RuntimePreludeDirectImportKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimePreludeDirectImport {
-    source: String,
-    snippet_source: String,
-    snippet_byte_start: u32,
-    kind: RuntimePreludeDirectImportKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimePreludeDirectImportKind {
+pub(crate) enum RuntimePreludeDirectImportKind {
     Default,
     Namespace,
     Named { imported: String },
@@ -5306,392 +5137,6 @@ fn runtime_prelude_direct_import_group_is_profitable(
     }
 
     saved > added_bytes
-}
-
-fn first_local_for_import<'a>(
-    bindings: &'a BTreeSet<BindingName>,
-    imports: &'a BTreeMap<BindingName, RuntimePreludeDirectImport>,
-    target: &RuntimePreludeDirectImport,
-) -> &'a BindingName {
-    bindings
-        .iter()
-        .find(|binding| imports.get(*binding).is_some_and(|import| import == target))
-        .unwrap_or_else(|| bindings.first().expect("non-empty import binding group"))
-}
-
-fn import_statement_local_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
-    let source = source.trim();
-    let rest = source.strip_prefix("import ")?;
-    if rest.starts_with("type ") {
-        return None;
-    }
-    let rest = rest.strip_suffix(';')?.trim();
-    if rest.contains(" with ") || rest.contains(" assert ") {
-        return None;
-    }
-    let (clause, specifier) = split_import_clause_and_specifier(rest)?;
-    if !is_bare_import_specifier(specifier) {
-        return None;
-    }
-    let mut bindings = BTreeSet::<BindingName>::new();
-    if let Some(namespace) = parse_namespace_import_clause(clause) {
-        bindings.insert(BindingName::new(namespace));
-        return Some(bindings);
-    }
-    let (default_part, rest) = split_default_import_clause(clause);
-    if let Some(default_part) = default_part {
-        bindings.insert(BindingName::new(default_part));
-    }
-    if let Some(rest) = rest {
-        if let Some(namespace) = parse_namespace_import_clause(rest) {
-            bindings.insert(BindingName::new(namespace));
-        } else {
-            for (_imported, local) in parse_named_import_clause(rest)? {
-                bindings.insert(BindingName::new(local));
-            }
-        }
-    }
-    Some(bindings)
-}
-
-fn parse_runtime_prelude_direct_import(
-    source: &str,
-    binding: &BindingName,
-) -> Option<RuntimePreludeDirectImport> {
-    let source = source.trim();
-    let rest = source.strip_prefix("import ")?;
-    if rest.starts_with("type ") {
-        return None;
-    }
-    let rest = rest.strip_suffix(';')?.trim();
-    if rest.contains(" with ") || rest.contains(" assert ") {
-        return None;
-    }
-    let (clause, specifier) = split_import_clause_and_specifier(rest)?;
-    if !is_bare_import_specifier(specifier) {
-        return None;
-    }
-    parse_import_clause_for_binding(clause, binding).map(|kind| RuntimePreludeDirectImport {
-        source: specifier.to_string(),
-        snippet_source: source.to_string(),
-        snippet_byte_start: 0,
-        kind,
-    })
-}
-
-fn split_import_clause_and_specifier(rest: &str) -> Option<(&str, &str)> {
-    for delimiter in [" from '", " from \""] {
-        let Some((clause, tail)) = rest.rsplit_once(delimiter) else {
-            continue;
-        };
-        let quote = delimiter.as_bytes().last().copied()? as char;
-        let specifier = tail.strip_suffix(quote)?;
-        return Some((clause.trim(), specifier));
-    }
-    None
-}
-
-fn parse_import_clause_for_binding(
-    clause: &str,
-    binding: &BindingName,
-) -> Option<RuntimePreludeDirectImportKind> {
-    let binding = binding.as_str();
-    if let Some(namespace) = parse_namespace_import_clause(clause)
-        && namespace == binding
-    {
-        return Some(RuntimePreludeDirectImportKind::Namespace);
-    }
-
-    let (default_part, rest) = split_default_import_clause(clause);
-    if let Some(default_part) = default_part
-        && default_part == binding
-    {
-        return Some(RuntimePreludeDirectImportKind::Default);
-    }
-
-    let rest = rest?;
-    if let Some(namespace) = parse_namespace_import_clause(rest)
-        && namespace == binding
-    {
-        return Some(RuntimePreludeDirectImportKind::Namespace);
-    }
-
-    for (imported, local) in parse_named_import_clause(rest)? {
-        if local == binding {
-            return Some(RuntimePreludeDirectImportKind::Named { imported });
-        }
-    }
-    None
-}
-
-fn parse_namespace_import_clause(clause: &str) -> Option<&str> {
-    let local = clause.trim().strip_prefix("* as ")?.trim();
-    is_identifier_like(local).then_some(local)
-}
-
-fn split_default_import_clause(clause: &str) -> (Option<&str>, Option<&str>) {
-    let clause = clause.trim();
-    if clause.starts_with('{') || clause.starts_with("* as ") {
-        return (None, Some(clause));
-    }
-    let (default_part, rest) = clause
-        .split_once(',')
-        .map_or((clause, None), |(default_part, rest)| {
-            (default_part, Some(rest.trim()))
-        });
-    let default_part = default_part.trim();
-    if is_identifier_like(default_part) {
-        (Some(default_part), rest)
-    } else {
-        (None, rest)
-    }
-}
-
-fn parse_named_import_clause(clause: &str) -> Option<Vec<(String, String)>> {
-    let clause = clause.trim();
-    let inner = clause.strip_prefix('{')?.strip_suffix('}')?.trim();
-    if inner.is_empty() {
-        return Some(Vec::new());
-    }
-    let mut specifiers = Vec::new();
-    for raw in inner.split(',') {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.starts_with("type ") {
-            return None;
-        }
-        let (imported, local) = raw
-            .split_once(" as ")
-            .map_or((raw, raw), |(imported, local)| {
-                (imported.trim(), local.trim())
-            });
-        if !is_identifier_like(imported) || !is_identifier_like(local) {
-            return None;
-        }
-        specifiers.push((imported.to_string(), local.to_string()));
-    }
-    Some(specifiers)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct MergeableImportDeclaration {
-    default_binding: Option<BindingName>,
-    named_specifiers: BTreeSet<(String, BindingName)>,
-    specifier: String,
-}
-
-fn coalesce_top_level_import_declarations(source: &str) -> String {
-    let mut groups = BTreeMap::<String, Vec<(usize, usize, MergeableImportDeclaration)>>::new();
-    for (start, end) in top_level_statement_spans(source) {
-        let statement = &source[start..end];
-        let Some(import) = parse_mergeable_import_declaration(statement) else {
-            continue;
-        };
-        groups
-            .entry(import.specifier.clone())
-            .or_default()
-            .push((start, end, import));
-    }
-
-    let mut edits = Vec::<(usize, usize, String)>::new();
-    for (specifier, declarations) in groups {
-        if declarations.len() < 2 {
-            continue;
-        }
-        let default_bindings = declarations
-            .iter()
-            .filter_map(|(_, _, declaration)| declaration.default_binding.clone())
-            .collect::<BTreeSet<_>>();
-        let named_specifiers = declarations
-            .iter()
-            .flat_map(|(_, _, declaration)| declaration.named_specifiers.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        if named_specifiers.is_empty() {
-            continue;
-        }
-        if default_bindings.len() > 1 {
-            let named_declarations = declarations
-                .iter()
-                .filter(|(_, _, declaration)| !declaration.named_specifiers.is_empty())
-                .collect::<Vec<_>>();
-            if named_declarations.len() < 2 {
-                continue;
-            }
-            let replacement_candidates = named_declarations
-                .iter()
-                .copied()
-                .filter(|(_, _, declaration)| declaration.default_binding.is_some())
-                .collect::<Vec<_>>();
-            let replacement_candidates = if replacement_candidates.is_empty() {
-                named_declarations.clone()
-            } else {
-                replacement_candidates
-            };
-            let Some((replacement_start, replacement_end, replacement_declaration)) =
-                replacement_candidates
-                    .iter()
-                    .min_by_key(|(start, _, _)| *start)
-                    .map(|(start, end, declaration)| (*start, *end, declaration))
-            else {
-                continue;
-            };
-            let replacement =
-                if let Some(default_binding) = replacement_declaration.default_binding.as_ref() {
-                    default_named_import_alias_statement(
-                        default_binding,
-                        named_specifiers
-                            .iter()
-                            .map(|(imported, local)| (imported.as_str(), local)),
-                        specifier.as_str(),
-                    )
-                } else {
-                    named_import_alias_statement(
-                        named_specifiers
-                            .iter()
-                            .map(|(imported, local)| (imported.as_str(), local)),
-                        specifier.as_str(),
-                    )
-                };
-            edits.push((replacement_start, replacement_end, replacement));
-            for (start, end, declaration) in named_declarations {
-                if *start == replacement_start {
-                    continue;
-                }
-                let replacement = declaration
-                    .default_binding
-                    .as_ref()
-                    .map_or_else(String::new, |binding| {
-                        default_import_statement(binding, specifier.as_str())
-                    });
-                edits.push((*start, *end, replacement));
-            }
-            continue;
-        }
-        let mergeable_declarations = declarations
-            .iter()
-            .filter(|(_, _, declaration)| {
-                !declaration.named_specifiers.is_empty()
-                    || (default_bindings.len() == 1 && declaration.default_binding.is_some())
-            })
-            .collect::<Vec<_>>();
-        if mergeable_declarations.len() < 2 {
-            continue;
-        }
-        let Some((replacement_start, replacement_end, _)) = mergeable_declarations
-            .iter()
-            .min_by_key(|(start, _, _)| *start)
-            .map(|(start, end, declaration)| (*start, *end, declaration))
-        else {
-            continue;
-        };
-        let replacement = if let Some(default_binding) = default_bindings.iter().next() {
-            default_named_import_alias_statement(
-                default_binding,
-                named_specifiers
-                    .iter()
-                    .map(|(imported, local)| (imported.as_str(), local)),
-                specifier.as_str(),
-            )
-        } else {
-            named_import_alias_statement(
-                named_specifiers
-                    .iter()
-                    .map(|(imported, local)| (imported.as_str(), local)),
-                specifier.as_str(),
-            )
-        };
-        edits.push((replacement_start, replacement_end, replacement));
-        for (start, end, _) in mergeable_declarations {
-            if *start == replacement_start {
-                continue;
-            }
-            edits.push((*start, *end, String::new()));
-        }
-    }
-
-    if edits.is_empty() {
-        source.to_string()
-    } else {
-        compact_top_level_import_trivia(&apply_text_edits(source, &edits))
-    }
-}
-
-fn parse_mergeable_import_declaration(source: &str) -> Option<MergeableImportDeclaration> {
-    let source = source.trim();
-    let rest = source.strip_prefix("import ")?;
-    if rest.starts_with("type ") {
-        return None;
-    }
-    let rest = rest.strip_suffix(';')?.trim();
-    if rest.contains(" with ") || rest.contains(" assert ") {
-        return None;
-    }
-    let (clause, specifier) = split_import_clause_and_specifier(rest)?;
-    if parse_namespace_import_clause(clause).is_some() {
-        return None;
-    }
-    let (default_part, rest) = split_default_import_clause(clause);
-    if rest.is_some_and(|rest| parse_namespace_import_clause(rest).is_some()) {
-        return None;
-    }
-    let default_binding = default_part.map(BindingName::new);
-    let named_specifiers = match rest {
-        Some(rest) => parse_named_import_clause(rest)?,
-        None => Vec::new(),
-    }
-    .into_iter()
-    .map(|(imported, local)| (imported, BindingName::new(local)))
-    .collect::<BTreeSet<_>>();
-    if default_binding.is_none() && named_specifiers.is_empty() {
-        return None;
-    }
-    Some(MergeableImportDeclaration {
-        default_binding,
-        named_specifiers,
-        specifier: specifier.to_string(),
-    })
-}
-
-fn compact_top_level_import_trivia(source: &str) -> String {
-    let spans = top_level_statement_spans(source);
-    if spans.len() < 2 {
-        return source.to_string();
-    }
-    let mut edits = Vec::<(usize, usize, String)>::new();
-    for window in spans.windows(2) {
-        let (previous_start, previous_end) = window[0];
-        let (next_start, next_end) = window[1];
-        let gap = &source[previous_end..next_start];
-        if gap.is_empty() || !gap.chars().all(char::is_whitespace) {
-            continue;
-        }
-        let previous = &source[previous_start..previous_end];
-        let next = &source[next_start..next_end];
-        let previous_is_import = is_static_import_declaration(previous);
-        let next_is_import = is_static_import_declaration(next);
-        let replacement =
-            if next_is_import && (previous_is_import || previous.trim_end().ends_with(';')) {
-                ""
-            } else if gap.as_bytes().iter().filter(|byte| **byte == b'\n').count() > 1 {
-                "\n"
-            } else {
-                continue;
-            };
-        edits.push((previous_end, next_start, replacement.to_string()));
-    }
-    if edits.is_empty() {
-        source.to_string()
-    } else {
-        apply_text_edits(source, &edits)
-    }
-}
-
-fn is_static_import_declaration(source: &str) -> bool {
-    let source = source.trim();
-    source.starts_with("import ") && source.ends_with(';')
-}
-
-fn is_bare_import_specifier(specifier: &str) -> bool {
-    !specifier.is_empty() && !specifier.starts_with('.') && !specifier.starts_with('/')
 }
 
 /// Identify bindings that can move from the shared runtime helpers file
@@ -11800,7 +11245,7 @@ fn pure_lazy_body_assignments(
     Some(assignments)
 }
 
-fn is_pure_initializer_expression(source: &str) -> bool {
+pub(crate) fn is_pure_initializer_expression(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() {
         return false;
@@ -12106,7 +11551,7 @@ fn top_level_statement_slices(source: &str) -> Vec<&str> {
         .collect()
 }
 
-fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
+pub(crate) fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
     collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
         .expect("planner top-level statement facts require parseable generated TypeScript source")
         .into_iter()
@@ -13528,10 +12973,6 @@ fn runtime_module_owner_imports_for_source(
             .insert(binding.clone());
     }
     imports
-}
-
-fn noop_function_statement(binding: &BindingName) -> String {
-    format!("function {}() {{}}", binding.as_str())
 }
 
 fn unresolved_runtime_helper_references(
@@ -16590,7 +16031,7 @@ fn rewrite_eagerified_call_sites(
     output
 }
 
-fn candidate_source_reads_by_module_with_exportable(
+pub(crate) fn candidate_source_reads_by_module_with_exportable(
     program: &EnrichedProgram,
     exportable_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
@@ -16650,7 +16091,7 @@ fn source_exportable_bindings(
     bindings
 }
 
-fn source_definition_bindings(
+pub(crate) fn source_definition_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
 ) -> BTreeSet<BindingName> {
@@ -16662,7 +16103,7 @@ fn source_definition_bindings(
     bindings
 }
 
-fn named_reexported_bindings(source: &str) -> BTreeSet<BindingName> {
+pub(crate) fn named_reexported_bindings(source: &str) -> BTreeSet<BindingName> {
     source_statements(source)
         .into_iter()
         .filter(|statement| statement.starts_with("export {") && statement.contains("} from "))
@@ -16897,7 +16338,7 @@ fn source_definition_bindings_by_module(
         .collect()
 }
 
-fn unique_source_definition_modules_from_bindings(
+pub(crate) fn unique_source_definition_modules_from_bindings(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     definition_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -17761,19 +17202,6 @@ fn apply_delazify_rewrites(source: &str, candidates: &[DelazifyCandidate]) -> St
 /// line/block comments, or regex literals. Returns the byte position just past
 /// the non-code span when something was skipped, or `None` when the current
 /// byte begins a code token.
-fn skip_non_code_at(source: &str, cursor: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let byte = *bytes.get(cursor)?;
-    match byte {
-        b'\'' | b'"' => Some(skip_quoted(bytes, cursor, byte)),
-        b'`' => Some(skip_template_literal(bytes, cursor)),
-        b'/' if bytes.get(cursor + 1) == Some(&b'/') => Some(skip_line_comment(bytes, cursor + 2)),
-        b'/' if bytes.get(cursor + 1) == Some(&b'*') => Some(skip_block_comment(bytes, cursor + 2)),
-        b'/' if looks_like_regex_literal(bytes, cursor) => Some(skip_regex_literal(bytes, cursor)),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone)]
 struct DecomposeCandidate {
     /// Byte range covering the full `var X = { ... };` declaration.
@@ -18529,16 +17957,6 @@ fn implicit_global_declarations_for_module(
         .collect()
 }
 
-/// Identifies binding names that the planner emits as synthetic scaffolding
-/// (lazy wrap temporaries, cross-module setters, createRequire alias). Such
-/// names must never be treated as user-defined bindings during import or
-/// implicit-write analysis. `__reverts_*` covers module-scope synthetics
-/// (setters, createRequire alias); `_$*` covers closure-local temporaries
-/// inside lazy wraps and update/destructure lowerings.
-fn is_planner_synthetic_binding(name: &str) -> bool {
-    name.starts_with("__reverts_") || name.starts_with("_$")
-}
-
 fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
     let mut writes = BTreeSet::new();
     let declaration_bindings = variable_declaration_binding_starts(source);
@@ -18786,344 +18204,6 @@ fn lazy_helper_import_names_for_source(source: &LoweredRuntimeModuleSource) -> V
         names.push("lazyValue");
     }
     names
-}
-
-/// Decide whether a prelude var declaration is safe to migrate, and
-/// extract its initializer expression when present.
-///
-/// Returns:
-///   * `None` — declaration is not a single-binding `var/let/const X[ =
-///     init];` statement, or the initializer is too complex to safely
-///     copy to a writer module (calls, member access, identifier
-///     references, etc.).
-///   * `Some(None)` — bare `var X;` declaration with no initializer.
-///   * `Some(Some(initializer))` — `var X = INIT;` where INIT is a
-///     side-effect-free initializer that can be transplanted as-is.
-fn classify_migratable_var_declaration<'a>(
-    snippet: &'a str,
-    binding: &str,
-) -> Option<Option<&'a str>> {
-    let trimmed = snippet.trim();
-    for keyword in ["var", "let", "const"] {
-        if let Some(rest) = trimmed.strip_prefix(keyword)
-            && rest.starts_with(|c: char| c.is_ascii_whitespace())
-        {
-            let rest = rest.trim_start();
-            let Some(rest) = rest.strip_suffix(';') else {
-                continue;
-            };
-            let rest = rest.trim();
-            // Bare `var X;`
-            if rest == binding {
-                return Some(None);
-            }
-            // `var X = INIT;`
-            let mut splitter = rest.splitn(2, '=');
-            let lhs = splitter.next()?.trim();
-            let rhs = splitter.next()?.trim();
-            if lhs != binding {
-                continue;
-            }
-            if is_pure_initializer_expression(rhs) {
-                return Some(Some(rhs));
-            }
-        }
-    }
-    None
-}
-
-/// Remove `var X;` or `var X = LITERAL;` declarations for each binding
-/// in `bindings` from the runtime helper source. Used after the Phase
-/// 10b/10c migration plan moves the declaration (and any literal
-/// initializer) to a new owner module — the declaration is no longer
-/// needed in the runtime, and leaving it would either create a
-/// duplicate-declaration audit failure or shadow the re-exported
-/// binding from the owner module.
-fn strip_runtime_var_declarations<'a>(
-    source: &str,
-    bindings: impl IntoIterator<Item = &'a BindingName>,
-) -> String {
-    let drop_set: BTreeSet<&str> = bindings.into_iter().map(BindingName::as_str).collect();
-    if drop_set.is_empty() {
-        return source.to_string();
-    }
-    let mut out = String::with_capacity(source.len());
-    for line in source.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-        let stripped = trimmed.trim();
-        let matched = stripped
-            .strip_prefix("var ")
-            .and_then(|rest| rest.strip_suffix(';'))
-            .map(|body| {
-                // Strip everything past `=` for declarations with an
-                // initializer; the migration's gate already verified the
-                // initializer is a side-effect-free literal that the
-                // writer carries verbatim, so the runtime line is safe
-                // to drop entirely.
-                body.split('=').next().unwrap_or(body).trim()
-            })
-            .is_some_and(|name| drop_set.contains(name));
-        if matched {
-            continue;
-        }
-        out.push_str(line);
-    }
-    out
-}
-
-fn strip_runtime_snippet_sources(
-    source: &str,
-    prelude: &RuntimePrelude,
-    bindings: &BTreeSet<BindingName>,
-) -> String {
-    if bindings.is_empty() {
-        return source.to_string();
-    }
-    let mut snippets = bindings
-        .iter()
-        .filter_map(|binding| prelude.snippets.get(binding))
-        .collect::<Vec<_>>();
-    snippets.sort_by(|left, right| right.byte_start.cmp(&left.byte_start));
-    let mut stripped = source.to_string();
-    for snippet in snippets {
-        if let Some((start, end)) = find_runtime_source_chunk(&stripped, snippet.source.as_str()) {
-            stripped.replace_range(start..end, "");
-        }
-    }
-    stripped
-}
-
-fn strip_runtime_namespace_export_sources(
-    source: &str,
-    prelude: &RuntimePrelude,
-    namespaces: &BTreeSet<BindingName>,
-) -> String {
-    if namespaces.is_empty() {
-        return source.to_string();
-    }
-    let mut exports = prelude
-        .namespace_exports
-        .iter()
-        .filter(|namespace_export| namespaces.contains(&namespace_export.namespace))
-        .collect::<Vec<_>>();
-    exports.sort_by(|left, right| right.byte_start.cmp(&left.byte_start));
-    let mut stripped = source.to_string();
-    for namespace_export in exports {
-        let statement = runtime_namespace_export_statement(namespace_export);
-        if let Some((start, end)) = find_runtime_source_chunk(&stripped, statement.as_str()) {
-            stripped.replace_range(start..end, "");
-        }
-    }
-    stripped
-}
-
-fn find_runtime_source_chunk(source: &str, chunk: &str) -> Option<(usize, usize)> {
-    for (start, _) in source.match_indices(chunk) {
-        let end = start + chunk.len();
-        let before_ok = start == 0 || source.as_bytes().get(start - 1) == Some(&b'\n');
-        let after_ok = end == source.len() || source.as_bytes().get(end) == Some(&b'\n');
-        if !before_ok || !after_ok {
-            continue;
-        }
-        let mut drop_start = start;
-        let mut drop_end = end;
-        if source.as_bytes().get(drop_end) == Some(&b'\n') {
-            drop_end += 1;
-        } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
-            drop_start -= 1;
-        }
-        return Some((drop_start, drop_end));
-    }
-    None
-}
-
-/// Inline same-module setter calls inside the runtime helpers module.
-/// `__reverts_set_X(<arg>)` becomes `(X = <arg>)` whenever:
-///   * The identifier appears in call position (not as a value reference
-///     or member access).
-///   * The argument list contains exactly one expression (no top-level
-///     comma).
-///
-/// The two forms are observationally equivalent for single-argument
-/// invocations: both evaluate the argument once, write the binding, and
-/// produce the argument's value as the expression's result. The cross-
-/// module mutation channel (the setter function) is still defined and
-/// exported afterwards — only the runtime's own internal calls collapse.
-fn inline_internal_setter_calls(source: &str) -> String {
-    inline_internal_setter_calls_matching(source, None)
-}
-
-fn inline_internal_setter_calls_for_bindings(
-    source: &str,
-    bindings: &BTreeSet<BindingName>,
-) -> String {
-    if bindings.is_empty() {
-        source.to_string()
-    } else {
-        inline_internal_setter_calls_matching(source, Some(bindings))
-    }
-}
-
-fn inline_internal_setter_calls_matching(
-    source: &str,
-    allowed_bindings: Option<&BTreeSet<BindingName>>,
-) -> String {
-    let bytes = source.as_bytes();
-    let mut out = String::with_capacity(source.len());
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if let Some(next) = skip_non_code_at(source, cursor) {
-            out.push_str(&source[cursor..next]);
-            cursor = next;
-            continue;
-        }
-        if !is_identifier_start(bytes[cursor]) {
-            // Push a single UTF-8 codepoint to keep the byte stream valid.
-            // ASCII fits in one byte; multi-byte sequences (continuation
-            // bytes match 10xxxxxx) need the full run to stay paired.
-            let mut next = cursor + 1;
-            if bytes[cursor] >= 0x80 {
-                while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
-                    next += 1;
-                }
-            }
-            out.push_str(&source[cursor..next]);
-            cursor = next;
-            continue;
-        }
-        let start = cursor;
-        cursor += 1;
-        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-            cursor += 1;
-        }
-        let ident = &source[start..cursor];
-        let Some(target) = ident.strip_prefix("__reverts_set_") else {
-            out.push_str(ident);
-            continue;
-        };
-        if target.is_empty() {
-            out.push_str(ident);
-            continue;
-        }
-        if allowed_bindings.is_some_and(|bindings| !bindings.contains(&BindingName::new(target))) {
-            out.push_str(ident);
-            continue;
-        }
-        let prev = start
-            .checked_sub(1)
-            .and_then(|index| bytes.get(index))
-            .copied();
-        if matches!(prev, Some(b'.') | Some(b'#')) {
-            out.push_str(ident);
-            continue;
-        }
-        let arg_open = skip_ws(bytes, cursor);
-        if bytes.get(arg_open) != Some(&b'(') {
-            out.push_str(ident);
-            continue;
-        }
-        let Some(arg_close) = find_matching_paren(source, arg_open) else {
-            out.push_str(ident);
-            continue;
-        };
-        let arg_slice = &source[arg_open + 1..arg_close];
-        if !arg_text_is_single_expression(arg_slice) {
-            out.push_str(ident);
-            continue;
-        }
-        // The trim avoids leading/trailing whitespace cluttering the
-        // assignment form; the byte-for-byte interior is otherwise
-        // preserved so embedded comments / newlines stay intact.
-        out.push('(');
-        out.push_str(target);
-        out.push_str(" = ");
-        out.push_str(arg_slice.trim());
-        out.push(')');
-        cursor = arg_close + 1;
-    }
-    out
-}
-
-/// Walk `source` (the bytes between a call's `(` and `)`) and return
-/// `true` iff it contains exactly one top-level expression — i.e., no
-/// top-level comma outside nested parens/brackets/braces/strings. Used
-/// to gate the setter-call inliner: multi-argument setter calls have
-/// different semantics from a comma-folded assignment expression, so
-/// they stay as function calls.
-fn arg_text_is_single_expression(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' => {
-                let Some(close) = find_matching_paren(source, cursor) else {
-                    return false;
-                };
-                cursor = close + 1;
-            }
-            b'[' => {
-                let Some(close) = find_matching_bracket(source, cursor) else {
-                    return false;
-                };
-                cursor = close + 1;
-            }
-            b'{' => {
-                let Some(close) = find_matching_brace(source, cursor) else {
-                    return false;
-                };
-                cursor = close + 1;
-            }
-            b',' => return false,
-            _ => cursor += 1,
-        }
-    }
-    true
-}
-
-fn runtime_namespace_export_statement(namespace_export: &RuntimeNamespaceExport) -> String {
-    let properties = namespace_export
-        .exports
-        .iter()
-        .map(|(export_name, binding)| {
-            format!(
-                "{}: {{ enumerable: true, get: () => {} }}",
-                property_key_source(export_name),
-                binding.as_str()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "Object.defineProperties({}, {{ {} }});",
-        namespace_export.namespace.as_str(),
-        properties
-    )
-}
-
-fn property_key_source(key: &str) -> String {
-    if key
-        .as_bytes()
-        .first()
-        .is_some_and(|byte| is_identifier_start(*byte))
-        && key.as_bytes()[1..]
-            .iter()
-            .all(|byte| is_identifier_continue(*byte))
-        && !is_js_keyword(key)
-    {
-        key.to_string()
-    } else {
-        format!("{key:?}")
-    }
 }
 
 #[cfg(test)]
@@ -19553,7 +18633,7 @@ var init = lazyValue(() => {\n\
             "import { c } from 'c';\n",
         );
 
-        let compacted = super::compact_top_level_import_trivia(source);
+        let compacted = super::import_coalesce::compact_top_level_import_trivia(source);
 
         assert!(compacted.contains("import a from 'a';import b from 'b';"));
         assert!(compacted.contains("`keep\\n\\nblank`"));

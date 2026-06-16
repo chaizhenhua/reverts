@@ -35,7 +35,10 @@ use reverts_js::{
     skip_line_comment,
 };
 
-use crate::byte_lexer::{looks_like_regex_literal, skip_quoted, skip_regex_literal, skip_ws};
+use crate::byte_lexer::{
+    arg_text_is_single_expression, find_matching_paren, looks_like_regex_literal, skip_non_code_at,
+    skip_quoted, skip_regex_literal, skip_ws,
+};
 use crate::identifiers::parse_identifier;
 use crate::statements::runtime_helper_setter_name;
 use crate::{
@@ -249,6 +252,113 @@ fn runtime_helper_update_expression(
             operator = operator.source()
         ),
     }
+}
+
+/// Inline same-module setter calls inside the runtime helpers module.
+/// `__reverts_set_X(<arg>)` becomes `(X = <arg>)` whenever:
+///   * The identifier appears in call position (not as a value reference
+///     or member access).
+///   * The argument list contains exactly one expression (no top-level
+///     comma).
+///
+/// The two forms are observationally equivalent for single-argument
+/// invocations: both evaluate the argument once, write the binding, and
+/// produce the argument's value as the expression's result. The cross-
+/// module mutation channel (the setter function) is still defined and
+/// exported afterwards — only the runtime's own internal calls collapse.
+pub(crate) fn inline_internal_setter_calls(source: &str) -> String {
+    inline_internal_setter_calls_matching(source, None)
+}
+
+pub(crate) fn inline_internal_setter_calls_for_bindings(
+    source: &str,
+    bindings: &BTreeSet<BindingName>,
+) -> String {
+    if bindings.is_empty() {
+        source.to_string()
+    } else {
+        inline_internal_setter_calls_matching(source, Some(bindings))
+    }
+}
+
+fn inline_internal_setter_calls_matching(
+    source: &str,
+    allowed_bindings: Option<&BTreeSet<BindingName>>,
+) -> String {
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if let Some(next) = skip_non_code_at(source, cursor) {
+            out.push_str(&source[cursor..next]);
+            cursor = next;
+            continue;
+        }
+        if !is_identifier_start(bytes[cursor]) {
+            // Push a single UTF-8 codepoint to keep the byte stream valid.
+            // ASCII fits in one byte; multi-byte sequences (continuation
+            // bytes match 10xxxxxx) need the full run to stay paired.
+            let mut next = cursor + 1;
+            if bytes[cursor] >= 0x80 {
+                while next < bytes.len() && (bytes[next] & 0xC0) == 0x80 {
+                    next += 1;
+                }
+            }
+            out.push_str(&source[cursor..next]);
+            cursor = next;
+            continue;
+        }
+        let start = cursor;
+        cursor += 1;
+        while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
+            cursor += 1;
+        }
+        let ident = &source[start..cursor];
+        let Some(target) = ident.strip_prefix("__reverts_set_") else {
+            out.push_str(ident);
+            continue;
+        };
+        if target.is_empty() {
+            out.push_str(ident);
+            continue;
+        }
+        if allowed_bindings.is_some_and(|bindings| !bindings.contains(&BindingName::new(target))) {
+            out.push_str(ident);
+            continue;
+        }
+        let prev = start
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .copied();
+        if matches!(prev, Some(b'.') | Some(b'#')) {
+            out.push_str(ident);
+            continue;
+        }
+        let arg_open = skip_ws(bytes, cursor);
+        if bytes.get(arg_open) != Some(&b'(') {
+            out.push_str(ident);
+            continue;
+        }
+        let Some(arg_close) = find_matching_paren(source, arg_open) else {
+            out.push_str(ident);
+            continue;
+        };
+        let arg_slice = &source[arg_open + 1..arg_close];
+        if !arg_text_is_single_expression(arg_slice) {
+            out.push_str(ident);
+            continue;
+        }
+        // The trim avoids leading/trailing whitespace cluttering the
+        // assignment form; the byte-for-byte interior is otherwise
+        // preserved so embedded comments / newlines stay intact.
+        out.push('(');
+        out.push_str(target);
+        out.push_str(" = ");
+        out.push_str(arg_slice.trim());
+        out.push(')');
+        cursor = arg_close + 1;
+    }
+    out
 }
 
 pub(crate) fn find_assignment_rhs_end(source: &str, mut cursor: usize) -> usize {
