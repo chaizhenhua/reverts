@@ -805,6 +805,43 @@ fn compute_localized_noop_runtime_helpers(
     )
 }
 
+/// Strip helpers already accounted for by namespace-member or
+/// node-builtin-`require` rewrites from the remaining-helpers set.
+/// The namespace rewrite drops getter-bound helpers when their
+/// namespace is collapsed in this source; the require rewrite consumes
+/// helper bindings whose only use site has been folded into an
+/// equivalent CommonJS `require(...)` form. Returns the filtered set
+/// plus the consumed-by-require helper set (still needed by a later
+/// partitioning filter on a different binding stream).
+fn filter_remaining_helpers_namespace_and_require(
+    remaining_runtime_helpers: BTreeSet<BindingName>,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
+) -> (BTreeSet<BindingName>, BTreeSet<BindingName>) {
+    let dropped_runtime_namespaces_for_source = lowered_source
+        .and_then(|source| {
+            namespace_member_rewrite.and_then(|rewrite| {
+                rewrite
+                    .dropped_namespaces_by_source
+                    .get(&source.source_file_id)
+            })
+        })
+        .cloned()
+        .unwrap_or_default();
+    let consumed_node_builtin_require_helpers = node_builtin_require_rewrite
+        .map(|rewrite| rewrite.consumed_helpers.clone())
+        .unwrap_or_default();
+    let filtered = remaining_runtime_helpers
+        .into_iter()
+        .filter(|binding| !dropped_runtime_namespaces_for_source.contains(binding))
+        .filter(|binding| !consumed_node_builtin_require_helpers.contains(binding))
+        .collect();
+    (filtered, consumed_node_builtin_require_helpers)
+}
+
 /// Collect the helper bindings that drive each
 /// `Object.defineProperties` namespace export. Used to gate which
 /// runtime helpers can be dropped from the helper file: a helper that
@@ -1760,28 +1797,13 @@ impl ImportExportPlanner {
                 &namespace_export_helpers_for_source,
                 &source_runtime_refs,
             );
-            let dropped_runtime_namespaces_for_source = lowered_source
-                .and_then(|source| {
-                    namespace_member_rewrite.as_ref().and_then(|rewrite| {
-                        rewrite
-                            .dropped_namespaces_by_source
-                            .get(&source.source_file_id)
-                    })
-                })
-                .cloned()
-                .unwrap_or_default();
-            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
-                .into_iter()
-                .filter(|binding| !dropped_runtime_namespaces_for_source.contains(binding))
-                .collect();
-            let consumed_node_builtin_require_helpers = node_builtin_require_rewrite
-                .as_ref()
-                .map(|rewrite| rewrite.consumed_helpers.clone())
-                .unwrap_or_default();
-            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
-                .difference(&consumed_node_builtin_require_helpers)
-                .cloned()
-                .collect();
+            let (remaining_runtime_helpers, consumed_node_builtin_require_helpers) =
+                filter_remaining_helpers_namespace_and_require(
+                    remaining_runtime_helpers,
+                    lowered_source,
+                    namespace_member_rewrite.as_ref(),
+                    node_builtin_require_rewrite.as_ref(),
+                );
             let localized_noop_runtime_helpers = compute_localized_noop_runtime_helpers(
                 program,
                 module.id,
