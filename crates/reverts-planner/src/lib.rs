@@ -757,6 +757,95 @@ fn emit_source_module_imports(
     has_runtime_edge_before_lazy_helpers
 }
 
+/// Compute the set of runtime no-op helpers that can be localised
+/// (declared inline in the consuming module) because the prelude
+/// shows them safe to copy and the rewritten source still references
+/// them.
+#[allow(clippy::too_many_arguments)]
+fn compute_localized_noop_runtime_helpers(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    let Some(source) = lowered_source else {
+        return BTreeSet::new();
+    };
+    let Some(prelude) = program
+        .model()
+        .graph()
+        .runtime_prelude(source.source_file_id)
+    else {
+        return BTreeSet::new();
+    };
+    let source_text = node_builtin_require_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or_else(|| {
+            namespace_member_rewrite
+                .map(|rewrite| rewrite.source.as_str())
+                .unwrap_or(source.source.as_str())
+        });
+    let exported_bindings = module_exported_bindings(
+        program,
+        module_id,
+        source_module_wiring.exports_by_module.get(&module_id),
+        source_text,
+    );
+    localizable_noop_runtime_helpers(
+        prelude,
+        source_text,
+        remaining_runtime_helpers,
+        &exported_bindings,
+        source.uses_lazy_value,
+    )
+}
+
+/// Collect the helper bindings that drive each
+/// `Object.defineProperties` namespace export. Used to gate which
+/// runtime helpers can be dropped from the helper file: a helper that
+/// only exists to back a namespace getter can be erased when nothing
+/// in the rewritten source still references it.
+fn namespace_export_helpers_for_source(
+    program: &EnrichedProgram,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+) -> BTreeSet<BindingName> {
+    lowered_source
+        .and_then(|source| {
+            program
+                .model()
+                .graph()
+                .runtime_prelude(source.source_file_id)
+        })
+        .map(|prelude| {
+            prelude
+                .namespace_exports
+                .iter()
+                .map(|export| export.helper.clone())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// Drop any namespace-export helper that the source no longer
+/// references after the rewrites.
+fn filter_unreferenced_namespace_helpers(
+    remaining: BTreeSet<BindingName>,
+    namespace_export_helpers: &BTreeSet<BindingName>,
+    source_runtime_refs: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    remaining
+        .into_iter()
+        .filter(|binding| {
+            !namespace_export_helpers.contains(binding) || source_runtime_refs.contains(binding)
+        })
+        .collect()
+}
+
 /// Re-filter `remaining_runtime_helpers` after applying the
 /// runtime-helper write rewrite. The write rewrite (`X = value` →
 /// `__reverts_set_X(value)`) can introduce new identifier references
@@ -1664,28 +1753,13 @@ impl ImportExportPlanner {
                 &migrated_extra_runtime_deps,
                 remaining_runtime_helpers,
             );
-            let namespace_export_helpers_for_source = lowered_source
-                .and_then(|source| {
-                    program
-                        .model()
-                        .graph()
-                        .runtime_prelude(source.source_file_id)
-                })
-                .map(|prelude| {
-                    prelude
-                        .namespace_exports
-                        .iter()
-                        .map(|export| export.helper.clone())
-                        .collect::<BTreeSet<_>>()
-                })
-                .unwrap_or_default();
-            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
-                .into_iter()
-                .filter(|binding| {
-                    !namespace_export_helpers_for_source.contains(binding)
-                        || source_runtime_refs.contains(binding)
-                })
-                .collect();
+            let namespace_export_helpers_for_source =
+                namespace_export_helpers_for_source(program, lowered_source);
+            let remaining_runtime_helpers = filter_unreferenced_namespace_helpers(
+                remaining_runtime_helpers,
+                &namespace_export_helpers_for_source,
+                &source_runtime_refs,
+            );
             let dropped_runtime_namespaces_for_source = lowered_source
                 .and_then(|source| {
                     namespace_member_rewrite.as_ref().and_then(|rewrite| {
@@ -1708,36 +1782,15 @@ impl ImportExportPlanner {
                 .difference(&consumed_node_builtin_require_helpers)
                 .cloned()
                 .collect();
-            let localized_noop_runtime_helpers = lowered_source
-                .and_then(|source| {
-                    let prelude = program
-                        .model()
-                        .graph()
-                        .runtime_prelude(source.source_file_id)?;
-                    let source_text = node_builtin_require_rewrite
-                        .as_ref()
-                        .map(|rewrite| rewrite.source.as_str())
-                        .unwrap_or_else(|| {
-                            namespace_member_rewrite
-                                .as_ref()
-                                .map(|rewrite| rewrite.source.as_str())
-                                .unwrap_or(source.source.as_str())
-                        });
-                    let exported_bindings = module_exported_bindings(
-                        program,
-                        module.id,
-                        source_module_wiring.exports_by_module.get(&module.id),
-                        source_text,
-                    );
-                    Some(localizable_noop_runtime_helpers(
-                        prelude,
-                        source_text,
-                        &remaining_runtime_helpers,
-                        &exported_bindings,
-                        source.uses_lazy_value,
-                    ))
-                })
-                .unwrap_or_default();
+            let localized_noop_runtime_helpers = compute_localized_noop_runtime_helpers(
+                program,
+                module.id,
+                source_module_wiring,
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                node_builtin_require_rewrite.as_ref(),
+                &remaining_runtime_helpers,
+            );
             let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
                 .difference(&localized_noop_runtime_helpers)
                 .cloned()
