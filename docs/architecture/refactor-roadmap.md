@@ -246,6 +246,26 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
+### Session of 2026-05-23 (continuation 6 — Phase 3-C step-by-step)
+
+3 commits, `lib.rs` 27,750 → 27,705 = -45 lines:
+
+- `4eab939` `external_package_adapter_emit.rs` — early-emit check (62
+  lines). The `if module.kind == Package && let Some(adapter_plan) =
+  …` cascade now compresses to one `try_emit_external_package_adapter`
+  call.
+- `a5a2257` extract `detect_folded_lazy_helper_use` from the inline
+  block at the head of `plan_enriched_program` (now a 12-line
+  freestanding helper).
+- `3656476` move `planned_runtime_helper_consumed_bindings` into
+  `runtime_helper_emission` (its only caller).
+
+The per-module loop interior remains large (~1,720 lines). Each
+remaining phase has 20-50 captured locals; extracting them requires
+either continuing to build a `ModulePlanCx` struct incrementally or
+accepting many `pub(crate)` bumps to the existing layout. Both paths
+warrant their own focused sessions.
+
 ### Session of 2026-05-23 (continuation 5 — Phase 3-C kickoff)
 
 3 commits, `lib.rs` 28,078 → 27,750 = -328 lines, and crucially the
