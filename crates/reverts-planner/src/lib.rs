@@ -2,6 +2,7 @@ mod binding_owner;
 mod byte_lexer;
 mod compiler_recovery;
 mod destructure_writes;
+mod eager_safe_analysis;
 mod identifiers;
 mod import_coalesce;
 mod plan_error;
@@ -12,17 +13,20 @@ mod runtime_helper_writes;
 mod runtime_namespace_rewrite;
 mod runtime_setter_migration_blocker;
 mod runtime_source_read;
+mod runtime_var_migration;
 mod source_module_facts;
 
 use runtime_source_read::{
-    RuntimeBindingReadProfile, RuntimeSourceReadIndex, runtime_binding_read_profile,
-    runtime_binding_read_profile_diagnostic, runtime_readers_for_binding,
-    runtime_source_read_index,
+    RuntimeBindingReadProfile, RuntimeSourceReadIndex, runtime_binding_read_profile_diagnostic,
+    runtime_readers_for_binding, runtime_source_read_index,
 };
 mod statement_parsers;
 mod statements;
 
 use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition};
+use runtime_var_migration::{
+    RuntimeOwnedSnippetMigration, RuntimeVarMigrationPlan, compute_runtime_var_migration_plan,
+};
 
 use source_module_facts::SourceModuleFacts;
 
@@ -30,6 +34,10 @@ use destructure_writes::{
     array_destructuring_assignment_writes, object_destructuring_assignment_writes,
     rewrite_array_destructuring_helper_writes, rewrite_object_destructuring_helper_writes,
     split_top_level_properties,
+};
+use eager_safe_analysis::{
+    EagerSafeAnalysis, compute_eager_safe_analysis, consumer_eagerified_imports,
+    rewrite_eagerified_call_sites, should_compute_cross_module_eager_safe_analysis,
 };
 
 use runtime_helper_strip::{
@@ -100,11 +108,10 @@ use reverts_input::{
 };
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    ImportUsageScope, ParseGoal, classify_import_usage_scope, collect_identifier_read_facts,
-    collect_top_level_statement_facts, format_source_pretty,
-    is_ascii_identifier_continue as is_identifier_continue,
+    ParseGoal, collect_identifier_read_facts, collect_top_level_statement_facts,
+    format_source_pretty, is_ascii_identifier_continue as is_identifier_continue,
     is_ascii_identifier_start as is_identifier_start, is_js_keyword, sanitize_identifier,
-    skip_block_comment, skip_line_comment, verify_only_immediate_call_references,
+    skip_block_comment, skip_line_comment,
 };
 use reverts_model::EnrichedProgram;
 use reverts_package::{
@@ -2746,671 +2753,29 @@ pub(crate) struct SourceModuleWiring {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LoweredRuntimeModuleSource {
-    source_file_id: u32,
-    source_file_path: String,
-    byte_start: u32,
-    source: String,
-    lowered_helpers: BTreeSet<BindingName>,
-    remaining_helpers: BTreeSet<BindingName>,
-    local_definitions: BTreeSet<BindingName>,
-    local_writes: BTreeSet<BindingName>,
-    written_helpers: BTreeSet<BindingName>,
-    uses_lazy_module: bool,
-    uses_lazy_value: bool,
+pub(crate) struct LoweredRuntimeModuleSource {
+    pub(crate) source_file_id: u32,
+    pub(crate) source_file_path: String,
+    pub(crate) byte_start: u32,
+    pub(crate) source: String,
+    pub(crate) lowered_helpers: BTreeSet<BindingName>,
+    pub(crate) remaining_helpers: BTreeSet<BindingName>,
+    pub(crate) local_definitions: BTreeSet<BindingName>,
+    pub(crate) local_writes: BTreeSet<BindingName>,
+    pub(crate) written_helpers: BTreeSet<BindingName>,
+    pub(crate) uses_lazy_module: bool,
+    pub(crate) uses_lazy_value: bool,
     /// Bindings whose shape was rewritten by delazify / namespace decomposition.
     /// The planner must override the IR-derived shape (which assumed the
     /// pre-lowering lazy thunk) to keep the audit consistent with what was
     /// actually emitted.
-    reshaped_bindings: BTreeSet<BindingName>,
+    pub(crate) reshaped_bindings: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLazyFoldPlan {
     pub(crate) modules: BTreeMap<ModuleId, RuntimeLazyFoldModule>,
     pub(crate) chunks_by_source_file: BTreeMap<u32, Vec<RuntimeFoldedSourceChunk>>,
-}
-
-/// Phase 10: vars currently declared inside `source-<N>-helpers.ts` that
-/// can be relocated to their writer module.
-///
-/// The runtime helper file traditionally holds every cross-module mutable
-/// binding plus a `__reverts_set_X(value)` thunk for each, because ESM
-/// forbids direct assignment to imported bindings. When a binding's value
-/// is only WRITTEN by a single application module AND the runtime body
-/// itself never READS that binding, the setter becomes a workaround for a
-/// problem that no longer exists — the writer module can declare and
-/// export the binding directly.
-///
-/// `migrations_by_binding` maps each migrated binding to its new owner
-/// module. Consumers are routed directly to that owner; the runtime helper
-/// file strips the migrated declaration and setter instead of emitting a
-/// compatibility re-export barrel.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeVarMigrationPlan {
-    /// Binding name → (owner module id, runtime source file id the
-    /// binding originally lived in).
-    pub(crate) migrations_by_binding: BTreeMap<BindingName, RuntimeVarMigration>,
-    /// Reverse index: owner module → set of bindings it now owns.
-    /// This index contains primary runtime vars only; extra moved
-    /// snippets are derived from `migrations_by_binding`.
-    pub(crate) migrations_by_owner: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    /// Source-backed runtime snippets whose owner can be rebuilt without a
-    /// writable primary var. These are whole closed helper components (for
-    /// example private functions/classes and their namespace export objects)
-    /// that no retained runtime snippet, folded chunk, namespace export, or
-    /// entrypoint side effect reads.
-    pub(crate) owned_snippets_by_binding:
-        BTreeMap<(u32, BindingName), RuntimeOwnedSnippetMigration>,
-    /// Reverse index for `owned_snippets_by_binding`.
-    pub(crate) owned_snippets_by_owner: BTreeMap<ModuleId, BTreeSet<(u32, BindingName)>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeVarMigration {
-    pub(crate) owner_module: ModuleId,
-    pub(crate) source_file_id: u32,
-    /// Additional runtime prelude snippets that must move with the
-    /// primary var. The first conservative use is the single reader
-    /// function that is the var's only runtime read.
-    pub(crate) extra_snippets: BTreeSet<BindingName>,
-    /// Runtime namespace export initializers whose namespace object
-    /// snippet moved with the primary var. These are emitted in the
-    /// writer module as `Object.defineProperties(...)` statements so the
-    /// namespace getter no longer reads the migrated var from runtime.
-    pub(crate) extra_namespace_exports: BTreeSet<BindingName>,
-    /// Runtime helper bindings read by `extra_snippets` after excluding
-    /// the migrated primary var. The writer module imports these back
-    /// from the helper file.
-    pub(crate) extra_runtime_deps: BTreeSet<BindingName>,
-    /// Runtime helper bindings written by moved reader snippets but not
-    /// moved with the cluster. The moved source is rewritten to call the
-    /// helper setter (`__reverts_set_X(value)`) and the owner imports that
-    /// setter from runtime.
-    pub(crate) extra_runtime_setter_deps: BTreeSet<BindingName>,
-    /// Import aliases for `extra_runtime_deps` whose original names collide
-    /// with existing bindings in the writer module. Moved snippets are
-    /// rewritten to reference the alias.
-    pub(crate) extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
-    /// Source-module bindings read by `extra_snippets` that are already
-    /// represented by a source dependency edge from the writer. The writer
-    /// imports these from their source module instead of forcing the reader
-    /// cluster to stay in runtime.
-    pub(crate) extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    /// Source-module bindings read by `extra_snippets` where a direct
-    /// writer -> source import would create a source-module cycle. The
-    /// runtime helper imports and re-exports these bindings, preserving the
-    /// existing writer -> runtime -> source route while still allowing the
-    /// migrated var/reader/setter cluster to leave runtime.
-    pub(crate) extra_runtime_reexport_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    /// No-op package initializer shims referenced by moved readers. These
-    /// mirror the runtime helper's externalized-package init shims locally so
-    /// the reader can move without importing runtime only for a stub call.
-    pub(crate) extra_noop_deps: BTreeSet<BindingName>,
-    /// Optional initializer expression preserved from the runtime
-    /// declaration. `None` means the original `var X;` had no
-    /// initializer; `Some(text)` carries a side-effect-free literal
-    /// (`null`, `0`, `!1`, `void 0`, etc.) to be emitted alongside the
-    /// writer module's `var X = INIT;`.
-    pub(crate) initializer: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeOwnedSnippetMigration {
-    pub(crate) owner_module: ModuleId,
-    pub(crate) source_file_id: u32,
-    /// Runtime helper bindings read by this moved standalone snippet/namespace
-    /// component but not moved with it. The owner imports these back from the
-    /// helper file (or from a different rebuilt owner if that dep also moved).
-    pub(crate) extra_runtime_deps: BTreeSet<BindingName>,
-    /// Import aliases for `extra_runtime_deps` whose original names collide
-    /// with existing bindings in the owner module. Moved snippets are rewritten
-    /// to reference the alias.
-    pub(crate) extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
-    /// No-op runtime helpers read by this moved snippet. Runtime helper
-    /// emission erases private no-ops, so owners get local stubs instead of
-    /// importing bindings that may disappear.
-    pub(crate) extra_noop_deps: BTreeSet<BindingName>,
-    /// Whether the snippet is the namespace object side of a recovered
-    /// `Object.defineProperties(ns, { ... })` export initializer. When true,
-    /// move the namespace initializer statement with the object declaration.
-    pub(crate) moves_namespace_export: bool,
-}
-
-impl RuntimeVarMigrationPlan {
-    fn insert(&mut self, binding: BindingName, migration: RuntimeVarMigration) {
-        self.migrations_by_owner
-            .entry(migration.owner_module)
-            .or_default()
-            .insert(binding.clone());
-        self.migrations_by_binding.insert(binding, migration);
-    }
-
-    fn insert_owned_snippet(
-        &mut self,
-        binding: BindingName,
-        migration: RuntimeOwnedSnippetMigration,
-    ) {
-        self.owned_snippets_by_owner
-            .entry(migration.owner_module)
-            .or_default()
-            .insert((migration.source_file_id, binding.clone()));
-        self.owned_snippets_by_binding
-            .insert((migration.source_file_id, binding), migration);
-    }
-
-    fn extra_snippets_for_owner(&self, owner_module: ModuleId) -> BTreeSet<(u32, BindingName)> {
-        let mut snippets = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-            .flat_map(|migration| {
-                migration
-                    .extra_snippets
-                    .iter()
-                    .cloned()
-                    .map(|binding| (migration.source_file_id, binding))
-            })
-            .collect::<BTreeSet<_>>();
-        snippets.extend(
-            self.owned_snippets_by_owner
-                .get(&owner_module)
-                .into_iter()
-                .flatten()
-                .cloned(),
-        );
-        snippets
-    }
-
-    fn extra_runtime_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
-        let mut deps = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-            .flat_map(|migration| {
-                migration
-                    .extra_runtime_deps
-                    .iter()
-                    .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
-                    .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
-                    .cloned()
-            })
-            .collect::<BTreeSet<_>>();
-        deps.extend(
-            self.owned_snippets_by_binding
-                .values()
-                .filter(|migration| migration.owner_module == owner_module)
-                .flat_map(|migration| {
-                    migration
-                        .extra_runtime_deps
-                        .iter()
-                        .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
-                        .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
-                        .cloned()
-                }),
-        );
-        deps
-    }
-
-    fn extra_runtime_deps_by_source_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<u32, BTreeSet<BindingName>> {
-        let mut deps_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            let deps = migration
-                .extra_runtime_deps
-                .iter()
-                .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
-                .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if !deps.is_empty() {
-                deps_by_source
-                    .entry(migration.source_file_id)
-                    .or_default()
-                    .extend(deps);
-            }
-        }
-        for migration in self
-            .owned_snippets_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            let deps = migration
-                .extra_runtime_deps
-                .iter()
-                .filter(|dep| !migration.extra_runtime_dep_aliases.contains_key(*dep))
-                .filter(|dep| self.migrated_owner(migration.source_file_id, dep).is_none())
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if !deps.is_empty() {
-                deps_by_source
-                    .entry(migration.source_file_id)
-                    .or_default()
-                    .extend(deps);
-            }
-        }
-        deps_by_source
-    }
-
-    fn extra_runtime_setter_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
-        self.migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-            .flat_map(|migration| migration.extra_runtime_setter_deps.iter().cloned())
-            .collect()
-    }
-
-    fn extra_runtime_setter_deps_by_source_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<u32, BTreeSet<BindingName>> {
-        let mut deps = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            if migration.extra_runtime_setter_deps.is_empty() {
-                continue;
-            }
-            deps.entry(migration.source_file_id)
-                .or_default()
-                .extend(migration.extra_runtime_setter_deps.iter().cloned());
-        }
-        deps
-    }
-
-    fn migrated_extra_runtime_deps_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-        // A reader cluster may first be selected while one of its cross-writer
-        // deps still lives in runtime. A later "primary-only" migration can
-        // move that dep to its own writer. Route the already-moved reader's
-        // import directly to the new owner instead of keeping a stale
-        // writer -> runtime edge.
-        let mut deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            for dep in &migration.extra_runtime_deps {
-                if migration.extra_runtime_dep_aliases.contains_key(dep) {
-                    continue;
-                }
-                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
-                    continue;
-                };
-                if dep_owner == owner_module {
-                    continue;
-                }
-                deps.entry(dep_owner).or_default().insert(dep.clone());
-            }
-        }
-        for migration in self
-            .owned_snippets_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            for dep in &migration.extra_runtime_deps {
-                if migration.extra_runtime_dep_aliases.contains_key(dep) {
-                    continue;
-                }
-                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
-                    continue;
-                };
-                if dep_owner == owner_module {
-                    continue;
-                }
-                deps.entry(dep_owner).or_default().insert(dep.clone());
-            }
-        }
-        deps
-    }
-
-    fn migrated_aliased_extra_runtime_deps_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<ModuleId, BTreeMap<BindingName, BindingName>> {
-        let mut deps = BTreeMap::<ModuleId, BTreeMap<BindingName, BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            for (dep, alias) in &migration.extra_runtime_dep_aliases {
-                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
-                    continue;
-                };
-                if dep_owner == owner_module {
-                    continue;
-                }
-                deps.entry(dep_owner)
-                    .or_default()
-                    .insert(dep.clone(), alias.clone());
-            }
-        }
-        for migration in self
-            .owned_snippets_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            for (dep, alias) in &migration.extra_runtime_dep_aliases {
-                let Some(dep_owner) = self.migrated_owner(migration.source_file_id, dep) else {
-                    continue;
-                };
-                if dep_owner == owner_module {
-                    continue;
-                }
-                deps.entry(dep_owner)
-                    .or_default()
-                    .insert(dep.clone(), alias.clone());
-            }
-        }
-        deps
-    }
-
-    fn extra_runtime_dep_aliases_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<u32, BTreeMap<BindingName, BindingName>> {
-        let mut aliases = BTreeMap::<u32, BTreeMap<BindingName, BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            if migration.extra_runtime_dep_aliases.is_empty() {
-                continue;
-            }
-            aliases
-                .entry(migration.source_file_id)
-                .or_default()
-                .extend(migration.extra_runtime_dep_aliases.clone());
-        }
-        for migration in self
-            .owned_snippets_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            if migration.extra_runtime_dep_aliases.is_empty() {
-                continue;
-            }
-            aliases
-                .entry(migration.source_file_id)
-                .or_default()
-                .extend(migration.extra_runtime_dep_aliases.clone());
-        }
-        aliases
-    }
-
-    fn runtime_extra_runtime_dep_aliases_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<u32, BTreeMap<BindingName, BindingName>> {
-        let mut aliases = BTreeMap::<u32, BTreeMap<BindingName, BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            if migration.extra_runtime_dep_aliases.is_empty() {
-                continue;
-            }
-            let runtime_aliases = migration
-                .extra_runtime_dep_aliases
-                .iter()
-                .filter(|(dep, _alias)| {
-                    self.migrated_owner(migration.source_file_id, dep).is_none()
-                })
-                .map(|(dep, alias)| (dep.clone(), alias.clone()))
-                .collect::<BTreeMap<_, _>>();
-            if !runtime_aliases.is_empty() {
-                aliases
-                    .entry(migration.source_file_id)
-                    .or_default()
-                    .extend(runtime_aliases);
-            }
-        }
-        for migration in self
-            .owned_snippets_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            if migration.extra_runtime_dep_aliases.is_empty() {
-                continue;
-            }
-            let runtime_aliases = migration
-                .extra_runtime_dep_aliases
-                .iter()
-                .filter(|(dep, _alias)| {
-                    self.migrated_owner(migration.source_file_id, dep).is_none()
-                })
-                .map(|(dep, alias)| (dep.clone(), alias.clone()))
-                .collect::<BTreeMap<_, _>>();
-            if !runtime_aliases.is_empty() {
-                aliases
-                    .entry(migration.source_file_id)
-                    .or_default()
-                    .extend(runtime_aliases);
-            }
-        }
-        aliases
-    }
-
-    fn extra_source_deps_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-        let mut deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            for (module_id, bindings) in &migration.extra_source_deps {
-                deps.entry(*module_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-            }
-        }
-        deps
-    }
-
-    fn extra_runtime_reexport_source_deps_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeMap<u32, BTreeSet<BindingName>> {
-        let mut deps = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-        {
-            let bindings = migration
-                .extra_runtime_reexport_source_deps
-                .values()
-                .flatten()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            if !bindings.is_empty() {
-                deps.entry(migration.source_file_id)
-                    .or_default()
-                    .extend(bindings);
-            }
-        }
-        deps
-    }
-
-    fn extra_noop_deps_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
-        let mut deps = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-            .flat_map(|migration| migration.extra_noop_deps.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        deps.extend(
-            self.owned_snippets_by_binding
-                .values()
-                .filter(|migration| migration.owner_module == owner_module)
-                .flat_map(|migration| migration.extra_noop_deps.iter().cloned()),
-        );
-        deps
-    }
-
-    fn source_dep_exports_for_module(&self, module_id: ModuleId) -> BTreeSet<BindingName> {
-        self.migrations_by_binding
-            .values()
-            .flat_map(|migration| {
-                migration
-                    .extra_source_deps
-                    .get(&module_id)
-                    .into_iter()
-                    .flatten()
-                    .cloned()
-            })
-            .collect()
-    }
-
-    fn runtime_reexport_source_deps_for_source(
-        &self,
-        source_file_id: u32,
-    ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-        let mut deps = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-        for migration in self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.source_file_id == source_file_id)
-        {
-            for (module_id, bindings) in &migration.extra_runtime_reexport_source_deps {
-                deps.entry(*module_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-            }
-        }
-        deps
-    }
-
-    fn extra_namespace_exports_for_owner(
-        &self,
-        owner_module: ModuleId,
-    ) -> BTreeSet<(u32, BindingName)> {
-        let mut exports = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.owner_module == owner_module)
-            .flat_map(|migration| {
-                migration
-                    .extra_namespace_exports
-                    .iter()
-                    .cloned()
-                    .map(|binding| (migration.source_file_id, binding))
-            })
-            .collect::<BTreeSet<_>>();
-        exports.extend(
-            self.owned_snippets_by_binding
-                .iter()
-                .filter(|(_, migration)| {
-                    migration.owner_module == owner_module && migration.moves_namespace_export
-                })
-                .map(|((source_file_id, binding), _)| (*source_file_id, binding.clone())),
-        );
-        exports
-    }
-
-    fn extra_namespace_export_bindings_for_source(
-        &self,
-        source_file_id: u32,
-    ) -> BTreeSet<BindingName> {
-        let mut exports = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.source_file_id == source_file_id)
-            .flat_map(|migration| migration.extra_namespace_exports.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        exports.extend(
-            self.owned_snippets_by_binding
-                .iter()
-                .filter(|((owned_source_file_id, _), migration)| {
-                    *owned_source_file_id == source_file_id && migration.moves_namespace_export
-                })
-                .map(|((_, binding), _)| binding.clone()),
-        );
-        exports
-    }
-
-    fn extra_snippet_bindings_for_source(&self, source_file_id: u32) -> BTreeSet<BindingName> {
-        let mut snippets = self
-            .migrations_by_binding
-            .values()
-            .filter(|migration| migration.source_file_id == source_file_id)
-            .flat_map(|migration| migration.extra_snippets.iter().cloned())
-            .collect::<BTreeSet<_>>();
-        snippets.extend(
-            self.owned_snippets_by_binding
-                .keys()
-                .filter(|(snippet_source_file_id, _binding)| {
-                    *snippet_source_file_id == source_file_id
-                })
-                .map(|(_, binding)| binding.clone()),
-        );
-        snippets
-    }
-
-    fn local_bindings_for_owner(&self, owner_module: ModuleId) -> BTreeSet<BindingName> {
-        let mut bindings = self
-            .migrations_by_owner
-            .get(&owner_module)
-            .cloned()
-            .unwrap_or_default();
-        bindings.extend(
-            self.extra_snippets_for_owner(owner_module)
-                .into_iter()
-                .map(|(_, binding)| binding),
-        );
-        bindings.extend(
-            self.extra_namespace_exports_for_owner(owner_module)
-                .into_iter()
-                .map(|(_, binding)| binding),
-        );
-        bindings
-    }
-
-    fn primary_bindings_for_source(&self, source_file_id: u32) -> BTreeMap<BindingName, ModuleId> {
-        self.migrations_by_binding
-            .iter()
-            .filter(|(_, migration)| migration.source_file_id == source_file_id)
-            .map(|(binding, migration)| (binding.clone(), migration.owner_module))
-            .collect()
-    }
-
-    fn migrated_owner(&self, source_file_id: u32, binding: &BindingName) -> Option<ModuleId> {
-        for (primary, migration) in &self.migrations_by_binding {
-            if migration.source_file_id != source_file_id {
-                continue;
-            }
-            if primary == binding
-                || migration.extra_snippets.contains(binding)
-                || migration.extra_namespace_exports.contains(binding)
-            {
-                return Some(migration.owner_module);
-            }
-        }
-        if let Some(migration) = self
-            .owned_snippets_by_binding
-            .get(&(source_file_id, binding.clone()))
-        {
-            return Some(migration.owner_module);
-        }
-        None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4988,7 +4353,7 @@ fn runtime_edge_direct_prelude_imports(
     allowed
 }
 
-fn runtime_prelude_direct_import_consumers(
+pub(crate) fn runtime_prelude_direct_import_consumers(
     program: &EnrichedProgram,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
 ) -> BTreeMap<(u32, BindingName), BTreeSet<ModuleId>> {
@@ -5147,434 +4512,7 @@ fn runtime_prelude_direct_import_group_is_profitable(
     saved > added_bytes
 }
 
-/// Identify bindings that can move from the shared runtime helpers file
-/// to a single owner module. Conservative gating:
-///   1. The binding must have a `__reverts_set_X` setter function (i.e.,
-///      it's part of the cross-module mutation surface).
-///   2. The runtime prelude itself must not REFERENCE the binding outside
-///      its own `var X;` declaration and `__reverts_set_X` body. Any
-///      other snippet that names X is a runtime read, and migrating X
-///      would force the runtime to import it back from the owner — a
-///      cycle hazard.
-///   3. Exactly one application module must write the binding (via the
-///      `written_helpers` set populated during lowering). With multiple
-///      writers, no single module can own the binding without one of
-///      them needing setter-mediated cross-module access, defeating the
-///      migration.
-fn compute_runtime_var_migration_plan(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    runtime_lazy_folds: &RuntimeLazyFoldPlan,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> RuntimeVarMigrationPlan {
-    // Modules whose lazy initializer bodies have already been folded
-    // into the runtime helper file. Their consumer file is an empty
-    // re-export stub; there is no source body to host a migrated
-    // declaration or to absorb same-module assignments. Skip them.
-    let folded_modules: BTreeSet<ModuleId> = runtime_lazy_folds.modules.keys().copied().collect();
-    let source_definition_modules_by_source =
-        runtime_owner_definition_modules_by_source(program, externalized_packages);
-    let all_source_definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
-    let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
-    let runtime_source_consumers =
-        runtime_prelude_direct_import_consumers(program, lowered_runtime_sources);
-    // Invert `written_helpers` to find single-writer bindings — but
-    // exclude writes that came from a module that was later folded.
-    let mut writers: BTreeMap<BindingName, BTreeSet<(ModuleId, u32)>> = BTreeMap::new();
-    for (module_id, source) in lowered_runtime_sources {
-        if folded_modules.contains(module_id) {
-            continue;
-        }
-        let Some(module) = program
-            .model()
-            .modules()
-            .iter()
-            .find(|module| module.id == *module_id)
-        else {
-            continue;
-        };
-        if module.kind == ModuleKind::Package && externalized_packages.contains(module_id) {
-            continue;
-        }
-        for binding in &source.written_helpers {
-            writers
-                .entry(binding.clone())
-                .or_default()
-                .insert((*module_id, source.source_file_id));
-        }
-    }
-    let single_writers: BTreeMap<BindingName, (ModuleId, u32)> = writers
-        .into_iter()
-        .filter_map(|(binding, writers)| {
-            if writers.len() == 1 {
-                writers.into_iter().next().map(|w| (binding, w))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Group single-writer candidates by source file id so each runtime
-    // prelude is scanned once.
-    let mut by_source: BTreeMap<u32, Vec<(BindingName, ModuleId)>> = BTreeMap::new();
-    for (binding, (module_id, source_id)) in single_writers {
-        by_source
-            .entry(source_id)
-            .or_default()
-            .push((binding, module_id));
-    }
-    let mut plan = RuntimeVarMigrationPlan::default();
-    for (source_id, candidates) in by_source {
-        let Some(prelude) = program.model().graph().runtime_prelude(source_id) else {
-            continue;
-        };
-        let candidates = candidates
-            .into_iter()
-            .filter_map(|(binding, owner_module)| {
-                let initializer = migratable_runtime_var_initializer(prelude, &binding)?;
-                Some((binding, owner_module, initializer))
-            })
-            .collect::<Vec<_>>();
-        let movable_bindings = candidates
-            .iter()
-            .map(|(binding, _, _)| binding.clone())
-            .collect::<BTreeSet<_>>();
-        let candidate_owners = candidates
-            .iter()
-            .map(|(binding, owner_module, _)| (binding.clone(), *owner_module))
-            .collect::<BTreeMap<_, _>>();
-        let candidate_initializers = candidates
-            .iter()
-            .map(|(binding, _, initializer)| (binding.clone(), initializer.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let candidate_owner_runtime_state = runtime_reader_owner_runtime_state(
-            lowered_runtime_sources,
-            candidate_owners.values().copied(),
-        );
-        let folded_chunks = runtime_lazy_folds
-            .chunks_by_source_file
-            .get(&source_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let folded_runtime_definitions = folded_runtime_chunk_definitions(folded_chunks);
-        let read_index = runtime_source_read_index(prelude, folded_chunks);
-        let owner_available_bindings = runtime_reader_owner_available_bindings(
-            program,
-            source_module_wiring,
-            lowered_runtime_sources,
-            candidate_owners.values().copied(),
-        );
-        let source_definition_modules = source_definition_modules_by_source
-            .get(&source_id)
-            .cloned()
-            .unwrap_or_default();
-        let owner_source_lines =
-            owner_module_source_lines(program, candidate_owners.values().copied());
-        let reader_cluster_context = RuntimeReaderClusterContext {
-            source_file_id: source_id,
-            owner_available_bindings: &owner_available_bindings,
-            source_consumers_by_runtime_binding: &runtime_source_consumers,
-            source_definition_modules: &source_definition_modules,
-            all_source_definition_modules: &all_source_definition_modules,
-            externalized_packages,
-            module_dependencies_by_owner: &module_dependencies_by_owner,
-            folded_modules: &folded_modules,
-            folded_runtime_definitions: &folded_runtime_definitions,
-            owner_runtime_state: &candidate_owner_runtime_state,
-            owner_source_lines: &owner_source_lines,
-            prelude,
-            read_index: &read_index,
-            movable_bindings: &movable_bindings,
-            candidate_owners: &candidate_owners,
-        };
-        let mut migration_proposals = Vec::<RuntimeReaderClusterMigrationProposal>::new();
-        for (binding, owner_module, _initializer) in &candidates {
-            // The binding must have a setter (zero-writer or shared
-            // bindings never enter `written_helpers`, but the prelude may
-            // also expose source-backed reads for which there is no setter
-            // — skip those).
-            // The binding must be a real prelude declaration. The
-            // migration accepts bare `var X;` and also `var X = LITERAL;`
-            // where LITERAL is a side-effect-free literal that the
-            // writer can re-emit verbatim. Anything more complex (calls,
-            // identifier references, member access) stays put — moving
-            // such an initializer would require dragging its
-            // dependencies along.
-            // The setter function is synthesized by the planner at emit
-            // time — it doesn't appear in the prelude snippets. Any
-            // OTHER prelude snippet, namespace export, or folded chunk
-            // that references X counts as a runtime read.
-            let migration = match runtime_binding_read_profile(&read_index, binding) {
-                RuntimeBindingReadProfile::NoReads => RuntimeReaderClusterMigration {
-                    primary_bindings: BTreeSet::from([binding.clone()]),
-                    extra_snippets: BTreeSet::new(),
-                    extra_namespace_exports: BTreeSet::new(),
-                    extra_runtime_deps: BTreeSet::new(),
-                    extra_runtime_setter_deps: BTreeSet::new(),
-                    extra_runtime_dep_aliases: BTreeMap::new(),
-                    pinned_runtime_deps: BTreeSet::new(),
-                    extra_source_deps: BTreeMap::new(),
-                    extra_runtime_reexport_source_deps: BTreeMap::new(),
-                    extra_noop_deps: BTreeSet::new(),
-                },
-                RuntimeBindingReadProfile::SnippetReaders(readers) => {
-                    let Ok(migration) = migratable_runtime_reader_cluster_result(
-                        &reader_cluster_context,
-                        *owner_module,
-                        binding,
-                        readers,
-                    ) else {
-                        continue;
-                    };
-                    migration
-                }
-                RuntimeBindingReadProfile::Rejected => {
-                    if let Some(migration) = migratable_folded_non_snippet_runtime_read_result(
-                        &reader_cluster_context,
-                        *owner_module,
-                        binding,
-                    ) {
-                        migration
-                    } else {
-                        if !runtime_reader_folded_non_snippet_use_can_move(
-                            &reader_cluster_context,
-                            binding,
-                        ) {
-                            continue;
-                        }
-                        let readers = runtime_readers_for_binding(&read_index, binding);
-                        if readers.is_empty() {
-                            continue;
-                        }
-                        let Ok(migration) = migratable_runtime_reader_cluster_result(
-                            &reader_cluster_context,
-                            *owner_module,
-                            binding,
-                            readers,
-                        ) else {
-                            continue;
-                        };
-                        migration
-                    }
-                }
-            };
-            if !migration
-                .primary_bindings
-                .iter()
-                .all(|primary| candidate_initializers.contains_key(primary))
-            {
-                continue;
-            }
-            migration_proposals.push(RuntimeReaderClusterMigrationProposal {
-                seed_binding: binding.clone(),
-                owner_module: *owner_module,
-                source_lines: runtime_reader_migration_source_lines(
-                    &reader_cluster_context,
-                    &migration,
-                ),
-                migration,
-            });
-        }
-        let mut migration_proposals = merge_same_owner_overlapping_reader_migrations(
-            &reader_cluster_context,
-            migration_proposals,
-        );
-        sort_reader_migration_proposals_by_preference(&mut migration_proposals);
-        let mut selected_migration_proposals =
-            select_non_conflicting_reader_migration_proposals(&migration_proposals);
-        let localized_setter_deps = localize_reader_runtime_setter_deps(
-            &reader_cluster_context,
-            &mut selected_migration_proposals,
-        );
-
-        let mut migrated_primary_bindings = BTreeSet::<BindingName>::new();
-        let mut pinned_primary_bindings = BTreeSet::<BindingName>::new();
-        let mut migrated_reader_owners = BTreeMap::<BindingName, ModuleId>::new();
-        let mut aliased_runtime_deps = BTreeSet::<BindingName>::new();
-        let mut aliased_runtime_dep_owners = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
-        for proposal in &selected_migration_proposals {
-            let owner_module = proposal.owner_module;
-            let migration = &proposal.migration;
-            if migration.primary_bindings.iter().any(|primary| {
-                migrated_primary_bindings.contains(primary)
-                    || pinned_primary_bindings.contains(primary)
-                    || aliased_runtime_deps.contains(primary)
-            }) || migration
-                .pinned_runtime_deps
-                .iter()
-                .any(|dep| migrated_primary_bindings.contains(dep))
-                || migration
-                    .extra_runtime_dep_aliases
-                    .keys()
-                    .any(|dep| migrated_primary_bindings.contains(dep))
-                || migration
-                    .extra_snippets
-                    .iter()
-                    .chain(migration.extra_namespace_exports.iter())
-                    .any(|reader| {
-                        migrated_reader_owners
-                            .get(reader)
-                            .is_some_and(|existing_owner| *existing_owner != owner_module)
-                    })
-            {
-                continue;
-            }
-            for dep in migration.extra_runtime_dep_aliases.keys() {
-                aliased_runtime_deps.insert(dep.clone());
-                aliased_runtime_dep_owners
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(owner_module);
-            }
-            for primary in &migration.primary_bindings {
-                let Some(primary_initializer) = candidate_initializers.get(primary).cloned() else {
-                    continue;
-                };
-                plan.insert(
-                    primary.clone(),
-                    RuntimeVarMigration {
-                        owner_module,
-                        source_file_id: source_id,
-                        extra_snippets: migration.extra_snippets.clone(),
-                        extra_namespace_exports: migration.extra_namespace_exports.clone(),
-                        extra_runtime_deps: migration.extra_runtime_deps.clone(),
-                        extra_runtime_setter_deps: migration.extra_runtime_setter_deps.clone(),
-                        extra_runtime_dep_aliases: migration.extra_runtime_dep_aliases.clone(),
-                        extra_source_deps: migration.extra_source_deps.clone(),
-                        extra_runtime_reexport_source_deps: migration
-                            .extra_runtime_reexport_source_deps
-                            .clone(),
-                        extra_noop_deps: migration.extra_noop_deps.clone(),
-                        initializer: primary_initializer,
-                    },
-                );
-                migrated_primary_bindings.insert(primary.clone());
-            }
-            for reader in migration
-                .extra_snippets
-                .iter()
-                .chain(migration.extra_namespace_exports.iter())
-            {
-                migrated_reader_owners.insert(reader.clone(), owner_module);
-            }
-            pinned_primary_bindings.extend(migration.pinned_runtime_deps.iter().cloned());
-        }
-        for (binding, localized) in localized_setter_deps {
-            plan.insert(
-                binding.clone(),
-                RuntimeVarMigration {
-                    owner_module: localized.owner_module,
-                    source_file_id: source_id,
-                    extra_snippets: BTreeSet::new(),
-                    extra_namespace_exports: BTreeSet::new(),
-                    extra_runtime_deps: BTreeSet::new(),
-                    extra_runtime_setter_deps: BTreeSet::new(),
-                    extra_runtime_dep_aliases: BTreeMap::new(),
-                    extra_source_deps: BTreeMap::new(),
-                    extra_runtime_reexport_source_deps: BTreeMap::new(),
-                    extra_noop_deps: BTreeSet::new(),
-                    initializer: localized.initializer,
-                },
-            );
-            migrated_primary_bindings.insert(binding);
-        }
-        // Some clusters share the same reader function across different
-        // writer-owned vars:
-        //
-        //   function pair() { return [left, right]; }
-        //
-        // The first selected cluster moves `pair` with one writer and records
-        // the other var as an extra runtime dep. If the other var's writer can
-        // be imported by that reader owner without adding a source cycle, move
-        // the second var as a primary-only migration too. The moved reader is
-        // then rewired by `migrated_extra_runtime_deps_for_owner` to import the
-        // var from its real writer, so both setters disappear.
-        for proposal in &migration_proposals {
-            let owner_module = proposal.owner_module;
-            let migration = &proposal.migration;
-            if migration.primary_bindings.iter().any(|primary| {
-                migrated_primary_bindings.contains(primary)
-                    || pinned_primary_bindings.contains(primary)
-            }) || migration
-                .pinned_runtime_deps
-                .iter()
-                .any(|dep| migrated_primary_bindings.contains(dep))
-            {
-                continue;
-            }
-            let alias_user_owners = migration
-                .primary_bindings
-                .iter()
-                .filter_map(|primary| aliased_runtime_dep_owners.get(primary))
-                .flatten()
-                .copied()
-                .collect::<BTreeSet<_>>();
-            let moved_reader_owners = migration
-                .extra_snippets
-                .iter()
-                .chain(migration.extra_namespace_exports.iter())
-                .filter_map(|reader| migrated_reader_owners.get(reader).copied())
-                .collect::<BTreeSet<_>>();
-            if moved_reader_owners.is_empty()
-                || migration
-                    .extra_snippets
-                    .iter()
-                    .chain(migration.extra_namespace_exports.iter())
-                    .any(|reader| !migrated_reader_owners.contains_key(reader))
-                || moved_reader_owners.iter().any(|reader_owner| {
-                    module_dependency_path_exists(
-                        &module_dependencies_by_owner,
-                        owner_module,
-                        *reader_owner,
-                    )
-                })
-                || alias_user_owners.iter().any(|alias_owner| {
-                    *alias_owner == owner_module
-                        || module_dependency_path_exists(
-                            &module_dependencies_by_owner,
-                            owner_module,
-                            *alias_owner,
-                        )
-                })
-            {
-                continue;
-            }
-            for primary in &migration.primary_bindings {
-                let Some(primary_initializer) = candidate_initializers.get(primary).cloned() else {
-                    continue;
-                };
-                plan.insert(
-                    primary.clone(),
-                    RuntimeVarMigration {
-                        owner_module,
-                        source_file_id: source_id,
-                        extra_snippets: BTreeSet::new(),
-                        extra_namespace_exports: BTreeSet::new(),
-                        extra_runtime_deps: BTreeSet::new(),
-                        extra_runtime_setter_deps: BTreeSet::new(),
-                        extra_runtime_dep_aliases: BTreeMap::new(),
-                        extra_source_deps: BTreeMap::new(),
-                        extra_runtime_reexport_source_deps: BTreeMap::new(),
-                        extra_noop_deps: BTreeSet::new(),
-                        initializer: primary_initializer,
-                    },
-                );
-                migrated_primary_bindings.insert(primary.clone());
-            }
-        }
-    }
-    add_global_owned_runtime_snippet_migrations(
-        program,
-        source_module_wiring,
-        lowered_runtime_sources,
-        runtime_lazy_folds,
-        externalized_packages,
-        &mut plan,
-    );
-    plan
-}
-
-fn add_global_owned_runtime_snippet_migrations(
+pub(crate) fn add_global_owned_runtime_snippet_migrations(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -6794,26 +5732,27 @@ fn runtime_setter_migration_blocker_report(
     report
 }
 
-struct RuntimeReaderClusterContext<'a> {
-    source_file_id: u32,
-    owner_available_bindings: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    source_consumers_by_runtime_binding: &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
-    source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
-    all_source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
-    externalized_packages: &'a BTreeSet<ModuleId>,
-    module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-    folded_modules: &'a BTreeSet<ModuleId>,
-    folded_runtime_definitions: &'a BTreeSet<BindingName>,
-    owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
+pub(crate) struct RuntimeReaderClusterContext<'a> {
+    pub(crate) source_file_id: u32,
+    pub(crate) owner_available_bindings: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) source_consumers_by_runtime_binding:
+        &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
+    pub(crate) source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
+    pub(crate) all_source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
+    pub(crate) externalized_packages: &'a BTreeSet<ModuleId>,
+    pub(crate) module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
+    pub(crate) folded_modules: &'a BTreeSet<ModuleId>,
+    pub(crate) folded_runtime_definitions: &'a BTreeSet<BindingName>,
+    pub(crate) owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
     /// Source line count for each candidate owner module. Lets the cluster
     /// size cap scale with the receiving module so large source modules can
     /// absorb proportionally larger reader clusters; small modules still
     /// see the fixed floor.
-    owner_source_lines: &'a BTreeMap<ModuleId, usize>,
-    prelude: &'a RuntimePrelude,
-    read_index: &'a RuntimeSourceReadIndex,
-    movable_bindings: &'a BTreeSet<BindingName>,
-    candidate_owners: &'a BTreeMap<BindingName, ModuleId>,
+    pub(crate) owner_source_lines: &'a BTreeMap<ModuleId, usize>,
+    pub(crate) prelude: &'a RuntimePrelude,
+    pub(crate) read_index: &'a RuntimeSourceReadIndex,
+    pub(crate) movable_bindings: &'a BTreeSet<BindingName>,
+    pub(crate) candidate_owners: &'a BTreeMap<BindingName, ModuleId>,
 }
 
 /// Per-owner cluster line cap: keep the historical fixed floor as a lower
@@ -6838,7 +5777,7 @@ fn runtime_reader_cluster_cap_for_owner(
 /// each — the meaningful "absorption capacity" is the source file the
 /// module slice was carved from, not the per-module slice. Two owners
 /// drawn from the same source file share its capacity here.
-fn owner_module_source_lines(
+pub(crate) fn owner_module_source_lines(
     program: &EnrichedProgram,
     owners: impl IntoIterator<Item = ModuleId>,
 ) -> BTreeMap<ModuleId, usize> {
@@ -6870,13 +5809,13 @@ fn owner_module_source_lines(
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeReaderOwnerRuntimeState {
-    source: String,
-    remaining_helpers: BTreeSet<BindingName>,
-    written_helpers: BTreeSet<BindingName>,
-    uses_lazy_module: bool,
-    uses_lazy_value: bool,
-    can_localize_lazy_value: bool,
+pub(crate) struct RuntimeReaderOwnerRuntimeState {
+    pub(crate) source: String,
+    pub(crate) remaining_helpers: BTreeSet<BindingName>,
+    pub(crate) written_helpers: BTreeSet<BindingName>,
+    pub(crate) uses_lazy_module: bool,
+    pub(crate) uses_lazy_value: bool,
+    pub(crate) can_localize_lazy_value: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7102,36 +6041,36 @@ fn enqueue_namespace_co_migration(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeReaderClusterMigration {
+pub(crate) struct RuntimeReaderClusterMigration {
     /// Primary runtime vars that can move as one same-writer component.
     /// This always includes the binding that seeded the cluster; it may
     /// also include other movable vars read by the same reader closure
     /// when they have the same owner module.
-    primary_bindings: BTreeSet<BindingName>,
-    extra_snippets: BTreeSet<BindingName>,
-    extra_namespace_exports: BTreeSet<BindingName>,
-    extra_runtime_deps: BTreeSet<BindingName>,
-    extra_runtime_setter_deps: BTreeSet<BindingName>,
-    extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
+    pub(crate) primary_bindings: BTreeSet<BindingName>,
+    pub(crate) extra_snippets: BTreeSet<BindingName>,
+    pub(crate) extra_namespace_exports: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_deps: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_setter_deps: BTreeSet<BindingName>,
+    pub(crate) extra_runtime_dep_aliases: BTreeMap<BindingName, BindingName>,
     /// Runtime deps that must explicitly stay owned by runtime because moving
     /// them to their writer would introduce a source-module cycle through this
     /// migrated reader's owner->runtime import.
-    pinned_runtime_deps: BTreeSet<BindingName>,
-    extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    extra_runtime_reexport_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    extra_noop_deps: BTreeSet<BindingName>,
+    pub(crate) pinned_runtime_deps: BTreeSet<BindingName>,
+    pub(crate) extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) extra_runtime_reexport_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) extra_noop_deps: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeReaderClusterMigrationProposal {
-    seed_binding: BindingName,
-    owner_module: ModuleId,
-    source_lines: usize,
-    migration: RuntimeReaderClusterMigration,
+pub(crate) struct RuntimeReaderClusterMigrationProposal {
+    pub(crate) seed_binding: BindingName,
+    pub(crate) owner_module: ModuleId,
+    pub(crate) source_lines: usize,
+    pub(crate) migration: RuntimeReaderClusterMigration,
 }
 
 impl RuntimeReaderClusterMigrationProposal {
-    fn estimated_runtime_savings(&self) -> usize {
+    pub(crate) fn estimated_runtime_savings(&self) -> usize {
         self.source_lines + self.migration.primary_bindings.len() * 4
     }
 }
@@ -7145,7 +6084,7 @@ const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
 /// never lowers it below this floor.
 const MAX_RUNTIME_READER_MIGRATION_CLUSTER_LINES: usize = 10000;
 
-fn merge_same_owner_overlapping_reader_migrations(
+pub(crate) fn merge_same_owner_overlapping_reader_migrations(
     ctx: &RuntimeReaderClusterContext<'_>,
     proposals: Vec<RuntimeReaderClusterMigrationProposal>,
 ) -> Vec<RuntimeReaderClusterMigrationProposal> {
@@ -7207,7 +6146,7 @@ fn merge_same_owner_overlapping_reader_migrations(
     merged
 }
 
-fn sort_reader_migration_proposals_by_preference(
+pub(crate) fn sort_reader_migration_proposals_by_preference(
     proposals: &mut [RuntimeReaderClusterMigrationProposal],
 ) {
     proposals.sort_by(|left, right| {
@@ -7231,7 +6170,7 @@ fn sort_reader_migration_proposals_by_preference(
     });
 }
 
-fn select_non_conflicting_reader_migration_proposals(
+pub(crate) fn select_non_conflicting_reader_migration_proposals(
     proposals: &[RuntimeReaderClusterMigrationProposal],
 ) -> Vec<RuntimeReaderClusterMigrationProposal> {
     if proposals.len() < 2 {
@@ -7557,7 +6496,7 @@ struct LocalizedRuntimeSetterDep {
     initializer: Option<String>,
 }
 
-fn localize_reader_runtime_setter_deps(
+pub(crate) fn localize_reader_runtime_setter_deps(
     ctx: &RuntimeReaderClusterContext<'_>,
     proposals: &mut [RuntimeReaderClusterMigrationProposal],
 ) -> BTreeMap<BindingName, LocalizedRuntimeSetterDep> {
@@ -7859,7 +6798,7 @@ impl RuntimeReaderClusterBlocker {
     }
 }
 
-fn migratable_runtime_reader_cluster_result(
+pub(crate) fn migratable_runtime_reader_cluster_result(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -8433,7 +7372,7 @@ fn runtime_binding_is_bare_var_declaration(
         })
 }
 
-fn migratable_folded_non_snippet_runtime_read_result(
+pub(crate) fn migratable_folded_non_snippet_runtime_read_result(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -8486,7 +7425,7 @@ fn migratable_folded_non_snippet_runtime_read_result(
     })
 }
 
-fn runtime_reader_owner_available_bindings(
+pub(crate) fn runtime_reader_owner_available_bindings(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -8731,7 +7670,7 @@ fn folded_runtime_reads_are_lazy_safe(
     true
 }
 
-fn runtime_reader_owner_runtime_state(
+pub(crate) fn runtime_reader_owner_runtime_state(
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     owners: impl IntoIterator<Item = ModuleId>,
 ) -> BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState> {
@@ -8973,7 +7912,7 @@ fn runtime_reader_cluster_source_lines(
         .sum()
 }
 
-fn runtime_reader_migration_source_lines(
+pub(crate) fn runtime_reader_migration_source_lines(
     ctx: &RuntimeReaderClusterContext<'_>,
     migration: &RuntimeReaderClusterMigration,
 ) -> usize {
@@ -8981,7 +7920,7 @@ fn runtime_reader_migration_source_lines(
         + migration.extra_namespace_exports.len()
 }
 
-fn folded_runtime_chunk_definitions(
+pub(crate) fn folded_runtime_chunk_definitions(
     folded_chunks: &[RuntimeFoldedSourceChunk],
 ) -> BTreeSet<BindingName> {
     folded_chunks
@@ -8990,7 +7929,7 @@ fn folded_runtime_chunk_definitions(
         .collect()
 }
 
-fn module_dependency_path_exists(
+pub(crate) fn module_dependency_path_exists(
     dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
     from: ModuleId,
     target: ModuleId,
@@ -9001,7 +7940,7 @@ fn module_dependency_path_exists(
             .is_some_and(|reachable| reachable.contains(&target))
 }
 
-fn module_dependency_modules_by_owner(
+pub(crate) fn module_dependency_modules_by_owner(
     program: &EnrichedProgram,
 ) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
     let mut direct_dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
@@ -9222,7 +8161,7 @@ fn runtime_binding_has_blocking_non_snippet_use(
         || read_index.namespace_export_helpers.contains(binding)
 }
 
-fn runtime_reader_folded_non_snippet_use_can_move(
+pub(crate) fn runtime_reader_folded_non_snippet_use_can_move(
     ctx: &RuntimeReaderClusterContext<'_>,
     binding: &BindingName,
 ) -> bool {
@@ -13161,7 +12100,11 @@ fn rename_identifier_reads_in_source(
     rewritten
 }
 
-fn identifier_occurrence_is_value_reference(source: &str, start: usize, end: usize) -> bool {
+pub(crate) fn identifier_occurrence_is_value_reference(
+    source: &str,
+    start: usize,
+    end: usize,
+) -> bool {
     let bytes = source.as_bytes();
     if previous_non_ws(bytes, start)
         .and_then(|index| bytes.get(index))
@@ -15046,781 +13989,6 @@ fn source_module_wiring(
     wiring
 }
 
-/// Cross-module eager-safety analysis: for each target module's exported
-/// binding, decide whether collapsing its lazy thunk into a direct value
-/// is safe **given how every other module observes that binding**.
-///
-/// A binding `X` exported by module `M` is "eager-safe" iff:
-///   1. `M` is a singleton SCC in the top-level module-dependency graph
-///      (no cycle whose every edge is a top-level reference passes through
-///      `M` — see [`build_top_level_dep_graph`]).
-///   2. Every consumer module that imports `X` references it exclusively
-///      from inside function / arrow / method bodies (its
-///      [`ImportUsageScope`] is `NestedOnly`). Top-level use anywhere
-///      forces the lazy semantics to be observable.
-///
-/// Note: per-module body purity (literal / class / function RHS) is **not**
-/// checked here — that's the existing `delazify_pure_value_bindings` /
-/// `delazify_pure_module_bindings` filter and applies per-binding inside
-/// the lowering pass. The eager-safety analysis only adds the missing
-/// cross-module dimension.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct EagerSafeAnalysis {
-    /// For each target module, the subset of its exported bindings that
-    /// pass the cross-module eager-safety check.
-    eager_safe_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    /// For each consumer module, the set of import names that resolve
-    /// to bindings the fixpoint marked eager-safe. The lowering pass
-    /// passes this set to the body extractor so `EagerWithDeps` bodies
-    /// (zero-arg calls to imported thunks) can extract their value
-    /// when every dep would itself have been eagerified.
-    safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>>,
-}
-
-const CROSS_MODULE_EAGER_SAFE_ANALYSIS_MODULE_LIMIT: usize = 1024;
-
-fn should_compute_cross_module_eager_safe_analysis(program: &EnrichedProgram) -> bool {
-    program.model().modules().len() <= CROSS_MODULE_EAGER_SAFE_ANALYSIS_MODULE_LIMIT
-        || std::env::var_os("REVERTS_CROSS_MODULE_EAGER_SAFE").is_some()
-}
-
-fn compute_eager_safe_analysis(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-) -> EagerSafeAnalysis {
-    let usage_scopes = compute_consumer_usage_scopes(program, source_module_wiring);
-    let call_forms = compute_consumer_call_forms(program, source_module_wiring);
-    let singleton_modules = singleton_scc_modules(program, source_module_wiring, &usage_scopes);
-    // Only bindings declared as `var X = <lazy_helper>(...)` in their
-    // exporting module are eagerification candidates — a regular function
-    // or value export is already "direct" and any consumer `X()` call is
-    // already calling it correctly (not invoking a thunk).
-    let thunk_wrapped_exports = compute_thunk_wrapped_exports(program);
-    // Additional gate: only bindings whose BODY actually passes the
-    // delazify-extraction check qualify for eagerification. The
-    // prediction also reports per-consumer `safe_call_targets` so the
-    // lowering extractor can accept `EagerWithDeps` bodies whose deps
-    // would themselves eagerify.
-    let prediction = predict_delazifiable_exports(program, source_module_wiring);
-    let mut eager_safe_exports_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-    for (target_id, exported_bindings) in &source_module_wiring.exports_by_module {
-        if !singleton_modules.contains(target_id) {
-            continue;
-        }
-        let Some(thunk_wrapped) = thunk_wrapped_exports.get(target_id) else {
-            continue;
-        };
-        let Some(delazifiable) = prediction.delazifiable_exports_by_module.get(target_id) else {
-            continue;
-        };
-        let mut safe = BTreeSet::<BindingName>::new();
-        'each_export: for binding in exported_bindings {
-            if !thunk_wrapped.contains(binding) {
-                continue;
-            }
-            if !delazifiable.contains(binding) {
-                continue;
-            }
-            // For every consumer that imports this binding, the consumer
-            // must reference it exclusively in the zero-arg `X()` call
-            // shape — the only pattern the cross-module rewriter knows
-            // how to mechanically convert to a bare `X` once M emits the
-            // direct value. Body-purity is checked separately inside
-            // `lower_runtime_helpers` (we never delazify an impure RHS),
-            // so call-form is the only additional gate Phase 8 introduces
-            // on top of SCC clearance.
-            for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
-                let Some(imported_from_target) = imports_by_target.get(target_id) else {
-                    continue;
-                };
-                if !imported_from_target.contains(binding) {
-                    continue;
-                }
-                let Some(consumer_call_forms) = call_forms.get(consumer_id) else {
-                    continue 'each_export;
-                };
-                if !consumer_call_forms
-                    .get(binding.as_str())
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    continue 'each_export;
-                }
-            }
-            safe.insert(binding.clone());
-        }
-        if !safe.is_empty() {
-            eager_safe_exports_by_module.insert(*target_id, safe);
-        }
-    }
-    EagerSafeAnalysis {
-        eager_safe_exports_by_module,
-        safe_call_targets_by_module: prediction.safe_call_targets_by_module,
-    }
-}
-
-/// For each consumer module, classify every imported binding by whether
-/// its uses in that consumer are all the zero-arg call shape `X()`. A
-/// binding can be eagerified only if every consumer that references it
-/// passes this check — otherwise cross-module rewriting can't
-/// mechanically convert `X()` (returning the thunk's value) into `X`
-/// (the value directly).
-fn compute_consumer_call_forms(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-) -> BTreeMap<ModuleId, BTreeMap<String, bool>> {
-    let mut out = BTreeMap::new();
-    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
-        let Some(source_slice) = program.model().input().module_source_slice(*consumer_id) else {
-            continue;
-        };
-        let binding_names: BTreeSet<String> = imports_by_target
-            .values()
-            .flatten()
-            .map(|binding| binding.as_str().to_string())
-            .collect();
-        if binding_names.is_empty() {
-            continue;
-        }
-        let call_forms = verify_only_immediate_call_references(
-            source_slice.source,
-            &binding_names,
-            Some(std::path::Path::new(source_slice.source_file_path)),
-            ParseGoal::TypeScript,
-        );
-        out.insert(*consumer_id, call_forms);
-    }
-    out
-}
-
-/// Parse every consumer module's source slice once and classify the usage
-/// scope of every binding it imports. Returns a map keyed by consumer
-/// module id, with values keyed by the imported binding's identifier.
-fn compute_consumer_usage_scopes(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-) -> BTreeMap<ModuleId, BTreeMap<String, ImportUsageScope>> {
-    let mut out = BTreeMap::new();
-    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
-        let Some(source_slice) = program.model().input().module_source_slice(*consumer_id) else {
-            continue;
-        };
-        let binding_names: BTreeSet<String> = imports_by_target
-            .values()
-            .flatten()
-            .map(|binding| binding.as_str().to_string())
-            .collect();
-        if binding_names.is_empty() {
-            continue;
-        }
-        let scopes = classify_import_usage_scope(
-            source_slice.source,
-            &binding_names,
-            Some(std::path::Path::new(source_slice.source_file_path)),
-            ParseGoal::TypeScript,
-        );
-        out.insert(*consumer_id, scopes);
-    }
-    out
-}
-
-/// Compute the set of modules that are singleton SCCs in the
-/// top-level-only module dependency graph: edges include only the
-/// references a consumer makes at its own top-level (not the ones nested
-/// inside fn/arrow/method bodies). Modules in singleton SCCs are not part
-/// of any module-evaluation cycle and can therefore be eagerified without
-/// reordering observable side effects.
-fn singleton_scc_modules(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-    usage_scopes: &BTreeMap<ModuleId, BTreeMap<String, ImportUsageScope>>,
-) -> BTreeSet<ModuleId> {
-    use petgraph::algo::tarjan_scc;
-    use petgraph::graph::{DiGraph, NodeIndex};
-    let mut graph: DiGraph<ModuleId, ()> = DiGraph::new();
-    let mut node_by_module = BTreeMap::<ModuleId, NodeIndex>::new();
-    for module in program.model().modules() {
-        let idx = graph.add_node(module.id);
-        node_by_module.insert(module.id, idx);
-    }
-    for (consumer_id, imports_by_target) in &source_module_wiring.imports_by_module {
-        let consumer_scopes = usage_scopes.get(consumer_id);
-        let Some(&consumer_idx) = node_by_module.get(consumer_id) else {
-            continue;
-        };
-        for (target_id, bindings) in imports_by_target {
-            let Some(&target_idx) = node_by_module.get(target_id) else {
-                continue;
-            };
-            let has_top_level_use = bindings.iter().any(|binding| {
-                consumer_scopes
-                    .and_then(|scopes| scopes.get(binding.as_str()))
-                    .copied()
-                    == Some(ImportUsageScope::TopLevel)
-            });
-            if has_top_level_use {
-                graph.add_edge(consumer_idx, target_idx, ());
-            }
-        }
-    }
-    let sccs = tarjan_scc(&graph);
-    let mut singleton = BTreeSet::new();
-    for scc in &sccs {
-        if scc.len() != 1 {
-            continue;
-        }
-        let node = scc[0];
-        // Reject if there's a self-loop — that's a (trivial) cycle.
-        if graph.find_edge(node, node).is_some() {
-            continue;
-        }
-        singleton.insert(graph[node]);
-    }
-    singleton
-}
-
-/// For each module, find every top-level binding declared as
-/// `var X = HELPER(...)` where HELPER is a lazy-wrapping helper from
-/// the bundle's runtime prelude (CommonJS wrapper or lazy initializer).
-/// These are the only exports the cross-module eager-safety analysis
-/// is allowed to consider as candidates — non-thunk exports (a literal,
-/// a function declaration, a class) are already direct and their
-/// consumer call sites are not zero-arg thunk invocations.
-fn compute_thunk_wrapped_exports(
-    program: &EnrichedProgram,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    let mut out = BTreeMap::new();
-    for module in program.model().modules() {
-        let Some(source) = program.model().input().module_source_slice(module.id) else {
-            continue;
-        };
-        let runtime_imports = program.model().graph().runtime_imports_for(module.id);
-        let mut helper_kinds = runtime_helper_kinds(program.model().graph(), &runtime_imports);
-        helper_kinds.extend(runtime_helper_kinds_for_source(
-            program.model().graph(),
-            source.source_file_id,
-            source.source,
-        ));
-        let lazy_helpers: BTreeSet<&str> = helper_kinds
-            .iter()
-            .filter(|(_, kind)| {
-                matches!(
-                    kind,
-                    RuntimePreludeBindingKind::CommonJsWrapper
-                        | RuntimePreludeBindingKind::LazyInitializer
-                )
-            })
-            .map(|(binding, _)| binding.as_str())
-            .collect();
-        if lazy_helpers.is_empty() {
-            continue;
-        }
-        let thunk_bindings = scan_thunk_wrapped_bindings(source.source, &lazy_helpers);
-        if !thunk_bindings.is_empty() {
-            out.insert(module.id, thunk_bindings);
-        }
-    }
-    out
-}
-
-/// Scan `source` for every `var/let/const X = HELPER(...)` declaration
-/// where HELPER is one of `lazy_helpers`, and return the binding name X.
-/// The scan is byte-level (skipping quoted strings, comments, regex
-/// literals, templates) — same conventions as the existing
-/// declaration scanners in this module.
-fn scan_thunk_wrapped_bindings(
-    source: &str,
-    lazy_helpers: &BTreeSet<&str>,
-) -> BTreeSet<BindingName> {
-    let mut out = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if let Some(next) = skip_non_code_at(source, cursor) {
-            cursor = next;
-            continue;
-        }
-        let Some(keyword) = ["var", "let", "const"]
-            .into_iter()
-            .find(|kw| keyword_at(source, cursor, kw))
-        else {
-            cursor += 1;
-            continue;
-        };
-        let mut c = cursor + keyword.len();
-        c = skip_ws(bytes, c);
-        let Some((binding_name, after_binding)) = parse_identifier(source, c) else {
-            cursor += 1;
-            continue;
-        };
-        c = skip_ws(bytes, after_binding);
-        if bytes.get(c) != Some(&b'=') {
-            cursor = after_binding;
-            continue;
-        }
-        c = skip_ws(bytes, c + 1);
-        let Some((helper_name, after_helper)) = parse_identifier(source, c) else {
-            cursor = after_binding;
-            continue;
-        };
-        c = skip_ws(bytes, after_helper);
-        if bytes.get(c) != Some(&b'(') {
-            cursor = after_helper;
-            continue;
-        }
-        if lazy_helpers.contains(helper_name) {
-            out.insert(BindingName::new(binding_name));
-        }
-        cursor = after_helper;
-    }
-    out
-}
-
-/// For each module, predict the subset of its thunk-wrapped exports
-/// whose body would actually delazify — including transitively, via
-/// the inter-procedural fixpoint over zero-arg thunk-call dependencies.
-///
-/// Pipeline:
-///   1. Enumerate every `var X = HELPER((params) => { BODY })` across
-///      every module and classify each BODY via the AST-level
-///      `classify_lazy_module_body`. Outcomes:
-///         * `Eager` — body has a value with no calls; immediately safe.
-///         * `EagerWithDeps` — body composes a value but invokes one or
-///           more zero-arg bindings; safe iff those bindings are
-///           themselves eager-safe.
-///         * `Impure` — body has unrecognized side effects; never safe.
-///   2. Build a per-module name-resolution table from
-///      `source_module_wiring.imports_by_module` so each `call_deps`
-///      identifier in step 1 can be mapped to a `(target_module, binding)`
-///      pair. Local thunks (declared in the consumer module itself)
-///      resolve to that same module's `(M, name)`.
-///   3. Fixpoint: seed with all `Eager` bindings, then loop: add
-///      `EagerWithDeps{deps}` bindings where every resolved dep already
-///      lives in the safe set, until stable. Mutual recursion (cycles
-///      in the dep graph) keep both sides unsafe — neither can be added
-///      without the other already in the set.
-fn predict_delazifiable_exports(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-) -> EagerSafetyPrediction {
-    let classifications = enumerate_and_classify_lazy_bindings(program);
-    let resolution = build_dep_resolution_map(program, source_module_wiring, &classifications);
-    let safe_keys = compute_eager_safe_fixpoint(&classifications, &resolution);
-    let mut delazifiable_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>> =
-        BTreeMap::new();
-    for (module_id, binding) in &safe_keys {
-        delazifiable_exports_by_module
-            .entry(*module_id)
-            .or_default()
-            .insert(binding.clone());
-    }
-    let mut safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>> = BTreeMap::new();
-    for module in program.model().modules() {
-        let names = build_eager_safe_call_targets_for_module(module.id, &safe_keys, &resolution);
-        if !names.is_empty() {
-            safe_call_targets_by_module.insert(module.id, names);
-        }
-    }
-    EagerSafetyPrediction {
-        delazifiable_exports_by_module,
-        safe_call_targets_by_module,
-    }
-}
-
-/// Bundle of outputs from the inter-procedural fixpoint. Both fields
-/// are needed by the lowering: the exports set tells the cross-module
-/// rewriter which consumer `X()` calls to strip, and the call-targets
-/// set tells the body extractor which thunk-call deps to treat as
-/// "already handled by the producer's eagerification" — i.e., drop
-/// from the consumer's prologue.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct EagerSafetyPrediction {
-    delazifiable_exports_by_module: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    safe_call_targets_by_module: BTreeMap<ModuleId, BTreeSet<String>>,
-}
-
-/// Walk every module, find each `var X = HELPER((params) => { BODY })`
-/// declaration where HELPER is a lazy wrapper, and classify the BODY
-/// via the AST classifier in `reverts_js`. Returns the classification
-/// keyed by `(module_id, binding)`.
-fn enumerate_and_classify_lazy_bindings(
-    program: &EnrichedProgram,
-) -> BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification> {
-    let mut classifications = BTreeMap::new();
-    for module in program.model().modules() {
-        let Some(source) = program.model().input().module_source_slice(module.id) else {
-            continue;
-        };
-        let runtime_imports = program.model().graph().runtime_imports_for(module.id);
-        let mut helper_kinds = runtime_helper_kinds(program.model().graph(), &runtime_imports);
-        helper_kinds.extend(runtime_helper_kinds_for_source(
-            program.model().graph(),
-            source.source_file_id,
-            source.source,
-        ));
-        let module_helpers: BTreeSet<&str> = helper_kinds
-            .iter()
-            .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::CommonJsWrapper))
-            .map(|(binding, _)| binding.as_str())
-            .collect();
-        let value_helpers: BTreeSet<&str> = helper_kinds
-            .iter()
-            .filter(|(_, kind)| matches!(kind, RuntimePreludeBindingKind::LazyInitializer))
-            .map(|(binding, _)| binding.as_str())
-            .collect();
-        if module_helpers.is_empty() && value_helpers.is_empty() {
-            continue;
-        }
-        scan_and_classify_lazy_bindings_in_module(
-            source.source,
-            &module_helpers,
-            &value_helpers,
-            module.id,
-            &mut classifications,
-        );
-    }
-    classifications
-}
-
-/// Companion to `enumerate_and_classify_lazy_bindings`: for one module,
-/// scan its source for lazy declarations and stash the body classification.
-fn scan_and_classify_lazy_bindings_in_module(
-    source: &str,
-    commonjs_helpers: &BTreeSet<&str>,
-    lazy_value_helpers: &BTreeSet<&str>,
-    module_id: ModuleId,
-    out: &mut BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
-) {
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        if let Some(next) = skip_non_code_at(source, cursor) {
-            cursor = next;
-            continue;
-        }
-        let Some(keyword) = ["var", "let", "const"]
-            .into_iter()
-            .find(|kw| keyword_at(source, cursor, kw))
-        else {
-            cursor += 1;
-            continue;
-        };
-        let mut c = cursor + keyword.len();
-        c = skip_ws(bytes, c);
-        let Some((binding_name, after_binding)) = parse_identifier(source, c) else {
-            cursor += 1;
-            continue;
-        };
-        c = skip_ws(bytes, after_binding);
-        if bytes.get(c) != Some(&b'=') {
-            cursor = after_binding;
-            continue;
-        }
-        c = skip_ws(bytes, c + 1);
-        let Some((helper_name, after_helper)) = parse_identifier(source, c) else {
-            cursor = after_binding;
-            continue;
-        };
-        c = skip_ws(bytes, after_helper);
-        if bytes.get(c) != Some(&b'(') {
-            cursor = after_helper;
-            continue;
-        }
-        let is_commonjs = commonjs_helpers.contains(helper_name);
-        let is_lazy_value = lazy_value_helpers.contains(helper_name);
-        if !is_commonjs && !is_lazy_value {
-            cursor = after_helper;
-            continue;
-        }
-        c = skip_ws(bytes, c + 1);
-        let (exports_param, module_param, body_start, body_end) =
-            match parse_lazy_factory_signature(source, c, is_commonjs) {
-                Some(parts) => parts,
-                None => {
-                    cursor = after_helper;
-                    continue;
-                }
-            };
-        let body = &source[body_start..body_end];
-        let classification = reverts_js::classify_lazy_module_body(
-            body,
-            exports_param,
-            module_param,
-            None,
-            ParseGoal::TypeScript,
-        );
-        if !matches!(classification, reverts_js::LazyBodyClassification::Impure) {
-            out.insert((module_id, BindingName::new(binding_name)), classification);
-        }
-        cursor = body_end;
-    }
-}
-
-/// For each consumer module, build a `name → (target_module, binding)`
-/// table so dep names appearing in lazy bodies can be resolved.
-/// Combines two sources:
-///   * Cross-module imports recorded in `source_module_wiring` — every
-///     imported binding is mapped to its target module.
-///   * Local thunk bindings — if a body calls `localX()` and the same
-///     module has `var localX = lazyValue(...)`, that resolves to
-///     `(self, localX)`.
-fn build_dep_resolution_map(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-    _classifications: &BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
-) -> BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>> {
-    // Only cross-module imports are resolved as eager-safe call deps —
-    // local thunks within the same module would need source-order
-    // verification (a thunk declared AFTER its consumer can't be
-    // referenced before its declaration runs) which we don't yet
-    // perform. Restricting to imports is the conservative direction:
-    // local-only chains stay lazy; cross-module chains get the
-    // fixpoint benefit.
-    let mut out: BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>> = BTreeMap::new();
-    for module in program.model().modules() {
-        let entry = out.entry(module.id).or_default();
-        if let Some(targets) = source_module_wiring.imports_by_module.get(&module.id) {
-            for (target_id, bindings) in targets {
-                for binding in bindings {
-                    entry.insert(binding.as_str().to_string(), (*target_id, binding.clone()));
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Standard worklist fixpoint over the dep graph. Seeds with `Eager`
-/// bindings (no deps), then iteratively adds `EagerWithDeps` bindings
-/// whose dependencies all resolve to entries already in the safe set.
-/// O(N × max-deps) per round; converges in a small number of rounds
-/// in practice because most chains are shallow.
-///
-/// Note: the fixpoint result is used both to gate cross-module
-/// rewriting (consumer `X()` → `X`) and to gate value extraction in
-/// the lowering pass — the matching extractor
-/// `extract_lazy_module_eager_value_with_safe_deps` accepts
-/// `EagerWithDeps` bindings whose every dep is in the safe set, so
-/// producer and consumer agree on whether the binding emits as a
-/// direct value.
-fn compute_eager_safe_fixpoint(
-    classifications: &BTreeMap<(ModuleId, BindingName), reverts_js::LazyBodyClassification>,
-    resolution: &BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>>,
-) -> BTreeSet<(ModuleId, BindingName)> {
-    let mut safe: BTreeSet<(ModuleId, BindingName)> = BTreeSet::new();
-    for (key, classification) in classifications {
-        if matches!(
-            classification,
-            reverts_js::LazyBodyClassification::Eager { .. }
-        ) {
-            safe.insert(key.clone());
-        }
-    }
-    loop {
-        let mut added = false;
-        for (key, classification) in classifications {
-            if safe.contains(key) {
-                continue;
-            }
-            let reverts_js::LazyBodyClassification::EagerWithDeps { call_deps, .. } =
-                classification
-            else {
-                continue;
-            };
-            let module_resolution = resolution.get(&key.0);
-            let all_deps_safe = call_deps.iter().all(|name| {
-                module_resolution
-                    .and_then(|r| r.get(name))
-                    .map(|resolved| safe.contains(resolved))
-                    .unwrap_or(false)
-            });
-            if all_deps_safe {
-                safe.insert(key.clone());
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-    safe
-}
-
-/// For a given module M, project the global fixpoint result onto the
-/// names visible in M's scope. Returns the set of names X such that
-/// `X()` (zero-arg call) in M's body resolves to a binding that the
-/// fixpoint marked eager-safe — feeds into
-/// `extract_lazy_module_eager_value_with_safe_deps` when lowering M.
-fn build_eager_safe_call_targets_for_module(
-    module_id: ModuleId,
-    safe_keys: &BTreeSet<(ModuleId, BindingName)>,
-    resolution: &BTreeMap<ModuleId, BTreeMap<String, (ModuleId, BindingName)>>,
-) -> BTreeSet<String> {
-    let Some(module_resolution) = resolution.get(&module_id) else {
-        return BTreeSet::new();
-    };
-    module_resolution
-        .iter()
-        .filter_map(|(name, resolved)| {
-            if safe_keys.contains(resolved) {
-                Some(name.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-/// Parse the `((exports[, module]) => { body })` signature inside a
-/// lazy-helper call, starting from the byte right after the helper's
-/// opening `(`. Returns the parameter names and the byte range of the
-/// arrow body (exclusive of the surrounding braces).
-fn parse_lazy_factory_signature(
-    source: &str,
-    open_paren_after_helper: usize,
-    expect_two_params: bool,
-) -> Option<(&str, Option<&str>, usize, usize)> {
-    let bytes = source.as_bytes();
-    let mut c = open_paren_after_helper;
-    if bytes.get(c) != Some(&b'(') {
-        return None;
-    }
-    c = skip_ws(bytes, c + 1);
-    let (exports_param, after_exports) = if expect_two_params {
-        let (name, after) = parse_identifier(source, c)?;
-        c = skip_ws(bytes, after);
-        (name, after)
-    } else {
-        // lazyValue arrow: `() => { ... }`. Allow empty parameter list.
-        if bytes.get(c) == Some(&b')') {
-            ("", c)
-        } else {
-            return None;
-        }
-    };
-    let _ = after_exports;
-    let module_param = if expect_two_params && bytes.get(c) == Some(&b',') {
-        c = skip_ws(bytes, c + 1);
-        let (name, after) = parse_identifier(source, c)?;
-        c = skip_ws(bytes, after);
-        Some(name)
-    } else {
-        None
-    };
-    if bytes.get(c) != Some(&b')') {
-        return None;
-    }
-    c = skip_ws(bytes, c + 1);
-    let arrow_end = expect_arrow(bytes, c)?;
-    c = skip_ws(bytes, arrow_end);
-    if bytes.get(c) != Some(&b'{') {
-        return None;
-    }
-    let body_end = find_matching_brace(source, c)?;
-    Some((exports_param, module_param, c + 1, body_end))
-}
-
-/// For a given consumer module, gather every imported binding the
-/// cross-module eager-safety analysis cleared. These are the call sites
-/// `lowered_runtime_sources` must rewrite from `X()` to `X` so the
-/// consumer can see the import's now-direct value rather than a missing
-/// thunk function.
-fn consumer_eagerified_imports(
-    consumer_id: ModuleId,
-    source_module_wiring: &SourceModuleWiring,
-    eager_safe_analysis: &EagerSafeAnalysis,
-) -> BTreeSet<BindingName> {
-    let mut out = BTreeSet::new();
-    let Some(imports_by_target) = source_module_wiring.imports_by_module.get(&consumer_id) else {
-        return out;
-    };
-    for (target_id, bindings) in imports_by_target {
-        let Some(eager_safe) = eager_safe_analysis
-            .eager_safe_exports_by_module
-            .get(target_id)
-        else {
-            continue;
-        };
-        for binding in bindings.intersection(eager_safe) {
-            out.insert(binding.clone());
-        }
-    }
-    out
-}
-
-/// Mechanically rewrite every `X()` zero-arg call site (where `X` is one
-/// of `eagerified_imports`) to a bare `X`. The cross-module eager-safe
-/// analysis has already verified upstream that every reference to each
-/// binding is in this exact shape, so the rewrite cannot lose precision.
-/// Property-access uses (`obj.X`) and non-value occurrences (import
-/// specifiers, export specifiers) are correctly skipped via the same
-/// classifier the local delazify pass uses.
-fn rewrite_eagerified_call_sites(
-    source: &str,
-    eagerified_imports: &BTreeSet<BindingName>,
-) -> String {
-    let mut edits: Vec<(usize, usize, String)> = Vec::new();
-    let bytes = source.as_bytes();
-    for binding in eagerified_imports {
-        let target = binding.as_str();
-        let mut cursor = 0;
-        while cursor < bytes.len() {
-            if let Some(next) = skip_non_code_at(source, cursor) {
-                cursor = next;
-                continue;
-            }
-            if !is_identifier_start(bytes[cursor]) {
-                cursor += 1;
-                continue;
-            }
-            let start = cursor;
-            cursor += 1;
-            while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                cursor += 1;
-            }
-            if &source[start..cursor] != target {
-                continue;
-            }
-            // Skip property access (`obj.X` / `obj#X`).
-            if let Some(prev) = previous_non_ws(bytes, start)
-                && matches!(bytes[prev], b'.' | b'#')
-            {
-                continue;
-            }
-            // Skip non-value occurrences (import specifier, etc.).
-            if !identifier_occurrence_is_value_reference(source, start, cursor) {
-                continue;
-            }
-            // Require zero-arg call shape `X()` — verified by the
-            // eager-safe analysis to be the only shape present.
-            let after = skip_ws(bytes, cursor);
-            if bytes.get(after) != Some(&b'(') {
-                continue;
-            }
-            let inner = skip_ws(bytes, after + 1);
-            if bytes.get(inner) != Some(&b')') {
-                continue;
-            }
-            edits.push((start, inner + 1, target.to_string()));
-            cursor = inner + 1;
-        }
-    }
-    if edits.is_empty() {
-        return source.to_string();
-    }
-    edits.sort_by_key(|(start, _, _)| *start);
-    let mut output = String::with_capacity(source.len());
-    let mut cursor = 0;
-    for (start, end, replacement) in &edits {
-        debug_assert!(*start >= cursor, "cross-module rewrites must not overlap");
-        output.push_str(&source[cursor..*start]);
-        output.push_str(replacement);
-        cursor = *end;
-    }
-    output.push_str(&source[cursor..]);
-    output
-}
-
 pub(crate) fn candidate_source_reads_by_module_with_exportable(
     program: &EnrichedProgram,
     exportable_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -16068,7 +14236,7 @@ fn extra_exports_for_module<'a>(
     exports
 }
 
-fn unique_source_definition_modules(
+pub(crate) fn unique_source_definition_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
@@ -16092,7 +14260,7 @@ fn runtime_owner_definition_modules(
     )
 }
 
-fn runtime_owner_definition_modules_by_source(
+pub(crate) fn runtime_owner_definition_modules_by_source(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<u32, BTreeMap<BindingName, Option<ModuleId>>> {
@@ -16193,7 +14361,7 @@ fn module_output_path(program: &EnrichedProgram, module_id: ModuleId) -> Option<
     )
 }
 
-fn runtime_helper_kinds(
+pub(crate) fn runtime_helper_kinds(
     graph: &RevertsGraph,
     runtime_imports: &[RuntimePreludeImport],
 ) -> BTreeMap<BindingName, RuntimePreludeBindingKind> {
@@ -16210,7 +14378,7 @@ fn runtime_helper_kinds(
     helpers
 }
 
-fn runtime_helper_kinds_for_source(
+pub(crate) fn runtime_helper_kinds_for_source(
     graph: &RevertsGraph,
     source_file_id: u32,
     source: &str,
@@ -18462,7 +16630,7 @@ var init = lazyValue(() => {\n\
         let mut migrations = super::RuntimeVarMigrationPlan::default();
         migrations.insert(
             migrated.clone(),
-            super::RuntimeVarMigration {
+            super::runtime_var_migration::RuntimeVarMigration {
                 owner_module: ModuleId(7),
                 source_file_id,
                 extra_snippets: BTreeSet::from([migrated_reader.clone()]),
