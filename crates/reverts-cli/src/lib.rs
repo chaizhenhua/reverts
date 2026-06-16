@@ -15,6 +15,10 @@ pub use errors::{
 pub use help::{HelpTopic, help_text, version_text};
 
 use args::{next_path, next_value, parse_project_id};
+use persistence::externalization_hints::{
+    PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION, PackageExternalizationHint,
+    persist_package_externalization_hints,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -2907,20 +2911,6 @@ fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PackageS
     }
 }
 
-const PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION: i64 = 1;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PackageExternalizationHint {
-    package_name: String,
-    package_version: String,
-    entry_path: String,
-    export_specifier: String,
-    content_hash: Option<String>,
-    normalized_source_hash: Option<String>,
-    public_members: BTreeSet<String>,
-    proof_policy_version: Option<i64>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalizationHintCandidate {
     package_name: String,
@@ -3226,97 +3216,6 @@ fn parse_public_members_hint(value: Option<&str>) -> BTreeSet<String> {
         .filter(|member| !member.is_empty())
         .collect()
 }
-
-fn persist_package_externalization_hints(
-    connection: &mut Connection,
-    hints: &[PackageExternalizationHint],
-) -> Result<usize, MatchPackagesError> {
-    ensure_package_externalization_hints_table(connection)?;
-    let transaction = connection
-        .transaction()
-        .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
-    let mut written = 0usize;
-    for hint in hints {
-        let public_members_json = serde_json::to_string(
-            &hint.public_members.iter().collect::<Vec<_>>(),
-        )
-        .map_err(|source| {
-            MatchPackagesError::WritePackageExternalizationHints(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(source)),
-            )
-        })?;
-        written += transaction
-            .execute(
-                r"
-                INSERT INTO package_externalization_hints
-                    (package_name, package_version, entry_path, export_specifier,
-                     content_hash, normalized_source_hash, public_members_json,
-                     proof_policy_version, created_at, updated_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
-                ON CONFLICT(package_name, package_version, entry_path, export_specifier)
-                DO UPDATE SET
-                    content_hash = excluded.content_hash,
-                    normalized_source_hash = excluded.normalized_source_hash,
-                    public_members_json = excluded.public_members_json,
-                    proof_policy_version = excluded.proof_policy_version,
-                    updated_at = datetime('now')
-                ",
-                params![
-                    hint.package_name.as_str(),
-                    hint.package_version.as_str(),
-                    hint.entry_path.as_str(),
-                    hint.export_specifier.as_str(),
-                    hint.content_hash.as_deref(),
-                    hint.normalized_source_hash.as_deref(),
-                    public_members_json.as_str(),
-                    hint.proof_policy_version
-                        .unwrap_or(PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION),
-                ],
-            )
-            .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
-    }
-    transaction
-        .commit()
-        .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
-    Ok(written)
-}
-
-fn ensure_package_externalization_hints_table(
-    connection: &Connection,
-) -> Result<(), MatchPackagesError> {
-    connection
-        .execute_batch(PACKAGE_EXTERNALIZATION_HINTS_CREATE_SQL)
-        .map_err(MatchPackagesError::WritePackageExternalizationHints)
-}
-
-const PACKAGE_EXTERNALIZATION_HINTS_CREATE_SQL: &str = r"
-CREATE TABLE IF NOT EXISTS package_externalization_hints (
-    package_name TEXT NOT NULL,
-    package_version TEXT NOT NULL,
-    entry_path TEXT NOT NULL,
-    export_specifier TEXT NOT NULL,
-    content_hash TEXT,
-    normalized_source_hash TEXT,
-    public_members_json TEXT NOT NULL DEFAULT '[]',
-    proof_policy_version INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (package_name, package_version, entry_path, export_specifier),
-    CHECK (TRIM(package_name) != ''),
-    CHECK (TRIM(package_version) != ''),
-    CHECK (TRIM(entry_path) != ''),
-    CHECK (TRIM(export_specifier) != ''),
-    CHECK (content_hash IS NULL OR TRIM(content_hash) != ''),
-    CHECK (normalized_source_hash IS NULL OR TRIM(normalized_source_hash) != ''),
-    CHECK (
-        content_hash IS NOT NULL
-        OR normalized_source_hash IS NOT NULL
-        OR TRIM(public_members_json) NOT IN ('', '[]')
-    )
-);
-CREATE INDEX IF NOT EXISTS idx_package_externalization_hints_package
-    ON package_externalization_hints(package_name, package_version);
-";
 
 fn hint_export_specifier_matches_package(package_name: &str, export_specifier: &str) -> bool {
     split_bare_specifier(export_specifier).is_some_and(|(specifier_package, _subpath)| {
