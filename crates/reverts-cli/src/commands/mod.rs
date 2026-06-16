@@ -5,3 +5,4 @@
 //! and are exposed as `pub(crate)`.
 
 pub(crate) mod generate_project;
+pub(crate) mod runtime_inventory;
