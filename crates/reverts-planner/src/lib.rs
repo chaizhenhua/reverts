@@ -1,5 +1,30 @@
+mod byte_lexer;
 mod compiler_recovery;
+mod identifiers;
+mod plan_error;
+mod relative_paths;
 mod runtime_setter_migration_blocker;
+mod statement_parsers;
+mod statements;
+
+use statement_parsers::{
+    coalesce_consecutive_uninitialized_var_declarations, parse_generated_default_import_statement,
+    parse_generated_named_export_statement, parse_generated_named_import_statement,
+    parse_generated_named_reexport_statement,
+};
+
+use byte_lexer::{
+    expect_arrow, find_byte, find_matching_brace, find_matching_bracket, find_matching_paren,
+    looks_like_regex_literal, skip_quoted, skip_regex_literal, skip_template_literal, skip_ws,
+    skip_ws_and_comments,
+};
+use identifiers::{
+    is_identifier_like, keyword_at, parse_identifier, parse_identifier_after_function_keyword,
+    parse_identifier_after_keyword,
+};
+
+pub use plan_error::PlanError;
+use relative_paths::relative_import_specifier;
 
 pub use compiler_recovery::{
     CompilerRecoveryAction, CompilerRecoveryDecision, SourceCompilerStrategy,
@@ -9,9 +34,16 @@ pub use runtime_setter_migration_blocker::{
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
 };
 
+use statements::{
+    default_import_statement, default_named_import_alias_statement, lazy_module_helper_source,
+    lazy_value_helper_source, named_export_statement, named_import_alias_statement,
+    named_import_statement, named_reexport_statement, namespace_import_statement,
+    node_require_prelude_statement, runtime_helper_import_statement,
+    runtime_helper_setter_declarations, runtime_helper_setter_name, runtime_helpers_path,
+    variable_declaration_statement,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
-use std::error::Error;
-use std::fmt;
 
 use reverts_graph::{
     RevertsGraph, RuntimeEntrypoint, RuntimeNamespaceExport, RuntimePrelude,
@@ -5894,13 +5926,6 @@ fn is_static_import_declaration(source: &str) -> bool {
 
 fn is_bare_import_specifier(specifier: &str) -> bool {
     !specifier.is_empty() && !specifier.starts_with('.') && !specifier.starts_with('/')
-}
-
-fn is_identifier_like(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && is_identifier_start(bytes[0])
-        && bytes[1..].iter().all(|byte| is_identifier_continue(*byte))
 }
 
 /// Identify bindings that can move from the shared runtime helpers file
@@ -18645,132 +18670,6 @@ fn find_keyword(source: &str, keyword: &str, from: usize) -> Option<usize> {
     None
 }
 
-fn parse_identifier(source: &str, start: usize) -> Option<(&str, usize)> {
-    let bytes = source.as_bytes();
-    let first = *bytes.get(start)?;
-    if !is_identifier_start(first) {
-        return None;
-    }
-    let mut end = start + 1;
-    while end < bytes.len() && is_identifier_continue(bytes[end]) {
-        end += 1;
-    }
-    Some((&source[start..end], end))
-}
-
-fn expect_arrow(bytes: &[u8], cursor: usize) -> Option<usize> {
-    (bytes.get(cursor) == Some(&b'=') && bytes.get(cursor + 1) == Some(&b'>')).then_some(cursor + 2)
-}
-
-fn find_byte(bytes: &[u8], mut cursor: usize, target: u8) -> Option<usize> {
-    while cursor < bytes.len() {
-        if bytes[cursor] == target {
-            return Some(cursor);
-        }
-        cursor += 1;
-    }
-    None
-}
-
-fn find_matching_brace(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut cursor = open;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'{' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b'}' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(cursor);
-                }
-                cursor += 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    None
-}
-
-fn find_matching_bracket(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut cursor = open;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'[' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b']' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(cursor);
-                }
-                cursor += 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    None
-}
-
-fn find_matching_paren(source: &str, open: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut cursor = open;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b')' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(cursor);
-                }
-                cursor += 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    None
-}
-
 fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     value_identifiers_in_source(source)
 }
@@ -18951,37 +18850,6 @@ fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
         }
     }
     writes
-}
-
-fn parse_identifier_after_keyword<'a>(
-    source: &'a str,
-    cursor: usize,
-    keyword: &str,
-) -> Option<(&'a str, usize)> {
-    parse_identifier(source, skip_ws(source.as_bytes(), cursor + keyword.len()))
-}
-
-fn parse_identifier_after_function_keyword(source: &str, cursor: usize) -> Option<(&str, usize)> {
-    let bytes = source.as_bytes();
-    let mut cursor = skip_ws(bytes, cursor + "function".len());
-    if bytes.get(cursor) == Some(&b'*') {
-        cursor = skip_ws(bytes, cursor + 1);
-    }
-    parse_identifier(source, cursor)
-}
-
-fn keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
-    source
-        .get(cursor..)
-        .is_some_and(|tail| tail.starts_with(keyword))
-        && cursor
-            .checked_sub(1)
-            .and_then(|index| source.as_bytes().get(index))
-            .is_none_or(|byte| !is_identifier_continue(*byte))
-        && source
-            .as_bytes()
-            .get(cursor + keyword.len())
-            .is_none_or(|byte| !is_identifier_continue(*byte))
 }
 
 fn collect_variable_declaration_definitions(
@@ -19633,296 +19501,6 @@ fn identifier_reference_positions<'a>(
         .map(|fact| fact.byte_end)
 }
 
-fn skip_ws(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn skip_ws_and_comments(bytes: &[u8], mut cursor: usize, limit: usize) -> usize {
-    let limit = limit.min(bytes.len());
-    loop {
-        while cursor < limit && bytes[cursor].is_ascii_whitespace() {
-            cursor += 1;
-        }
-        if cursor + 1 < limit && bytes[cursor] == b'/' && bytes[cursor + 1] == b'/' {
-            cursor = skip_line_comment(bytes, cursor + 2).min(limit);
-            continue;
-        }
-        if cursor + 1 < limit && bytes[cursor] == b'/' && bytes[cursor + 1] == b'*' {
-            cursor = skip_block_comment(bytes, cursor + 2).min(limit);
-            continue;
-        }
-        return cursor;
-    }
-}
-
-fn skip_quoted(bytes: &[u8], start: usize, quote: u8) -> usize {
-    if quote == b'`' {
-        return skip_template_literal(bytes, start);
-    }
-    let mut cursor = start + 1;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'\\' {
-            cursor += 2;
-            continue;
-        }
-        if bytes[cursor] == quote {
-            return cursor + 1;
-        }
-        cursor += 1;
-    }
-    bytes.len()
-}
-
-fn skip_template_literal(bytes: &[u8], start: usize) -> usize {
-    let mut cursor = start + 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor += 2,
-            b'`' => return cursor + 1,
-            b'$' if bytes.get(cursor + 1) == Some(&b'{') => {
-                cursor = skip_template_expression(bytes, cursor + 2);
-            }
-            _ => cursor += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn skip_template_expression(bytes: &[u8], mut cursor: usize) -> usize {
-    let mut depth = 1usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'{' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-                if depth == 0 {
-                    return cursor;
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn looks_like_regex_literal(bytes: &[u8], slash: usize) -> bool {
-    if bytes.get(slash + 1).is_none() {
-        return false;
-    }
-    let mut cursor = slash;
-    while cursor > 0 {
-        cursor -= 1;
-        if bytes[cursor].is_ascii_whitespace() {
-            continue;
-        }
-        if is_identifier_continue(bytes[cursor]) {
-            let end = cursor + 1;
-            while cursor > 0 && is_identifier_continue(bytes[cursor - 1]) {
-                cursor -= 1;
-            }
-            return matches!(
-                std::str::from_utf8(&bytes[cursor..end]).unwrap_or_default(),
-                "return" | "throw" | "case" | "yield" | "delete" | "void" | "typeof"
-            );
-        }
-        return matches!(
-            bytes[cursor],
-            b'(' | b'='
-                | b':'
-                | b'['
-                | b','
-                | b'!'
-                | b'?'
-                | b'{'
-                | b';'
-                | b'&'
-                | b'|'
-                | b'+'
-                | b'-'
-                | b'*'
-                | b'%'
-                | b'~'
-                | b'^'
-                | b'<'
-                | b'>'
-        );
-    }
-    true
-}
-
-fn skip_regex_literal(bytes: &[u8], start: usize) -> usize {
-    let mut cursor = start + 1;
-    let mut in_class = false;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor += 2,
-            b'[' => {
-                in_class = true;
-                cursor += 1;
-            }
-            b']' => {
-                in_class = false;
-                cursor += 1;
-            }
-            b'/' if !in_class => {
-                cursor += 1;
-                while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
-                    cursor += 1;
-                }
-                return cursor;
-            }
-            _ => cursor += 1,
-        }
-    }
-    bytes.len()
-}
-
-fn runtime_helpers_path(source_file_id: u32) -> String {
-    format!("modules/runtime/source-{source_file_id}-helpers.ts")
-}
-
-fn named_import_statement<'a>(
-    bindings: impl Iterator<Item = &'a BindingName>,
-    specifier: &str,
-) -> String {
-    let names = bindings
-        .map(BindingName::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("import {{ {names} }} from '{specifier}';")
-}
-
-fn named_import_alias_statement<'a>(
-    specifiers: impl Iterator<Item = (&'a str, &'a BindingName)>,
-    source: &str,
-) -> String {
-    let names = specifiers
-        .map(|(imported, local)| {
-            if imported == local.as_str() {
-                local.as_str().to_string()
-            } else {
-                format!("{imported} as {local}", local = local.as_str())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("import {{ {names} }} from '{source}';")
-}
-
-fn default_named_import_alias_statement<'a>(
-    default_binding: &BindingName,
-    specifiers: impl Iterator<Item = (&'a str, &'a BindingName)>,
-    source: &str,
-) -> String {
-    let names = specifiers
-        .map(|(imported, local)| {
-            if imported == local.as_str() {
-                local.as_str().to_string()
-            } else {
-                format!("{imported} as {local}", local = local.as_str())
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "import {}, {{ {names} }} from '{source}';",
-        default_binding.as_str()
-    )
-}
-
-fn default_import_statement(binding: &BindingName, source: &str) -> String {
-    format!("import {} from '{source}';", binding.as_str())
-}
-
-fn namespace_import_statement(binding: &BindingName, source: &str) -> String {
-    format!("import * as {} from '{source}';", binding.as_str())
-}
-
-fn parse_generated_named_import_statement(source: &str) -> Option<(BTreeSet<BindingName>, String)> {
-    let source = source.trim();
-    let rest = source.strip_prefix("import { ")?;
-    let (names, rest) = rest.split_once(" } from '")?;
-    let specifier = rest.strip_suffix("';")?;
-    if names.trim().is_empty() {
-        return None;
-    }
-    let bindings = names
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(BindingName::new)
-        .collect::<BTreeSet<_>>();
-    if bindings.is_empty() {
-        None
-    } else {
-        Some((bindings, specifier.to_string()))
-    }
-}
-
-fn parse_generated_default_import_statement(source: &str) -> Option<(BindingName, String)> {
-    let source = source.trim();
-    let rest = source.strip_prefix("import ")?;
-    let (binding, rest) = rest.split_once(" from '")?;
-    let specifier = rest.strip_suffix("';")?;
-    let binding = binding.trim();
-    is_identifier_like(binding).then(|| (BindingName::new(binding), specifier.to_string()))
-}
-
-fn parse_generated_named_reexport_statement(
-    source: &str,
-) -> Option<(BTreeSet<BindingName>, String)> {
-    let source = source.trim();
-    let rest = source.strip_prefix("export { ")?;
-    let (names, rest) = rest.split_once(" } from '")?;
-    let specifier = rest.strip_suffix("';")?;
-    if names.trim().is_empty() {
-        return None;
-    }
-    let bindings = names
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(BindingName::new)
-        .collect::<BTreeSet<_>>();
-    if bindings.is_empty() {
-        None
-    } else {
-        Some((bindings, specifier.to_string()))
-    }
-}
-
-fn runtime_helper_import_statement(
-    bindings: &BTreeSet<BindingName>,
-    setter_bindings: &BTreeSet<BindingName>,
-    lazy_helper_names: &[&'static str],
-    specifier: &str,
-) -> String {
-    let mut names = bindings
-        .iter()
-        .map(|binding| binding.as_str().to_string())
-        .collect::<Vec<_>>();
-    names.extend(setter_bindings.iter().map(runtime_helper_setter_name));
-    names.extend(lazy_helper_names.iter().map(|name| (*name).to_string()));
-    format!("import {{ {} }} from '{specifier}';", names.join(", "))
-}
-
 fn lazy_helper_import_names_for_source(source: &LoweredRuntimeModuleSource) -> Vec<&'static str> {
     let mut names = Vec::new();
     if source.uses_lazy_module {
@@ -19932,36 +19510,6 @@ fn lazy_helper_import_names_for_source(source: &LoweredRuntimeModuleSource) -> V
         names.push("lazyValue");
     }
     names
-}
-
-fn lazy_module_helper_source() -> &'static str {
-    "function lazyModule(factory) {\n  \
-        let _$cached;\n  \
-        return () => {\n    \
-            if (_$cached) return _$cached.exports;\n    \
-            var _$module = _$cached = { exports: {} };\n    \
-            factory(_$module.exports, _$module);\n    \
-            return _$module.exports;\n  \
-        };\n\
-    }"
-}
-
-fn lazy_value_helper_source() -> &'static str {
-    "function lazyValue(factory) {\n  \
-        let _$init = false;\n  \
-        let _$val;\n  \
-        return () => {\n    \
-            if (!_$init) {\n      \
-                _$init = true;\n      \
-                _$val = factory();\n    \
-            }\n    \
-            return _$val;\n  \
-        };\n\
-    }"
-}
-
-fn runtime_helper_setter_name(binding: &BindingName) -> String {
-    format!("__reverts_set_{}", binding.as_str())
 }
 
 /// Decide whether a prelude var declaration is safe to migrate, and
@@ -20111,25 +19659,6 @@ fn find_runtime_source_chunk(source: &str, chunk: &str) -> Option<(usize, usize)
         return Some((drop_start, drop_end));
     }
     None
-}
-
-fn runtime_helper_setter_declaration(binding: &BindingName) -> String {
-    let setter = runtime_helper_setter_name(binding);
-    let binding = binding.as_str();
-    // Keep this as a hoisted function declaration. Runtime helpers can
-    // participate in ESM cycles with writer modules that call the setter
-    // during module evaluation; a `const` arrow thunk would be in TDZ in
-    // that shape. `return X = value` is still one formatted line smaller
-    // than the previous two-statement body while preserving hoisting.
-    format!("function {setter}(value) {{ return {binding} = value; }}")
-}
-
-fn runtime_helper_setter_declarations(bindings: &BTreeSet<BindingName>) -> String {
-    bindings
-        .iter()
-        .map(runtime_helper_setter_declaration)
-        .collect::<Vec<_>>()
-        .join("")
 }
 
 /// Inline same-module setter calls inside the runtime helpers module.
@@ -20320,195 +19849,6 @@ fn property_key_source(key: &str) -> String {
         format!("{key:?}")
     }
 }
-
-fn node_require_prelude_statement() -> String {
-    "import { createRequire } from 'node:module';\nvar require = createRequire(import.meta.url);"
-        .to_string()
-}
-
-fn named_export_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
-    let names = bindings
-        .map(BindingName::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("export {{ {names} }};")
-}
-
-fn parse_generated_named_export_statement(source: &str) -> Option<BTreeSet<BindingName>> {
-    let source = source.trim();
-    let names = source.strip_prefix("export { ")?.strip_suffix(" };")?;
-    if names.trim().is_empty() || names.contains(" from ") || names.contains(" as ") {
-        return None;
-    }
-    let mut bindings = BTreeSet::<BindingName>::new();
-    for name in names.split(',').map(str::trim) {
-        if name.is_empty() {
-            return None;
-        }
-        let (identifier, end) = parse_identifier(name, 0)?;
-        if end != name.len() || is_js_keyword(identifier) {
-            return None;
-        }
-        bindings.insert(BindingName::new(identifier));
-    }
-    (!bindings.is_empty()).then_some(bindings)
-}
-
-fn named_reexport_statement<'a>(
-    bindings: impl Iterator<Item = &'a BindingName>,
-    specifier: &str,
-) -> String {
-    let names = bindings
-        .map(BindingName::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("export {{ {names} }} from '{specifier}';")
-}
-
-fn variable_declaration_statement<'a>(bindings: impl Iterator<Item = &'a BindingName>) -> String {
-    let names = bindings
-        .map(BindingName::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("var {names};")
-}
-
-fn coalesce_consecutive_uninitialized_var_declarations(source: &str) -> String {
-    let mut output = Vec::<String>::new();
-    let mut pending = Vec::<String>::new();
-    for line in source.lines() {
-        if let Some(binding) = parse_single_uninitialized_var_line(line) {
-            pending.push(binding.to_string());
-            continue;
-        }
-        flush_uninitialized_var_run(&mut output, &mut pending);
-        output.push(line.to_string());
-    }
-    flush_uninitialized_var_run(&mut output, &mut pending);
-    if source.ends_with('\n') {
-        format!("{}\n", output.join("\n"))
-    } else {
-        output.join("\n")
-    }
-}
-
-fn flush_uninitialized_var_run(output: &mut Vec<String>, pending: &mut Vec<String>) {
-    if pending.is_empty() {
-        return;
-    }
-    if pending.len() == 1 {
-        output.push(format!("var {};", pending[0]));
-    } else {
-        output.push(format!("var {};", pending.join(", ")));
-    }
-    pending.clear();
-}
-
-fn parse_single_uninitialized_var_line(line: &str) -> Option<&str> {
-    let line = line.trim();
-    let rest = line.strip_prefix("var ")?;
-    let name = rest.strip_suffix(';')?;
-    let bytes = name.as_bytes();
-    if bytes.is_empty() || !is_identifier_start(bytes[0]) {
-        return None;
-    }
-    if bytes[1..].iter().all(|byte| is_identifier_continue(*byte)) {
-        Some(name)
-    } else {
-        None
-    }
-}
-
-fn relative_import_specifier(from_file: &str, to_file: &str) -> String {
-    let from_dir = path_dir_segments(from_file);
-    let to_segments = path_file_segments_with_js_extension(to_file);
-    let common = common_prefix_len(&from_dir, &to_segments);
-    let mut relative = Vec::new();
-    relative.extend(std::iter::repeat_n(
-        "..".to_string(),
-        from_dir.len().saturating_sub(common),
-    ));
-    relative.extend(to_segments[common..].iter().cloned());
-    let joined = relative.join("/");
-    if joined.starts_with("..") {
-        joined
-    } else {
-        format!("./{joined}")
-    }
-}
-
-fn path_dir_segments(path: &str) -> Vec<String> {
-    let mut segments = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    segments.pop();
-    segments
-}
-
-fn path_file_segments_with_js_extension(path: &str) -> Vec<String> {
-    let mut segments = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if let Some(last) = segments.last_mut()
-        && let Some(stripped) = last.strip_suffix(".ts")
-    {
-        *last = format!("{stripped}.js");
-    }
-    segments
-}
-
-fn common_prefix_len(left: &[String], right: &[String]) -> usize {
-    left.iter()
-        .zip(right)
-        .take_while(|(left, right)| left == right)
-        .count()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PlanError {
-    UnparseableSource {
-        module_id: ModuleId,
-        path: String,
-        message: String,
-    },
-    UnresolvedRuntimeHelperReferences {
-        path: String,
-        bindings: Vec<BindingName>,
-    },
-}
-
-impl fmt::Display for PlanError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnparseableSource {
-                module_id,
-                path,
-                message,
-            } => write!(
-                formatter,
-                "module {} source {} failed normalization: {message}",
-                module_id.0, path
-            ),
-            Self::UnresolvedRuntimeHelperReferences { path, bindings } => {
-                let bindings = bindings
-                    .iter()
-                    .map(BindingName::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                write!(
-                    formatter,
-                    "runtime helper {path} has unresolved references: {bindings}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for PlanError {}
 
 #[cfg(test)]
 mod tests {
