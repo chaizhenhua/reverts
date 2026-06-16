@@ -757,6 +757,72 @@ fn emit_source_module_imports(
     has_runtime_edge_before_lazy_helpers
 }
 
+/// Per-owner snapshot of the runtime-var migration plan.
+///
+/// Computing all of these per-owner views at the top of the per-module
+/// loop avoids re-walking the migration plan multiple times for the
+/// same module. The fields mirror the `*_for_owner` accessors on
+/// `RuntimeVarMigrationPlan`. Phase 10b commentary: `migrated_locally`
+/// are the primary runtime vars now declared in this module — their
+/// `X = value` writes stay as direct assignments instead of getting
+/// rewritten to setter calls.
+struct OwnerMigrationState {
+    migrated_locally: BTreeSet<BindingName>,
+    migrated_extra_snippets: BTreeSet<(u32, BindingName)>,
+    migrated_extra_namespace_exports: BTreeSet<(u32, BindingName)>,
+    migrated_extra_namespace_bindings: BTreeSet<BindingName>,
+    migrated_extra_runtime_deps: BTreeSet<BindingName>,
+    migrated_extra_runtime_setter_deps: BTreeSet<BindingName>,
+    migrated_extra_runtime_setter_deps_by_source: BTreeMap<u32, BTreeSet<BindingName>>,
+    migrated_extra_runtime_owner_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    migrated_extra_runtime_owner_dep_aliases:
+        BTreeMap<ModuleId, BTreeMap<BindingName, BindingName>>,
+    migrated_extra_runtime_dep_aliases: BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    migrated_runtime_extra_runtime_dep_aliases: BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    migrated_extra_source_deps: BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    migrated_extra_runtime_reexport_deps: BTreeMap<u32, BTreeSet<BindingName>>,
+    migrated_extra_noop_deps: BTreeSet<BindingName>,
+    migrated_local_bindings: BTreeSet<BindingName>,
+}
+
+impl OwnerMigrationState {
+    fn from_plan(plan: &RuntimeVarMigrationPlan, module_id: ModuleId) -> Self {
+        let migrated_locally = plan
+            .migrations_by_owner
+            .get(&module_id)
+            .cloned()
+            .unwrap_or_default();
+        let migrated_extra_snippets = plan.extra_snippets_for_owner(module_id);
+        let migrated_extra_namespace_exports = plan.extra_namespace_exports_for_owner(module_id);
+        let migrated_extra_namespace_bindings = migrated_extra_namespace_exports
+            .iter()
+            .map(|(_, binding)| binding.clone())
+            .collect::<BTreeSet<_>>();
+        Self {
+            migrated_locally,
+            migrated_extra_snippets,
+            migrated_extra_namespace_exports,
+            migrated_extra_namespace_bindings,
+            migrated_extra_runtime_deps: plan.extra_runtime_deps_for_owner(module_id),
+            migrated_extra_runtime_setter_deps: plan.extra_runtime_setter_deps_for_owner(module_id),
+            migrated_extra_runtime_setter_deps_by_source: plan
+                .extra_runtime_setter_deps_by_source_for_owner(module_id),
+            migrated_extra_runtime_owner_deps: plan
+                .migrated_extra_runtime_deps_for_owner(module_id),
+            migrated_extra_runtime_owner_dep_aliases: plan
+                .migrated_aliased_extra_runtime_deps_for_owner(module_id),
+            migrated_extra_runtime_dep_aliases: plan.extra_runtime_dep_aliases_for_owner(module_id),
+            migrated_runtime_extra_runtime_dep_aliases: plan
+                .runtime_extra_runtime_dep_aliases_for_owner(module_id),
+            migrated_extra_source_deps: plan.extra_source_deps_for_owner(module_id),
+            migrated_extra_runtime_reexport_deps: plan
+                .extra_runtime_reexport_source_deps_for_owner(module_id),
+            migrated_extra_noop_deps: plan.extra_noop_deps_for_owner(module_id),
+            migrated_local_bindings: plan.local_bindings_for_owner(module_id),
+        }
+    }
+}
+
 /// Push every `PlannedImport` for module's package-graph imports
 /// (the decisions surfaced by `program.package_imports_for`).
 fn push_package_imports(program: &EnrichedProgram, module_id: ModuleId, file: &mut PlannedFile) {
@@ -1314,46 +1380,23 @@ impl ImportExportPlanner {
             let written_runtime_helpers = lowered_source
                 .map(|source| source.written_helpers.clone())
                 .unwrap_or_default();
-            // Phase 10b: bindings the migration plan reassigned to this
-            // module. They're declared locally below (rather than imported
-            // from the runtime), and their `X = value` writes stay as
-            // direct same-module assignments instead of being rewritten
-            // to setter calls.
-            let migrated_locally: BTreeSet<BindingName> = runtime_var_migrations
-                .migrations_by_owner
-                .get(&module.id)
-                .cloned()
-                .unwrap_or_default();
-            let migrated_extra_snippets =
-                runtime_var_migrations.extra_snippets_for_owner(module.id);
-            let migrated_extra_namespace_exports =
-                runtime_var_migrations.extra_namespace_exports_for_owner(module.id);
-            let migrated_extra_namespace_bindings = migrated_extra_namespace_exports
-                .iter()
-                .map(|(_, binding)| binding.clone())
-                .collect::<BTreeSet<_>>();
-            let migrated_extra_runtime_deps =
-                runtime_var_migrations.extra_runtime_deps_for_owner(module.id);
-            let migrated_extra_runtime_setter_deps =
-                runtime_var_migrations.extra_runtime_setter_deps_for_owner(module.id);
-            let migrated_extra_runtime_setter_deps_by_source =
-                runtime_var_migrations.extra_runtime_setter_deps_by_source_for_owner(module.id);
-            let migrated_extra_runtime_owner_deps =
-                runtime_var_migrations.migrated_extra_runtime_deps_for_owner(module.id);
-            let migrated_extra_runtime_owner_dep_aliases =
-                runtime_var_migrations.migrated_aliased_extra_runtime_deps_for_owner(module.id);
-            let migrated_extra_runtime_dep_aliases =
-                runtime_var_migrations.extra_runtime_dep_aliases_for_owner(module.id);
-            let migrated_runtime_extra_runtime_dep_aliases =
-                runtime_var_migrations.runtime_extra_runtime_dep_aliases_for_owner(module.id);
-            let migrated_extra_source_deps =
-                runtime_var_migrations.extra_source_deps_for_owner(module.id);
-            let migrated_extra_runtime_reexport_deps =
-                runtime_var_migrations.extra_runtime_reexport_source_deps_for_owner(module.id);
-            let migrated_extra_noop_deps =
-                runtime_var_migrations.extra_noop_deps_for_owner(module.id);
-            let migrated_local_bindings =
-                runtime_var_migrations.local_bindings_for_owner(module.id);
+            let OwnerMigrationState {
+                migrated_locally,
+                migrated_extra_snippets,
+                migrated_extra_namespace_exports,
+                migrated_extra_namespace_bindings,
+                migrated_extra_runtime_deps,
+                migrated_extra_runtime_setter_deps,
+                migrated_extra_runtime_setter_deps_by_source,
+                migrated_extra_runtime_owner_deps,
+                migrated_extra_runtime_owner_dep_aliases,
+                migrated_extra_runtime_dep_aliases,
+                migrated_runtime_extra_runtime_dep_aliases,
+                migrated_extra_source_deps,
+                migrated_extra_runtime_reexport_deps,
+                migrated_extra_noop_deps,
+                migrated_local_bindings,
+            } = OwnerMigrationState::from_plan(&runtime_var_migrations, module.id);
             let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
                 .union(&migrated_extra_runtime_deps)
                 .cloned()
