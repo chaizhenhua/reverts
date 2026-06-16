@@ -2,9 +2,12 @@ mod classify;
 mod errors;
 mod facts;
 mod format;
+mod format_module_items;
+mod generated_statements;
 mod identifier;
 mod import_coalesce;
 mod lazy;
+mod local_named_exports;
 mod lowering;
 mod namespace_flatten;
 mod namespace_split;
@@ -19,6 +22,10 @@ pub use classify::{
     classify_top_level_bindings, verify_only_immediate_call_references,
 };
 pub use format::{format_source_minified, format_source_pretty, normalize_source_for_pipeline};
+pub use format_module_items::{
+    format_source_with_module_items, format_source_with_module_items_and_renames,
+    format_source_with_module_items_and_renames_with_report,
+};
 pub use lowering::CompilerLowering;
 
 pub use errors::{JsError, ParseError, ParseGoal, Result, parse_error_message};
@@ -34,44 +41,14 @@ pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_part,
     is_identifier_start, is_js_keyword, sanitize_identifier, skip_block_comment, skip_line_comment,
 };
-use import_coalesce::{coalesce_imports_in_program, prune_unused_import_specifiers_in_program};
 pub use lazy::{
     LazyBodyClassification, classify_lazy_module_body, extract_lazy_module_eager_value,
     extract_lazy_module_eager_value_with_safe_deps,
 };
-use lowering::{
-    BABEL_INTEROP_HELPERS, ESBUILD_RUNTIME_HELPERS, WEBPACK_RUNTIME_HELPERS,
-    apply_source_level_lowerings, is_babel_es_module_marker, is_babel_interop_helper_definition,
-    program_references_named_identifier, strip_named_declarations_in_program,
-    strip_named_var_declarations_in_program, strip_webpack_make_namespace_markers_in_program,
-};
-use namespace_flatten::flatten_node_builtin_namespace_imports_in_program;
-use namespace_split::{merge_and_sort_named_imports, split_safe_namespace_imports};
+pub(crate) use local_named_exports::module_export_name_text;
 pub use parse::{parse_options_for, parse_source, source_type_candidates, source_type_for_parse};
-use recover::{
-    apply_object_property_readability, inline_simple_root_aliases, recover_class_declarations,
-    recover_function_declarations, recover_object_destructuring,
-};
-use rename_apply::{
-    ReadabilityRenameHint, ReadabilityRenameSource, apply_emit_safety_renames,
-    apply_readability_renames, resolve_readability_rename_hints,
-};
-use rename_hints::collect_late_readability_rename_hints;
 
-use std::collections::BTreeSet;
-use std::path::Path;
-
-use oxc_allocator::Allocator;
-use oxc_ast::{
-    AstBuilder, NONE,
-    ast::{
-        ExportNamedDeclaration, Expression, ImportOrExportKind, ModuleExportName, Program,
-        Statement,
-    },
-};
-use oxc_codegen::{CodeGenerator, CodegenOptions};
-use oxc_parser::Parser;
-use oxc_span::SPAN;
+use oxc_ast::ast::Expression;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedImport {
@@ -147,345 +124,6 @@ pub(crate) fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Optio
     match expression {
         Expression::Identifier(identifier) => Some(identifier.name.as_str()),
         _ => None,
-    }
-}
-
-pub fn format_source_with_module_items(
-    body_source: &str,
-    generated_imports: &[GeneratedImport],
-    generated_exports: &[GeneratedExport],
-    path_hint: Option<&Path>,
-    goal: ParseGoal,
-    lowering: CompilerLowering,
-) -> Result<String> {
-    format_source_with_module_items_and_renames(
-        body_source,
-        generated_imports,
-        generated_exports,
-        &[],
-        path_hint,
-        goal,
-        lowering,
-    )
-}
-
-pub fn format_source_with_module_items_and_renames(
-    body_source: &str,
-    generated_imports: &[GeneratedImport],
-    generated_exports: &[GeneratedExport],
-    readability_renames: &[GeneratedRename],
-    path_hint: Option<&Path>,
-    goal: ParseGoal,
-    lowering: CompilerLowering,
-) -> Result<String> {
-    format_source_with_module_items_and_renames_with_report(
-        body_source,
-        generated_imports,
-        generated_exports,
-        readability_renames,
-        path_hint,
-        goal,
-        lowering,
-    )
-    .map(|(source, _)| source)
-}
-
-pub fn format_source_with_module_items_and_renames_with_report(
-    body_source: &str,
-    generated_imports: &[GeneratedImport],
-    generated_exports: &[GeneratedExport],
-    readability_renames: &[GeneratedRename],
-    path_hint: Option<&Path>,
-    goal: ParseGoal,
-    lowering: CompilerLowering,
-) -> Result<(String, ReadabilityReport)> {
-    // Source-level pre-rewrites: applied before the main parse/codegen path so
-    // that subsequent steps (audit, codegen) see the lowered form. The
-    // rewriter parses once, collects span-aware edits, and returns the
-    // unchanged source if it cannot parse — in which case the regular parse
-    // below will surface a faithful diagnostic.
-    let lowered = apply_source_level_lowerings(body_source, path_hint, goal, lowering);
-    let body_source = lowered.as_str();
-
-    let mut errors = Vec::new();
-    let mut report = ReadabilityReport::default();
-
-    for source_type in source_type_candidates(path_hint, goal) {
-        let allocator = Allocator::default();
-        let mut parsed = Parser::new(&allocator, body_source, source_type)
-            .with_options(parse_options_for(source_type))
-            .parse();
-        if !parsed.errors.is_empty() || parsed.panicked {
-            errors.push(ParseError {
-                source_type: format!("{source_type:?}"),
-                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
-            });
-            continue;
-        }
-
-        if matches!(lowering, CompilerLowering::Babel) {
-            parsed
-                .program
-                .body
-                .retain(|statement| !is_babel_es_module_marker(statement));
-            for helper in BABEL_INTEROP_HELPERS {
-                if !program_references_named_identifier(&parsed.program, helper.name) {
-                    parsed
-                        .program
-                        .body
-                        .retain(|statement| !is_babel_interop_helper_definition(statement, helper));
-                }
-            }
-        }
-        if matches!(lowering, CompilerLowering::Esbuild) {
-            let mut unreferenced = Vec::new();
-            for helper_name in ESBUILD_RUNTIME_HELPERS {
-                if !program_references_named_identifier(&parsed.program, helper_name) {
-                    unreferenced.push(*helper_name);
-                }
-            }
-            strip_named_var_declarations_in_program(&mut parsed.program, &unreferenced);
-        }
-        if matches!(lowering, CompilerLowering::Webpack) {
-            strip_webpack_make_namespace_markers_in_program(&mut parsed.program);
-            let mut unreferenced = Vec::new();
-            for helper_name in WEBPACK_RUNTIME_HELPERS {
-                if !program_references_named_identifier(&parsed.program, helper_name) {
-                    unreferenced.push(*helper_name);
-                }
-            }
-            strip_named_declarations_in_program(&mut parsed.program, &unreferenced);
-        }
-
-        let builder = AstBuilder::new(&allocator);
-        for generated_import in generated_imports.iter().rev() {
-            parsed
-                .program
-                .body
-                .insert(0, generated_import_statement(&builder, generated_import));
-        }
-        for generated_export in generated_exports {
-            parsed
-                .program
-                .body
-                .push(generated_export_statement(&builder, generated_export));
-        }
-        let mut readability_hints = collect_late_readability_rename_hints(&parsed.program);
-        readability_hints.extend(readability_renames.iter().map(|rename| {
-            ReadabilityRenameHint::new(
-                rename.original.as_str(),
-                rename.renamed.as_str(),
-                ReadabilityRenameSource::ExplicitSemantic,
-            )
-        }));
-        let readability_renames_with_imports =
-            resolve_readability_rename_hints(readability_hints, &mut report);
-        apply_readability_renames(
-            &allocator,
-            &mut parsed.program,
-            &readability_renames_with_imports,
-            &mut report,
-        );
-        apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
-        apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
-        normalize_imports_after_emit(&mut parsed.program, &builder);
-        if parsed.program.body.is_empty() {
-            parsed.program.body.push(empty_export_statement(&builder));
-        }
-        coalesce_simple_local_named_exports_in_program(&mut parsed.program, &builder);
-
-        let output = CodeGenerator::new()
-            .with_options(CodegenOptions {
-                single_quote: true,
-                minify: false,
-                ..Default::default()
-            })
-            .build(&parsed.program);
-        return Ok((output.code, report));
-    }
-
-    Err(JsError::ParseFailed(errors))
-}
-
-fn apply_emit_readability_polish<'a>(
-    allocator: &'a Allocator,
-    program: &mut Program<'a>,
-    report: &mut ReadabilityReport,
-) {
-    recover_function_declarations(allocator, program, report);
-    recover_class_declarations(allocator, program, report);
-    inline_simple_root_aliases(allocator, program, report);
-    recover_object_destructuring(allocator, program, report);
-    apply_object_property_readability(program, report);
-    split_safe_namespace_imports(allocator, program, report);
-    merge_and_sort_named_imports(allocator, program, report);
-}
-
-fn normalize_imports_after_emit<'a>(program: &mut Program<'a>, builder: &AstBuilder<'a>) {
-    // These passes intentionally run in phases rather than as one monolithic
-    // import rewriter:
-    //
-    // 1. merge the import surface created by source + generated imports;
-    // 2. flatten safe Node builtin namespace member reads, which may synthesize
-    //    new named imports;
-    // 3. merge again so those synthesized imports join existing imports;
-    // 4. prune unused specifiers after readability renames/flattening;
-    // 5. merge once more because pruning can convert mixed imports into a
-    //    shape that is mergeable with a sibling import.
-    coalesce_imports_in_program(program, builder);
-    flatten_node_builtin_namespace_imports_in_program(program, builder);
-    coalesce_imports_in_program(program, builder);
-    prune_unused_import_specifiers_in_program(program, builder);
-    coalesce_imports_in_program(program, builder);
-}
-
-fn generated_import_statement<'a>(
-    builder: &AstBuilder<'a>,
-    generated_import: &GeneratedImport,
-) -> Statement<'a> {
-    let local = builder.binding_identifier(SPAN, generated_import.namespace.as_str());
-    let specifier = builder.import_declaration_specifier_import_namespace_specifier(SPAN, local);
-    let specifiers = Some(builder.vec1(specifier));
-    let source = builder.string_literal(SPAN, generated_import.specifier.as_str(), None);
-    let with_clause = if generated_import.attributes.is_empty() {
-        None
-    } else {
-        let mut entries = builder.vec();
-        for (key, value) in &generated_import.attributes {
-            entries.push(builder.import_attribute(
-                SPAN,
-                builder.import_attribute_key_identifier_name(SPAN, key.as_str()),
-                builder.string_literal(SPAN, value.as_str(), None),
-            ));
-        }
-        Some(builder.alloc_with_clause(SPAN, builder.identifier_name(SPAN, "with"), entries))
-    };
-    Statement::ImportDeclaration(builder.alloc_import_declaration(
-        SPAN,
-        specifiers,
-        source,
-        None,
-        with_clause,
-        ImportOrExportKind::Value,
-    ))
-}
-
-fn generated_export_statement<'a>(
-    builder: &AstBuilder<'a>,
-    generated_export: &GeneratedExport,
-) -> Statement<'a> {
-    let local =
-        builder.module_export_name_identifier_reference(SPAN, generated_export.binding.as_str());
-    let exported =
-        builder.module_export_name_identifier_name(SPAN, generated_export.binding.as_str());
-    let specifier = builder.export_specifier(SPAN, local, exported, ImportOrExportKind::Value);
-    let specifiers = builder.vec1(specifier);
-    Statement::ExportNamedDeclaration(builder.alloc_export_named_declaration(
-        SPAN,
-        None,
-        specifiers,
-        None,
-        ImportOrExportKind::Value,
-        NONE,
-    ))
-}
-
-fn empty_export_statement<'a>(builder: &AstBuilder<'a>) -> Statement<'a> {
-    Statement::ExportNamedDeclaration(builder.alloc_export_named_declaration(
-        SPAN,
-        None,
-        builder.vec(),
-        None,
-        ImportOrExportKind::Value,
-        NONE,
-    ))
-}
-
-fn coalesce_simple_local_named_exports_in_program<'a>(
-    program: &mut Program<'a>,
-    builder: &AstBuilder<'a>,
-) {
-    let mut bindings = BTreeSet::<String>::new();
-    let mut first_index = None::<usize>;
-    let mut duplicate_indices = Vec::<usize>::new();
-
-    for (index, statement) in program.body.iter().enumerate() {
-        let Statement::ExportNamedDeclaration(declaration) = statement else {
-            continue;
-        };
-        let Some(statement_bindings) = simple_local_named_export_bindings(declaration) else {
-            continue;
-        };
-        bindings.extend(statement_bindings);
-        if first_index.is_none() {
-            first_index = Some(index);
-        } else {
-            duplicate_indices.push(index);
-        }
-    }
-
-    if duplicate_indices.is_empty() {
-        return;
-    }
-    let Some(first_index) = first_index else {
-        return;
-    };
-
-    let mut specifiers = builder.vec();
-    for binding in bindings {
-        let local = builder.module_export_name_identifier_reference(SPAN, binding.as_str());
-        let exported = builder.module_export_name_identifier_name(SPAN, binding.as_str());
-        specifiers.push(builder.export_specifier(SPAN, local, exported, ImportOrExportKind::Value));
-    }
-    program.body[first_index] =
-        Statement::ExportNamedDeclaration(builder.alloc_export_named_declaration(
-            SPAN,
-            None,
-            specifiers,
-            None,
-            ImportOrExportKind::Value,
-            NONE,
-        ));
-
-    for index in duplicate_indices.iter().rev() {
-        program.body.remove(*index);
-    }
-}
-
-fn simple_local_named_export_bindings(
-    declaration: &ExportNamedDeclaration<'_>,
-) -> Option<Vec<String>> {
-    if declaration.declaration.is_some()
-        || declaration.source.is_some()
-        || declaration.export_kind != ImportOrExportKind::Value
-        || declaration.with_clause.is_some()
-        || declaration.specifiers.is_empty()
-    {
-        return None;
-    }
-
-    let mut bindings = Vec::<String>::new();
-    for specifier in &declaration.specifiers {
-        if specifier.export_kind != ImportOrExportKind::Value {
-            return None;
-        }
-        let local = module_export_name_text(&specifier.local)?;
-        let exported = module_export_name_text(&specifier.exported)?;
-        if local != exported {
-            return None;
-        }
-        bindings.push(local);
-    }
-    Some(bindings)
-}
-
-pub(crate) fn module_export_name_text(name: &ModuleExportName<'_>) -> Option<String> {
-    match name {
-        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str().to_string()),
-        ModuleExportName::IdentifierReference(identifier) => {
-            Some(identifier.name.as_str().to_string())
-        }
-        ModuleExportName::StringLiteral(_) => None,
     }
 }
 
