@@ -7270,16 +7270,6 @@ fn external_import_proof_kind(source_path: &str) -> &'static str {
     external_import_proof_label(source_path)
 }
 
-/// Persist bundle-extraction synthetic modules into the SQLite `modules`
-/// table. Required when `apply: true` so that function-level attribution rows
-/// can satisfy their `module_id REFERENCES modules(id)` foreign key.
-///
-/// Uses `INSERT OR IGNORE` to allow idempotent re-runs: if a previous
-/// run already wrote a row with the same `(file_id, original_name)`,
-/// the duplicate is silently skipped. Synthetic-id collisions across
-/// runs are avoided by the shared pipeline preparation allocator starting past
-/// the max real module id at load time.
-
 fn sqlite_table_exists(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
     connection
         .query_row(
