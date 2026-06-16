@@ -2,6 +2,7 @@ mod binding_owner;
 mod byte_lexer;
 mod cli_entrypoint;
 mod compiler_recovery;
+mod compute_modules;
 mod destructure_writes;
 mod eager_safe_analysis;
 mod external_package_adapter_emit;
@@ -32,8 +33,7 @@ use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition}
 use package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, PackageRuntimeImportEmitter,
     PackageRuntimeOwner, emit_package_runtime_helper_files, emit_package_runtime_helper_import,
-    package_runtime_island_plan, package_runtime_owner_for_module,
-    partition_package_runtime_bindings,
+    package_runtime_island_plan, partition_package_runtime_bindings,
 };
 use runtime_singleton_inline::{
     RuntimeSingletonInlineEmitContext, RuntimeSingletonInlinePlan,
@@ -457,7 +457,7 @@ pub struct PlannedExport {
 pub struct ImportExportPlanner;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PlannerAnalysis {
+pub(crate) struct PlannerAnalysis {
     external_package_adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     externalized_packages: BTreeSet<ModuleId>,
     source_suppressed_packages: BTreeSet<ModuleId>,
@@ -545,7 +545,7 @@ impl PlannerAnalysis {
 ///   from the owner directly), and
 /// - bindings whose owner is still the runtime helpers file (re-exported
 ///   from the runtime helpers).
-fn partition_folded_stub_exports(
+pub(crate) fn partition_folded_stub_exports(
     folded: &RuntimeLazyFoldModule,
     module_id: ModuleId,
     binding_owners: &BindingOwnerPlan,
@@ -574,7 +574,7 @@ fn partition_folded_stub_exports(
 /// subset still owned by either the runtime helpers file or this
 /// module itself (i.e. excluding bindings whose owners have moved to
 /// another module — those are imported directly from the new owner).
-fn folded_runtime_required_bindings(
+pub(crate) fn folded_runtime_required_bindings(
     folded: &RuntimeLazyFoldModule,
     module_id: ModuleId,
     binding_owners: &BindingOwnerPlan,
@@ -595,7 +595,7 @@ fn folded_runtime_required_bindings(
 /// stub exports still owned by the runtime helpers file, and record
 /// those bindings in the helper-file-bindings + exports indexes so the
 /// runtime helper emission phase knows to surface them.
-fn emit_folded_runtime_stub_reexports(
+pub(crate) fn emit_folded_runtime_stub_reexports(
     source_file_id: u32,
     path: &str,
     runtime_stub_exports: &BTreeSet<BindingName>,
@@ -639,7 +639,7 @@ fn emit_folded_runtime_stub_reexports(
 /// module's runtime helper file — the caller uses that to decide
 /// whether the lazy helper imports must precede the rest.
 #[allow(clippy::too_many_arguments)]
-fn emit_source_module_imports(
+pub(crate) fn emit_source_module_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     path: &str,
@@ -762,7 +762,7 @@ fn emit_source_module_imports(
 /// shows them safe to copy and the rewritten source still references
 /// them.
 #[allow(clippy::too_many_arguments)]
-fn compute_localized_noop_runtime_helpers(
+pub(crate) fn compute_localized_noop_runtime_helpers(
     program: &EnrichedProgram,
     module_id: ModuleId,
     source_module_wiring: &SourceModuleWiring,
@@ -813,7 +813,7 @@ fn compute_localized_noop_runtime_helpers(
 /// equivalent CommonJS `require(...)` form. Returns the filtered set
 /// plus the consumed-by-require helper set (still needed by a later
 /// partitioning filter on a different binding stream).
-fn filter_remaining_helpers_namespace_and_require(
+pub(crate) fn filter_remaining_helpers_namespace_and_require(
     remaining_runtime_helpers: BTreeSet<BindingName>,
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     namespace_member_rewrite: Option<
@@ -849,7 +849,7 @@ fn filter_remaining_helpers_namespace_and_require(
 /// direct-import buckets via `partition_runtime_owner_bindings`.
 /// Empty partitions are dropped.
 #[allow(clippy::too_many_arguments)]
-fn build_runtime_import_partitions(
+pub(crate) fn build_runtime_import_partitions(
     program: &EnrichedProgram,
     module_id: ModuleId,
     runtime_import_groups: BTreeMap<u32, BTreeSet<BindingName>>,
@@ -939,7 +939,7 @@ fn build_runtime_import_partitions(
 /// localized rewritten source on success; `None` if any precondition
 /// fails or the rewrite isn't applicable.
 #[allow(clippy::too_many_arguments)]
-fn try_localize_lazy_value(
+pub(crate) fn try_localize_lazy_value(
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     namespace_member_rewrite: Option<
         &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
@@ -983,7 +983,7 @@ fn try_localize_lazy_value(
 /// could be inlined as a singleton snippet, or because written/lazy
 /// helpers always go through the runtime file. Used downstream to
 /// route prelude imports through the runtime companion.
-fn compute_runtime_sources_for_module(
+pub(crate) fn compute_runtime_sources_for_module(
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     lowered_import_partition: &RuntimeOwnerImportPartition,
     runtime_import_partitions: &[(u32, RuntimeOwnerImportPartition)],
@@ -1030,7 +1030,7 @@ fn compute_runtime_sources_for_module(
 /// `require(...)` reshape, and runtime-helper writes routed through
 /// `__reverts_set_X(...)`. The result is the source body the emitter
 /// will normalise and write to disk.
-fn build_lowered_module_source(
+pub(crate) fn build_lowered_module_source(
     lowered_source: &LoweredRuntimeModuleSource,
     localized_lazy_value_source: Option<&str>,
     namespace_member_rewrite: Option<
@@ -1072,7 +1072,7 @@ fn build_lowered_module_source(
 /// migrations and a separate `var X = init;` for each that carries an
 /// initializer. Initialized bindings are emitted as individual
 /// statements (not bundled) so the initializers stay readable.
-fn emit_migrated_locally_var_declarations(
+pub(crate) fn emit_migrated_locally_var_declarations(
     file: &mut PlannedFile,
     migrated_locally: &BTreeSet<BindingName>,
     runtime_var_migrations: &RuntimeVarMigrationPlan,
@@ -1113,7 +1113,7 @@ fn emit_migrated_locally_var_declarations(
 /// `BindingShape::Unknown` because the lowered form may reshape them;
 /// other migrated bindings stay `Callable`. Called from both the
 /// source-free and source-backed paths.
-fn add_migrated_local_binding_declarations(
+pub(crate) fn add_migrated_local_binding_declarations(
     file: &mut PlannedFile,
     planned_bindings: &mut BTreeSet<BindingName>,
     migrated_local_bindings: &BTreeSet<BindingName>,
@@ -1145,7 +1145,7 @@ fn add_migrated_local_binding_declarations(
 /// and setter-writes are routed through `__reverts_set_X` helpers.
 /// Called from both the source-free and source-backed module-emit
 /// paths since the chunk-emit shape is identical.
-fn emit_migrated_extra_chunks(
+pub(crate) fn emit_migrated_extra_chunks(
     program: &EnrichedProgram,
     file: &mut PlannedFile,
     migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
@@ -1212,7 +1212,7 @@ fn emit_migrated_extra_chunks(
 /// name differs from the original AST identifier and an `Unknown`
 /// shape override for bindings that were reshaped during runtime
 /// lowering.
-fn emit_module_definition_bindings(
+pub(crate) fn emit_module_definition_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
     file: &mut PlannedFile,
@@ -1254,7 +1254,7 @@ fn emit_module_definition_bindings(
 /// aren't already planned (graph imports the planner kept as-is),
 /// each with a readability rename when the emitted semantic name
 /// differs from the original.
-fn emit_source_import_bindings(
+pub(crate) fn emit_source_import_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
     file: &mut PlannedFile,
@@ -1292,7 +1292,7 @@ fn emit_source_import_bindings(
 /// package_written, written)` — the post-split sets needed by the
 /// follow-up lazyValue localization and helper-usage recording.
 #[allow(clippy::too_many_arguments)]
-fn emit_lowered_package_runtime_imports(
+pub(crate) fn emit_lowered_package_runtime_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -1358,7 +1358,7 @@ fn emit_lowered_package_runtime_imports(
 /// runtime edge, we localize it too and avoid materializing the
 /// runtime-helper file just for the memoizer.
 #[allow(clippy::too_many_arguments)]
-fn try_post_inline_localize_lazy_value(
+pub(crate) fn try_post_inline_localize_lazy_value(
     lowered_source: &LoweredRuntimeModuleSource,
     namespace_member_rewrite: Option<
         &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
@@ -1423,7 +1423,7 @@ fn try_post_inline_localize_lazy_value(
 /// the remaining bindings — updating usage/export accumulators along
 /// the way.
 #[allow(clippy::too_many_arguments)]
-fn emit_runtime_import_partitions(
+pub(crate) fn emit_runtime_import_partitions(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -1545,7 +1545,7 @@ fn emit_runtime_import_partitions(
 /// imports — and add `PlannedBinding` entries for the read bindings.
 /// Skipped entirely when every category is empty.
 #[allow(clippy::too_many_arguments)]
-fn emit_lowered_runtime_helper_import(
+pub(crate) fn emit_lowered_runtime_helper_import(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -1592,7 +1592,7 @@ fn emit_lowered_runtime_helper_import(
 /// setters target this source, and which lazy helpers are imported or
 /// re-exported by lazy form.
 #[allow(clippy::too_many_arguments)]
-fn record_lowered_runtime_helper_usage(
+pub(crate) fn record_lowered_runtime_helper_usage(
     lowered_source: &LoweredRuntimeModuleSource,
     remaining_runtime_helpers: &BTreeSet<BindingName>,
     written_runtime_helpers: &BTreeSet<BindingName>,
@@ -1653,7 +1653,7 @@ fn record_lowered_runtime_helper_usage(
 /// } from "runtime-helpers/..."` statement and updates the helper-
 /// tracking maps so audits know this module reads from that source.
 #[allow(clippy::too_many_arguments)]
-fn emit_migrated_runtime_extra_alias_imports(
+pub(crate) fn emit_migrated_runtime_extra_alias_imports(
     module_path: &str,
     file: &mut PlannedFile,
     planned_bindings: &mut BTreeSet<BindingName>,
@@ -1707,7 +1707,7 @@ fn emit_migrated_runtime_extra_alias_imports(
 /// can re-export them. Each `(source_file_id -> {bindings})` emits
 /// one helper-import statement and records the surface for audit.
 #[allow(clippy::too_many_arguments)]
-fn emit_migrated_extra_runtime_reexport_imports(
+pub(crate) fn emit_migrated_extra_runtime_reexport_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -1756,7 +1756,7 @@ fn emit_migrated_extra_runtime_reexport_imports(
 /// direct owner re-import for source/runtime-owner deps and an
 /// aliased import for the alias-renamed bindings.
 #[allow(clippy::too_many_arguments)]
-fn emit_migrated_extra_owner_imports(
+pub(crate) fn emit_migrated_extra_owner_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -1805,7 +1805,7 @@ fn emit_migrated_extra_owner_imports(
 /// them via the runtime companion instead of a direct prelude path),
 /// except for bindings whose direct route was explicitly allowed by
 /// `runtime_edge_direct_prelude_imports`.
-fn route_prelude_imports_for_runtime_sources(
+pub(crate) fn route_prelude_imports_for_runtime_sources(
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     lowered_import_partition: &mut RuntimeOwnerImportPartition,
     runtime_import_partitions: &mut [(u32, RuntimeOwnerImportPartition)],
@@ -1833,7 +1833,7 @@ fn route_prelude_imports_for_runtime_sources(
 /// runtime helpers can be dropped from the helper file: a helper that
 /// only exists to back a namespace getter can be erased when nothing
 /// in the rewritten source still references it.
-fn namespace_export_helpers_for_source(
+pub(crate) fn namespace_export_helpers_for_source(
     program: &EnrichedProgram,
     lowered_source: Option<&LoweredRuntimeModuleSource>,
 ) -> BTreeSet<BindingName> {
@@ -1856,7 +1856,7 @@ fn namespace_export_helpers_for_source(
 
 /// Drop any namespace-export helper that the source no longer
 /// references after the rewrites.
-fn filter_unreferenced_namespace_helpers(
+pub(crate) fn filter_unreferenced_namespace_helpers(
     remaining: BTreeSet<BindingName>,
     namespace_export_helpers: &BTreeSet<BindingName>,
     source_runtime_refs: &BTreeSet<BindingName>,
@@ -1875,7 +1875,7 @@ fn filter_unreferenced_namespace_helpers(
 /// and erase others; this pass keeps only helpers that are still
 /// referenced or still pulled in via migration.
 #[allow(clippy::too_many_arguments)]
-fn filter_remaining_helpers_by_write_rewrite(
+pub(crate) fn filter_remaining_helpers_by_write_rewrite(
     program: &EnrichedProgram,
     module_id: ModuleId,
     source_module_wiring: &SourceModuleWiring,
@@ -1934,7 +1934,7 @@ fn filter_remaining_helpers_by_write_rewrite(
 /// wiring's import set. Top-level named exports get stripped and
 /// folded back in so the binding's name survives even when the
 /// `export` statement is later removed.
-fn compute_source_runtime_refs(
+pub(crate) fn compute_source_runtime_refs(
     program: &EnrichedProgram,
     module_id: ModuleId,
     source_module_wiring: &SourceModuleWiring,
@@ -1977,7 +1977,7 @@ fn compute_source_runtime_refs(
 /// Compute the namespace-member-access rewrite for the lowered source,
 /// reserving the union of source-definitions / source-imports /
 /// already-planned bindings to avoid clobbering shadowable names.
-fn compute_namespace_member_rewrite(
+pub(crate) fn compute_namespace_member_rewrite(
     program: &EnrichedProgram,
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     runtime_import_groups: &BTreeMap<u32, BTreeSet<BindingName>>,
@@ -2000,7 +2000,7 @@ fn compute_namespace_member_rewrite(
 
 /// Compute the per-source-file `runtime_create_require_helpers` map
 /// that the node-builtin-require rewriter needs.
-fn compute_node_builtin_require_helpers(
+pub(crate) fn compute_node_builtin_require_helpers(
     program: &EnrichedProgram,
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     runtime_prelude_direct_imports: &BTreeMap<
@@ -2026,7 +2026,7 @@ fn compute_node_builtin_require_helpers(
 /// optionally already had its namespace members rewritten. The reserved
 /// binding set is recomputed so the new top-level definitions
 /// introduced by the namespace rewrite are visible.
-fn compute_node_builtin_require_rewrite(
+pub(crate) fn compute_node_builtin_require_rewrite(
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     namespace_member_rewrite: Option<
         &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
@@ -2056,7 +2056,7 @@ fn compute_node_builtin_require_rewrite(
 /// Phase 10b migrations: bindings the migration pulled in as extra
 /// runtime deps need to remain in the helper file, while bindings now
 /// owned locally are removed from the runtime side.
-fn adjust_remaining_runtime_helpers(
+pub(crate) fn adjust_remaining_runtime_helpers(
     remaining: &BTreeSet<BindingName>,
     migrated_extra_runtime_deps: &BTreeSet<BindingName>,
     migrated_local_bindings: &BTreeSet<BindingName>,
@@ -2074,7 +2074,7 @@ fn adjust_remaining_runtime_helpers(
 /// Phase 10b migrations: bindings now owned locally no longer write
 /// through the runtime setter, while moved reader snippets contribute
 /// new setter writes.
-fn adjust_written_runtime_helpers(
+pub(crate) fn adjust_written_runtime_helpers(
     written: &BTreeSet<BindingName>,
     migrated_locally: &BTreeSet<BindingName>,
     migrated_extra_runtime_setter_deps: &BTreeSet<BindingName>,
@@ -2095,7 +2095,7 @@ fn adjust_written_runtime_helpers(
 /// are the primary runtime vars now declared in this module — their
 /// `X = value` writes stay as direct assignments instead of getting
 /// rewritten to setter calls.
-struct OwnerMigrationState {
+pub(crate) struct OwnerMigrationState {
     migrated_locally: BTreeSet<BindingName>,
     migrated_extra_snippets: BTreeSet<(u32, BindingName)>,
     migrated_extra_namespace_exports: BTreeSet<(u32, BindingName)>,
@@ -2154,7 +2154,11 @@ impl OwnerMigrationState {
 
 /// Push every `PlannedImport` for module's package-graph imports
 /// (the decisions surfaced by `program.package_imports_for`).
-fn push_package_imports(program: &EnrichedProgram, module_id: ModuleId, file: &mut PlannedFile) {
+pub(crate) fn push_package_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    file: &mut PlannedFile,
+) {
     for decision in program.package_imports_for(module_id) {
         file.add_import(PlannedImport {
             namespace: decision.namespace_binding.clone(),
@@ -2173,7 +2177,7 @@ fn push_package_imports(program: &EnrichedProgram, module_id: ModuleId, file: &m
 /// because their shape was rewritten by namespace decomposition;
 /// other migrated bindings are callable.
 #[allow(clippy::too_many_arguments)]
-fn push_folded_noop_and_migrated_exports(
+pub(crate) fn push_folded_noop_and_migrated_exports(
     folded: &RuntimeLazyFoldModule,
     runtime_stub_exports: &BTreeSet<BindingName>,
     direct_stub_exports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -2232,7 +2236,7 @@ fn push_folded_noop_and_migrated_exports(
 /// into `file`, in their original source order. The flat alias table
 /// from `migrated_extra_runtime_dep_aliases` is used to rename any
 /// references to bindings whose original name collided in this owner.
-fn push_migrated_runtime_snippets_and_namespaces(
+pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
     program: &EnrichedProgram,
     migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
     migrated_extra_namespace_exports: &BTreeSet<(u32, BindingName)>,
@@ -2297,7 +2301,7 @@ fn push_migrated_runtime_snippets_and_namespaces(
 /// exported / required indexes and turned into a `PlannedBinding`
 /// derived from the program's shape/known-members data.
 #[allow(clippy::too_many_arguments)]
-fn emit_runtime_extra_deps_imports(
+pub(crate) fn emit_runtime_extra_deps_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     path: &str,
@@ -2354,7 +2358,7 @@ fn emit_runtime_extra_deps_imports(
 /// module + register every original/alias binding in the helper-file,
 /// exported, and required indexes so the runtime helper file actually
 /// surfaces them.
-fn emit_runtime_extra_alias_imports(
+pub(crate) fn emit_runtime_extra_alias_imports(
     path: &str,
     aliases_by_source: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
     file: &mut PlannedFile,
@@ -2404,7 +2408,7 @@ fn emit_runtime_extra_alias_imports(
 /// Emit `export { X } from './other-owner.ts'` for each binding whose
 /// owner moved to a different module. Owners without a resolvable output
 /// path are silently skipped — they'll surface as audit findings later.
-fn emit_folded_direct_stub_reexports(
+pub(crate) fn emit_folded_direct_stub_reexports(
     program: &EnrichedProgram,
     path: &str,
     direct_stub_exports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -2427,7 +2431,7 @@ fn emit_folded_direct_stub_reexports(
 /// helper file does. Detect that case here so the helper file declares
 /// and exports `lazyValue`/`lazyModule` even though no consumer needs to
 /// import them.
-fn detect_folded_lazy_helper_use(
+pub(crate) fn detect_folded_lazy_helper_use(
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     used_lazy_module: &mut BTreeSet<u32>,
     used_lazy_value: &mut BTreeSet<u32>,
@@ -2526,701 +2530,33 @@ impl ImportExportPlanner {
         );
 
         for module in program.model().modules() {
-            if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
-                continue;
-            }
-
-            let path = program
-                .semantic_names()
-                .module_path(module.id)
-                .unwrap_or(module.semantic_path.as_str());
-            let package_runtime_owner =
-                package_runtime_owner_for_module(module, source_suppressed_packages);
-            let compiler_profile = program.compiler_profile().module(module.id);
-            let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
-            let mut adapter_file = PlannedFile::new(path);
-            adapter_file.set_compiler_recovery(compiler_recovery.clone());
-            if external_package_adapter_emit::try_emit_external_package_adapter(
+            compute_modules::plan_one_module(
                 program,
                 module,
-                external_package_adapters,
-                adapter_file,
                 &mut plan,
-            ) {
-                continue;
-            }
-            let mut file = PlannedFile::new(path);
-            file.set_compiler_recovery(compiler_recovery);
-            let mut planned_bindings = BTreeSet::<BindingName>::new();
-            let mut emitted_inline_runtime_helpers = BTreeSet::<(u32, BindingName)>::new();
-
-            if pure_reexport_bypasses.omitted_modules.contains(&module.id) {
-                continue;
-            }
-
-            if let Some(folded) = runtime_lazy_folds.modules.get(&module.id) {
-                let migrated_extra_snippets =
-                    runtime_var_migrations.extra_snippets_for_owner(module.id);
-                let migrated_extra_namespace_exports =
-                    runtime_var_migrations.extra_namespace_exports_for_owner(module.id);
-                let migrated_extra_namespace_bindings = migrated_extra_namespace_exports
-                    .iter()
-                    .map(|(_, binding)| binding.clone())
-                    .collect::<BTreeSet<_>>();
-                let migrated_extra_noop_deps =
-                    runtime_var_migrations.extra_noop_deps_for_owner(module.id);
-                let migrated_extra_runtime_deps_by_source =
-                    runtime_var_migrations.extra_runtime_deps_by_source_for_owner(module.id);
-                let migrated_extra_runtime_owner_deps =
-                    runtime_var_migrations.migrated_extra_runtime_deps_for_owner(module.id);
-                let migrated_extra_runtime_owner_dep_aliases =
-                    runtime_var_migrations.migrated_aliased_extra_runtime_deps_for_owner(module.id);
-                let migrated_extra_runtime_dep_aliases =
-                    runtime_var_migrations.extra_runtime_dep_aliases_for_owner(module.id);
-                let migrated_runtime_extra_runtime_dep_aliases =
-                    runtime_var_migrations.runtime_extra_runtime_dep_aliases_for_owner(module.id);
-                let migrated_local_bindings =
-                    runtime_var_migrations.local_bindings_for_owner(module.id);
-                let (runtime_stub_exports, direct_stub_exports) =
-                    partition_folded_stub_exports(folded, module.id, &binding_owners);
-                let runtime_required_bindings =
-                    folded_runtime_required_bindings(folded, module.id, &binding_owners);
-                if !runtime_required_bindings.is_empty() {
-                    required_runtime_helper_bindings
-                        .entry(folded.source_file_id)
-                        .or_default()
-                        .extend(runtime_required_bindings);
-                }
-                // Phase 13: a folded module whose only in-project purpose is
-                // `export { X } from runtime` is a pure forwarding shim. When
-                // we can rewrite every internal consumer to import the folded
-                // binding directly from the runtime helper, omit that shim
-                // entirely. Modules with no internal consumers keep their stub
-                // file so an explicit/source export surface is still visible.
-                if omitted_folded_stub_modules.contains(&module.id)
-                    && migrated_local_bindings.is_empty()
-                {
-                    continue;
-                }
-                emit_folded_runtime_stub_reexports(
-                    folded.source_file_id,
-                    path,
-                    &runtime_stub_exports,
-                    &mut file,
-                    &mut used_runtime_helper_files,
-                    &mut exported_runtime_helper_bindings,
-                );
-                emit_folded_direct_stub_reexports(program, path, &direct_stub_exports, &mut file);
-                if !migrated_extra_runtime_owner_deps.is_empty() {
-                    emit_direct_owner_imports(
-                        program,
-                        module.id,
-                        path,
-                        &mut file,
-                        &mut planned_bindings,
-                        &migrated_extra_runtime_owner_deps,
-                    );
-                }
-                if !migrated_extra_runtime_owner_dep_aliases.is_empty() {
-                    emit_direct_owner_import_aliases(
-                        program,
-                        path,
-                        &mut file,
-                        &mut planned_bindings,
-                        &migrated_extra_runtime_owner_dep_aliases,
-                    );
-                }
-                emit_runtime_extra_alias_imports(
-                    path,
-                    &migrated_runtime_extra_runtime_dep_aliases,
-                    &mut file,
-                    &mut planned_bindings,
-                    &mut used_runtime_helper_files,
-                    &mut exported_runtime_helper_bindings,
-                    &mut required_runtime_helper_bindings,
-                );
-                emit_runtime_extra_deps_imports(
-                    program,
-                    module.id,
-                    path,
-                    &migrated_extra_runtime_deps_by_source,
-                    &mut file,
-                    &mut planned_bindings,
-                    &mut used_runtime_helper_files,
-                    &mut exported_runtime_helper_bindings,
-                    &mut required_runtime_helper_bindings,
-                );
-                push_migrated_runtime_snippets_and_namespaces(
-                    program,
-                    &migrated_extra_snippets,
-                    &migrated_extra_namespace_exports,
-                    &migrated_extra_runtime_dep_aliases,
-                    &mut file,
-                );
-                push_folded_noop_and_migrated_exports(
-                    folded,
-                    &runtime_stub_exports,
-                    &direct_stub_exports,
-                    &migrated_extra_noop_deps,
-                    &migrated_local_bindings,
-                    &migrated_extra_namespace_bindings,
-                    &mut file,
-                    &mut planned_bindings,
-                );
-                plan.push_file(file);
-                continue;
-            }
-
-            push_package_imports(program, module.id, &mut file);
-
-            let has_runtime_edge_before_lazy_helpers = emit_source_module_imports(
-                program,
-                module.id,
-                path,
+                &mut used_runtime_helper_files,
+                &mut exported_runtime_helper_bindings,
+                &mut required_runtime_helper_bindings,
+                &mut used_runtime_helper_setters,
+                &mut used_lazy_module,
+                &mut used_lazy_value,
+                &mut exported_lazy_module,
+                &mut exported_lazy_value,
+                &mut used_package_runtime_helper_files,
+                external_package_adapters,
+                externalized_packages,
+                source_suppressed_packages,
                 source_module_wiring,
-                &pure_reexport_bypasses,
+                lowered_runtime_sources,
                 runtime_lazy_folds,
                 &omitted_folded_stub_modules,
-                &binding_owners,
-                &mut file,
-                &mut planned_bindings,
-                &mut used_runtime_helper_files,
-                &mut exported_runtime_helper_bindings,
-            );
-
-            let runtime_imports = program.model().graph().runtime_imports_for(module.id);
-            let runtime_import_groups = group_runtime_imports(runtime_imports);
-            let lowered_source = lowered_runtime_sources.get(&module.id);
-            let lowered_helpers = lowered_source
-                .map(|source| source.lowered_helpers.clone())
-                .unwrap_or_default();
-            let local_source_definitions = lowered_source
-                .as_ref()
-                .map(|source| source.local_definitions.clone())
-                .unwrap_or_default();
-            let local_source_writes = lowered_source
-                .as_ref()
-                .map(|source| source.local_writes.clone())
-                .unwrap_or_default();
-            let source_imports = program.model().graph().ast_imports_for(module.id);
-            let remaining_runtime_helpers = lowered_source
-                .map(|source| source.remaining_helpers.clone())
-                .unwrap_or_default();
-            let written_runtime_helpers = lowered_source
-                .map(|source| source.written_helpers.clone())
-                .unwrap_or_default();
-            let OwnerMigrationState {
-                migrated_locally,
-                migrated_extra_snippets,
-                migrated_extra_namespace_exports,
-                migrated_extra_namespace_bindings,
-                migrated_extra_runtime_deps,
-                migrated_extra_runtime_setter_deps,
-                migrated_extra_runtime_setter_deps_by_source,
-                migrated_extra_runtime_owner_deps,
-                migrated_extra_runtime_owner_dep_aliases,
-                migrated_extra_runtime_dep_aliases,
-                migrated_runtime_extra_runtime_dep_aliases,
-                migrated_extra_source_deps,
-                migrated_extra_runtime_reexport_deps,
-                migrated_extra_noop_deps,
-                migrated_local_bindings,
-            } = OwnerMigrationState::from_plan(&runtime_var_migrations, module.id);
-            let remaining_runtime_helpers = adjust_remaining_runtime_helpers(
-                &remaining_runtime_helpers,
-                &migrated_extra_runtime_deps,
-                &migrated_local_bindings,
-            );
-            let written_runtime_helpers = adjust_written_runtime_helpers(
-                &written_runtime_helpers,
-                &migrated_locally,
-                &migrated_extra_runtime_setter_deps,
-            );
-            let namespace_member_rewrite = compute_namespace_member_rewrite(
-                program,
-                lowered_source,
-                &runtime_import_groups,
-                &local_source_definitions,
-                &source_imports,
-                &planned_bindings,
-            );
-            let node_builtin_require_helpers = compute_node_builtin_require_helpers(
-                program,
-                lowered_source,
+                &pure_reexport_bypasses,
+                &runtime_var_migrations,
                 &runtime_prelude_direct_imports,
-            );
-            let node_builtin_require_rewrite = compute_node_builtin_require_rewrite(
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                &node_builtin_require_helpers,
-                &local_source_definitions,
-                &source_imports,
-                &planned_bindings,
-            );
-            let source_runtime_refs = compute_source_runtime_refs(
-                program,
-                module.id,
-                source_module_wiring,
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                node_builtin_require_rewrite.as_ref(),
-            );
-            let remaining_runtime_helpers = filter_remaining_helpers_by_write_rewrite(
-                program,
-                module.id,
-                source_module_wiring,
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                node_builtin_require_rewrite.as_ref(),
-                &written_runtime_helpers,
-                &migrated_extra_runtime_deps,
-                remaining_runtime_helpers,
-            );
-            let namespace_export_helpers_for_source =
-                namespace_export_helpers_for_source(program, lowered_source);
-            let remaining_runtime_helpers = filter_unreferenced_namespace_helpers(
-                remaining_runtime_helpers,
-                &namespace_export_helpers_for_source,
-                &source_runtime_refs,
-            );
-            let (remaining_runtime_helpers, consumed_node_builtin_require_helpers) =
-                filter_remaining_helpers_namespace_and_require(
-                    remaining_runtime_helpers,
-                    lowered_source,
-                    namespace_member_rewrite.as_ref(),
-                    node_builtin_require_rewrite.as_ref(),
-                );
-            let localized_noop_runtime_helpers = compute_localized_noop_runtime_helpers(
-                program,
-                module.id,
-                source_module_wiring,
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                node_builtin_require_rewrite.as_ref(),
-                &remaining_runtime_helpers,
-            );
-            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
-                .difference(&localized_noop_runtime_helpers)
-                .cloned()
-                .collect();
-            let mut runtime_import_partitions = build_runtime_import_partitions(
-                program,
-                module.id,
-                runtime_import_groups,
-                &binding_owners,
-                namespace_member_rewrite.as_ref(),
-                &source_runtime_refs,
-                &lowered_helpers,
-                &written_runtime_helpers,
-                &consumed_node_builtin_require_helpers,
-                &localized_noop_runtime_helpers,
-                &remaining_runtime_helpers,
-                &planned_bindings,
-                &local_source_definitions,
-                &local_source_writes,
-            );
-            let has_runtime_group_imports = runtime_import_partitions
-                .iter()
-                .any(|(_, partition)| !partition.runtime_bindings.is_empty());
-            let mut lowered_import_partition = lowered_source
-                .map(|lowered_source| {
-                    partition_runtime_owner_bindings(
-                        &binding_owners,
-                        lowered_source.source_file_id,
-                        module.id,
-                        remaining_runtime_helpers.clone(),
-                    )
-                })
-                .unwrap_or_default();
-            let mut lazy_helper_names = lowered_source
-                .map(lazy_helper_import_names_for_source)
-                .unwrap_or_default();
-            let mut localized_lazy_value_source = try_localize_lazy_value(
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                has_runtime_edge_before_lazy_helpers,
-                &written_runtime_helpers,
-                has_runtime_group_imports,
                 &runtime_singleton_inlines,
-                module.id,
-                &lowered_import_partition.runtime_bindings,
-            );
-            if localized_lazy_value_source.is_some() {
-                lazy_helper_names.retain(|name| *name != "lazyValue");
-            }
-            let runtime_sources_for_module = compute_runtime_sources_for_module(
-                lowered_source,
-                &lowered_import_partition,
-                &runtime_import_partitions,
-                &runtime_singleton_inlines,
-                module.id,
-                &written_runtime_helpers,
-                &lazy_helper_names,
-            );
-            route_prelude_imports_for_runtime_sources(
-                lowered_source,
-                &mut lowered_import_partition,
-                &mut runtime_import_partitions,
-                &runtime_sources_for_module,
                 &runtime_edge_direct_prelude_imports,
-            );
-            emit_migrated_extra_owner_imports(
-                program,
-                module.id,
-                path,
-                &mut file,
-                &mut planned_bindings,
-                &migrated_extra_source_deps,
-                &migrated_extra_runtime_owner_deps,
-                &migrated_extra_runtime_owner_dep_aliases,
-            );
-            emit_migrated_runtime_extra_alias_imports(
-                path,
-                &mut file,
-                &mut planned_bindings,
-                &mut used_runtime_helper_files,
-                &mut exported_runtime_helper_bindings,
-                &mut required_runtime_helper_bindings,
-                &migrated_runtime_extra_runtime_dep_aliases,
-            );
-            emit_migrated_extra_runtime_reexport_imports(
-                program,
-                module.id,
-                path,
-                &mut file,
-                &mut planned_bindings,
-                &mut used_runtime_helper_files,
-                &mut exported_runtime_helper_bindings,
-                &migrated_extra_runtime_reexport_deps,
-            );
-            if let Some(lowered_source) = lowered_source
-                && (!remaining_runtime_helpers.is_empty()
-                    || !written_runtime_helpers.is_empty()
-                    || !lazy_helper_names.is_empty())
-            {
-                emit_direct_owner_imports(
-                    program,
-                    module.id,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    &lowered_import_partition.direct_imports,
-                );
-                emit_direct_prelude_imports(
-                    &mut file,
-                    &mut planned_bindings,
-                    &lowered_import_partition.direct_prelude_imports,
-                );
-                let (inline_remaining_helpers, remaining_runtime_helpers) =
-                    partition_runtime_singleton_inline_bindings(
-                        &runtime_singleton_inlines,
-                        module.id,
-                        lowered_source.source_file_id,
-                        &lowered_import_partition.runtime_bindings,
-                    );
-                emit_runtime_singleton_inline_helpers(
-                    RuntimeSingletonInlineEmitContext {
-                        program,
-                        module_id: module.id,
-                        module_path: path,
-                    },
-                    &runtime_singleton_inlines,
-                    &mut file,
-                    &mut planned_bindings,
-                    &mut emitted_inline_runtime_helpers,
-                    lowered_source.source_file_id,
-                    &inline_remaining_helpers,
-                );
-                let (
-                    package_remaining_helpers,
-                    remaining_runtime_helpers,
-                    package_written_helpers,
-                    written_runtime_helpers,
-                ) = emit_lowered_package_runtime_imports(
-                    program,
-                    module.id,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    &mut used_package_runtime_helper_files,
-                    lowered_source.source_file_id,
-                    &binding_owners,
-                    package_runtime_owner.as_ref(),
-                    &remaining_runtime_helpers,
-                    &written_runtime_helpers,
-                );
-                if let Some(localized) = try_post_inline_localize_lazy_value(
-                    lowered_source,
-                    namespace_member_rewrite.as_ref(),
-                    localized_lazy_value_source.as_ref(),
-                    has_runtime_edge_before_lazy_helpers,
-                    &remaining_runtime_helpers,
-                    &written_runtime_helpers,
-                    &package_remaining_helpers,
-                    &package_written_helpers,
-                    &lazy_helper_names,
-                    &runtime_import_partitions,
-                    &runtime_singleton_inlines,
-                    &binding_owners,
-                    package_runtime_owner.as_ref(),
-                    module.id,
-                ) {
-                    localized_lazy_value_source = Some(localized);
-                    lazy_helper_names.retain(|name| *name != "lazyValue");
-                }
-                record_lowered_runtime_helper_usage(
-                    lowered_source,
-                    &remaining_runtime_helpers,
-                    &written_runtime_helpers,
-                    &lazy_helper_names,
-                    &mut used_runtime_helper_files,
-                    &mut exported_runtime_helper_bindings,
-                    &mut required_runtime_helper_bindings,
-                    &mut used_runtime_helper_setters,
-                    &mut used_lazy_module,
-                    &mut used_lazy_value,
-                    &mut exported_lazy_module,
-                    &mut exported_lazy_value,
-                );
-                emit_lowered_runtime_helper_import(
-                    program,
-                    module.id,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    lowered_source.source_file_id,
-                    &remaining_runtime_helpers,
-                    &written_runtime_helpers,
-                    &lazy_helper_names,
-                );
-            }
-
-            emit_runtime_import_partitions(
-                program,
-                module.id,
-                path,
-                &mut file,
-                &mut planned_bindings,
-                &mut used_runtime_helper_files,
-                &mut exported_runtime_helper_bindings,
-                &mut required_runtime_helper_bindings,
-                &mut used_package_runtime_helper_files,
-                &mut emitted_inline_runtime_helpers,
-                runtime_import_partitions,
-                &runtime_singleton_inlines,
                 &binding_owners,
-                package_runtime_owner.as_ref(),
-            );
-
-            if let Some(rewrite) = &node_builtin_require_rewrite
-                && !rewrite.imports.is_empty()
-            {
-                emit_node_builtin_default_imports(
-                    &mut file,
-                    &mut planned_bindings,
-                    &rewrite.imports,
-                );
-            }
-
-            let source_definitions = program.model().graph().ast_definitions_for(module.id);
-            emit_module_definition_bindings(
-                program,
-                module.id,
-                &mut file,
-                &mut planned_bindings,
-                lowered_source,
-            );
-
-            emit_source_import_bindings(
-                program,
-                module.id,
-                &mut file,
-                &mut planned_bindings,
-                &source_imports,
-            );
-
-            if lowered_source.is_none() && !migrated_local_bindings.is_empty() {
-                add_migrated_local_binding_declarations(
-                    &mut file,
-                    &mut planned_bindings,
-                    &migrated_local_bindings,
-                    &migrated_locally,
-                    &migrated_extra_namespace_bindings,
-                );
-                emit_migrated_locally_var_declarations(
-                    &mut file,
-                    &migrated_locally,
-                    &runtime_var_migrations,
-                );
-                emit_migrated_extra_chunks(
-                    program,
-                    &mut file,
-                    &migrated_extra_snippets,
-                    &migrated_extra_namespace_exports,
-                    &migrated_extra_runtime_dep_aliases,
-                    &migrated_extra_runtime_setter_deps_by_source,
-                );
-                for binding in &migrated_extra_noop_deps {
-                    file.push_source(noop_function_statement(binding));
-                }
-            }
-
-            if let Some(lowered_source) = lowered_source {
-                let source_file_path = lowered_source.source_file_path.as_str();
-                let source = build_lowered_module_source(
-                    lowered_source,
-                    localized_lazy_value_source.as_deref(),
-                    namespace_member_rewrite.as_ref(),
-                    &localized_noop_runtime_helpers,
-                    node_builtin_require_rewrite.as_ref(),
-                    &node_builtin_require_helpers,
-                    &written_runtime_helpers,
-                );
-                if contains_call_to_identifier(source.as_str(), "require")
-                    && !local_source_definitions.contains(&BindingName::new("require"))
-                {
-                    file.push_source(node_require_prelude_statement());
-                    planned_bindings.insert(BindingName::new("require"));
-                }
-                // Phase 10b: register migrated bindings as planned BEFORE
-                // computing implicit globals — otherwise the implicit-
-                // globals scan picks the same bindings up as undeclared
-                // writes and emits a redundant `var X;` line alongside
-                // the migration's own declaration.
-                add_migrated_local_binding_declarations(
-                    &mut file,
-                    &mut planned_bindings,
-                    &migrated_local_bindings,
-                    &migrated_locally,
-                    &migrated_extra_namespace_bindings,
-                );
-                let implicit_globals = implicit_global_declarations_for_module(
-                    source.as_str(),
-                    &source_definitions,
-                    &source_imports,
-                    &planned_bindings,
-                );
-                if !implicit_globals.is_empty() {
-                    file.push_source(variable_declaration_statement(implicit_globals.iter()));
-                }
-                // Declare the bindings the runtime helpers module no
-                // longer hosts. Their `X = value` writes (left
-                // unrewritten above because we excluded them from
-                // `written_runtime_helpers`) now bind to the same-module
-                // `var X;` slot. Cross-module readers are routed directly to
-                // this owner module instead of through the runtime helpers
-                // barrel. Bindings that came with a literal initializer emit
-                // `var X = INIT;` so the writer keeps the original
-                // initial value the runtime used to set at load.
-                emit_migrated_locally_var_declarations(
-                    &mut file,
-                    &migrated_locally,
-                    &runtime_var_migrations,
-                );
-                emit_migrated_extra_chunks(
-                    program,
-                    &mut file,
-                    &migrated_extra_snippets,
-                    &migrated_extra_namespace_exports,
-                    &migrated_extra_runtime_dep_aliases,
-                    &migrated_extra_runtime_setter_deps_by_source,
-                );
-                for binding in &migrated_extra_noop_deps {
-                    file.push_source(noop_function_statement(binding));
-                }
-                let normalized = normalize_source_for_emit(
-                    module.id,
-                    source_file_path,
-                    source.as_str(),
-                    file.source_strategy(),
-                )?;
-                file.push_source(normalized);
-            }
-
-            for export in program
-                .model()
-                .graph()
-                .import_export()
-                .exports_for(module.id)
-            {
-                file.add_export_with_source_backed(export, true);
-            }
-            // Phase 10b: bindings this module now owns must be exported so
-            // direct-routed consumers resolve through the live binding. Skip
-            // any binding that is already exported through the module's
-            // regular AST or wiring path to avoid duplicate-export audit
-            // failures.
-            if !migrated_local_bindings.is_empty() {
-                let already_exported: BTreeSet<BindingName> = program
-                    .model()
-                    .graph()
-                    .import_export()
-                    .exports_for(module.id)
-                    .into_iter()
-                    .chain(
-                        source_module_wiring
-                            .exports_by_module
-                            .get(&module.id)
-                            .cloned()
-                            .unwrap_or_default(),
-                    )
-                    .collect();
-                let new_exports: BTreeSet<BindingName> = migrated_local_bindings
-                    .difference(&already_exported)
-                    .cloned()
-                    .collect();
-                if !new_exports.is_empty() {
-                    file.push_source(named_export_statement(new_exports.iter()));
-                    for binding in &new_exports {
-                        file.add_export_with_source_backed(binding.clone(), true);
-                    }
-                }
-            }
-            let migration_source_exports =
-                runtime_var_migrations.source_dep_exports_for_module(module.id);
-            if !migration_source_exports.is_empty() {
-                let already_exported = file
-                    .exports
-                    .iter()
-                    .map(|export| export.binding.clone())
-                    .collect::<BTreeSet<_>>();
-                let new_exports = migration_source_exports
-                    .difference(&already_exported)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                if !new_exports.is_empty() {
-                    file.push_source(named_export_statement(new_exports.iter()));
-                    for binding in &new_exports {
-                        file.add_export_with_source_backed(binding.clone(), true);
-                    }
-                }
-            }
-            let extra_exports = extra_exports_for_module(
-                program,
-                module.id,
-                [source_module_wiring.exports_by_module.get(&module.id)],
-            );
-            if !extra_exports.is_empty() {
-                let existing_exports = program
-                    .model()
-                    .graph()
-                    .import_export()
-                    .exports_for(module.id)
-                    .into_iter()
-                    .collect::<BTreeSet<_>>();
-                let extra_exports = extra_exports
-                    .into_iter()
-                    .filter(|binding| !existing_exports.contains(binding))
-                    .collect::<BTreeSet<_>>();
-                if !extra_exports.is_empty() {
-                    file.push_source(named_export_statement(extra_exports.iter()));
-                    for export in extra_exports {
-                        file.add_export_with_source_backed(export, true);
-                    }
-                }
-            }
-
-            plan.push_file(file);
+            )?;
         }
 
         emit_package_runtime_helper_files(
@@ -3285,7 +2621,7 @@ impl ImportExportPlanner {
     }
 }
 
-fn normalize_source_for_emit(
+pub(crate) fn normalize_source_for_emit(
     _module_id: ModuleId,
     path: &str,
     source: &str,
@@ -3305,7 +2641,7 @@ fn normalize_source_for_emit(
     .unwrap_or_else(|_| source.to_string()))
 }
 
-fn group_runtime_imports(
+pub(crate) fn group_runtime_imports(
     imports: Vec<RuntimePreludeImport>,
 ) -> BTreeMap<u32, BTreeSet<BindingName>> {
     let mut grouped = BTreeMap::<u32, BTreeSet<BindingName>>::new();
@@ -3365,7 +2701,7 @@ pub(crate) enum RuntimePreludeDirectImportKind {
     Named { imported: String },
 }
 
-fn partition_runtime_owner_bindings(
+pub(crate) fn partition_runtime_owner_bindings(
     binding_owners: &BindingOwnerPlan,
     source_file_id: u32,
     current_module: ModuleId,
@@ -3467,7 +2803,7 @@ pub(crate) fn emit_direct_owner_import_aliases(
     }
 }
 
-fn emit_node_builtin_default_imports(
+pub(crate) fn emit_node_builtin_default_imports(
     file: &mut PlannedFile,
     planned_bindings: &mut BTreeSet<BindingName>,
     imports: &BTreeMap<BindingName, String>,
@@ -3557,7 +2893,7 @@ pub(crate) fn emit_direct_prelude_imports(
     }
 }
 
-fn runtime_prelude_direct_imports(
+pub(crate) fn runtime_prelude_direct_imports(
     program: &EnrichedProgram,
 ) -> BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>> {
     program
@@ -3572,7 +2908,7 @@ fn runtime_prelude_direct_imports(
         .collect()
 }
 
-fn runtime_prelude_direct_imports_for_prelude(
+pub(crate) fn runtime_prelude_direct_imports_for_prelude(
     prelude: &RuntimePrelude,
 ) -> BTreeMap<BindingName, RuntimePreludeDirectImport> {
     let mut imports = BTreeMap::<BindingName, RuntimePreludeDirectImport>::new();
@@ -3589,7 +2925,7 @@ fn runtime_prelude_direct_imports_for_prelude(
     imports
 }
 
-fn runtime_edge_direct_prelude_imports(
+pub(crate) fn runtime_edge_direct_prelude_imports(
     program: &EnrichedProgram,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
@@ -3695,7 +3031,7 @@ pub(crate) fn runtime_prelude_direct_import_consumers(
     consumers
 }
 
-fn runtime_prelude_import_has_runtime_reader(
+pub(crate) fn runtime_prelude_import_has_runtime_reader(
     prelude: &RuntimePrelude,
     runtime_lazy_folds: &RuntimeLazyFoldPlan,
     source_file_id: u32,
@@ -3748,7 +3084,7 @@ fn runtime_prelude_import_has_runtime_reader(
         })
 }
 
-fn runtime_prelude_direct_import_group_is_profitable(
+pub(crate) fn runtime_prelude_direct_import_group_is_profitable(
     source_file_id: u32,
     bindings: &BTreeSet<BindingName>,
     imports: &BTreeMap<BindingName, RuntimePreludeDirectImport>,
@@ -3978,7 +3314,7 @@ pub(crate) fn add_global_owned_runtime_snippet_migrations(
     }
 }
 
-fn runtime_owner_candidate_can_emit(
+pub(crate) fn runtime_owner_candidate_can_emit(
     binding: &BindingName,
     owner_module: ModuleId,
     modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
@@ -4016,7 +3352,7 @@ fn runtime_owner_candidate_can_emit(
     true
 }
 
-fn runtime_adjacent_snippet_owners(
+pub(crate) fn runtime_adjacent_snippet_owners(
     prelude: &RuntimePrelude,
     eligible_movable_bindings: &BTreeSet<BindingName>,
     known_owners: &BTreeMap<BindingName, ModuleId>,
@@ -4050,7 +3386,7 @@ fn runtime_adjacent_snippet_owners(
     owners
 }
 
-fn global_runtime_snippet_owner(
+pub(crate) fn global_runtime_snippet_owner(
     definition_owner: Option<ModuleId>,
     namespace_owner: Option<ModuleId>,
     span_owner: Option<ModuleId>,
@@ -4063,7 +3399,7 @@ fn global_runtime_snippet_owner(
     definition_owner.or(span_owner).or(namespace_owner)
 }
 
-fn namespace_export_owner(
+pub(crate) fn namespace_export_owner(
     namespace_export: &RuntimeNamespaceExport,
     source_definition_modules: &BTreeMap<BindingName, Option<ModuleId>>,
 ) -> Option<ModuleId> {
@@ -4080,7 +3416,7 @@ fn namespace_export_owner(
     owners.is_empty().then_some(owner)
 }
 
-fn runtime_namespace_target_owners(
+pub(crate) fn runtime_namespace_target_owners(
     read_index: &RuntimeSourceReadIndex,
     source_definition_modules: &BTreeMap<BindingName, Option<ModuleId>>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
@@ -4106,7 +3442,7 @@ fn runtime_namespace_target_owners(
     owners
 }
 
-fn runtime_snippet_source_span_owner<'a>(
+pub(crate) fn runtime_snippet_source_span_owner<'a>(
     modules: impl IntoIterator<Item = &'a ModuleInput>,
     source_file_id: u32,
     byte_start: u32,
@@ -4168,7 +3504,7 @@ fn runtime_snippet_source_span_owner<'a>(
     owners.is_empty().then_some(owner)
 }
 
-fn global_owner_movable_runtime_snippet(
+pub(crate) fn global_owner_movable_runtime_snippet(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
     source: &str,
@@ -4185,7 +3521,7 @@ fn global_owner_movable_runtime_snippet(
     is_migratable_reader_function_snippet(binding, source)
 }
 
-fn propagate_runtime_reader_owned_snippet_candidates(
+pub(crate) fn propagate_runtime_reader_owned_snippet_candidates(
     prelude: &RuntimePrelude,
     read_index: &RuntimeSourceReadIndex,
     eligible_movable_bindings: &BTreeSet<BindingName>,
@@ -4249,7 +3585,7 @@ fn propagate_runtime_reader_owned_snippet_candidates(
     }
 }
 
-fn closed_global_owned_runtime_snippets(
+pub(crate) fn closed_global_owned_runtime_snippets(
     prelude: &RuntimePrelude,
     read_index: &RuntimeSourceReadIndex,
     candidate_owners: &BTreeMap<BindingName, ModuleId>,
@@ -4498,14 +3834,14 @@ fn closed_global_owned_runtime_snippets(
 }
 
 #[derive(Clone, Copy)]
-struct GlobalOwnedRuntimeEdgeContext<'a> {
+pub(crate) struct GlobalOwnedRuntimeEdgeContext<'a> {
     prelude: &'a RuntimePrelude,
     read_index: &'a RuntimeSourceReadIndex,
     selected: &'a BTreeMap<BindingName, ModuleId>,
     owner_runtime_state: &'a BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
 }
 
-fn global_owned_retained_runtime_readers_can_import_owner(
+pub(crate) fn global_owned_retained_runtime_readers_can_import_owner(
     ctx: GlobalOwnedRuntimeEdgeContext<'_>,
     binding: &BindingName,
     owner_module: ModuleId,
@@ -4531,7 +3867,7 @@ fn global_owned_retained_runtime_readers_can_import_owner(
     global_owned_runtime_edge_to_owner_is_safe(ctx, binding, owner_module, runtime_reads)
 }
 
-fn global_owned_retained_runtime_reader_is_import_safe(
+pub(crate) fn global_owned_retained_runtime_reader_is_import_safe(
     ctx: GlobalOwnedRuntimeEdgeContext<'_>,
     reader: &BindingName,
 ) -> bool {
@@ -4548,7 +3884,7 @@ fn global_owned_retained_runtime_reader_is_import_safe(
     global_owned_moved_snippet_is_cycle_safe(ctx.prelude, reader)
 }
 
-fn retained_runtime_reader_has_unsafe_runtime_caller(
+pub(crate) fn retained_runtime_reader_has_unsafe_runtime_caller(
     read_index: &RuntimeSourceReadIndex,
     reader: &BindingName,
     selected: &BTreeMap<BindingName, ModuleId>,
@@ -4577,7 +3913,7 @@ fn retained_runtime_reader_has_unsafe_runtime_caller(
     false
 }
 
-fn global_owned_folded_runtime_read_can_import_owner(
+pub(crate) fn global_owned_folded_runtime_read_can_import_owner(
     ctx: GlobalOwnedRuntimeEdgeContext<'_>,
     binding: &BindingName,
     owner_module: ModuleId,
@@ -4614,7 +3950,7 @@ fn global_owned_folded_runtime_read_can_import_owner(
     global_owned_runtime_edge_to_owner_is_safe(ctx, binding, owner_module, runtime_reads)
 }
 
-fn global_owned_runtime_edge_to_owner_is_safe(
+pub(crate) fn global_owned_runtime_edge_to_owner_is_safe(
     ctx: GlobalOwnedRuntimeEdgeContext<'_>,
     binding: &BindingName,
     owner_module: ModuleId,
@@ -4664,7 +4000,7 @@ fn global_owned_runtime_edge_to_owner_is_safe(
         && global_owned_moved_snippet_is_cycle_safe(ctx.prelude, binding)
 }
 
-fn global_owned_moved_snippet_is_cycle_safe(
+pub(crate) fn global_owned_moved_snippet_is_cycle_safe(
     prelude: &RuntimePrelude,
     binding: &BindingName,
 ) -> bool {
@@ -4684,7 +4020,7 @@ fn global_owned_moved_snippet_is_cycle_safe(
     variable_declaration_names_function_like_binding(source, binding)
 }
 
-fn global_owned_runtime_dep_aliases_for_owner_conflicts(
+pub(crate) fn global_owned_runtime_dep_aliases_for_owner_conflicts(
     binding: &BindingName,
     extra_runtime_deps: &BTreeSet<BindingName>,
     owner_available_bindings: &BTreeSet<BindingName>,
@@ -4703,7 +4039,7 @@ fn global_owned_runtime_dep_aliases_for_owner_conflicts(
     aliases
 }
 
-fn selected_owner_dependency_creates_cycle(
+pub(crate) fn selected_owner_dependency_creates_cycle(
     selected: &BTreeMap<BindingName, ModuleId>,
     read_index: &RuntimeSourceReadIndex,
     module_dependencies_by_owner: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
@@ -4714,7 +4050,7 @@ fn selected_owner_dependency_creates_cycle(
         || selected_owner_path_exists(selected, read_index, dep_owner, owner_module)
 }
 
-fn selected_owner_path_exists(
+pub(crate) fn selected_owner_path_exists(
     selected: &BTreeMap<BindingName, ModuleId>,
     read_index: &RuntimeSourceReadIndex,
     from_owner: ModuleId,
@@ -4750,7 +4086,7 @@ fn selected_owner_path_exists(
     false
 }
 
-fn selected_runtime_dependencies_for_binding(
+pub(crate) fn selected_runtime_dependencies_for_binding(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
 ) -> BTreeSet<BindingName> {
@@ -4765,7 +4101,7 @@ fn selected_runtime_dependencies_for_binding(
     deps
 }
 
-fn runtime_setter_migration_blocker_report(
+pub(crate) fn runtime_setter_migration_blocker_report(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -5078,7 +4414,7 @@ pub(crate) struct RuntimeReaderClusterContext<'a> {
 /// large modules can absorb proportionally larger runtime clusters
 /// without producing 99%-runtime-disguised-as-source output for small
 /// modules.
-fn runtime_reader_cluster_cap_for_owner(
+pub(crate) fn runtime_reader_cluster_cap_for_owner(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
 ) -> usize {
@@ -5137,7 +4473,7 @@ pub(crate) struct RuntimeReaderOwnerRuntimeState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimeReaderClusterBlocker {
+pub(crate) enum RuntimeReaderClusterBlocker {
     NonSnippetUse(ReaderNonSnippetUseKind),
     MissingSnippet,
     InvalidNamespaceSnippet,
@@ -5225,7 +4561,7 @@ impl ReaderNonSnippetUseKind {
 /// verified `runtime_binding_has_blocking_non_snippet_use` is true and
 /// `can_move` is false; this picks the most specific reason in priority
 /// order (entrypoint > namespace > folded > unfolded read).
-fn classify_unfoldable_non_snippet_use(
+pub(crate) fn classify_unfoldable_non_snippet_use(
     ctx: &RuntimeReaderClusterContext<'_>,
     reader: &BindingName,
 ) -> ReaderNonSnippetUseKind {
@@ -5270,7 +4606,7 @@ fn classify_unfoldable_non_snippet_use(
 /// owner can import. The helper file then invokes the callee via ESM
 /// import; the lazy-init cycle guard (LazyInitCycleImport) blocks any
 /// unsafe runtime→owner→runtime cycle this could synthesize.
-fn can_co_migrate_entrypoint_callee(
+pub(crate) fn can_co_migrate_entrypoint_callee(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     reader: &BindingName,
@@ -5281,7 +4617,7 @@ fn can_co_migrate_entrypoint_callee(
     namespace_contributor_resolvable_in_owner(ctx, owner_module, reader)
 }
 
-fn can_co_migrate_namespace_target(
+pub(crate) fn can_co_migrate_namespace_target(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     reader: &BindingName,
@@ -5304,7 +4640,7 @@ fn can_co_migrate_namespace_target(
     namespace_contributor_resolvable_in_owner(ctx, owner_module, helper)
 }
 
-fn namespace_contributor_resolvable_in_owner(
+pub(crate) fn namespace_contributor_resolvable_in_owner(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -5338,7 +4674,7 @@ fn namespace_contributor_resolvable_in_owner(
 /// Push the contributor bindings + helper of `reader`'s namespace export
 /// onto the cluster walker's queue so they migrate together with the
 /// namespace target itself. Already-moved bindings are skipped.
-fn enqueue_namespace_co_migration(
+pub(crate) fn enqueue_namespace_co_migration(
     ctx: &RuntimeReaderClusterContext<'_>,
     reader: &BindingName,
     moved_snippets: &BTreeSet<BindingName>,
@@ -5523,7 +4859,7 @@ pub(crate) fn select_non_conflicting_reader_migration_proposals(
 // exhaustively exploring a dense overlap cluster.
 const MAX_EXACT_READER_MIGRATION_CONFLICT_COMPONENT: usize = 24;
 
-fn reader_migration_conflict_graph(
+pub(crate) fn reader_migration_conflict_graph(
     proposals: &[RuntimeReaderClusterMigrationProposal],
 ) -> Vec<BTreeSet<usize>> {
     let mut conflicts = vec![BTreeSet::<usize>::new(); proposals.len()];
@@ -5538,7 +4874,7 @@ fn reader_migration_conflict_graph(
     conflicts
 }
 
-fn reader_migration_proposals_conflict(
+pub(crate) fn reader_migration_proposals_conflict(
     left: &RuntimeReaderClusterMigrationProposal,
     right: &RuntimeReaderClusterMigrationProposal,
 ) -> bool {
@@ -5588,7 +4924,9 @@ fn reader_migration_proposals_conflict(
         .any(|reader| left_readers.contains(reader))
 }
 
-fn reader_migration_conflict_components(conflicts: &[BTreeSet<usize>]) -> Vec<Vec<usize>> {
+pub(crate) fn reader_migration_conflict_components(
+    conflicts: &[BTreeSet<usize>],
+) -> Vec<Vec<usize>> {
     let mut components = Vec::<Vec<usize>>::new();
     let mut seen = vec![false; conflicts.len()];
     for start in 0..conflicts.len() {
@@ -5614,7 +4952,7 @@ fn reader_migration_conflict_components(conflicts: &[BTreeSet<usize>]) -> Vec<Ve
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct ReaderMigrationSelectionScore {
+pub(crate) struct ReaderMigrationSelectionScore {
     primary_bindings: usize,
     estimated_runtime_savings: usize,
     source_lines: usize,
@@ -5628,7 +4966,7 @@ impl ReaderMigrationSelectionScore {
     }
 }
 
-fn reader_migration_selection_score(
+pub(crate) fn reader_migration_selection_score(
     proposals: &[RuntimeReaderClusterMigrationProposal],
     indices: &[usize],
 ) -> ReaderMigrationSelectionScore {
@@ -5639,7 +4977,7 @@ fn reader_migration_selection_score(
     score
 }
 
-fn reader_migration_score_is_better(
+pub(crate) fn reader_migration_score_is_better(
     candidate: ReaderMigrationSelectionScore,
     incumbent: ReaderMigrationSelectionScore,
 ) -> bool {
@@ -5650,7 +4988,7 @@ fn reader_migration_score_is_better(
                     && candidate.source_lines < incumbent.source_lines)
 }
 
-fn select_exact_reader_migration_component(
+pub(crate) fn select_exact_reader_migration_component(
     proposals: &[RuntimeReaderClusterMigrationProposal],
     conflicts: &[BTreeSet<usize>],
     component: &[usize],
@@ -5697,7 +5035,7 @@ fn select_exact_reader_migration_component(
     search.best_selected
 }
 
-struct ReaderMigrationExactSearch<'a> {
+pub(crate) struct ReaderMigrationExactSearch<'a> {
     proposals: &'a [RuntimeReaderClusterMigrationProposal],
     component: &'a [usize],
     conflict_masks: &'a [u64],
@@ -5754,7 +5092,7 @@ impl ReaderMigrationExactSearch<'_> {
     }
 }
 
-fn select_large_reader_migration_component(
+pub(crate) fn select_large_reader_migration_component(
     proposals: &[RuntimeReaderClusterMigrationProposal],
     conflicts: &[BTreeSet<usize>],
     component: &[usize],
@@ -5809,7 +5147,7 @@ fn select_large_reader_migration_component(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalizedRuntimeSetterDep {
+pub(crate) struct LocalizedRuntimeSetterDep {
     owner_module: ModuleId,
     initializer: Option<String>,
 }
@@ -5912,7 +5250,7 @@ pub(crate) fn localize_reader_runtime_setter_deps(
     localized
 }
 
-fn runtime_setter_dep_can_localize_with_reader_owner(
+pub(crate) fn runtime_setter_dep_can_localize_with_reader_owner(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -5955,7 +5293,7 @@ fn runtime_setter_dep_can_localize_with_reader_owner(
         .any(|writer| !moved_readers.contains(writer))
 }
 
-fn runtime_snippet_writers_for_binding(
+pub(crate) fn runtime_snippet_writers_for_binding(
     prelude: &RuntimePrelude,
     binding: &BindingName,
 ) -> BTreeSet<BindingName> {
@@ -5973,7 +5311,7 @@ fn runtime_snippet_writers_for_binding(
         .collect()
 }
 
-fn reader_migration_local_bindings(
+pub(crate) fn reader_migration_local_bindings(
     migration: &RuntimeReaderClusterMigration,
 ) -> BTreeSet<BindingName> {
     migration
@@ -5985,7 +5323,7 @@ fn reader_migration_local_bindings(
         .collect()
 }
 
-fn merge_reader_migration_component(
+pub(crate) fn merge_reader_migration_component(
     ctx: &RuntimeReaderClusterContext<'_>,
     proposals: &[RuntimeReaderClusterMigrationProposal],
     component: &[usize],
@@ -6565,7 +5903,7 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
     })
 }
 
-fn owner_declared_or_imported_bindings(
+pub(crate) fn owner_declared_or_imported_bindings(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
 ) -> Result<BTreeSet<BindingName>, RuntimeReaderClusterBlocker> {
@@ -6575,7 +5913,7 @@ fn owner_declared_or_imported_bindings(
         .ok_or(RuntimeReaderClusterBlocker::OwnerSourceMissing)
 }
 
-fn runtime_reader_write_can_use_setter(
+pub(crate) fn runtime_reader_write_can_use_setter(
     source: &str,
     local_bindings: &BTreeSet<String>,
     binding: &BindingName,
@@ -6594,7 +5932,7 @@ fn runtime_reader_write_can_use_setter(
         .any(|write| write == *binding)
 }
 
-fn runtime_setter_deps_read_after_write_rewrite(
+pub(crate) fn runtime_setter_deps_read_after_write_rewrite(
     ctx: &RuntimeReaderClusterContext<'_>,
     moved_snippets: &BTreeSet<BindingName>,
     moved_namespace_exports: &BTreeSet<BindingName>,
@@ -6635,7 +5973,7 @@ fn runtime_setter_deps_read_after_write_rewrite(
     reads
 }
 
-fn runtime_setter_imports_conflict(
+pub(crate) fn runtime_setter_imports_conflict(
     setter_deps: &BTreeSet<BindingName>,
     owner_available_bindings: &BTreeSet<BindingName>,
     primary_bindings: &BTreeSet<BindingName>,
@@ -6653,7 +5991,7 @@ fn runtime_setter_imports_conflict(
     })
 }
 
-fn runtime_setter_dep_cycle_is_safe(
+pub(crate) fn runtime_setter_dep_cycle_is_safe(
     ctx: &RuntimeReaderClusterContext<'_>,
     setter_deps: &BTreeSet<BindingName>,
 ) -> bool {
@@ -6662,7 +6000,7 @@ fn runtime_setter_dep_cycle_is_safe(
         .all(|dep| runtime_binding_is_bare_var_declaration(ctx.prelude, dep))
 }
 
-fn runtime_binding_is_bare_var_declaration(
+pub(crate) fn runtime_binding_is_bare_var_declaration(
     prelude: &RuntimePrelude,
     binding: &BindingName,
 ) -> bool {
@@ -6769,12 +6107,14 @@ pub(crate) fn runtime_reader_owner_available_bindings(
     by_owner
 }
 
-fn owner_state_needs_shared_lazy_helper(owner_state: &RuntimeReaderOwnerRuntimeState) -> bool {
+pub(crate) fn owner_state_needs_shared_lazy_helper(
+    owner_state: &RuntimeReaderOwnerRuntimeState,
+) -> bool {
     owner_state.uses_lazy_module
         || (owner_state.uses_lazy_value && !owner_state.can_localize_lazy_value)
 }
 
-struct RuntimeReaderCycleImportGate<'a> {
+pub(crate) struct RuntimeReaderCycleImportGate<'a> {
     ctx: &'a RuntimeReaderClusterContext<'a>,
     owner_module: ModuleId,
     primary_bindings: &'a BTreeSet<BindingName>,
@@ -6787,7 +6127,7 @@ struct RuntimeReaderCycleImportGate<'a> {
     extra_runtime_reexport_source_deps: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
 }
 
-fn runtime_reader_cycle_imports_can_move(
+pub(crate) fn runtime_reader_cycle_imports_can_move(
     gate: RuntimeReaderCycleImportGate<'_>,
 ) -> Result<bool, RuntimeReaderClusterBlocker> {
     if !runtime_setter_dep_cycle_is_safe(gate.ctx, gate.extra_runtime_setter_deps)
@@ -6847,7 +6187,10 @@ fn runtime_reader_cycle_imports_can_move(
     Ok(true)
 }
 
-fn owner_runtime_imports_are_lazy_safe(source: &str, runtime_deps: &BTreeSet<BindingName>) -> bool {
+pub(crate) fn owner_runtime_imports_are_lazy_safe(
+    source: &str,
+    runtime_deps: &BTreeSet<BindingName>,
+) -> bool {
     let statements = top_level_statement_slices(source);
     let lazy_bindings = statements
         .iter()
@@ -6887,7 +6230,7 @@ fn owner_runtime_imports_are_lazy_safe(source: &str, runtime_deps: &BTreeSet<Bin
     true
 }
 
-fn owner_runtime_writes_are_lazy_safe(
+pub(crate) fn owner_runtime_writes_are_lazy_safe(
     source: &str,
     written_helpers: &BTreeSet<BindingName>,
 ) -> bool {
@@ -6933,7 +6276,7 @@ fn owner_runtime_writes_are_lazy_safe(
     true
 }
 
-fn folded_runtime_reads_are_lazy_safe(
+pub(crate) fn folded_runtime_reads_are_lazy_safe(
     ctx: &RuntimeReaderClusterContext<'_>,
     primary_bindings: &BTreeSet<BindingName>,
     moved_snippets: &BTreeSet<BindingName>,
@@ -7025,7 +6368,7 @@ pub(crate) fn runtime_reader_owner_runtime_state(
     by_owner
 }
 
-fn runtime_dep_aliases_for_owner_conflicts(
+pub(crate) fn runtime_dep_aliases_for_owner_conflicts(
     ctx: &RuntimeReaderClusterContext<'_>,
     moved_snippets: &BTreeSet<BindingName>,
     moved_namespace_exports: &BTreeSet<BindingName>,
@@ -7061,7 +6404,7 @@ fn runtime_dep_aliases_for_owner_conflicts(
     Some(aliases)
 }
 
-fn unique_runtime_dep_alias(
+pub(crate) fn unique_runtime_dep_alias(
     binding: &BindingName,
     reserved: &mut BTreeSet<BindingName>,
 ) -> BindingName {
@@ -7079,7 +6422,7 @@ fn unique_runtime_dep_alias(
     unreachable!("unbounded alias search should always find an identifier")
 }
 
-fn runtime_dep_alias_is_safe_in_moved_sources(
+pub(crate) fn runtime_dep_alias_is_safe_in_moved_sources(
     ctx: &RuntimeReaderClusterContext<'_>,
     moved_snippets: &BTreeSet<BindingName>,
     moved_namespace_exports: &BTreeSet<BindingName>,
@@ -7111,7 +6454,7 @@ fn runtime_dep_alias_is_safe_in_moved_sources(
     true
 }
 
-fn runtime_reader_source_dependency(
+pub(crate) fn runtime_reader_source_dependency(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -7138,7 +6481,7 @@ fn runtime_reader_source_dependency(
     Some(dep_module)
 }
 
-fn runtime_reader_source_reexport_dependency(
+pub(crate) fn runtime_reader_source_reexport_dependency(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -7166,7 +6509,7 @@ fn runtime_reader_source_reexport_dependency(
     Some(dep_module)
 }
 
-fn runtime_reader_externalized_package_init_dependency(
+pub(crate) fn runtime_reader_externalized_package_init_dependency(
     ctx: &RuntimeReaderClusterContext<'_>,
     snippet_source: &str,
     binding: &BindingName,
@@ -7188,7 +6531,7 @@ fn runtime_reader_externalized_package_init_dependency(
     !reads.is_empty() && reads.iter().all(|fact| fact.is_call_callee)
 }
 
-fn runtime_reader_folded_runtime_dependency(
+pub(crate) fn runtime_reader_folded_runtime_dependency(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -7219,7 +6562,7 @@ fn runtime_reader_folded_runtime_dependency(
     true
 }
 
-fn runtime_reader_cluster_source_lines(
+pub(crate) fn runtime_reader_cluster_source_lines(
     ctx: &RuntimeReaderClusterContext<'_>,
     readers: &BTreeSet<BindingName>,
 ) -> usize {
@@ -7298,7 +6641,7 @@ pub(crate) fn module_dependency_modules_by_owner(
     transitive_dependencies
 }
 
-fn source_suppressed_package_dependency_closure(
+pub(crate) fn source_suppressed_package_dependency_closure(
     program: &EnrichedProgram,
     seed_modules: &BTreeSet<ModuleId>,
     source_preserved_packages: &BTreeSet<ModuleId>,
@@ -7375,7 +6718,10 @@ fn source_suppressed_package_dependency_closure(
     reachable
 }
 
-fn source_suppressed_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+pub(crate) fn source_suppressed_consumer_is_boundary(
+    module: &ModuleInput,
+    consumer: &ModuleInput,
+) -> bool {
     match consumer.kind {
         ModuleKind::Application => true,
         ModuleKind::Package => !source_suppressed_same_package_consumer(module, consumer),
@@ -7383,7 +6729,10 @@ fn source_suppressed_consumer_is_boundary(module: &ModuleInput, consumer: &Modul
     }
 }
 
-fn source_suppressed_same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+pub(crate) fn source_suppressed_same_package_consumer(
+    module: &ModuleInput,
+    consumer: &ModuleInput,
+) -> bool {
     let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
         return false;
     };
@@ -7393,7 +6742,7 @@ fn source_suppressed_same_package_consumer(module: &ModuleInput, consumer: &Modu
     !module_package.is_empty() && module_package == consumer_package
 }
 
-fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
+pub(crate) fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
     let modules_by_id = program
         .model()
         .modules()
@@ -7413,7 +6762,7 @@ fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<Mo
         .collect()
 }
 
-fn package_attribution_proves_package_ownership(
+pub(crate) fn package_attribution_proves_package_ownership(
     attribution: &PackageAttributionInput,
     module: &ModuleInput,
 ) -> bool {
@@ -7440,7 +6789,7 @@ fn package_attribution_proves_package_ownership(
             && attribution.package_version.is_some())
 }
 
-fn direct_module_dependency_indexes(
+pub(crate) fn direct_module_dependency_indexes(
     program: &EnrichedProgram,
 ) -> (
     BTreeMap<ModuleId, BTreeSet<ModuleId>>,
@@ -7503,7 +6852,7 @@ pub(crate) fn runtime_reader_folded_non_snippet_use_can_move(
         && !ctx.folded_runtime_definitions.contains(binding)
 }
 
-fn runtime_private_function_dependency_closure(
+pub(crate) fn runtime_private_function_dependency_closure(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     seed: &BindingName,
@@ -7528,7 +6877,7 @@ fn runtime_private_function_dependency_closure(
     Some(closure)
 }
 
-fn runtime_private_function_dependency_can_move(
+pub(crate) fn runtime_private_function_dependency_can_move(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
     binding: &BindingName,
@@ -7562,7 +6911,10 @@ fn runtime_private_function_dependency_can_move(
         .any(|write| ctx.prelude.defines(&write))
 }
 
-fn is_migratable_private_runtime_function_dependency(binding: &BindingName, source: &str) -> bool {
+pub(crate) fn is_migratable_private_runtime_function_dependency(
+    binding: &BindingName,
+    source: &str,
+) -> bool {
     let source = source.trim();
     if let Some(rest) = source.strip_prefix("async")
         && rest.starts_with(|c: char| c.is_ascii_whitespace())
@@ -7585,7 +6937,7 @@ pub(crate) fn is_migratable_reader_function_snippet(binding: &BindingName, sourc
         || variable_declaration_names_function_like_binding(source, binding)
 }
 
-fn is_migratable_namespace_reader_snippet(binding: &BindingName, source: &str) -> bool {
+pub(crate) fn is_migratable_namespace_reader_snippet(binding: &BindingName, source: &str) -> bool {
     let source = source.trim();
     for keyword in ["var", "let", "const"] {
         let Some(rest) = source.strip_prefix(keyword) else {
@@ -7615,7 +6967,7 @@ fn is_migratable_namespace_reader_snippet(binding: &BindingName, source: &str) -
     false
 }
 
-fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
+pub(crate) fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
     if !keyword_at(source, 0, "function") {
         return false;
     }
@@ -7623,7 +6975,7 @@ fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bo
         .is_some_and(|(name, _)| name == binding.as_str())
 }
 
-fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
+pub(crate) fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
     if !keyword_at(source, 0, "class") {
         return false;
     }
@@ -7632,7 +6984,7 @@ fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool 
         && is_migratable_reader_class(source)
 }
 
-fn is_migratable_reader_class(source: &str) -> bool {
+pub(crate) fn is_migratable_reader_class(source: &str) -> bool {
     let Some(open) = find_top_level_byte(source, b'{') else {
         return false;
     };
@@ -7649,7 +7001,7 @@ fn is_migratable_reader_class(source: &str) -> bool {
     !class_body_has_top_level_computed_key(source) && !class_body_has_eager_static_element(source)
 }
 
-fn migratable_reader_class_header(header: &str) -> bool {
+pub(crate) fn migratable_reader_class_header(header: &str) -> bool {
     if header.contains('[') {
         return false;
     }
@@ -7668,7 +7020,7 @@ fn migratable_reader_class_header(header: &str) -> bool {
     true
 }
 
-fn class_body_has_top_level_computed_key(source: &str) -> bool {
+pub(crate) fn class_body_has_top_level_computed_key(source: &str) -> bool {
     let Some(open) = find_top_level_byte(source, b'{') else {
         return true;
     };
@@ -7713,7 +7065,7 @@ fn class_body_has_top_level_computed_key(source: &str) -> bool {
     false
 }
 
-fn class_body_has_eager_static_element(source: &str) -> bool {
+pub(crate) fn class_body_has_eager_static_element(source: &str) -> bool {
     let Some(open) = find_top_level_byte(source, b'{') else {
         return true;
     };
@@ -7752,7 +7104,11 @@ fn class_body_has_eager_static_element(source: &str) -> bool {
     false
 }
 
-fn static_class_element_is_eager(source: &str, after_static: usize, close: usize) -> bool {
+pub(crate) fn static_class_element_is_eager(
+    source: &str,
+    after_static: usize,
+    close: usize,
+) -> bool {
     let bytes = source.as_bytes();
     let cursor = skip_ws_and_comments(bytes, after_static, close);
     if cursor >= close {
@@ -7793,7 +7149,7 @@ fn static_class_element_is_eager(source: &str, after_static: usize, close: usize
     false
 }
 
-fn static_field_initializer_is_eager(source: &str, equals: usize, close: usize) -> bool {
+pub(crate) fn static_field_initializer_is_eager(source: &str, equals: usize, close: usize) -> bool {
     let bytes = source.as_bytes();
     let initializer_start = skip_ws_and_comments(bytes, equals + 1, close);
     if initializer_start >= close {
@@ -7804,7 +7160,10 @@ fn static_field_initializer_is_eager(source: &str, equals: usize, close: usize) 
     !initializer.is_empty() && !is_pure_initializer_expression(initializer)
 }
 
-fn variable_declaration_names_function_like_binding(source: &str, binding: &BindingName) -> bool {
+pub(crate) fn variable_declaration_names_function_like_binding(
+    source: &str,
+    binding: &BindingName,
+) -> bool {
     let source = source.trim();
     for keyword in ["var", "let", "const"] {
         let Some(rest) = source.strip_prefix(keyword) else {
@@ -7829,7 +7188,7 @@ fn variable_declaration_names_function_like_binding(source: &str, binding: &Bind
     false
 }
 
-fn expression_is_function_like_reader(source: &str) -> bool {
+pub(crate) fn expression_is_function_like_reader(source: &str) -> bool {
     let source = source.trim();
     if keyword_at(source, 0, "function") || looks_like_arrow_function_expression(source) {
         return true;
@@ -7856,7 +7215,7 @@ pub(crate) struct RuntimeFoldedSourceChunk {
     source: String,
 }
 
-fn lowered_runtime_sources(
+pub(crate) fn lowered_runtime_sources(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     eager_safe_analysis: &EagerSafeAnalysis,
@@ -7977,7 +7336,7 @@ fn lowered_runtime_sources(
     sources
 }
 
-fn runtime_lazy_fold_plan(
+pub(crate) fn runtime_lazy_fold_plan(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -8135,7 +7494,7 @@ fn runtime_lazy_fold_plan(
     plan
 }
 
-fn runtime_writer_modules_by_binding(
+pub(crate) fn runtime_writer_modules_by_binding(
     program: &EnrichedProgram,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
     externalized_packages: &BTreeSet<ModuleId>,
@@ -8163,7 +7522,7 @@ fn runtime_writer_modules_by_binding(
     writers
 }
 
-fn runtime_remaining_modules_by_binding(
+pub(crate) fn runtime_remaining_modules_by_binding(
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
 ) -> BTreeMap<BindingName, BTreeSet<ModuleId>> {
     let mut readers = BTreeMap::<BindingName, BTreeSet<ModuleId>>::new();
@@ -8178,7 +7537,7 @@ fn runtime_remaining_modules_by_binding(
     readers
 }
 
-fn runtime_foldable_import_modules_by_binding(
+pub(crate) fn runtime_foldable_import_modules_by_binding(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
     lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -8217,7 +7576,7 @@ fn runtime_foldable_import_modules_by_binding(
     readers
 }
 
-struct RuntimeLazyStayLocalContext<'a> {
+pub(crate) struct RuntimeLazyStayLocalContext<'a> {
     externalized_packages: &'a BTreeSet<ModuleId>,
     writer_modules_by_binding: &'a BTreeMap<BindingName, BTreeSet<ModuleId>>,
     remaining_modules_by_binding: &'a BTreeMap<BindingName, BTreeSet<ModuleId>>,
@@ -8231,7 +7590,7 @@ struct RuntimeLazyStayLocalContext<'a> {
     owner_source_lines: &'a BTreeMap<ModuleId, usize>,
 }
 
-fn runtime_lazy_fold_can_stay_local(
+pub(crate) fn runtime_lazy_fold_can_stay_local(
     ctx: &RuntimeLazyStayLocalContext<'_>,
     module_id: ModuleId,
     source: &LoweredRuntimeModuleSource,
@@ -8428,7 +7787,7 @@ pub(crate) fn strip_top_level_named_exports(
     Some((output, exports))
 }
 
-fn parse_named_export_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
+pub(crate) fn parse_named_export_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
     let mut bindings = BTreeSet::new();
     for item in split_top_level_properties(source) {
         let item = item.trim();
@@ -8452,7 +7811,7 @@ fn parse_named_export_bindings(source: &str) -> Option<BTreeSet<BindingName>> {
     Some(bindings)
 }
 
-fn source_is_lazy_preserving_foldable(source: &str) -> bool {
+pub(crate) fn source_is_lazy_preserving_foldable(source: &str) -> bool {
     let mut saw_lazy_initializer = false;
     for statement in top_level_statement_slices(source) {
         let statement = statement.trim();
@@ -8471,7 +7830,7 @@ fn source_is_lazy_preserving_foldable(source: &str) -> bool {
     saw_lazy_initializer
 }
 
-fn purify_folded_lazy_initializers(
+pub(crate) fn purify_folded_lazy_initializers(
     source: &str,
     writable_helpers: &BTreeSet<BindingName>,
 ) -> String {
@@ -8584,7 +7943,7 @@ pub(crate) fn coalesce_runtime_lazy_initializer_call_runs(source: &str) -> Strin
     }
 }
 
-fn coalesced_lazy_body_call_run_edits(
+pub(crate) fn coalesced_lazy_body_call_run_edits(
     full_source: &str,
     body: &str,
     body_span: (usize, usize),
@@ -8604,7 +7963,7 @@ fn coalesced_lazy_body_call_run_edits(
     edits
 }
 
-fn flush_lazy_body_call_run_edit(
+pub(crate) fn flush_lazy_body_call_run_edit(
     full_source: &str,
     body_span: (usize, usize),
     run: &mut Vec<(usize, usize, String)>,
@@ -8633,12 +7992,12 @@ fn flush_lazy_body_call_run_edit(
     run.clear();
 }
 
-fn statement_leading_whitespace(statement: &str) -> &str {
+pub(crate) fn statement_leading_whitespace(statement: &str) -> &str {
     let trimmed_start = statement.trim_start();
     &statement[..statement.len() - trimmed_start.len()]
 }
 
-fn coalescible_lazy_body_expression(statement: &str) -> Option<String> {
+pub(crate) fn coalescible_lazy_body_expression(statement: &str) -> Option<String> {
     let trimmed = statement.trim();
     let expression = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
     if expression == "void 0" {
@@ -8697,7 +8056,10 @@ pub(crate) fn compact_pure_static_runtime_literals(source: &str) -> String {
     }
 }
 
-fn container_literal_can_start_runtime_compaction(source: &str, literal_start: usize) -> bool {
+pub(crate) fn container_literal_can_start_runtime_compaction(
+    source: &str,
+    literal_start: usize,
+) -> bool {
     let bytes = source.as_bytes();
     let Some(previous) = previous_non_ws(bytes, literal_start) else {
         return false;
@@ -8714,7 +8076,7 @@ fn container_literal_can_start_runtime_compaction(source: &str, literal_start: u
     }
 }
 
-fn compact_static_container_literal(literal: &str) -> Option<String> {
+pub(crate) fn compact_static_container_literal(literal: &str) -> Option<String> {
     if literal.lines().count() < 6
         || !static_container_literal_is_compaction_safe(literal)
         || !static_literal_is_text_compaction_safe(literal)
@@ -8729,7 +8091,7 @@ fn compact_static_container_literal(literal: &str) -> Option<String> {
     }
 }
 
-fn static_literal_is_text_compaction_safe(literal: &str) -> bool {
+pub(crate) fn static_literal_is_text_compaction_safe(literal: &str) -> bool {
     let blocked_keywords = [
         "await", "break", "case", "catch", "class", "const", "continue", "do", "else", "for",
         "function", "if", "let", "return", "switch", "throw", "try", "var", "while", "yield",
@@ -8761,7 +8123,7 @@ fn static_literal_is_text_compaction_safe(literal: &str) -> bool {
     true
 }
 
-fn compact_static_literal_text(literal: &str) -> String {
+pub(crate) fn compact_static_literal_text(literal: &str) -> String {
     let bytes = literal.as_bytes();
     let mut output = String::with_capacity(literal.len());
     let mut cursor = 0usize;
@@ -8812,7 +8174,11 @@ fn compact_static_literal_text(literal: &str) -> String {
     output
 }
 
-fn compact_removed_separator_needs_space(output: &str, source: &str, next: usize) -> bool {
+pub(crate) fn compact_removed_separator_needs_space(
+    output: &str,
+    source: &str,
+    next: usize,
+) -> bool {
     let Some(previous) = output.as_bytes().last().copied() else {
         return false;
     };
@@ -8826,7 +8192,7 @@ fn compact_removed_separator_needs_space(output: &str, source: &str, next: usize
         )
 }
 
-fn static_container_literal_is_compaction_safe(literal: &str) -> bool {
+pub(crate) fn static_container_literal_is_compaction_safe(literal: &str) -> bool {
     match literal.as_bytes().first().copied() {
         Some(b'{') => compactable_object_container_literal(literal),
         Some(b'[') => compactable_array_container_literal(literal),
@@ -8834,7 +8200,7 @@ fn static_container_literal_is_compaction_safe(literal: &str) -> bool {
     }
 }
 
-fn compactable_object_container_literal(source: &str) -> bool {
+pub(crate) fn compactable_object_container_literal(source: &str) -> bool {
     let Some(close) = find_matching_brace(source, 0) else {
         return false;
     };
@@ -8846,7 +8212,7 @@ fn compactable_object_container_literal(source: &str) -> bool {
         .all(compactable_object_container_property)
 }
 
-fn compactable_object_container_property(property: &str) -> bool {
+pub(crate) fn compactable_object_container_property(property: &str) -> bool {
     let property = property.trim();
     if property.is_empty() {
         return false;
@@ -8863,7 +8229,7 @@ fn compactable_object_container_property(property: &str) -> bool {
     simple_runtime_reference_expression(property)
 }
 
-fn compactable_array_container_literal(source: &str) -> bool {
+pub(crate) fn compactable_array_container_literal(source: &str) -> bool {
     let Some(close) = find_matching_bracket(source, 0) else {
         return false;
     };
@@ -8884,7 +8250,7 @@ fn compactable_array_container_literal(source: &str) -> bool {
         })
 }
 
-fn compactable_container_value_expression(source: &str) -> bool {
+pub(crate) fn compactable_container_value_expression(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() {
         return false;
@@ -8904,14 +8270,14 @@ fn compactable_container_value_expression(source: &str) -> bool {
     simple_runtime_reference_expression(source)
 }
 
-fn regex_literal_covers_source(source: &str) -> bool {
+pub(crate) fn regex_literal_covers_source(source: &str) -> bool {
     let bytes = source.as_bytes();
     bytes.first() == Some(&b'/')
         && looks_like_regex_literal(bytes, 0)
         && skip_regex_literal(bytes, 0) == bytes.len()
 }
 
-fn simple_runtime_reference_expression(source: &str) -> bool {
+pub(crate) fn simple_runtime_reference_expression(source: &str) -> bool {
     let source = source.trim();
     let bytes = source.as_bytes();
     let Some((first, mut cursor)) = parse_identifier(source, 0) else {
@@ -8951,7 +8317,7 @@ pub(crate) fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -
     output
 }
 
-fn private_runtime_lazy_initializer_replacement(
+pub(crate) fn private_runtime_lazy_initializer_replacement(
     initializer: &ParsedRuntimeLazyInitializer<'_>,
     writable_helpers: &BTreeSet<BindingName>,
     pure_value_bindings: &BTreeSet<BindingName>,
@@ -8975,7 +8341,7 @@ fn private_runtime_lazy_initializer_replacement(
     Some(lines.join("\n"))
 }
 
-fn pure_runtime_value_bindings(source: &str) -> BTreeSet<BindingName> {
+pub(crate) fn pure_runtime_value_bindings(source: &str) -> BTreeSet<BindingName> {
     let mut bindings = BTreeSet::new();
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -9026,7 +8392,7 @@ fn pure_runtime_value_bindings(source: &str) -> BTreeSet<BindingName> {
     bindings
 }
 
-fn parse_pure_top_level_var_value(
+pub(crate) fn parse_pure_top_level_var_value(
     source: &str,
     start: usize,
 ) -> Option<(BindingName, &str, usize)> {
@@ -9048,14 +8414,14 @@ fn parse_pure_top_level_var_value(
 }
 
 #[derive(Debug, Clone)]
-struct ParsedRuntimeLazyInitializer<'a> {
+pub(crate) struct ParsedRuntimeLazyInitializer<'a> {
     binding: BindingName,
     body: &'a str,
     body_span: (usize, usize),
     span: (usize, usize),
 }
 
-fn try_parse_runtime_lazy_initializer_declaration(
+pub(crate) fn try_parse_runtime_lazy_initializer_declaration(
     source: &str,
     start: usize,
 ) -> Option<(ParsedRuntimeLazyInitializer<'_>, usize)> {
@@ -9111,7 +8477,7 @@ fn try_parse_runtime_lazy_initializer_declaration(
     ))
 }
 
-fn find_statement_end(source: &str, start: usize) -> Option<usize> {
+pub(crate) fn find_statement_end(source: &str, start: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = start;
     let mut paren_depth = 0usize;
@@ -9139,7 +8505,7 @@ fn find_statement_end(source: &str, start: usize) -> Option<usize> {
     None
 }
 
-fn pure_runtime_lazy_body_assignments(
+pub(crate) fn pure_runtime_lazy_body_assignments(
     body: &str,
     writable_helpers: &BTreeSet<BindingName>,
     pure_value_bindings: &BTreeSet<BindingName>,
@@ -9173,7 +8539,7 @@ fn pure_runtime_lazy_body_assignments(
     Some(assignments)
 }
 
-fn is_pure_runtime_assignment_value(
+pub(crate) fn is_pure_runtime_assignment_value(
     value: &str,
     pure_value_bindings: &BTreeSet<BindingName>,
 ) -> bool {
@@ -9191,7 +8557,7 @@ fn is_pure_runtime_assignment_value(
         || pure_value_bindings.contains(&BindingName::new(identifier))
 }
 
-fn pure_lazy_initializer_replacement(
+pub(crate) fn pure_lazy_initializer_replacement(
     statement: &str,
     writable_helpers: &BTreeSet<BindingName>,
 ) -> Option<String> {
@@ -9212,12 +8578,12 @@ fn pure_lazy_initializer_replacement(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedLoweredLazyInitializer<'a> {
+pub(crate) struct ParsedLoweredLazyInitializer<'a> {
     binding: BindingName,
     body: &'a str,
 }
 
-fn parse_lowered_lazy_initializer_statement(
+pub(crate) fn parse_lowered_lazy_initializer_statement(
     statement: &str,
 ) -> Option<ParsedLoweredLazyInitializer<'_>> {
     let statement = statement.trim().trim_end_matches(';').trim();
@@ -9236,7 +8602,7 @@ fn parse_lowered_lazy_initializer_statement(
     })
 }
 
-fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
+pub(crate) fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
     if !looks_like_lowered_lazy_initializer(initializer) {
         return None;
     }
@@ -9268,7 +8634,7 @@ fn parse_lowered_lazy_initializer_body(initializer: &str) -> Option<&str> {
     Some(initializer[cursor + 1..body_end].trim())
 }
 
-fn pure_lazy_body_assignments(
+pub(crate) fn pure_lazy_body_assignments(
     body: &str,
     writable_helpers: &BTreeSet<BindingName>,
 ) -> Option<Vec<(BindingName, String)>> {
@@ -9327,7 +8693,7 @@ pub(crate) fn is_pure_initializer_expression(source: &str) -> bool {
     false
 }
 
-fn is_literal_expression(source: &str) -> bool {
+pub(crate) fn is_literal_expression(source: &str) -> bool {
     if matches!(
         source,
         "true" | "false" | "null" | "undefined" | "NaN" | "Infinity"
@@ -9351,7 +8717,7 @@ fn is_literal_expression(source: &str) -> bool {
         && number.chars().any(|character| character.is_ascii_digit())
 }
 
-fn quoted_literal_covers_source(source: &str) -> bool {
+pub(crate) fn quoted_literal_covers_source(source: &str) -> bool {
     let bytes = source.as_bytes();
     let Some(quote @ (b'\'' | b'"')) = bytes.first().copied() else {
         return false;
@@ -9359,7 +8725,7 @@ fn quoted_literal_covers_source(source: &str) -> bool {
     skip_quoted(bytes, 0, quote) == bytes.len()
 }
 
-fn pure_object_literal(source: &str) -> bool {
+pub(crate) fn pure_object_literal(source: &str) -> bool {
     let Some(close) = find_matching_brace(source, 0) else {
         return false;
     };
@@ -9371,7 +8737,7 @@ fn pure_object_literal(source: &str) -> bool {
         .all(pure_object_property)
 }
 
-fn pure_object_property(property: &str) -> bool {
+pub(crate) fn pure_object_property(property: &str) -> bool {
     let property = property.trim();
     if property.is_empty() || property.starts_with("...") {
         return false;
@@ -9386,7 +8752,7 @@ fn pure_object_property(property: &str) -> bool {
     pure_object_method_property(property)
 }
 
-fn pure_object_property_key(source: &str) -> bool {
+pub(crate) fn pure_object_property_key(source: &str) -> bool {
     let source = source.trim();
     if source.is_empty() {
         return false;
@@ -9411,7 +8777,7 @@ fn pure_object_property_key(source: &str) -> bool {
             .all(|byte| is_identifier_continue(*byte) || *byte == b'.')
 }
 
-fn pure_object_method_property(source: &str) -> bool {
+pub(crate) fn pure_object_method_property(source: &str) -> bool {
     let source = source.trim();
     let method_source = source
         .strip_prefix("async ")
@@ -9438,7 +8804,7 @@ fn pure_object_method_property(source: &str) -> bool {
     skip_ws(method_source.as_bytes(), close_body + 1) == method_source.len()
 }
 
-fn pure_array_literal(source: &str) -> bool {
+pub(crate) fn pure_array_literal(source: &str) -> bool {
     let Some(close) = find_matching_bracket(source, 0) else {
         return false;
     };
@@ -9455,7 +8821,7 @@ fn pure_array_literal(source: &str) -> bool {
         })
 }
 
-fn pure_class_expression(source: &str) -> bool {
+pub(crate) fn pure_class_expression(source: &str) -> bool {
     let Some(open) = find_top_level_byte(source, b'{') else {
         return false;
     };
@@ -9486,11 +8852,11 @@ fn pure_class_expression(source: &str) -> bool {
         .any(|word| word == "static")
 }
 
-fn looks_like_arrow_function_expression(source: &str) -> bool {
+pub(crate) fn looks_like_arrow_function_expression(source: &str) -> bool {
     find_top_level_arrow(source).is_some()
 }
 
-fn find_top_level_arrow(source: &str) -> Option<usize> {
+pub(crate) fn find_top_level_arrow(source: &str) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     let mut paren_depth = 0usize;
@@ -9545,7 +8911,7 @@ fn find_top_level_arrow(source: &str) -> Option<usize> {
     None
 }
 
-fn find_top_level_byte(source: &str, target: u8) -> Option<usize> {
+pub(crate) fn find_top_level_byte(source: &str, target: u8) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     let mut paren_depth = 0usize;
@@ -9615,7 +8981,7 @@ pub(crate) fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn variable_declaration_without_initializer(statement: &str) -> bool {
+pub(crate) fn variable_declaration_without_initializer(statement: &str) -> bool {
     let statement = statement.trim().trim_end_matches(';').trim();
     let Some((keyword, after_keyword)) = declaration_keyword_at_start(statement) else {
         return false;
@@ -9644,12 +9010,12 @@ pub(crate) fn lowered_lazy_initializer_statement_binding(statement: &str) -> Opt
     looks_like_lowered_lazy_initializer(initializer).then(|| BindingName::new(binding))
 }
 
-fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
+pub(crate) fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
     let compact = compact_js_source(initializer);
     compact.starts_with("lazyValue(()=>{") && compact.ends_with("})")
 }
 
-fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
+pub(crate) fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
     let bytes = source.as_bytes();
     let mut paren_depth = 0usize;
     let mut bracket_depth = 0usize;
@@ -9817,7 +9183,7 @@ pub(crate) fn close_runtime_helper_source_excluding(
     }
 }
 
-fn runtime_required_bindings_excluding<'a>(
+pub(crate) fn runtime_required_bindings_excluding<'a>(
     prelude: &RuntimePrelude,
     roots: impl Iterator<Item = &'a BindingName>,
     excluded_bindings: &BTreeSet<BindingName>,
@@ -9829,7 +9195,7 @@ fn runtime_required_bindings_excluding<'a>(
         .collect()
 }
 
-fn emitted_runtime_helper_bindings(
+pub(crate) fn emitted_runtime_helper_bindings(
     prelude: &RuntimePrelude,
     bindings: &BTreeSet<BindingName>,
     folded_chunks: &[RuntimeFoldedSourceChunk],
@@ -9847,7 +9213,7 @@ fn emitted_runtime_helper_bindings(
     emitted
 }
 
-fn runtime_helper_source(
+pub(crate) fn runtime_helper_source(
     prelude: &RuntimePrelude,
     source_bindings: &BTreeSet<BindingName>,
     namespace_exports: &[RuntimeNamespaceExport],
@@ -9890,7 +9256,7 @@ fn runtime_helper_source(
         .join("\n")
 }
 
-fn runtime_entrypoint_side_effects(
+pub(crate) fn runtime_entrypoint_side_effects(
     prelude: &RuntimePrelude,
     entrypoint: &RuntimeEntrypoint,
 ) -> Vec<reverts_graph::RuntimePreludeSideEffect> {
@@ -9904,7 +9270,7 @@ fn runtime_entrypoint_side_effects(
     side_effects
 }
 
-fn is_noop_runtime_side_effect(prelude: &RuntimePrelude, source: &str) -> bool {
+pub(crate) fn is_noop_runtime_side_effect(prelude: &RuntimePrelude, source: &str) -> bool {
     let Some(binding) = simple_call_statement_binding(source) else {
         return false;
     };
@@ -9914,7 +9280,7 @@ fn is_noop_runtime_side_effect(prelude: &RuntimePrelude, source: &str) -> bool {
     runtime_prelude_snippet_is_noop(binding.as_str(), snippet.source.as_str())
 }
 
-fn simple_call_statement_binding(source: &str) -> Option<BindingName> {
+pub(crate) fn simple_call_statement_binding(source: &str) -> Option<BindingName> {
     let source = source.trim().trim_end_matches(';').trim();
     let (identifier, after_identifier) = parse_identifier(source, 0)?;
     let open = skip_ws(source.as_bytes(), after_identifier);
@@ -9928,7 +9294,7 @@ fn simple_call_statement_binding(source: &str) -> Option<BindingName> {
     (skip_ws(source.as_bytes(), close + 1) == source.len()).then(|| BindingName::new(identifier))
 }
 
-fn runtime_prelude_snippet_is_noop(binding: &str, source: &str) -> bool {
+pub(crate) fn runtime_prelude_snippet_is_noop(binding: &str, source: &str) -> bool {
     let compact = compact_js_source(source);
     let candidates = [
         format!("var{binding}=()=>{{}};"),
@@ -9940,13 +9306,13 @@ fn runtime_prelude_snippet_is_noop(binding: &str, source: &str) -> bool {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct NodeBuiltinRequireRewrite {
+pub(crate) struct NodeBuiltinRequireRewrite {
     source: String,
     imports: BTreeMap<BindingName, String>,
     consumed_helpers: BTreeSet<BindingName>,
 }
 
-fn runtime_create_require_helpers(
+pub(crate) fn runtime_create_require_helpers(
     prelude: &RuntimePrelude,
     direct_imports: Option<&BTreeMap<BindingName, RuntimePreludeDirectImport>>,
 ) -> BTreeSet<BindingName> {
@@ -9967,14 +9333,14 @@ fn runtime_create_require_helpers(
         .collect()
 }
 
-fn runtime_direct_import_is_create_require(import: &RuntimePreludeDirectImport) -> bool {
+pub(crate) fn runtime_direct_import_is_create_require(import: &RuntimePreludeDirectImport) -> bool {
     matches!(
         &import.kind,
         RuntimePreludeDirectImportKind::Named { imported } if imported == "createRequire"
     ) && matches!(import.source.as_str(), "module" | "node:module")
 }
 
-fn runtime_create_require_helper_callee(
+pub(crate) fn runtime_create_require_helper_callee(
     binding: &BindingName,
     source: &str,
 ) -> Option<BindingName> {
@@ -10007,7 +9373,7 @@ fn runtime_create_require_helper_callee(
     Some(BindingName::new(callee))
 }
 
-fn rewrite_node_builtin_require_calls(
+pub(crate) fn rewrite_node_builtin_require_calls(
     source: &str,
     require_helpers: &BTreeSet<BindingName>,
     reserved_bindings: &BTreeSet<BindingName>,
@@ -10063,7 +9429,7 @@ fn rewrite_node_builtin_require_calls(
     }
 }
 
-fn rewrite_node_builtin_require_calls_with_imports(
+pub(crate) fn rewrite_node_builtin_require_calls_with_imports(
     source: &str,
     require_helpers: &BTreeSet<BindingName>,
     imports: &BTreeMap<BindingName, String>,
@@ -10098,7 +9464,7 @@ fn rewrite_node_builtin_require_calls_with_imports(
     rewritten
 }
 
-fn node_builtin_require_call_replacement(
+pub(crate) fn node_builtin_require_call_replacement(
     source: &str,
     fact: &IdentifierReadUsage,
 ) -> Option<(usize, usize, String)> {
@@ -10119,7 +9485,7 @@ fn node_builtin_require_call_replacement(
     Some((fact.byte_start, close + 1, normalized))
 }
 
-fn parse_single_string_literal_argument(
+pub(crate) fn parse_single_string_literal_argument(
     source: &str,
     start: usize,
     close: usize,
@@ -10147,12 +9513,12 @@ fn parse_single_string_literal_argument(
     Some(source[cursor + 1..end].to_string())
 }
 
-fn normalize_node_builtin_specifier(specifier: &str) -> Option<String> {
+pub(crate) fn normalize_node_builtin_specifier(specifier: &str) -> Option<String> {
     let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
     is_node_builtin_specifier(bare).then(|| format!("node:{bare}"))
 }
 
-fn is_node_builtin_specifier(specifier: &str) -> bool {
+pub(crate) fn is_node_builtin_specifier(specifier: &str) -> bool {
     matches!(
         specifier,
         "_http_agent"
@@ -10230,7 +9596,7 @@ fn is_node_builtin_specifier(specifier: &str) -> bool {
     )
 }
 
-fn node_builtin_import_binding(
+pub(crate) fn node_builtin_import_binding(
     specifier: &str,
     reserved: &mut BTreeSet<BindingName>,
 ) -> BindingName {
@@ -10254,7 +9620,7 @@ fn node_builtin_import_binding(
     unreachable!("unbounded node builtin import alias search should always find an identifier")
 }
 
-fn sanitize_identifier_fragment(value: &str) -> String {
+pub(crate) fn sanitize_identifier_fragment(value: &str) -> String {
     let mut out = String::new();
     for character in value.chars() {
         if character == '$' || character == '_' || character.is_ascii_alphanumeric() {
@@ -10266,7 +9632,7 @@ fn sanitize_identifier_fragment(value: &str) -> String {
     out
 }
 
-fn localizable_noop_runtime_helpers(
+pub(crate) fn localizable_noop_runtime_helpers(
     prelude: &RuntimePrelude,
     source: &str,
     candidates: &BTreeSet<BindingName>,
@@ -10298,7 +9664,7 @@ fn localizable_noop_runtime_helpers(
     localizable
 }
 
-fn source_contains_top_level_lazy_value_call_referencing_binding(
+pub(crate) fn source_contains_top_level_lazy_value_call_referencing_binding(
     source: &str,
     binding: &BindingName,
 ) -> bool {
@@ -10356,7 +9722,7 @@ pub(crate) fn strip_runtime_noop_declarations(
     apply_text_edits(source, &expand_line_removal_edits(source, &edits))
 }
 
-fn expand_line_removal_edits(
+pub(crate) fn expand_line_removal_edits(
     source: &str,
     edits: &[(usize, usize, String)],
 ) -> Vec<(usize, usize, String)> {
@@ -10391,13 +9757,13 @@ pub(crate) fn drop_bare_void_zero_top_level_statements(source: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeOrphanPrune {
+pub(crate) struct RuntimeOrphanPrune {
     source: String,
     dropped_bindings: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeBindingGraphStatement {
+pub(crate) struct RuntimeBindingGraphStatement {
     start: usize,
     end: usize,
     definitions: BTreeSet<BindingName>,
@@ -10525,7 +9891,7 @@ pub(crate) fn prune_orphan_runtime_bindings(
     }
 }
 
-fn runtime_orphan_statement_is_prunable(
+pub(crate) fn runtime_orphan_statement_is_prunable(
     statement: &str,
     definitions: &BTreeSet<BindingName>,
 ) -> bool {
@@ -10542,7 +9908,7 @@ fn runtime_orphan_statement_is_prunable(
     runtime_orphan_variable_declaration_is_prunable(trimmed, definitions)
 }
 
-fn runtime_orphan_function_declaration_is_prunable(source: &str) -> bool {
+pub(crate) fn runtime_orphan_function_declaration_is_prunable(source: &str) -> bool {
     if keyword_at(source, 0, "function") {
         return true;
     }
@@ -10553,7 +9919,7 @@ fn runtime_orphan_function_declaration_is_prunable(source: &str) -> bool {
     keyword_at(source, cursor, "function")
 }
 
-fn runtime_orphan_variable_declaration_is_prunable(
+pub(crate) fn runtime_orphan_variable_declaration_is_prunable(
     source: &str,
     definitions: &BTreeSet<BindingName>,
 ) -> bool {
@@ -10591,7 +9957,10 @@ fn runtime_orphan_variable_declaration_is_prunable(
     parsed_bindings == *definitions
 }
 
-fn source_reads_binding_only_as_erasable_noop_calls(source: &str, binding: &BindingName) -> bool {
+pub(crate) fn source_reads_binding_only_as_erasable_noop_calls(
+    source: &str,
+    binding: &BindingName,
+) -> bool {
     if implicit_global_writes_in_source(source).contains(binding) {
         return false;
     }
@@ -10631,7 +10000,10 @@ pub(crate) fn rewrite_noop_runtime_helper_calls(
     rewritten
 }
 
-fn noop_call_replacement_span(source: &str, fact: &IdentifierReadUsage) -> Option<(usize, usize)> {
+pub(crate) fn noop_call_replacement_span(
+    source: &str,
+    fact: &IdentifierReadUsage,
+) -> Option<(usize, usize)> {
     if !fact.is_call_callee
         || !identifier_read_rename_site_is_safe(source, fact.byte_start, fact.byte_end)
     {
@@ -10652,7 +10024,7 @@ fn noop_call_replacement_span(source: &str, fact: &IdentifierReadUsage) -> Optio
     Some((fact.byte_start, close + 1))
 }
 
-fn previous_token_is_keyword(source: &str, before: usize, keyword: &str) -> bool {
+pub(crate) fn previous_token_is_keyword(source: &str, before: usize, keyword: &str) -> bool {
     let bytes = source.as_bytes();
     let Some(last) = previous_non_ws(bytes, before) else {
         return false;
@@ -10667,7 +10039,7 @@ fn previous_token_is_keyword(source: &str, before: usize, keyword: &str) -> bool
     &source[start..=last] == keyword
 }
 
-fn compact_js_source(source: &str) -> String {
+pub(crate) fn compact_js_source(source: &str) -> String {
     source
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -10675,7 +10047,7 @@ fn compact_js_source(source: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeProxyFunction {
+pub(crate) struct RuntimeProxyFunction {
     binding: BindingName,
     target: BindingName,
     span: (usize, usize),
@@ -10696,7 +10068,7 @@ pub(crate) fn inline_single_use_runtime_proxy_functions(
     current
 }
 
-fn inline_single_use_runtime_proxy_functions_once(
+pub(crate) fn inline_single_use_runtime_proxy_functions_once(
     source: &str,
     blocked_bindings: &BTreeSet<BindingName>,
 ) -> String {
@@ -10749,7 +10121,7 @@ fn inline_single_use_runtime_proxy_functions_once(
     apply_text_edits(source, &edits)
 }
 
-fn runtime_proxy_function_declarations(source: &str) -> Vec<RuntimeProxyFunction> {
+pub(crate) fn runtime_proxy_function_declarations(source: &str) -> Vec<RuntimeProxyFunction> {
     let bytes = source.as_bytes();
     let mut proxies = Vec::new();
     let mut cursor = 0usize;
@@ -10795,7 +10167,7 @@ fn runtime_proxy_function_declarations(source: &str) -> Vec<RuntimeProxyFunction
     proxies
 }
 
-fn keyword_before_position(source: &str, position: usize) -> Option<&str> {
+pub(crate) fn keyword_before_position(source: &str, position: usize) -> Option<&str> {
     let bytes = source.as_bytes();
     let mut cursor = position;
     let before = loop {
@@ -10813,7 +10185,7 @@ fn keyword_before_position(source: &str, position: usize) -> Option<&str> {
     Some(&source[start..=before])
 }
 
-fn parse_runtime_proxy_function(
+pub(crate) fn parse_runtime_proxy_function(
     source: &str,
     start: usize,
 ) -> Option<(RuntimeProxyFunction, usize)> {
@@ -10856,7 +10228,7 @@ fn parse_runtime_proxy_function(
     ))
 }
 
-fn parse_runtime_proxy_arrow_var(
+pub(crate) fn parse_runtime_proxy_arrow_var(
     source: &str,
     start: usize,
 ) -> Option<(RuntimeProxyFunction, usize)> {
@@ -10907,7 +10279,7 @@ fn parse_runtime_proxy_arrow_var(
     ))
 }
 
-fn parse_arrow_proxy_params(source: &str, start: usize) -> Option<(Vec<String>, usize)> {
+pub(crate) fn parse_arrow_proxy_params(source: &str, start: usize) -> Option<(Vec<String>, usize)> {
     let bytes = source.as_bytes();
     if bytes.get(start) == Some(&b'(') {
         let close = find_matching_paren(source, start)?;
@@ -10918,7 +10290,7 @@ fn parse_arrow_proxy_params(source: &str, start: usize) -> Option<(Vec<String>, 
     Some((vec![param.to_string()], after_param))
 }
 
-fn parse_proxy_return_call(body: &str) -> Option<(&str, Vec<String>)> {
+pub(crate) fn parse_proxy_return_call(body: &str) -> Option<(&str, Vec<String>)> {
     let body = body.trim().strip_prefix("return ")?.trim();
     let body = body.trim_end_matches(';').trim();
     let (target, after_target) = parse_identifier(body, 0)?;
@@ -10934,7 +10306,7 @@ fn parse_proxy_return_call(body: &str) -> Option<(&str, Vec<String>)> {
     Some((target, args))
 }
 
-fn parse_simple_identifier_list(source: &str) -> Option<Vec<String>> {
+pub(crate) fn parse_simple_identifier_list(source: &str) -> Option<Vec<String>> {
     let source = source.trim();
     if source.is_empty() {
         return Some(Vec::new());
@@ -10950,7 +10322,7 @@ fn parse_simple_identifier_list(source: &str) -> Option<Vec<String>> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-struct RuntimeExternalizedBindingScan {
+pub(crate) struct RuntimeExternalizedBindingScan {
     source_module_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
     package_init_shims: BTreeSet<BindingName>,
 }
@@ -11064,7 +10436,7 @@ pub(crate) fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<Str
         .collect()
 }
 
-fn runtime_dependency_scan_source(source: &str) -> Option<String> {
+pub(crate) fn runtime_dependency_scan_source(source: &str) -> Option<String> {
     let body_open = function_body_open(source)?;
     let body_close = find_matching_brace(source, body_open)?;
     let body = &source[body_open + 1..body_close];
@@ -11089,7 +10461,7 @@ fn runtime_dependency_scan_source(source: &str) -> Option<String> {
     Some(stripped)
 }
 
-fn function_body_open(source: &str) -> Option<usize> {
+pub(crate) fn function_body_open(source: &str) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = skip_ws(bytes, 0);
     if keyword_at(source, cursor, "async") {
@@ -11123,7 +10495,7 @@ fn function_body_open(source: &str) -> Option<usize> {
     None
 }
 
-fn top_level_return_statement_span(body: &str) -> Option<(usize, usize)> {
+pub(crate) fn top_level_return_statement_span(body: &str) -> Option<(usize, usize)> {
     let bytes = body.as_bytes();
     let mut cursor = 0usize;
     let mut paren_depth = 0usize;
@@ -11179,7 +10551,7 @@ fn top_level_return_statement_span(body: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn top_level_statement_end(source: &str, start: usize) -> usize {
+pub(crate) fn top_level_statement_end(source: &str, start: usize) -> usize {
     let bytes = source.as_bytes();
     let mut cursor = start;
     let mut paren_depth = 0usize;
@@ -11230,7 +10602,7 @@ fn top_level_statement_end(source: &str, start: usize) -> usize {
     source.len()
 }
 
-fn top_level_function_declaration_names(source: &str) -> BTreeSet<String> {
+pub(crate) fn top_level_function_declaration_names(source: &str) -> BTreeSet<String> {
     let bytes = source.as_bytes();
     let mut names = BTreeSet::new();
     let mut cursor = 0usize;
@@ -11292,7 +10664,7 @@ fn top_level_function_declaration_names(source: &str) -> BTreeSet<String> {
     names
 }
 
-fn source_contains_identifier_token(source: &str, identifier: &str) -> bool {
+pub(crate) fn source_contains_identifier_token(source: &str, identifier: &str) -> bool {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
@@ -11323,7 +10695,7 @@ fn source_contains_identifier_token(source: &str, identifier: &str) -> bool {
     false
 }
 
-fn call_identifiers_in_source(source: &str) -> BTreeSet<String> {
+pub(crate) fn call_identifiers_in_source(source: &str) -> BTreeSet<String> {
     identifier_read_facts_in_source(source)
         .into_iter()
         .filter(|fact| fact.is_call_callee)
@@ -11332,7 +10704,7 @@ fn call_identifiers_in_source(source: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
+pub(crate) fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
     identifier_read_facts_in_source(source)
         .into_iter()
         .map(|fact| fact.name)
@@ -11351,7 +10723,9 @@ pub(crate) fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierRea
     try_identifier_read_facts_in_source(source).unwrap_or_default()
 }
 
-fn try_identifier_read_facts_in_source(source: &str) -> Option<Vec<IdentifierReadUsage>> {
+pub(crate) fn try_identifier_read_facts_in_source(
+    source: &str,
+) -> Option<Vec<IdentifierReadUsage>> {
     collect_identifier_read_facts(source, None, ParseGoal::TypeScript)
         .ok()
         .map(|facts| {
@@ -11367,7 +10741,7 @@ fn try_identifier_read_facts_in_source(source: &str) -> Option<Vec<IdentifierRea
         })
 }
 
-fn identifier_read_rename_sites_are_safe(source: &str, binding: &BindingName) -> bool {
+pub(crate) fn identifier_read_rename_sites_are_safe(source: &str, binding: &BindingName) -> bool {
     // When the generated source isn't parseable we can't enumerate reads,
     // so we must declare the rename unsafe rather than admitting it on an
     // empty fact set (which would silently miss usages).
@@ -11380,7 +10754,7 @@ fn identifier_read_rename_sites_are_safe(source: &str, binding: &BindingName) ->
         .all(|fact| identifier_read_rename_site_is_safe(source, fact.byte_start, fact.byte_end))
 }
 
-fn identifier_read_rename_site_is_safe(source: &str, start: usize, end: usize) -> bool {
+pub(crate) fn identifier_read_rename_site_is_safe(source: &str, start: usize, end: usize) -> bool {
     let bytes = source.as_bytes();
     if previous_non_ws(bytes, start)
         .and_then(|index| bytes.get(index))
@@ -11484,7 +10858,11 @@ pub(crate) fn identifier_occurrence_is_value_reference(
     true
 }
 
-fn identifier_is_declaration_name_after_keyword(source: &str, start: usize, keyword: &str) -> bool {
+pub(crate) fn identifier_is_declaration_name_after_keyword(
+    source: &str,
+    start: usize,
+    keyword: &str,
+) -> bool {
     let bytes = source.as_bytes();
     let Some(keyword_end) = previous_non_ws(bytes, start) else {
         return false;
@@ -11507,7 +10885,7 @@ fn identifier_is_declaration_name_after_keyword(source: &str, start: usize, keyw
         && after.is_some_and(|byte| byte.is_ascii_whitespace())
 }
 
-fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
+pub(crate) fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
     match keyword_before_paren(source, open_paren) {
         Some("if" | "while" | "switch" | "for" | "catch" | "with") => true,
         Some("await") => for_keyword_before_await(source, open_paren),
@@ -11515,7 +10893,7 @@ fn control_flow_keyword_before_paren(source: &str, open_paren: usize) -> bool {
     }
 }
 
-fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
+pub(crate) fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
     let bytes = source.as_bytes();
     let before = previous_non_ws(bytes, open_paren)?;
     // `previous_non_ws` walks raw bytes, so `before` can land inside a
@@ -11539,7 +10917,7 @@ fn keyword_before_paren(source: &str, open_paren: usize) -> Option<&str> {
     Some(&source[start..=before])
 }
 
-fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
+pub(crate) fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
     let bytes = source.as_bytes();
     let await_end = match previous_non_ws(bytes, open_paren) {
         Some(index) => index,
@@ -11568,7 +10946,7 @@ fn for_keyword_before_await(source: &str, open_paren: usize) -> bool {
     &source[for_start..=for_end] == "for"
 }
 
-fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
+pub(crate) fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
     let mut bindings = BTreeMap::new();
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -11602,7 +10980,7 @@ fn class_field_bindings_in_source(source: &str) -> BTreeMap<usize, String> {
     bindings
 }
 
-fn find_class_body_open(source: &str, mut cursor: usize) -> Option<usize> {
+pub(crate) fn find_class_body_open(source: &str, mut cursor: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     while cursor < bytes.len() {
         match bytes[cursor] {
@@ -11624,7 +11002,7 @@ fn find_class_body_open(source: &str, mut cursor: usize) -> Option<usize> {
     None
 }
 
-fn collect_class_field_bindings(
+pub(crate) fn collect_class_field_bindings(
     source: &str,
     body_start: usize,
     body_end: usize,
@@ -11786,7 +11164,7 @@ pub(crate) fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
     bindings
 }
 
-fn collect_template_expression_local_bindings(
+pub(crate) fn collect_template_expression_local_bindings(
     source: &str,
     start: usize,
     bindings: &mut BTreeSet<String>,
@@ -11811,7 +11189,7 @@ fn collect_template_expression_local_bindings(
     bytes.len()
 }
 
-fn collect_local_variable_bindings(
+pub(crate) fn collect_local_variable_bindings(
     source: &str,
     mut cursor: usize,
     bindings: &mut BTreeSet<String>,
@@ -11944,7 +11322,7 @@ fn collect_local_variable_bindings(
     }
 }
 
-fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
+pub(crate) fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
     let mut segment_start = 0usize;
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -11983,7 +11361,10 @@ fn collect_binding_pattern_identifiers(source: &str, bindings: &mut BTreeSet<Str
     collect_binding_pattern_segment_identifiers(&source[segment_start..], bindings);
 }
 
-fn collect_binding_pattern_segment_identifiers(source: &str, bindings: &mut BTreeSet<String>) {
+pub(crate) fn collect_binding_pattern_segment_identifiers(
+    source: &str,
+    bindings: &mut BTreeSet<String>,
+) {
     let pattern_end = top_level_binding_initializer_start(source).unwrap_or(source.len());
     let source = &source[..pattern_end];
     let bytes = source.as_bytes();
@@ -12030,7 +11411,7 @@ fn collect_binding_pattern_segment_identifiers(source: &str, bindings: &mut BTre
     }
 }
 
-fn top_level_binding_initializer_start(source: &str) -> Option<usize> {
+pub(crate) fn top_level_binding_initializer_start(source: &str) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
     let mut depth = 0usize;
@@ -12069,12 +11450,12 @@ fn top_level_binding_initializer_start(source: &str) -> Option<usize> {
     None
 }
 
-fn keyword_starts_statement_declaration(source: &str, cursor: usize) -> bool {
+pub(crate) fn keyword_starts_statement_declaration(source: &str, cursor: usize) -> bool {
     let bytes = source.as_bytes();
     previous_non_ws(bytes, cursor).is_none_or(|index| matches!(bytes[index], b'{' | b'}' | b';'))
 }
 
-fn is_runtime_global_identifier(identifier: &str) -> bool {
+pub(crate) fn is_runtime_global_identifier(identifier: &str) -> bool {
     matches!(
         identifier,
         "AbortController"
@@ -12227,7 +11608,7 @@ pub(crate) fn ensure_planned_module_exports(
     }
 }
 
-fn runtime_namespace_exports_for_helpers(
+pub(crate) fn runtime_namespace_exports_for_helpers(
     prelude: &RuntimePrelude,
     helper_bindings: &BTreeSet<BindingName>,
 ) -> Vec<RuntimeNamespaceExport> {
@@ -12283,7 +11664,7 @@ pub(crate) struct ExternalPackageAdapterPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExportMemberAdapterProofKind {
+pub(crate) enum ExportMemberAdapterProofKind {
     BarrelReference,
     BuildVariantPeer,
     CommonJsReexport,
@@ -12325,7 +11706,7 @@ pub(crate) struct ExportMemberAdapterProof {
     aliases: BTreeMap<BindingName, String>,
 }
 
-fn export_member_adapter_proof(
+pub(crate) fn export_member_adapter_proof(
     attribution: &PackageAttributionInput,
 ) -> Option<ExportMemberAdapterProof> {
     let resolved_file = attribution.resolved_file.as_deref()?;
@@ -12343,12 +11724,12 @@ fn export_member_adapter_proof(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ExternalPackageAdapterAnalysis {
+pub(crate) struct ExternalPackageAdapterAnalysis {
     adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     adapter_required_packages: BTreeSet<ModuleId>,
 }
 
-fn external_package_adapter_analysis(
+pub(crate) fn external_package_adapter_analysis(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
@@ -12381,7 +11762,7 @@ fn external_package_adapter_analysis(
     }
 }
 
-fn adapter_plan_is_safe(
+pub(crate) fn adapter_plan_is_safe(
     program: &EnrichedProgram,
     module_id: ModuleId,
     bindings: &BTreeSet<BindingName>,
@@ -12416,7 +11797,7 @@ fn adapter_plan_is_safe(
     })
 }
 
-fn adapter_source_has_implicit_side_effect_exports(
+pub(crate) fn adapter_source_has_implicit_side_effect_exports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     original_name: Option<&str>,
@@ -12466,7 +11847,7 @@ fn adapter_source_has_implicit_side_effect_exports(
     })
 }
 
-fn adapter_member_proof_allows_full_source_replacement(
+pub(crate) fn adapter_member_proof_allows_full_source_replacement(
     original_name: Option<&str>,
     member_proof: Option<&ExportMemberAdapterProof>,
     member_backed_bindings: &BTreeMap<BindingName, String>,
@@ -12483,7 +11864,7 @@ fn adapter_member_proof_allows_full_source_replacement(
     })
 }
 
-fn adapter_relevant_implicit_writes(
+pub(crate) fn adapter_relevant_implicit_writes(
     source: &str,
     member_backed_bindings: &BTreeMap<BindingName, String>,
 ) -> BTreeSet<BindingName> {
@@ -12497,7 +11878,7 @@ fn adapter_relevant_implicit_writes(
         .collect()
 }
 
-fn adapter_member_proof_allows_call_side_effect_elision(
+pub(crate) fn adapter_member_proof_allows_call_side_effect_elision(
     compact_source: &str,
     original_name: Option<&str>,
     member_proof: Option<&ExportMemberAdapterProof>,
@@ -12524,7 +11905,10 @@ fn adapter_member_proof_allows_call_side_effect_elision(
     source_has_adapter_lazy_initializer(compact_source, original_name)
 }
 
-fn source_has_adapter_lazy_initializer(compact_source: &str, original_name: &str) -> bool {
+pub(crate) fn source_has_adapter_lazy_initializer(
+    compact_source: &str,
+    original_name: &str,
+) -> bool {
     [
         format!("var{original_name}=E("),
         format!("let{original_name}=E("),
@@ -12543,7 +11927,7 @@ fn source_has_adapter_lazy_initializer(compact_source: &str, original_name: &str
     .any(|needle| compact_source.contains(needle))
 }
 
-fn external_adapter_non_original_binding_is_safe(
+pub(crate) fn external_adapter_non_original_binding_is_safe(
     program: &EnrichedProgram,
     module_id: ModuleId,
     binding: &BindingName,
@@ -12555,7 +11939,7 @@ fn external_adapter_non_original_binding_is_safe(
     compact_source_declares_adapter_safe_binding(compact.as_str(), binding.as_str())
 }
 
-fn export_member_adapter_binding_map(
+pub(crate) fn export_member_adapter_binding_map(
     program: &EnrichedProgram,
     module_id: ModuleId,
     member_proof: Option<&ExportMemberAdapterProof>,
@@ -12590,7 +11974,7 @@ fn export_member_adapter_binding_map(
     bindings
 }
 
-fn commonjs_exported_member_bindings(source: &str) -> BTreeMap<BindingName, String> {
+pub(crate) fn commonjs_exported_member_bindings(source: &str) -> BTreeMap<BindingName, String> {
     let compact = compact_js_source(source);
     let mut bindings = BTreeMap::new();
     collect_direct_member_export_assignments(compact.as_str(), &mut bindings);
@@ -12598,7 +11982,7 @@ fn commonjs_exported_member_bindings(source: &str) -> BTreeMap<BindingName, Stri
     bindings
 }
 
-fn class_runtime_name_member_bindings(
+pub(crate) fn class_runtime_name_member_bindings(
     source: &str,
     exported_members: &BTreeSet<String>,
 ) -> BTreeMap<BindingName, String> {
@@ -12628,7 +12012,7 @@ fn class_runtime_name_member_bindings(
     bindings
 }
 
-fn keyword_boundary(source: &str, start: usize, keyword: &str) -> bool {
+pub(crate) fn keyword_boundary(source: &str, start: usize, keyword: &str) -> bool {
     let end = start + keyword.len();
     let bytes = source.as_bytes();
     let before_ok = start == 0 || !is_identifier_continue(bytes[start - 1]);
@@ -12638,7 +12022,7 @@ fn keyword_boundary(source: &str, start: usize, keyword: &str) -> bool {
     before_ok && after_ok
 }
 
-fn class_local_binding_and_body_end(
+pub(crate) fn class_local_binding_and_body_end(
     source: &str,
     class_start: usize,
 ) -> Option<(BindingName, usize)> {
@@ -12654,7 +12038,7 @@ fn class_local_binding_and_body_end(
     Some((local, body_end))
 }
 
-fn assigned_identifier_before_expression(
+pub(crate) fn assigned_identifier_before_expression(
     source: &str,
     expression_start: usize,
 ) -> Option<BindingName> {
@@ -12675,12 +12059,12 @@ fn assigned_identifier_before_expression(
     is_identifier_like(name).then(|| BindingName::new(name))
 }
 
-fn class_declares_runtime_name(compact_class_source: &str, member: &str) -> bool {
+pub(crate) fn class_declares_runtime_name(compact_class_source: &str, member: &str) -> bool {
     compact_class_source.contains(format!("name=\"{member}\"").as_str())
         || compact_class_source.contains(format!("name='{member}'").as_str())
 }
 
-fn collect_direct_member_export_assignments(
+pub(crate) fn collect_direct_member_export_assignments(
     compact_source: &str,
     bindings: &mut BTreeMap<BindingName, String>,
 ) {
@@ -12710,7 +12094,7 @@ fn collect_direct_member_export_assignments(
     }
 }
 
-fn collect_define_property_member_getters(
+pub(crate) fn collect_define_property_member_getters(
     compact_source: &str,
     bindings: &mut BTreeMap<BindingName, String>,
 ) {
@@ -12745,7 +12129,7 @@ fn collect_define_property_member_getters(
     }
 }
 
-fn read_quoted_string(source: &str, start: usize) -> Option<(String, usize)> {
+pub(crate) fn read_quoted_string(source: &str, start: usize) -> Option<(String, usize)> {
     let quote = *source.as_bytes().get(start)?;
     if quote != b'\'' && quote != b'"' {
         return None;
@@ -12770,7 +12154,10 @@ fn read_quoted_string(source: &str, start: usize) -> Option<(String, usize)> {
     None
 }
 
-fn compact_source_declares_adapter_safe_binding(compact_source: &str, binding: &str) -> bool {
+pub(crate) fn compact_source_declares_adapter_safe_binding(
+    compact_source: &str,
+    binding: &str,
+) -> bool {
     [
         format!("function{binding}("),
         format!("asyncfunction{binding}("),
@@ -12812,7 +12199,10 @@ fn compact_source_declares_adapter_safe_binding(compact_source: &str, binding: &
     .any(|needle| compact_source.contains(needle))
 }
 
-fn binding_has_non_empty_call_in_program(program: &EnrichedProgram, binding: &BindingName) -> bool {
+pub(crate) fn binding_has_non_empty_call_in_program(
+    program: &EnrichedProgram,
+    binding: &BindingName,
+) -> bool {
     program
         .model()
         .input()
@@ -12822,7 +12212,7 @@ fn binding_has_non_empty_call_in_program(program: &EnrichedProgram, binding: &Bi
         .any(|source| source_has_non_empty_call_to_binding(source, binding.as_str()))
 }
 
-fn source_has_non_empty_call_to_binding(source: &str, binding: &str) -> bool {
+pub(crate) fn source_has_non_empty_call_to_binding(source: &str, binding: &str) -> bool {
     if binding.is_empty() {
         return false;
     }
@@ -12853,7 +12243,7 @@ fn source_has_non_empty_call_to_binding(source: &str, binding: &str) -> bool {
     false
 }
 
-fn external_package_adapter_kind(
+pub(crate) fn external_package_adapter_kind(
     program: &EnrichedProgram,
     module_id: ModuleId,
     adapter_bindings: &BTreeSet<BindingName>,
@@ -12950,7 +12340,7 @@ pub(crate) fn populate_external_package_adapter_file(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalPackageAdapterBindingKind {
+pub(crate) enum ExternalPackageAdapterBindingKind {
     Callable,
     Value,
 }
@@ -12964,7 +12354,7 @@ impl ExternalPackageAdapterBindingKind {
     }
 }
 
-fn external_package_adapter_binding_kind(
+pub(crate) fn external_package_adapter_binding_kind(
     program: &EnrichedProgram,
     module_id: ModuleId,
     binding: &BindingName,
@@ -12988,7 +12378,7 @@ fn external_package_adapter_binding_kind(
     ExternalPackageAdapterBindingKind::Value
 }
 
-fn external_package_adapter_binding_is_original(
+pub(crate) fn external_package_adapter_binding_is_original(
     program: &EnrichedProgram,
     module_id: ModuleId,
     binding: &BindingName,
@@ -13001,7 +12391,7 @@ fn external_package_adapter_binding_is_original(
         .is_some_and(|module| module.original_name == binding.as_str())
 }
 
-fn external_package_source_defines_callable_binding(
+pub(crate) fn external_package_source_defines_callable_binding(
     program: &EnrichedProgram,
     module_id: ModuleId,
     binding: &BindingName,
@@ -13015,7 +12405,7 @@ fn external_package_source_defines_callable_binding(
     )
 }
 
-fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) -> bool {
+pub(crate) fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) -> bool {
     [
         format!("function{binding}("),
         format!("asyncfunction{binding}("),
@@ -13058,7 +12448,10 @@ fn compact_source_defines_callable_binding(compact_source: &str, binding: &str) 
         || compact_source_defines_thunk_factory_binding(compact_source, binding)
 }
 
-fn compact_source_defines_thunk_factory_binding(compact_source: &str, binding: &str) -> bool {
+pub(crate) fn compact_source_defines_thunk_factory_binding(
+    compact_source: &str,
+    binding: &str,
+) -> bool {
     ["var", "let", "const"].iter().any(|declaration| {
         let needle = format!("{declaration}{binding}=");
         let mut search_start = 0usize;
@@ -13073,7 +12466,7 @@ fn compact_source_defines_thunk_factory_binding(compact_source: &str, binding: &
     })
 }
 
-fn compact_initializer_is_thunk_factory(source: &str) -> bool {
+pub(crate) fn compact_initializer_is_thunk_factory(source: &str) -> bool {
     let Some((callee, callee_end)) = parse_identifier(source, 0) else {
         return false;
     };
@@ -13087,7 +12480,7 @@ fn compact_initializer_is_thunk_factory(source: &str) -> bool {
         || argument.starts_with("asyncfunction(")
 }
 
-fn external_package_adapter_return_expression(
+pub(crate) fn external_package_adapter_return_expression(
     namespace: &str,
     adapter_kind: ExternalPackageAdapterKind,
 ) -> String {
@@ -13099,7 +12492,7 @@ fn external_package_adapter_return_expression(
     }
 }
 
-fn external_package_adapter_member_expression(
+pub(crate) fn external_package_adapter_member_expression(
     namespace: &str,
     adapter_kind: ExternalPackageAdapterKind,
     member: &str,
@@ -13112,7 +12505,7 @@ fn external_package_adapter_member_expression(
     }
 }
 
-fn package_adapter_export_bindings(
+pub(crate) fn package_adapter_export_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
     source_facts: &SourceModuleFacts,
@@ -13154,7 +12547,7 @@ fn package_adapter_export_bindings(
     bindings
 }
 
-fn external_package_adapter_namespace(
+pub(crate) fn external_package_adapter_namespace(
     attribution: &PackageAttributionInput,
     exportable_bindings: &BTreeSet<BindingName>,
 ) -> BindingName {
@@ -13173,7 +12566,7 @@ fn external_package_adapter_namespace(
     BindingName::new(format!("{base}Namespace"))
 }
 
-fn adapter_required_package_modules(
+pub(crate) fn adapter_required_package_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
@@ -13254,7 +12647,7 @@ fn adapter_required_package_modules(
     required
 }
 
-fn source_module_wiring(
+pub(crate) fn source_module_wiring(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
@@ -13365,7 +12758,7 @@ pub(crate) fn candidate_source_reads_by_module_with_exportable(
     reads
 }
 
-fn source_exportable_bindings(
+pub(crate) fn source_exportable_bindings(
     program: &EnrichedProgram,
     module_id: ModuleId,
 ) -> BTreeSet<BindingName> {
@@ -13453,18 +12846,18 @@ pub(crate) fn pure_named_barrel_reexports(source: &str) -> Option<BTreeSet<Bindi
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NamedReexportSpecifier {
+pub(crate) struct NamedReexportSpecifier {
     exported: String,
     is_aliased: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct NamedImportSpecifier {
+pub(crate) struct NamedImportSpecifier {
     local: String,
     is_aliased: bool,
 }
 
-fn source_statements(source: &str) -> Vec<&str> {
+pub(crate) fn source_statements(source: &str) -> Vec<&str> {
     source
         .split(';')
         .map(str::trim)
@@ -13472,7 +12865,7 @@ fn source_statements(source: &str) -> Vec<&str> {
         .collect()
 }
 
-fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
+pub(crate) fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
     let rest = statement.strip_prefix("export {")?;
     let (inner, after) = rest.split_once('}')?;
     if !after.trim_start().starts_with("from ") {
@@ -13500,7 +12893,9 @@ fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifi
     Some(specifiers)
 }
 
-fn local_named_export_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
+pub(crate) fn local_named_export_specifiers(
+    statement: &str,
+) -> Option<Vec<NamedReexportSpecifier>> {
     let rest = statement.strip_prefix("export {")?;
     let (inner, after) = rest.split_once('}')?;
     if !after.trim().is_empty() {
@@ -13509,7 +12904,7 @@ fn local_named_export_specifiers(statement: &str) -> Option<Vec<NamedReexportSpe
     parse_named_export_inner(inner)
 }
 
-fn parse_named_export_inner(inner: &str) -> Option<Vec<NamedReexportSpecifier>> {
+pub(crate) fn parse_named_export_inner(inner: &str) -> Option<Vec<NamedReexportSpecifier>> {
     let mut specifiers = Vec::new();
     for raw in inner.split(',') {
         let raw = raw.trim();
@@ -13532,7 +12927,7 @@ fn parse_named_export_inner(inner: &str) -> Option<Vec<NamedReexportSpecifier>> 
     Some(specifiers)
 }
 
-fn named_import_specifiers(statement: &str) -> Option<Vec<NamedImportSpecifier>> {
+pub(crate) fn named_import_specifiers(statement: &str) -> Option<Vec<NamedImportSpecifier>> {
     let rest = statement.strip_prefix("import ")?.trim();
     if rest.starts_with("type ") || rest.contains(" with ") || rest.contains(" assert ") {
         return None;
@@ -13552,7 +12947,7 @@ fn named_import_specifiers(statement: &str) -> Option<Vec<NamedImportSpecifier>>
     )
 }
 
-fn extra_exports_for_module<'a>(
+pub(crate) fn extra_exports_for_module<'a>(
     _program: &EnrichedProgram,
     _module_id: ModuleId,
     sources: impl IntoIterator<Item = Option<&'a BTreeSet<BindingName>>>,
@@ -13600,7 +12995,7 @@ pub(crate) fn runtime_owner_definition_modules_by_source(
     )
 }
 
-fn runtime_owner_definition_bindings_by_module(
+pub(crate) fn runtime_owner_definition_bindings_by_module(
     program: &EnrichedProgram,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     let mut definition_bindings_by_module = source_definition_bindings_by_module(program);
@@ -13613,7 +13008,7 @@ fn runtime_owner_definition_bindings_by_module(
     definition_bindings_by_module
 }
 
-fn source_definition_bindings_by_module(
+pub(crate) fn source_definition_bindings_by_module(
     program: &EnrichedProgram,
 ) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
     program
@@ -13647,7 +13042,7 @@ pub(crate) fn unique_source_definition_modules_from_bindings(
     definitions
 }
 
-fn unique_source_definition_modules_by_source_from_bindings(
+pub(crate) fn unique_source_definition_modules_by_source_from_bindings(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     definition_bindings_by_module: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -13729,7 +13124,7 @@ pub(crate) fn runtime_helper_kinds_for_source(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeHelperLowering {
+pub(crate) struct RuntimeHelperLowering {
     source: String,
     lowered_helpers: BTreeSet<BindingName>,
     remaining_helpers: BTreeSet<BindingName>,
@@ -13745,7 +13140,7 @@ struct RuntimeHelperLowering {
 }
 
 #[cfg(test)]
-fn lower_runtime_helpers(
+pub(crate) fn lower_runtime_helpers(
     source: &str,
     helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
     exported_bindings: &BTreeSet<BindingName>,
@@ -13760,7 +13155,7 @@ fn lower_runtime_helpers(
     )
 }
 
-fn lower_runtime_helpers_with_options(
+pub(crate) fn lower_runtime_helpers_with_options(
     source: &str,
     helper_kinds: &BTreeMap<BindingName, RuntimePreludeBindingKind>,
     exported_bindings: &BTreeSet<BindingName>,
@@ -13868,21 +13263,23 @@ fn lower_runtime_helpers_with_options(
     }
 }
 
-fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
+pub(crate) fn inline_remaining_lazy_value_wrappers(source: &str) -> (String, bool) {
     inline_remaining_lazy_value_wrappers_with_options(source, false)
 }
 
-fn inline_remaining_lazy_value_wrappers_allowing_assignments(source: &str) -> (String, bool) {
+pub(crate) fn inline_remaining_lazy_value_wrappers_allowing_assignments(
+    source: &str,
+) -> (String, bool) {
     inline_remaining_lazy_value_wrappers_with_options(source, true)
 }
 
-fn localize_lazy_value_source(source: &str) -> Option<String> {
+pub(crate) fn localize_lazy_value_source(source: &str) -> Option<String> {
     let (localized, changed) = inline_remaining_lazy_value_wrappers_allowing_assignments(source);
     (changed && !source_contains_top_level_call(localized.as_str(), "lazyValue"))
         .then_some(localized)
 }
 
-fn inline_remaining_lazy_value_wrappers_with_options(
+pub(crate) fn inline_remaining_lazy_value_wrappers_with_options(
     source: &str,
     allow_assignment_factories: bool,
 ) -> (String, bool) {
@@ -13930,11 +13327,11 @@ fn inline_remaining_lazy_value_wrappers_with_options(
 }
 
 #[derive(Debug, Clone)]
-struct ParsedLazyValueWrapper {
+pub(crate) struct ParsedLazyValueWrapper {
     callee_span: (usize, usize),
 }
 
-fn try_parse_lazy_value_wrapper_declaration(
+pub(crate) fn try_parse_lazy_value_wrapper_declaration(
     source: &str,
     start: usize,
     allow_assignment_factory: bool,
@@ -13988,7 +13385,7 @@ fn try_parse_lazy_value_wrapper_declaration(
     ))
 }
 
-fn lazy_value_factory_contains_assignment(factory: &str) -> bool {
+pub(crate) fn lazy_value_factory_contains_assignment(factory: &str) -> bool {
     let Some(arrow) = factory.find("=>") else {
         return true;
     };
@@ -14017,7 +13414,7 @@ fn lazy_value_factory_contains_assignment(factory: &str) -> bool {
     false
 }
 
-fn lazy_value_factory_is_zero_arg_arrow(factory: &str) -> bool {
+pub(crate) fn lazy_value_factory_is_zero_arg_arrow(factory: &str) -> bool {
     let bytes = factory.as_bytes();
     let mut cursor = skip_ws(bytes, 0);
     if bytes.get(cursor) != Some(&b'(') {
@@ -14033,7 +13430,7 @@ fn lazy_value_factory_is_zero_arg_arrow(factory: &str) -> bool {
     expect_arrow(bytes, cursor).is_some()
 }
 
-fn local_lazy_value_helper_name(source: &str) -> String {
+pub(crate) fn local_lazy_value_helper_name(source: &str) -> String {
     let mut name = "_$l".to_string();
     let mut suffix = 0usize;
     let local_bindings = local_bindings_in_source(source);
@@ -14046,11 +13443,11 @@ fn local_lazy_value_helper_name(source: &str) -> String {
     name
 }
 
-fn local_lazy_value_helper_source(helper_name: &str) -> String {
+pub(crate) fn local_lazy_value_helper_source(helper_name: &str) -> String {
     format!("var {helper_name}=(_$f,_$v)=>()=>(_$f&&(_$v=_$f(_$f=0)),_$v);")
 }
 
-fn inline_remaining_lazy_module_wrappers(source: &str) -> (String, bool) {
+pub(crate) fn inline_remaining_lazy_module_wrappers(source: &str) -> (String, bool) {
     let bytes = source.as_bytes();
     let mut edits = Vec::<(usize, usize, String)>::new();
     let mut cursor = 0usize;
@@ -14093,13 +13490,13 @@ fn inline_remaining_lazy_module_wrappers(source: &str) -> (String, bool) {
 }
 
 #[derive(Debug, Clone)]
-struct ParsedLazyModuleWrapper<'a> {
+pub(crate) struct ParsedLazyModuleWrapper<'a> {
     binding: BindingName,
     factory: &'a str,
     span: (usize, usize),
 }
 
-fn try_parse_lazy_module_wrapper_declaration(
+pub(crate) fn try_parse_lazy_module_wrapper_declaration(
     source: &str,
     start: usize,
 ) -> Option<(ParsedLazyModuleWrapper<'_>, usize)> {
@@ -14141,7 +13538,7 @@ fn try_parse_lazy_module_wrapper_declaration(
     ))
 }
 
-fn inline_lazy_module_wrapper_replacement(decl: &ParsedLazyModuleWrapper<'_>) -> String {
+pub(crate) fn inline_lazy_module_wrapper_replacement(decl: &ParsedLazyModuleWrapper<'_>) -> String {
     let binding = decl.binding.as_str();
     format!(
         "var {binding} = (() => {{ let _$cached; return () => {{ if (_$cached) return _$cached.exports; var _$module = _$cached = {{ exports: {{}} }}; ({factory})(_$module.exports, _$module); return _$module.exports; }}; }})();",
@@ -14149,16 +13546,16 @@ fn inline_lazy_module_wrapper_replacement(decl: &ParsedLazyModuleWrapper<'_>) ->
     )
 }
 
-fn lower_commonjs_wrapper_helper(source: &str, helper: &str) -> Option<String> {
+pub(crate) fn lower_commonjs_wrapper_helper(source: &str, helper: &str) -> Option<String> {
     lower_helper_declarations(source, helper, HelperDeclarationKind::CommonJsWrapper)
 }
 
-fn lower_lazy_initializer_helper(source: &str, helper: &str) -> Option<String> {
+pub(crate) fn lower_lazy_initializer_helper(source: &str, helper: &str) -> Option<String> {
     lower_helper_declarations(source, helper, HelperDeclarationKind::LazyInitializer)
 }
 
 #[derive(Debug, Clone)]
-struct DelazifyCandidate {
+pub(crate) struct DelazifyCandidate {
     binding: BindingName,
     /// Byte range covering the full `var X = lazyValue(() => { ... });` statement.
     declaration_span: (usize, usize),
@@ -14174,7 +13571,7 @@ struct DelazifyCandidate {
 /// expression (literal, object literal, array literal, class expression, or
 /// function expression). Returns the rewritten source unchanged when no
 /// candidates qualify, so callers can apply the pass unconditionally.
-fn delazify_pure_value_bindings(
+pub(crate) fn delazify_pure_value_bindings(
     source: &str,
     exported_bindings: &BTreeSet<BindingName>,
     eager_safe_call_targets: &BTreeSet<String>,
@@ -14194,7 +13591,7 @@ fn delazify_pure_value_bindings(
     (apply_delazify_rewrites(source, &candidates), changed)
 }
 
-fn collect_delazify_candidates(
+pub(crate) fn collect_delazify_candidates(
     source: &str,
     eager_safe_call_targets: &BTreeSet<String>,
 ) -> Vec<DelazifyCandidate> {
@@ -14230,13 +13627,13 @@ fn collect_delazify_candidates(
     candidates
 }
 
-struct ParsedDelazifiableDeclaration {
+pub(crate) struct ParsedDelazifiableDeclaration {
     binding: BindingName,
     span: (usize, usize),
     value_expr: String,
 }
 
-fn try_parse_lazy_value_declaration(
+pub(crate) fn try_parse_lazy_value_declaration(
     source: &str,
     start: usize,
     eager_safe_call_targets: &BTreeSet<String>,
@@ -14314,7 +13711,7 @@ fn try_parse_lazy_value_declaration(
 /// Any other body shape (mixed assignments, control flow, `require` calls,
 /// helper declarations) leaves the lazy module intact for a later, more
 /// invasive pass to extract to a sibling file.
-fn try_parse_lazy_module_declaration(
+pub(crate) fn try_parse_lazy_module_declaration(
     source: &str,
     start: usize,
     eager_safe_call_targets: &BTreeSet<String>,
@@ -14395,7 +13792,7 @@ fn try_parse_lazy_module_declaration(
 /// invocation `X()` — anything else (used as a value, exported, passed as an
 /// argument, captured in a closure, etc.) is unsafe to rewrite. Returns
 /// `Some(call_sites)` when every reference qualifies; otherwise `None`.
-fn collect_safe_call_sites(
+pub(crate) fn collect_safe_call_sites(
     source: &str,
     binding: &str,
     exclude_span: (usize, usize),
@@ -14455,7 +13852,7 @@ fn collect_safe_call_sites(
     Some(call_sites)
 }
 
-fn apply_delazify_rewrites(source: &str, candidates: &[DelazifyCandidate]) -> String {
+pub(crate) fn apply_delazify_rewrites(source: &str, candidates: &[DelazifyCandidate]) -> String {
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     for candidate in candidates {
         edits.push((
@@ -14489,7 +13886,7 @@ fn apply_delazify_rewrites(source: &str, candidates: &[DelazifyCandidate]) -> St
 /// the non-code span when something was skipped, or `None` when the current
 /// byte begins a code token.
 #[derive(Debug, Clone)]
-struct DecomposeCandidate {
+pub(crate) struct DecomposeCandidate {
     /// Byte range covering the full `var X = { ... };` declaration.
     declaration_span: (usize, usize),
     /// Object properties, in their source order. Every value is guaranteed
@@ -14512,7 +13909,7 @@ struct DecomposeCandidate {
 /// object is really an API namespace rather than a data record); primitive- or
 /// mixed-valued objects keep their grouped form because the grouping is the
 /// pre-bundle programmer's intent.
-fn decompose_function_namespace_objects(
+pub(crate) fn decompose_function_namespace_objects(
     source: &str,
     exported_bindings: &BTreeSet<BindingName>,
 ) -> (String, BTreeSet<BindingName>) {
@@ -14544,7 +13941,7 @@ fn decompose_function_namespace_objects(
 }
 
 #[derive(Debug, Clone)]
-struct RawDecomposeCandidate {
+pub(crate) struct RawDecomposeCandidate {
     binding: BindingName,
     declaration_span: (usize, usize),
     properties: Vec<(String, String)>,
@@ -14554,7 +13951,7 @@ struct RawDecomposeCandidate {
 /// `var X = { ... }` declarations nested inside functions or blocks) and
 /// collect every `var X = { ... };` whose object literal has only
 /// function-shape values.
-fn scan_function_namespace_declarations(source: &str) -> Vec<RawDecomposeCandidate> {
+pub(crate) fn scan_function_namespace_declarations(source: &str) -> Vec<RawDecomposeCandidate> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();
     let mut cursor = 0;
@@ -14613,7 +14010,7 @@ fn scan_function_namespace_declarations(source: &str) -> Vec<RawDecomposeCandida
     out
 }
 
-fn try_parse_function_namespace_declaration(
+pub(crate) fn try_parse_function_namespace_declaration(
     source: &str,
     start: usize,
 ) -> Option<(RawDecomposeCandidate, usize)> {
@@ -14660,7 +14057,7 @@ fn try_parse_function_namespace_declaration(
 ///   * spread elements,
 ///   * primitive or other non-function values,
 ///   * any value that is not a function/class/arrow expression.
-fn parse_function_namespace_properties(inner: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn parse_function_namespace_properties(inner: &str) -> Option<Vec<(String, String)>> {
     let entries = split_top_level_commas(inner);
     let mut properties = Vec::new();
     let mut seen = BTreeSet::new();
@@ -14698,7 +14095,7 @@ fn parse_function_namespace_properties(inner: &str) -> Option<Vec<(String, Strin
 /// True iff `source` (after trimming) is a function expression, class
 /// expression, or arrow function expression. Used to detect "API surface"
 /// values for the namespace decomposition pass — only those decompose.
-fn is_function_or_class_value(source: &str) -> bool {
+pub(crate) fn is_function_or_class_value(source: &str) -> bool {
     let trimmed = source.trim();
     if keyword_at(trimmed, 0, "class") {
         return pure_class_expression(trimmed);
@@ -14711,7 +14108,7 @@ fn is_function_or_class_value(source: &str) -> bool {
 
 /// Split `source` on top-level `,` separators (those not nested inside
 /// `(...)`, `[...]`, `{...}`, strings, templates, regex, or comments).
-fn split_top_level_commas(source: &str) -> Vec<&str> {
+pub(crate) fn split_top_level_commas(source: &str) -> Vec<&str> {
     let bytes = source.as_bytes();
     let mut parts = Vec::new();
     let mut start = 0;
@@ -14766,7 +14163,7 @@ fn split_top_level_commas(source: &str) -> Vec<&str> {
 ///   * None of the property keys may collide with an existing top-level
 ///     binding (other than the X about to be removed) or with a key already
 ///     introduced by a prior accepted candidate.
-fn filter_decompose_candidates(
+pub(crate) fn filter_decompose_candidates(
     source: &str,
     raw: Vec<RawDecomposeCandidate>,
     existing_top_level: &BTreeSet<BindingName>,
@@ -14888,7 +14285,7 @@ pub(crate) fn collect_member_access_only(
     Some(sites)
 }
 
-fn apply_decompose_rewrites(source: &str, candidates: &[DecomposeCandidate]) -> String {
+pub(crate) fn apply_decompose_rewrites(source: &str, candidates: &[DecomposeCandidate]) -> String {
     let mut edits: Vec<(usize, usize, String)> = Vec::new();
     for candidate in candidates {
         let mut new_decl = String::new();
@@ -14924,7 +14321,7 @@ fn apply_decompose_rewrites(source: &str, candidates: &[DecomposeCandidate]) -> 
 /// isn't inside a string, comment, template, or regex literal. Used to
 /// determine whether the helper module still needs to export a runtime helper
 /// after the delazify pass has had a chance to remove lazy thunks.
-fn source_contains_top_level_call(source: &str, name: &str) -> bool {
+pub(crate) fn source_contains_top_level_call(source: &str, name: &str) -> bool {
     let bytes = source.as_bytes();
     let mut cursor = 0;
     while cursor < bytes.len() {
@@ -14953,12 +14350,12 @@ fn source_contains_top_level_call(source: &str, name: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HelperDeclarationKind {
+pub(crate) enum HelperDeclarationKind {
     CommonJsWrapper,
     LazyInitializer,
 }
 
-fn lower_helper_declarations(
+pub(crate) fn lower_helper_declarations(
     source: &str,
     helper: &str,
     kind: HelperDeclarationKind,
@@ -14981,13 +14378,13 @@ fn lower_helper_declarations(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct HelperDeclaration {
+pub(crate) struct HelperDeclaration {
     start: usize,
     end: usize,
     replacement: String,
 }
 
-fn find_helper_declaration(
+pub(crate) fn find_helper_declaration(
     source: &str,
     from: usize,
     helper: &str,
@@ -15043,7 +14440,7 @@ fn find_helper_declaration(
     None
 }
 
-fn parse_commonjs_wrapper_replacement(
+pub(crate) fn parse_commonjs_wrapper_replacement(
     source: &str,
     mut cursor: usize,
     binding: &str,
@@ -15083,7 +14480,7 @@ fn parse_commonjs_wrapper_replacement(
     ))
 }
 
-fn parse_lazy_initializer_replacement(
+pub(crate) fn parse_lazy_initializer_replacement(
     source: &str,
     mut cursor: usize,
     binding: &str,
@@ -15112,7 +14509,7 @@ fn parse_lazy_initializer_replacement(
     ))
 }
 
-fn parse_helper_call_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
+pub(crate) fn parse_helper_call_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
     cursor = skip_ws(bytes, cursor);
     if bytes.get(cursor) != Some(&b')') {
         return None;
@@ -15128,7 +14525,7 @@ pub(crate) fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     value_identifiers_in_source(source)
 }
 
-fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
+pub(crate) fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
     let mut definitions = BTreeSet::new();
     let bytes = source.as_bytes();
     let mut cursor = 0;
@@ -15200,7 +14597,7 @@ fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
     definitions
 }
 
-fn implicit_global_declarations_for_module(
+pub(crate) fn implicit_global_declarations_for_module(
     source: &str,
     source_definitions: &BTreeSet<BindingName>,
     source_imports: &BTreeSet<BindingName>,
@@ -15296,7 +14693,7 @@ pub(crate) fn implicit_global_writes_in_source(source: &str) -> BTreeSet<Binding
     writes
 }
 
-fn collect_variable_declaration_definitions(
+pub(crate) fn collect_variable_declaration_definitions(
     source: &str,
     mut cursor: usize,
     definitions: &mut BTreeSet<BindingName>,
@@ -15386,7 +14783,7 @@ pub(crate) fn variable_declaration_binding_starts(source: &str) -> BTreeSet<usiz
     starts
 }
 
-fn collect_variable_declaration_binding_starts(
+pub(crate) fn collect_variable_declaration_binding_starts(
     source: &str,
     mut cursor: usize,
     starts: &mut BTreeSet<usize>,
@@ -15432,20 +14829,20 @@ fn collect_variable_declaration_binding_starts(
     cursor
 }
 
-fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
+pub(crate) fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
     identifier_read_facts_in_source(source)
         .into_iter()
         .any(|fact| fact.name == identifier && fact.is_call_callee)
 }
 
-fn contains_identifier_reference(source: &str, identifier: &str) -> bool {
+pub(crate) fn contains_identifier_reference(source: &str, identifier: &str) -> bool {
     identifier_read_facts_in_source(source)
         .into_iter()
         .any(|fact| fact.name == identifier)
 }
 
 #[cfg(test)]
-fn identifier_reference_positions<'a>(
+pub(crate) fn identifier_reference_positions<'a>(
     source: &'a str,
     identifier: &'a str,
 ) -> impl Iterator<Item = usize> + 'a {
@@ -15455,7 +14852,9 @@ fn identifier_reference_positions<'a>(
         .map(|fact| fact.byte_end)
 }
 
-fn lazy_helper_import_names_for_source(source: &LoweredRuntimeModuleSource) -> Vec<&'static str> {
+pub(crate) fn lazy_helper_import_names_for_source(
+    source: &LoweredRuntimeModuleSource,
+) -> Vec<&'static str> {
     let mut names = Vec::new();
     if source.uses_lazy_module {
         names.push("lazyModule");
