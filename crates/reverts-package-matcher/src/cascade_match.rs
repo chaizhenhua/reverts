@@ -20,7 +20,7 @@ use reverts_ir::{AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionI
 use reverts_js::parse_options_for;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_index::{
-    Candidate, CfgKey, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
+    Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, PackageId, StructuralKey,
 };
 
 use crate::PackageSource;
@@ -149,11 +149,8 @@ pub fn match_with_cascade(
     }
 }
 
-fn build_index(
-    package_sources: &[PackageSource],
-    audit: &mut AuditReport,
-) -> InMemoryFingerprintIndex {
-    let mut index = InMemoryFingerprintIndex::new();
+fn build_index(package_sources: &[PackageSource], audit: &mut AuditReport) -> FingerprintIndex {
+    let mut index = FingerprintIndex::new();
     for (idx, source) in package_sources.iter().enumerate() {
         if !source.is_within_fingerprint_budget() {
             continue;

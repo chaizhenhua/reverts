@@ -1,12 +1,9 @@
 use std::collections::BTreeMap;
 
-use super::{
-    AxisKind, Candidate, CfgKey, CorpusStats, ExactKey, FeatureKey, PackageFingerprintIndex,
-    StructuralKey,
-};
+use super::{AxisKind, Candidate, CfgKey, CorpusStats, ExactKey, FeatureKey, StructuralKey};
 
 #[derive(Debug, Default)]
-pub struct InMemoryFingerprintIndex {
+pub struct FingerprintIndex {
     exact: BTreeMap<ExactKey, Vec<Candidate>>,
     cfg: BTreeMap<CfgKey, Vec<Candidate>>,
     feature: BTreeMap<FeatureKey, Vec<Candidate>>,
@@ -14,7 +11,7 @@ pub struct InMemoryFingerprintIndex {
     stats: CorpusStats,
 }
 
-impl InMemoryFingerprintIndex {
+impl FingerprintIndex {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -55,22 +52,29 @@ impl InMemoryFingerprintIndex {
             .or_default() += 1;
         self.structural.entry(key).or_default().push(candidate);
     }
-}
 
-impl PackageFingerprintIndex for InMemoryFingerprintIndex {
-    fn query_exact(&self, key: ExactKey) -> Vec<Candidate> {
+    #[must_use]
+    pub fn query_exact(&self, key: ExactKey) -> Vec<Candidate> {
         self.exact.get(&key).cloned().unwrap_or_default()
     }
-    fn query_cfg(&self, key: CfgKey) -> Vec<Candidate> {
+
+    #[must_use]
+    pub fn query_cfg(&self, key: CfgKey) -> Vec<Candidate> {
         self.cfg.get(&key).cloned().unwrap_or_default()
     }
-    fn query_feature(&self, key: FeatureKey) -> Vec<Candidate> {
+
+    #[must_use]
+    pub fn query_feature(&self, key: FeatureKey) -> Vec<Candidate> {
         self.feature.get(&key).cloned().unwrap_or_default()
     }
-    fn query_structural(&self, key: StructuralKey) -> Vec<Candidate> {
+
+    #[must_use]
+    pub fn query_structural(&self, key: StructuralKey) -> Vec<Candidate> {
         self.structural.get(&key).cloned().unwrap_or_default()
     }
-    fn corpus_stats(&self) -> &CorpusStats {
+
+    #[must_use]
+    pub fn corpus_stats(&self) -> &CorpusStats {
         &self.stats
     }
 }
@@ -96,7 +100,7 @@ mod tests {
 
     #[test]
     fn in_memory_index_inserts_and_queries_by_exact_key() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -117,7 +121,7 @@ mod tests {
 
     #[test]
     fn in_memory_index_tracks_corpus_frequency() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -131,7 +135,7 @@ mod tests {
 
     #[test]
     fn in_memory_index_returns_default_frequency_for_unseen_hash() {
-        let idx = InMemoryFingerprintIndex::new();
+        let idx = FingerprintIndex::new();
         assert_eq!(idx.corpus_stats().frequency(AxisKind::Ast, 999), 1);
     }
 }

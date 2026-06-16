@@ -1,5 +1,5 @@
 use reverts_ir::{FunctionFingerprint, FunctionId};
-use reverts_package_index::PackageFingerprintIndex;
+use reverts_package_index::FingerprintIndex;
 
 use crate::hungarian::assign_max_weight;
 use crate::tier::{
@@ -9,10 +9,7 @@ use crate::tier::{
 };
 
 #[must_use]
-pub fn match_function(
-    fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+pub fn match_function(fp: &FunctionFingerprint, index: &FingerprintIndex) -> Option<FunctionMatch> {
     try_exact(fp, index)
 }
 
@@ -30,7 +27,7 @@ pub fn match_function(
 #[must_use]
 pub fn cascade_candidates(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Vec<FunctionMatch> {
     let mut all = Vec::new();
     if let Some(m) = try_exact(fp, index) {
@@ -97,7 +94,7 @@ impl GlobalAssignment {
 #[must_use]
 pub fn assign_globally(
     bundle_fps: &[FunctionFingerprint],
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Vec<GlobalAssignment> {
     use reverts_package_index::PackageId;
 
@@ -261,7 +258,7 @@ mod tests {
         NormalizationPassId,
     };
     use reverts_package_index::{
-        Candidate, ExactKey, FeatureKey, InMemoryFingerprintIndex, PackageId, StructuralKey,
+        Candidate, ExactKey, FeatureKey, FingerprintIndex, PackageId, StructuralKey,
     };
 
     use crate::tier::{
@@ -287,7 +284,7 @@ mod tests {
 
     #[test]
     fn match_function_returns_exact_when_unique() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -323,7 +320,7 @@ mod tests {
 
     #[test]
     fn match_function_rejects_ambiguous_exact() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -360,7 +357,7 @@ mod tests {
 
     #[test]
     fn exact_alternate_tier_is_explicit_only() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         // No primary exact match; an alternate matches at ast=222
         idx.insert_exact(
             ExactKey {
@@ -409,7 +406,7 @@ mod tests {
 
     #[test]
     fn structural_anchored_requires_cfg_and_anchor_overlap() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let candidate = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -454,7 +451,7 @@ mod tests {
 
     #[test]
     fn structural_anchored_rejects_when_no_anchor_overlap() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         // CFG matches but no anchor overlap
         idx.insert_cfg(
             reverts_package_index::CfgKey {
@@ -491,7 +488,7 @@ mod tests {
 
     #[test]
     fn feature_similarity_accepts_high_jaccard_candidate() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "lodash".into(),
@@ -574,7 +571,7 @@ mod tests {
 
     #[test]
     fn feature_similarity_rejects_low_jaccard() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -623,7 +620,7 @@ mod tests {
 
     #[test]
     fn structural_only_accepts_unique_low_frequency_candidate() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         idx.insert_structural(
             StructuralKey {
                 param_count: 1,
@@ -658,7 +655,7 @@ mod tests {
 
     #[test]
     fn structural_only_rejects_high_frequency_hash() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         // Hit the same structural hash 51 times (limit=50) — corpus frequency > limit
         for i in 0..51u64 {
             idx.insert_structural(
@@ -702,7 +699,7 @@ mod tests {
         // primary ast, plus StructuralAnchored via cfg + literal_anchor).
         // assign_globally must surface only the exact candidate; weaker
         // structural evidence is available through explicit tier APIs.
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let pkg_top = PackageId {
             name: "exactpkg".into(),
             version: "1.0".into(),
@@ -790,7 +787,7 @@ mod tests {
         // Each bundle fp has exactly one candidate (exact match), so Hungarian
         // and greedy produce the same answer — but this verifies the integration:
         // each fp is assigned, no candidate is reused, counts are 5/5.
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let pkg_a = PackageId {
             name: "a".into(),
             version: "1.0".into(),
@@ -867,7 +864,7 @@ mod tests {
         // from try_exact). Instead we use structural_only with unique keys so tier is
         // lower weight. The simpler scenario: fp[0] exact→pkg_a, fp[1] exact→pkg_b only.
         // They don't collide, so we verify the no-collision path too.
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let pkg_a = PackageId {
             name: "pa".into(),
             version: "1.0".into(),

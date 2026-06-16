@@ -1,6 +1,6 @@
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
 use reverts_package_index::{
-    Candidate, CfgKey, ExactKey, FeatureKey, PackageFingerprintIndex, StructuralKey,
+    Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, StructuralKey,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,10 +27,7 @@ pub struct FunctionMatch {
 }
 
 #[must_use]
-pub fn try_exact(
-    fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+pub fn try_exact(fp: &FunctionFingerprint, index: &FingerprintIndex) -> Option<FunctionMatch> {
     exact_for_axes(
         fp.param_count,
         fp.statement_count,
@@ -45,7 +42,7 @@ fn exact_for_axes(
     param_count: u32,
     statement_count: u32,
     ast_hash: u64,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -73,7 +70,7 @@ fn first_alternate_match(
 #[must_use]
 pub fn try_exact_alternate(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |statement_count, axes, pass| {
         exact_for_axes(
@@ -90,7 +87,7 @@ pub fn try_exact_alternate(
 #[must_use]
 pub fn try_structural_anchored(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     structural_anchored_for_axes(
         fp.param_count,
@@ -111,7 +108,7 @@ pub fn try_structural_anchored(
 #[must_use]
 pub fn try_structural_anchored_alternate(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_anchored_for_axes(
@@ -127,7 +124,7 @@ pub fn try_structural_anchored_alternate(
 fn structural_anchored_for_axes(
     param_count: u32,
     axes: &AxisHashes,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -215,7 +212,7 @@ fn structural_anchored_for_axes(
 #[must_use]
 pub fn try_feature_similarity(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     feature_similarity_for_axes(
         fp.param_count,
@@ -235,7 +232,7 @@ pub fn try_feature_similarity(
 #[must_use]
 pub fn try_feature_similarity_alternate(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         feature_similarity_for_axes(
@@ -251,7 +248,7 @@ pub fn try_feature_similarity_alternate(
 fn feature_similarity_for_axes(
     param_count: u32,
     axes: &AxisHashes,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -420,7 +417,7 @@ const STRUCTURAL_FREQUENCY_LIMIT_ALT: u32 = 75;
 #[must_use]
 pub fn try_structural_only(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     structural_only_for_anchor(
         fp.param_count,
@@ -441,7 +438,7 @@ pub fn try_structural_only(
 #[must_use]
 pub fn try_structural_only_alternate(
     fp: &FunctionFingerprint,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_only_for_anchor(
@@ -457,7 +454,7 @@ pub fn try_structural_only_alternate(
 fn structural_only_for_anchor(
     param_count: u32,
     structural_anchor: u64,
-    index: &dyn PackageFingerprintIndex,
+    index: &FingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -548,7 +545,7 @@ pub(crate) fn pick_unique(
 mod tests {
     use super::*;
     use reverts_ir::{ByteRange, FunctionId, ModuleId};
-    use reverts_package_index::{InMemoryFingerprintIndex, PackageId};
+    use reverts_package_index::{FingerprintIndex, PackageId};
 
     fn sample_axes() -> AxisHashes {
         AxisHashes {
@@ -569,7 +566,7 @@ mod tests {
 
     #[test]
     fn structural_anchored_records_all_overlapping_axes() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -634,7 +631,7 @@ mod tests {
         //   * the primary tier rejects (0.5 < 0.6);
         //   * the alt tier accepts when the same axis values appear on an
         //     alternate fingerprint.
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -748,7 +745,7 @@ mod tests {
     #[test]
     fn structural_only_alternate_uses_alt_structural_anchor() {
         // Index a candidate keyed on a specific structural_anchor hash.
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -809,7 +806,7 @@ mod tests {
 
     #[test]
     fn structural_anchored_alternate_uses_alt_axes_when_primary_misses() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         let cand = Candidate {
             package: PackageId {
                 name: "p".into(),
@@ -883,7 +880,7 @@ mod tests {
 
     #[test]
     fn exact_match_records_single_ast_axis() {
-        let mut idx = InMemoryFingerprintIndex::new();
+        let mut idx = FingerprintIndex::new();
         idx.insert_exact(
             ExactKey {
                 param_count: 1,

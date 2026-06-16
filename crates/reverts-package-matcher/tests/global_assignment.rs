@@ -11,7 +11,7 @@
 use reverts_ir::{
     AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId, NormalizationPassId,
 };
-use reverts_package_index::{Candidate, ExactKey, InMemoryFingerprintIndex, PackageId};
+use reverts_package_index::{Candidate, ExactKey, FingerprintIndex, PackageId};
 use reverts_package_matcher::cascade::assign_globally;
 
 fn zero_axes(ast: u64) -> AxisHashes {
@@ -59,7 +59,7 @@ const ALT_BASE: u64 = 20_000;
 
 #[test]
 fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
-    let mut idx = InMemoryFingerprintIndex::new();
+    let mut idx = FingerprintIndex::new();
     let pkg_a = PackageId {
         name: "a".into(),
         version: "1.0".into(),
@@ -191,7 +191,7 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
 /// lower tier weight.
 #[test]
 fn hungarian_assigns_reused_exact_columns_once() {
-    let mut idx = InMemoryFingerprintIndex::new();
+    let mut idx = FingerprintIndex::new();
     let pkg_a = PackageId {
         name: "x".into(),
         version: "1.0".into(),

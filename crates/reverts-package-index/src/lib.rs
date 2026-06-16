@@ -56,13 +56,5 @@ impl CorpusStats {
     }
 }
 
-pub trait PackageFingerprintIndex: Send + Sync {
-    fn query_exact(&self, key: ExactKey) -> Vec<Candidate>;
-    fn query_cfg(&self, key: CfgKey) -> Vec<Candidate>;
-    fn query_feature(&self, key: FeatureKey) -> Vec<Candidate>;
-    fn query_structural(&self, key: StructuralKey) -> Vec<Candidate>;
-    fn corpus_stats(&self) -> &CorpusStats;
-}
-
 pub mod in_memory;
-pub use in_memory::InMemoryFingerprintIndex;
+pub use in_memory::FingerprintIndex;
