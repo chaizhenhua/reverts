@@ -1,5 +1,6 @@
 mod binding_owner;
 mod byte_lexer;
+mod cli_entrypoint;
 mod compiler_recovery;
 mod destructure_writes;
 mod eager_safe_analysis;
@@ -9,6 +10,7 @@ mod package_runtime;
 mod plan_error;
 mod pure_reexport_bypass;
 mod relative_paths;
+mod runtime_helper_emission;
 mod runtime_helper_strip;
 mod runtime_helper_writes;
 mod runtime_namespace_rewrite;
@@ -30,7 +32,7 @@ use package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, PackageRuntimeImportEmitter,
     emit_package_runtime_helper_files, emit_package_runtime_helper_import,
     package_runtime_island_plan, package_runtime_owner_for_module,
-    partition_package_runtime_bindings, push_packed_runtime_helper_imports,
+    partition_package_runtime_bindings,
 };
 use runtime_singleton_inline::{
     RuntimeSingletonInlineEmitContext, emit_runtime_singleton_inline_helpers,
@@ -53,10 +55,8 @@ use eager_safe_analysis::{
     rewrite_eagerified_call_sites, should_compute_cross_module_eager_safe_analysis,
 };
 
-use runtime_helper_strip::{
-    migratable_runtime_var_initializer, strip_runtime_namespace_export_sources,
-    strip_runtime_snippet_sources, strip_runtime_var_declarations,
-};
+use runtime_helper_strip::migratable_runtime_var_initializer;
+#[allow(unused_imports)]
 use runtime_helper_writes::{
     inline_internal_setter_calls, is_simple_update_target, rewrite_runtime_helper_writes,
     update_operator_at,
@@ -83,6 +83,7 @@ use identifiers::{
     is_identifier_like, is_planner_synthetic_binding, keyword_at, parse_identifier,
     parse_identifier_after_function_keyword, parse_identifier_after_keyword,
 };
+#[allow(unused_imports)]
 use import_coalesce::{
     coalesce_top_level_import_declarations, first_local_for_import,
     import_statement_local_bindings, parse_named_import_clause,
@@ -100,13 +101,14 @@ pub use runtime_setter_migration_blocker::{
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
 };
 
+#[allow(unused_imports)]
 use statements::{
-    default_import_statement, default_named_import_alias_statement, lazy_module_helper_source,
-    lazy_value_helper_source, named_export_statement, named_import_alias_statement,
-    named_import_statement, named_reexport_statement, namespace_import_statement,
-    node_require_prelude_statement, noop_function_statement, runtime_helper_import_statement,
-    runtime_helper_setter_declarations, runtime_helper_setter_name, runtime_helpers_path,
-    runtime_namespace_export_statement, variable_declaration_statement,
+    default_import_statement, default_named_import_alias_statement, named_export_statement,
+    named_import_alias_statement, named_import_statement, named_reexport_statement,
+    namespace_import_statement, node_require_prelude_statement, noop_function_statement,
+    runtime_helper_import_statement, runtime_helper_setter_declarations,
+    runtime_helper_setter_name, runtime_helpers_path, runtime_namespace_export_statement,
+    variable_declaration_statement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2348,365 +2350,27 @@ impl ImportExportPlanner {
                 .insert(entrypoint.callee.clone());
         }
 
-        for (source_file_id, helper_bindings) in &used_runtime_helper_files {
-            let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
-                continue;
-            };
-            let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
-            let mut public_helper_bindings = exported_runtime_helper_bindings
-                .get(source_file_id)
-                .cloned()
-                .unwrap_or_default();
-            let extra_snippet_bindings_for_source =
-                runtime_var_migrations.extra_snippet_bindings_for_source(*source_file_id);
-            let extra_namespace_export_bindings_for_source =
-                runtime_var_migrations.extra_namespace_export_bindings_for_source(*source_file_id);
-            let migrations_for_source =
-                runtime_var_migrations.primary_bindings_for_source(*source_file_id);
-            let module_owned_bindings_for_source =
-                binding_owners.module_owners_for_source(*source_file_id);
-            let module_owned_binding_names_for_source = module_owned_bindings_for_source
-                .keys()
-                .cloned()
-                .collect::<BTreeSet<_>>();
-            let entrypoint = prelude
-                .entrypoint
-                .as_ref()
-                .filter(|entrypoint| helper_bindings.contains(&entrypoint.callee));
-            let entrypoint_callee = entrypoint.map(|entrypoint| entrypoint.callee.clone());
-            let consumed_helper_bindings =
-                planned_runtime_helper_consumed_bindings(&plan, *source_file_id);
-            let namespace_export_helpers = prelude
-                .namespace_exports
-                .iter()
-                .map(|export| export.helper.clone())
-                .collect::<BTreeSet<_>>();
-            public_helper_bindings.retain(|binding| {
-                !namespace_export_helpers.contains(binding)
-                    || consumed_helper_bindings.contains(binding)
-                    || entrypoint_callee
-                        .as_ref()
-                        .is_some_and(|callee| callee == binding)
-            });
-            let mut root_bindings = required_runtime_helper_bindings
-                .get(source_file_id)
-                .cloned()
-                .unwrap_or_else(|| helper_bindings.clone());
-            root_bindings.retain(|binding| {
-                !namespace_export_helpers.contains(binding)
-                    || consumed_helper_bindings.contains(binding)
-                    || entrypoint_callee
-                        .as_ref()
-                        .is_some_and(|callee| callee == binding)
-            });
-            if let Some(setter_targets) = used_runtime_helper_setters.get(source_file_id) {
-                root_bindings.extend(setter_targets.iter().cloned());
-            }
-            for binding in &module_owned_binding_names_for_source {
-                root_bindings.remove(binding);
-            }
-            if let Some(entrypoint) = entrypoint {
-                root_bindings.extend(runtime_entrypoint_root_bindings(prelude, entrypoint));
-            }
-            if let Some(folded_chunks) =
-                runtime_lazy_folds.chunks_by_source_file.get(source_file_id)
-            {
-                for chunk in folded_chunks {
-                    for identifier in identifiers_in_source(chunk.source.as_str()) {
-                        let binding = BindingName::new(identifier);
-                        if prelude.defines(&binding) {
-                            root_bindings.insert(binding);
-                        }
-                    }
-                }
-            }
-            for binding in &module_owned_binding_names_for_source {
-                root_bindings.remove(binding);
-            }
-            let folded_chunks = runtime_lazy_folds
-                .chunks_by_source_file
-                .get(source_file_id)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let mut helper_closure = close_runtime_helper_source_excluding(
-                prelude,
-                &root_bindings,
-                entrypoint,
-                folded_chunks,
-                &module_owned_binding_names_for_source,
-            );
-            // Phase 9a: collapse `__reverts_set_X(arg)` → `(X = arg)`
-            // whenever the call sits inside the runtime helpers module
-            // itself. Same-module direct assignment is observationally
-            // equivalent for single-argument invocations, and the form
-            // reads as the underlying bundler intent. The cross-module
-            // setter function is still emitted below so consumer modules
-            // (which can't legally assign through their read-only ESM
-            // imports) keep their existing call form unchanged.
-            helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
-            // Phase 10b: bindings the migration plan reassigned out of
-            // this runtime helpers file no longer have their `var X;`
-            // declaration here. Consumers are routed directly to the owner
-            // module instead of through a runtime re-export barrel.
-            if !migrations_for_source.is_empty() {
-                helper_closure.source = strip_runtime_var_declarations(
-                    helper_closure.source.as_str(),
-                    migrations_for_source.keys(),
-                );
-                for binding in migrations_for_source.keys() {
-                    helper_closure.emitted_bindings.remove(binding);
-                }
-            }
-            if !extra_snippet_bindings_for_source.is_empty() {
-                helper_closure.source = strip_runtime_snippet_sources(
-                    helper_closure.source.as_str(),
-                    prelude,
-                    &extra_snippet_bindings_for_source,
-                );
-                for binding in &extra_snippet_bindings_for_source {
-                    helper_closure.emitted_bindings.remove(binding);
-                }
-            }
-            if !extra_namespace_export_bindings_for_source.is_empty() {
-                helper_closure.source = strip_runtime_namespace_export_sources(
-                    helper_closure.source.as_str(),
-                    prelude,
-                    &extra_namespace_export_bindings_for_source,
-                );
-            }
-            let adapter_owned_runtime_bindings = adapter_owned_runtime_bindings(
+        runtime_helper_emission::emit_runtime_helper_files(
+            &runtime_helper_emission::RuntimeHelperEmissionContext {
                 program,
+                runtime_var_migrations: &runtime_var_migrations,
+                binding_owners: &binding_owners,
+                runtime_lazy_folds,
+                externalized_packages,
                 external_package_adapters,
-                externalized_packages,
-                &helper_closure.emitted_bindings,
-            );
-            if !adapter_owned_runtime_bindings.is_empty() {
-                helper_closure.source = strip_runtime_var_declarations(
-                    helper_closure.source.as_str(),
-                    &adapter_owned_runtime_bindings,
-                );
-                for binding in &adapter_owned_runtime_bindings {
-                    helper_closure.emitted_bindings.remove(binding);
-                }
-            }
-            // Phase 11a: some runtime lazyValue thunks are not real lazy
-            // module boundaries; they only fill private helper vars with
-            // pure values and return `undefined`. Make those assignments
-            // direct and leave a no-op initializer behind for existing
-            // `init()` call sites. This removes lazy loader wrappers
-            // without changing the exported runtime surface.
-            helper_closure.source = purify_private_runtime_lazy_initializers(
-                helper_closure.source.as_str(),
-                &helper_closure.emitted_bindings,
-            );
-            let noop_runtime_helpers =
-                noop_runtime_helpers_in_source(helper_closure.source.as_str());
-            let erased_private_noops = private_noop_runtime_helpers_in_source(
-                helper_closure.source.as_str(),
-                &public_helper_bindings,
-            );
-            if !noop_runtime_helpers.is_empty() {
-                helper_closure.source = rewrite_noop_runtime_helper_calls(
-                    helper_closure.source.as_str(),
-                    &noop_runtime_helpers,
-                );
-                helper_closure.source =
-                    drop_bare_void_zero_top_level_statements(helper_closure.source.as_str());
-            }
-            if !erased_private_noops.is_empty() {
-                helper_closure.source = strip_runtime_noop_declarations(
-                    helper_closure.source.as_str(),
-                    &erased_private_noops,
-                );
-                for binding in &erased_private_noops {
-                    helper_closure.emitted_bindings.remove(binding);
-                }
-            }
-            helper_closure.source =
-                coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
-            helper_closure.source =
-                compact_pure_static_runtime_literals(helper_closure.source.as_str());
-            helper_closure.source = inline_single_use_runtime_proxy_functions(
-                helper_closure.source.as_str(),
-                &public_helper_bindings,
-            );
-            helper_closure.source =
-                coalesce_top_level_import_declarations(helper_closure.source.as_str());
-            let runtime_setter_bindings = used_runtime_helper_setters
-                .get(source_file_id)
-                .cloned()
-                .unwrap_or_default();
-            // Phase 14a: after all runtime-local rewrites, rebuild a binding
-            // graph from the emitted helper source and delete private helper
-            // declarations that are no longer reachable from the public
-            // runtime surface, setter targets, or top-level side effects. This
-            // is deliberately structural (no symbol-name allowlist): only
-            // top-level declarations whose initializer/declaration is
-            // side-effect-free are pruned.
-            let mut runtime_binding_roots = public_helper_bindings.clone();
-            runtime_binding_roots.extend(runtime_setter_bindings.iter().cloned());
-            let orphan_prune = prune_orphan_runtime_bindings(
-                helper_closure.source.as_str(),
-                &runtime_binding_roots,
-            );
-            helper_closure.source = orphan_prune.source;
-            for binding in &orphan_prune.dropped_bindings {
-                helper_closure.emitted_bindings.remove(binding);
-            }
-            let runtime_externalized_binding_scan = scan_runtime_externalized_bindings(
-                program,
-                helper_closure.source.as_str(),
-                &helper_closure.emitted_bindings,
-                externalized_packages,
-            );
-            let mut helper_imports = runtime_module_owner_imports_for_source(
-                helper_closure.source.as_str(),
-                &helper_closure.emitted_bindings,
-                &module_owned_bindings_for_source,
-                runtime_externalized_binding_scan.source_module_imports,
-            );
-            for (module_id, bindings) in
-                runtime_var_migrations.runtime_reexport_source_deps_for_source(*source_file_id)
-            {
-                helper_imports
-                    .entry(module_id)
-                    .or_default()
-                    .extend(bindings);
-            }
-            let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
-            let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
-            emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
-            let helper_path = runtime_helpers_path(*source_file_id);
-            let unresolved = unresolved_runtime_helper_references(
-                prelude,
-                helper_closure.source.as_str(),
-                &emitted_runtime_bindings,
-                &helper_imports,
-            );
-            if !unresolved.is_empty() {
-                return Err(PlanError::UnresolvedRuntimeHelperReferences {
-                    path: helper_path,
-                    bindings: unresolved.into_iter().collect(),
-                });
-            }
-            push_packed_runtime_helper_imports(
-                program,
-                &mut plan,
-                &mut file,
-                helper_path.as_str(),
-                &helper_imports,
-            );
-            for binding in &package_init_shims {
-                file.push_source(noop_function_statement(binding));
-            }
-            if !helper_closure.source.trim().is_empty() {
-                file.push_source(helper_closure.source);
-            }
-            // Phase 10b: skip setter functions for migrated primary bindings;
-            // the writer module now mutates them via direct assignment.
-            let setter_bindings: BTreeSet<BindingName> = runtime_setter_bindings
-                .difference(
-                    &migrations_for_source
-                        .keys()
-                        .cloned()
-                        .collect::<BTreeSet<_>>(),
-                )
-                .cloned()
-                .collect();
-            if !setter_bindings.is_empty() {
-                file.push_source(runtime_helper_setter_declarations(&setter_bindings));
-            }
-            let emits_lazy_module = used_lazy_module.contains(source_file_id);
-            let emits_lazy_value = used_lazy_value.contains(source_file_id);
-            let exports_lazy_module = exported_lazy_module.contains(source_file_id);
-            let exports_lazy_value = exported_lazy_value.contains(source_file_id);
-            if emits_lazy_module {
-                file.push_source(lazy_module_helper_source());
-            }
-            if emits_lazy_value {
-                file.push_source(lazy_value_helper_source());
-            }
-            let mut exported_bindings = public_helper_bindings.clone();
-            exported_bindings.extend(
-                setter_bindings
-                    .iter()
-                    .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
-            );
-            // Phase 10b: drop module-owned bindings from the runtime helper's
-            // own named export. All consumers should import the owner module
-            // directly; the runtime file is no longer a compatibility barrel.
-            for binding in &module_owned_binding_names_for_source {
-                exported_bindings.remove(binding);
-            }
-            if exports_lazy_module {
-                exported_bindings.insert(BindingName::new("lazyModule"));
-            }
-            if exports_lazy_value {
-                exported_bindings.insert(BindingName::new("lazyValue"));
-            }
-            if !exported_bindings.is_empty() {
-                file.push_source(named_export_statement(exported_bindings.iter()));
-            }
-            for binding in public_helper_bindings
-                .iter()
-                .filter(|binding| !module_owned_bindings_for_source.contains_key(*binding))
-                .cloned()
-            {
-                file.add_binding(PlannedBinding::new(
-                    binding.clone(),
-                    binding.clone(),
-                    BindingShape::Unknown,
-                    true,
-                ));
-                file.add_export_with_source_backed(binding, true);
-            }
-            for setter in setter_bindings
-                .iter()
-                .map(|binding| BindingName::new(runtime_helper_setter_name(binding)))
-            {
-                file.add_binding(PlannedBinding::new(
-                    setter.clone(),
-                    setter.clone(),
-                    BindingShape::Callable,
-                    true,
-                ));
-                file.add_export_with_source_backed(setter, true);
-            }
-            for lazy_name in [
-                exports_lazy_module.then_some("lazyModule"),
-                exports_lazy_value.then_some("lazyValue"),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                let binding = BindingName::new(lazy_name);
-                file.add_binding(PlannedBinding::new(
-                    binding.clone(),
-                    binding.clone(),
-                    BindingShape::Callable,
-                    true,
-                ));
-                file.add_export_with_source_backed(binding, true);
-            }
-            if file.body.is_empty() {
-                continue;
-            }
-            plan.push_file(file);
-        }
+                used_runtime_helper_files: &used_runtime_helper_files,
+                exported_runtime_helper_bindings: &exported_runtime_helper_bindings,
+                required_runtime_helper_bindings: &required_runtime_helper_bindings,
+                used_runtime_helper_setters: &used_runtime_helper_setters,
+                used_lazy_module: &used_lazy_module,
+                used_lazy_value: &used_lazy_value,
+                exported_lazy_module: &exported_lazy_module,
+                exported_lazy_value: &exported_lazy_value,
+            },
+            &mut plan,
+        )?;
 
-        if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
-            let mut file = PlannedFile::new("cli.ts");
-            file.push_source("#!/usr/bin/env node");
-            let helper_path = runtime_helpers_path(entrypoint.source_file_id);
-            let specifier = relative_import_specifier("cli.ts", helper_path.as_str());
-            let entrypoint_imports = BTreeSet::from([entrypoint.callee.clone()]);
-            file.push_source(named_import_statement(
-                entrypoint_imports.iter(),
-                specifier.as_str(),
-            ));
-            file.push_source(format!("await {}();", entrypoint.callee.as_str()));
-            plan.push_file(file);
-        }
+        cli_entrypoint::emit_cli_entrypoint(program, &mut plan);
 
         Ok(plan)
     }
@@ -2834,7 +2498,7 @@ fn partition_runtime_owner_bindings(
     partition
 }
 
-fn planned_runtime_helper_consumed_bindings(
+pub(crate) fn planned_runtime_helper_consumed_bindings(
     plan: &EmitPlan,
     source_file_id: u32,
 ) -> BTreeSet<BindingName> {
@@ -9172,7 +8836,9 @@ fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> b
     false
 }
 
-fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &RuntimeEntrypoint)> {
+pub(crate) fn runtime_entrypoint(
+    program: &EnrichedProgram,
+) -> Option<(&RuntimePrelude, &RuntimeEntrypoint)> {
     program
         .model()
         .graph()
@@ -9186,7 +8852,7 @@ fn runtime_entrypoint(program: &EnrichedProgram) -> Option<(&RuntimePrelude, &Ru
         })
 }
 
-fn runtime_entrypoint_root_bindings(
+pub(crate) fn runtime_entrypoint_root_bindings(
     prelude: &RuntimePrelude,
     entrypoint: &RuntimeEntrypoint,
 ) -> BTreeSet<BindingName> {
@@ -9224,7 +8890,7 @@ pub(crate) fn close_runtime_helper_source(
     )
 }
 
-fn close_runtime_helper_source_excluding(
+pub(crate) fn close_runtime_helper_source_excluding(
     prelude: &RuntimePrelude,
     root_bindings: &BTreeSet<BindingName>,
     entrypoint: Option<&RuntimeEntrypoint>,
@@ -9774,7 +9440,7 @@ fn source_contains_top_level_lazy_value_call_referencing_binding(
         .any(|statement| contains_identifier_reference(statement, binding.as_str()))
 }
 
-fn private_noop_runtime_helpers_in_source(
+pub(crate) fn private_noop_runtime_helpers_in_source(
     source: &str,
     public_bindings: &BTreeSet<BindingName>,
 ) -> BTreeSet<BindingName> {
@@ -9785,7 +9451,7 @@ fn private_noop_runtime_helpers_in_source(
         .collect()
 }
 
-fn noop_runtime_helpers_in_source(source: &str) -> BTreeSet<BindingName> {
+pub(crate) fn noop_runtime_helpers_in_source(source: &str) -> BTreeSet<BindingName> {
     top_level_statement_slices(source)
         .into_iter()
         .flat_map(|statement| {
@@ -9796,7 +9462,10 @@ fn noop_runtime_helpers_in_source(source: &str) -> BTreeSet<BindingName> {
         .collect()
 }
 
-fn strip_runtime_noop_declarations(source: &str, bindings: &BTreeSet<BindingName>) -> String {
+pub(crate) fn strip_runtime_noop_declarations(
+    source: &str,
+    bindings: &BTreeSet<BindingName>,
+) -> String {
     if bindings.is_empty() {
         return source.to_string();
     }
@@ -9838,7 +9507,7 @@ fn expand_line_removal_edits(
         .collect()
 }
 
-fn drop_bare_void_zero_top_level_statements(source: &str) -> String {
+pub(crate) fn drop_bare_void_zero_top_level_statements(source: &str) -> String {
     let edits = top_level_statement_spans(source)
         .into_iter()
         .filter_map(|(start, end)| {
@@ -10068,7 +9737,10 @@ fn source_reads_binding_only_as_erasable_noop_calls(source: &str, binding: &Bind
             .all(|fact| noop_call_replacement_span(source, fact).is_some())
 }
 
-fn rewrite_noop_runtime_helper_calls(source: &str, helpers: &BTreeSet<BindingName>) -> String {
+pub(crate) fn rewrite_noop_runtime_helper_calls(
+    source: &str,
+    helpers: &BTreeSet<BindingName>,
+) -> String {
     if helpers.is_empty() {
         return source.to_string();
     }
@@ -10141,7 +9813,7 @@ struct RuntimeProxyFunction {
     span: (usize, usize),
 }
 
-fn inline_single_use_runtime_proxy_functions(
+pub(crate) fn inline_single_use_runtime_proxy_functions(
     source: &str,
     blocked_bindings: &BTreeSet<BindingName>,
 ) -> String {
@@ -10468,7 +10140,7 @@ pub(crate) fn scan_runtime_externalized_bindings(
     }
 }
 
-fn runtime_module_owner_imports_for_source(
+pub(crate) fn runtime_module_owner_imports_for_source(
     source: &str,
     satisfied_runtime_bindings: &BTreeSet<BindingName>,
     module_owned_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
@@ -11699,7 +11371,7 @@ fn runtime_namespace_exports_for_helpers(
         .collect()
 }
 
-fn adapter_owned_runtime_bindings(
+pub(crate) fn adapter_owned_runtime_bindings(
     program: &EnrichedProgram,
     external_package_adapters: &BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     externalized_packages: &BTreeSet<ModuleId>,
@@ -11736,7 +11408,7 @@ enum ExternalPackageAdapterKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ExternalPackageAdapterPlan {
+pub(crate) struct ExternalPackageAdapterPlan {
     bindings: BTreeSet<BindingName>,
     kind: ExternalPackageAdapterKind,
     member_proof: Option<ExportMemberAdapterProof>,
@@ -14584,7 +14256,7 @@ fn parse_helper_call_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
     Some(cursor)
 }
 
-fn identifiers_in_source(source: &str) -> BTreeSet<String> {
+pub(crate) fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     value_identifiers_in_source(source)
 }
 
@@ -20394,7 +20066,7 @@ function target() { return 1; }\n";
             namespace_exports: Vec::new(),
             entrypoint: None,
         };
-        let stripped = super::strip_runtime_snippet_sources(
+        let stripped = super::runtime_helper_strip::strip_runtime_snippet_sources(
             source.as_str(),
             &prelude,
             &BTreeSet::from([BindingName::new("drop")]),
