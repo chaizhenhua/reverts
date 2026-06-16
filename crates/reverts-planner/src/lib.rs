@@ -540,6 +540,357 @@ impl PlannerAnalysis {
     }
 }
 
+/// For a folded module, split `folded.stub_exports` into:
+/// - bindings whose owner is in another module (these get re-exported
+///   from the owner directly), and
+/// - bindings whose owner is still the runtime helpers file (re-exported
+///   from the runtime helpers).
+fn partition_folded_stub_exports(
+    folded: &RuntimeLazyFoldModule,
+    module_id: ModuleId,
+    binding_owners: &BindingOwnerPlan,
+) -> (
+    BTreeSet<BindingName>,
+    BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) {
+    let mut runtime_stub_exports = BTreeSet::<BindingName>::new();
+    let mut direct_stub_exports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for binding in &folded.stub_exports {
+        if let Some(owner_module) = binding_owners.module_owner(folded.source_file_id, binding) {
+            if owner_module != module_id {
+                direct_stub_exports
+                    .entry(owner_module)
+                    .or_default()
+                    .insert(binding.clone());
+            }
+        } else {
+            runtime_stub_exports.insert(binding.clone());
+        }
+    }
+    (runtime_stub_exports, direct_stub_exports)
+}
+
+/// For a folded module, restrict `folded.required_bindings` to the
+/// subset still owned by either the runtime helpers file or this
+/// module itself (i.e. excluding bindings whose owners have moved to
+/// another module — those are imported directly from the new owner).
+fn folded_runtime_required_bindings(
+    folded: &RuntimeLazyFoldModule,
+    module_id: ModuleId,
+    binding_owners: &BindingOwnerPlan,
+) -> BTreeSet<BindingName> {
+    folded
+        .required_bindings
+        .iter()
+        .filter(|binding| {
+            binding_owners
+                .module_owner(folded.source_file_id, binding)
+                .is_none_or(|owner| owner == module_id)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Emit `export { X, Y } from runtime` for the subset of folded-module
+/// stub exports still owned by the runtime helpers file, and record
+/// those bindings in the helper-file-bindings + exports indexes so the
+/// runtime helper emission phase knows to surface them.
+fn emit_folded_runtime_stub_reexports(
+    source_file_id: u32,
+    path: &str,
+    runtime_stub_exports: &BTreeSet<BindingName>,
+    file: &mut PlannedFile,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    if runtime_stub_exports.is_empty() {
+        return;
+    }
+    used_runtime_helper_files
+        .entry(source_file_id)
+        .or_default()
+        .extend(runtime_stub_exports.iter().cloned());
+    exported_runtime_helper_bindings
+        .entry(source_file_id)
+        .or_default()
+        .extend(runtime_stub_exports.iter().cloned());
+    let specifier = relative_import_specifier(path, runtime_helpers_path(source_file_id).as_str());
+    file.push_source(named_reexport_statement(
+        runtime_stub_exports.iter(),
+        specifier.as_str(),
+    ));
+}
+
+/// Push every `PlannedImport` for module's package-graph imports
+/// (the decisions surfaced by `program.package_imports_for`).
+fn push_package_imports(program: &EnrichedProgram, module_id: ModuleId, file: &mut PlannedFile) {
+    for decision in program.package_imports_for(module_id) {
+        file.add_import(PlannedImport {
+            namespace: decision.namespace_binding.clone(),
+            resolution: decision.resolution.clone(),
+            source_backed: decision.source_backed,
+        });
+    }
+}
+
+/// Final emission step for a folded-module stub file: emit no-op
+/// shims for any package-runtime stubs the migrated cluster pulled
+/// in, emit `export { … };` for migrated local bindings that weren't
+/// already part of the stub-export surface, register `PlannedBinding`
+/// entries for both the original folded stub exports and the migrated
+/// local bindings. Namespace-component bindings get `Unknown` shape
+/// because their shape was rewritten by namespace decomposition;
+/// other migrated bindings are callable.
+#[allow(clippy::too_many_arguments)]
+fn push_folded_noop_and_migrated_exports(
+    folded: &RuntimeLazyFoldModule,
+    runtime_stub_exports: &BTreeSet<BindingName>,
+    direct_stub_exports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    migrated_extra_noop_deps: &BTreeSet<BindingName>,
+    migrated_local_bindings: &BTreeSet<BindingName>,
+    migrated_extra_namespace_bindings: &BTreeSet<BindingName>,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+) {
+    for binding in migrated_extra_noop_deps {
+        file.push_source(noop_function_statement(binding));
+    }
+    let already_exported = runtime_stub_exports
+        .iter()
+        .cloned()
+        .chain(direct_stub_exports.values().flatten().cloned())
+        .collect::<BTreeSet<_>>();
+    let migrated_exports = migrated_local_bindings
+        .difference(&already_exported)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !migrated_exports.is_empty() {
+        file.push_source(named_export_statement(migrated_exports.iter()));
+        for binding in &migrated_exports {
+            file.add_export_with_source_backed(binding.clone(), true);
+        }
+    }
+    for export in &folded.stub_exports {
+        file.add_binding(PlannedBinding::new(
+            export.clone(),
+            export.clone(),
+            BindingShape::Unknown,
+            true,
+        ));
+        file.add_export_with_source_backed(export.clone(), true);
+    }
+    for binding in migrated_local_bindings {
+        if planned_bindings.insert(binding.clone()) {
+            let binding_shape = if migrated_extra_namespace_bindings.contains(binding) {
+                BindingShape::Unknown
+            } else {
+                BindingShape::Callable
+            };
+            file.add_binding(PlannedBinding::new(
+                binding.clone(),
+                binding.clone(),
+                binding_shape,
+                true,
+            ));
+        }
+    }
+}
+
+/// Push the recovered source of every migrated runtime snippet and
+/// every migrated namespace-export Object.defineProperties statement
+/// into `file`, in their original source order. The flat alias table
+/// from `migrated_extra_runtime_dep_aliases` is used to rename any
+/// references to bindings whose original name collided in this owner.
+fn push_migrated_runtime_snippets_and_namespaces(
+    program: &EnrichedProgram,
+    migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
+    migrated_extra_namespace_exports: &BTreeSet<(u32, BindingName)>,
+    migrated_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    file: &mut PlannedFile,
+) {
+    if migrated_extra_snippets.is_empty() && migrated_extra_namespace_exports.is_empty() {
+        return;
+    }
+    let migrated_extra_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
+        .values()
+        .flat_map(|aliases| aliases.iter())
+        .map(|(original, alias)| (original.clone(), alias.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let migrated_extra_runtime_dep_aliases = &migrated_extra_runtime_dep_aliases;
+    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+    for (source_file_id, binding) in migrated_extra_snippets {
+        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
+            continue;
+        };
+        let Some(snippet) = prelude.snippets.get(binding) else {
+            continue;
+        };
+        migrated_chunks.push((
+            snippet.byte_start,
+            0,
+            rename_identifier_reads_in_source(
+                snippet.source.as_str(),
+                migrated_extra_runtime_dep_aliases,
+            ),
+        ));
+    }
+    for (source_file_id, namespace) in migrated_extra_namespace_exports {
+        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
+            continue;
+        };
+        let Some(namespace_export) = prelude
+            .namespace_exports
+            .iter()
+            .find(|export| export.namespace == *namespace)
+        else {
+            continue;
+        };
+        migrated_chunks.push((
+            namespace_export.byte_start,
+            1,
+            rename_identifier_reads_in_source(
+                runtime_namespace_export_statement(namespace_export).as_str(),
+                migrated_extra_runtime_dep_aliases,
+            ),
+        ));
+    }
+    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
+    for (_, _, source) in migrated_chunks {
+        file.push_source(source);
+    }
+}
+
+/// Emit `import { X, Y } from runtime` for each (source_file_id, bindings)
+/// pair the migration plan recorded as still needed by this owner module
+/// after its lazy fold. Each binding is registered in the helper-file /
+/// exported / required indexes and turned into a `PlannedBinding`
+/// derived from the program's shape/known-members data.
+#[allow(clippy::too_many_arguments)]
+fn emit_runtime_extra_deps_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    path: &str,
+    deps_by_source: &BTreeMap<u32, BTreeSet<BindingName>>,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    for (source_file_id, bindings) in deps_by_source {
+        if bindings.is_empty() {
+            continue;
+        }
+        used_runtime_helper_files
+            .entry(*source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        required_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        let specifier =
+            relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
+        file.push_source(runtime_helper_import_statement(
+            bindings,
+            &BTreeSet::new(),
+            &[],
+            specifier.as_str(),
+        ));
+        for binding in bindings {
+            if planned_bindings.contains(binding) {
+                continue;
+            }
+            planned_bindings.insert(binding.clone());
+            file.add_binding(plan_binding_from_program(
+                program,
+                module_id,
+                binding.clone(),
+                binding.clone(),
+                true,
+                None,
+            ));
+        }
+    }
+}
+
+/// For each per-source-file alias group, emit a
+/// `import { original as alias } from runtime` line for the folded
+/// module + register every original/alias binding in the helper-file,
+/// exported, and required indexes so the runtime helper file actually
+/// surfaces them.
+fn emit_runtime_extra_alias_imports(
+    path: &str,
+    aliases_by_source: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    for (source_file_id, aliases) in aliases_by_source {
+        if aliases.is_empty() {
+            continue;
+        }
+        let original_bindings = aliases.keys().cloned().collect::<BTreeSet<_>>();
+        used_runtime_helper_files
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        required_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        let specifier =
+            relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
+        file.push_source(named_import_alias_statement(
+            aliases
+                .iter()
+                .map(|(original, alias)| (original.as_str(), alias)),
+            specifier.as_str(),
+        ));
+        for alias in aliases.values() {
+            if planned_bindings.insert(alias.clone()) {
+                file.add_binding(PlannedBinding::new(
+                    alias.clone(),
+                    alias.clone(),
+                    BindingShape::Unknown,
+                    true,
+                ));
+            }
+        }
+    }
+}
+
+/// Emit `export { X } from './other-owner.ts'` for each binding whose
+/// owner moved to a different module. Owners without a resolvable output
+/// path are silently skipped — they'll surface as audit findings later.
+fn emit_folded_direct_stub_reexports(
+    program: &EnrichedProgram,
+    path: &str,
+    direct_stub_exports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    file: &mut PlannedFile,
+) {
+    for (owner_module, bindings) in direct_stub_exports {
+        let Some(owner_path) = module_output_path(program, *owner_module) else {
+            continue;
+        };
+        let specifier = relative_import_specifier(path, owner_path.as_str());
+        file.push_source(named_reexport_statement(
+            bindings.iter(),
+            specifier.as_str(),
+        ));
+    }
+}
+
 /// When a lazy binding is folded into its helper module, the consumer no
 /// longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
 /// helper file does. Detect that case here so the helper file declares
@@ -699,32 +1050,10 @@ impl ImportExportPlanner {
                     runtime_var_migrations.runtime_extra_runtime_dep_aliases_for_owner(module.id);
                 let migrated_local_bindings =
                     runtime_var_migrations.local_bindings_for_owner(module.id);
-                let mut runtime_stub_exports = BTreeSet::<BindingName>::new();
-                let mut direct_stub_exports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-                for binding in &folded.stub_exports {
-                    if let Some(owner_module) =
-                        binding_owners.module_owner(folded.source_file_id, binding)
-                    {
-                        if owner_module != module.id {
-                            direct_stub_exports
-                                .entry(owner_module)
-                                .or_default()
-                                .insert(binding.clone());
-                        }
-                    } else {
-                        runtime_stub_exports.insert(binding.clone());
-                    }
-                }
-                let runtime_required_bindings = folded
-                    .required_bindings
-                    .iter()
-                    .filter(|binding| {
-                        binding_owners
-                            .module_owner(folded.source_file_id, binding)
-                            .is_none_or(|owner| owner == module.id)
-                    })
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+                let (runtime_stub_exports, direct_stub_exports) =
+                    partition_folded_stub_exports(folded, module.id, &binding_owners);
+                let runtime_required_bindings =
+                    folded_runtime_required_bindings(folded, module.id, &binding_owners);
                 if !runtime_required_bindings.is_empty() {
                     required_runtime_helper_bindings
                         .entry(folded.source_file_id)
@@ -742,34 +1071,15 @@ impl ImportExportPlanner {
                 {
                     continue;
                 }
-                if !runtime_stub_exports.is_empty() {
-                    used_runtime_helper_files
-                        .entry(folded.source_file_id)
-                        .or_default()
-                        .extend(runtime_stub_exports.iter().cloned());
-                    exported_runtime_helper_bindings
-                        .entry(folded.source_file_id)
-                        .or_default()
-                        .extend(runtime_stub_exports.iter().cloned());
-                    let specifier = relative_import_specifier(
-                        path,
-                        runtime_helpers_path(folded.source_file_id).as_str(),
-                    );
-                    file.push_source(named_reexport_statement(
-                        runtime_stub_exports.iter(),
-                        specifier.as_str(),
-                    ));
-                }
-                for (owner_module, bindings) in &direct_stub_exports {
-                    let Some(owner_path) = module_output_path(program, *owner_module) else {
-                        continue;
-                    };
-                    let specifier = relative_import_specifier(path, owner_path.as_str());
-                    file.push_source(named_reexport_statement(
-                        bindings.iter(),
-                        specifier.as_str(),
-                    ));
-                }
+                emit_folded_runtime_stub_reexports(
+                    folded.source_file_id,
+                    path,
+                    &runtime_stub_exports,
+                    &mut file,
+                    &mut used_runtime_helper_files,
+                    &mut exported_runtime_helper_bindings,
+                );
+                emit_folded_direct_stub_reexports(program, path, &direct_stub_exports, &mut file);
                 if !migrated_extra_runtime_owner_deps.is_empty() {
                     emit_direct_owner_imports(
                         program,
@@ -789,192 +1099,48 @@ impl ImportExportPlanner {
                         &migrated_extra_runtime_owner_dep_aliases,
                     );
                 }
-                for (source_file_id, aliases) in &migrated_runtime_extra_runtime_dep_aliases {
-                    if aliases.is_empty() {
-                        continue;
-                    }
-                    let original_bindings = aliases.keys().cloned().collect::<BTreeSet<_>>();
-                    used_runtime_helper_files
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(original_bindings.iter().cloned());
-                    exported_runtime_helper_bindings
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(original_bindings.iter().cloned());
-                    required_runtime_helper_bindings
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(original_bindings.iter().cloned());
-                    let specifier = relative_import_specifier(
-                        path,
-                        runtime_helpers_path(*source_file_id).as_str(),
-                    );
-                    file.push_source(named_import_alias_statement(
-                        aliases
-                            .iter()
-                            .map(|(original, alias)| (original.as_str(), alias)),
-                        specifier.as_str(),
-                    ));
-                    for alias in aliases.values() {
-                        if planned_bindings.insert(alias.clone()) {
-                            file.add_binding(PlannedBinding::new(
-                                alias.clone(),
-                                alias.clone(),
-                                BindingShape::Unknown,
-                                true,
-                            ));
-                        }
-                    }
-                }
-                for (source_file_id, bindings) in &migrated_extra_runtime_deps_by_source {
-                    if bindings.is_empty() {
-                        continue;
-                    }
-                    used_runtime_helper_files
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(bindings.iter().cloned());
-                    exported_runtime_helper_bindings
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(bindings.iter().cloned());
-                    required_runtime_helper_bindings
-                        .entry(*source_file_id)
-                        .or_default()
-                        .extend(bindings.iter().cloned());
-                    let specifier = relative_import_specifier(
-                        path,
-                        runtime_helpers_path(*source_file_id).as_str(),
-                    );
-                    file.push_source(runtime_helper_import_statement(
-                        bindings,
-                        &BTreeSet::new(),
-                        &[],
-                        specifier.as_str(),
-                    ));
-                    for binding in bindings {
-                        if planned_bindings.contains(binding) {
-                            continue;
-                        }
-                        planned_bindings.insert(binding.clone());
-                        file.add_binding(plan_binding_from_program(
-                            program,
-                            module.id,
-                            binding.clone(),
-                            binding.clone(),
-                            true,
-                            None,
-                        ));
-                    }
-                }
-                if !migrated_extra_snippets.is_empty()
-                    || !migrated_extra_namespace_exports.is_empty()
-                {
-                    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
-                    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
-                        .values()
-                        .flat_map(|aliases| aliases.iter())
-                        .map(|(original, alias)| (original.clone(), alias.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    for (source_file_id, binding) in &migrated_extra_snippets {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(snippet) = prelude.snippets.get(binding) else {
-                            continue;
-                        };
-                        migrated_chunks.push((
-                            snippet.byte_start,
-                            0,
-                            rename_identifier_reads_in_source(
-                                snippet.source.as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    for (source_file_id, namespace) in &migrated_extra_namespace_exports {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(namespace_export) = prelude
-                            .namespace_exports
-                            .iter()
-                            .find(|export| export.namespace == *namespace)
-                        else {
-                            continue;
-                        };
-                        migrated_chunks.push((
-                            namespace_export.byte_start,
-                            1,
-                            rename_identifier_reads_in_source(
-                                runtime_namespace_export_statement(namespace_export).as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
-                    for (_, _, source) in migrated_chunks {
-                        file.push_source(source);
-                    }
-                }
-                for binding in &migrated_extra_noop_deps {
-                    file.push_source(noop_function_statement(binding));
-                }
-                let already_exported = runtime_stub_exports
-                    .iter()
-                    .cloned()
-                    .chain(direct_stub_exports.values().flatten().cloned())
-                    .collect::<BTreeSet<_>>();
-                let migrated_exports = migrated_local_bindings
-                    .difference(&already_exported)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                if !migrated_exports.is_empty() {
-                    file.push_source(named_export_statement(migrated_exports.iter()));
-                    for binding in &migrated_exports {
-                        file.add_export_with_source_backed(binding.clone(), true);
-                    }
-                }
-                for export in &folded.stub_exports {
-                    file.add_binding(PlannedBinding::new(
-                        export.clone(),
-                        export.clone(),
-                        BindingShape::Unknown,
-                        true,
-                    ));
-                    file.add_export_with_source_backed(export.clone(), true);
-                }
-                for binding in &migrated_local_bindings {
-                    if planned_bindings.insert(binding.clone()) {
-                        let binding_shape = if migrated_extra_namespace_bindings.contains(binding) {
-                            BindingShape::Unknown
-                        } else {
-                            BindingShape::Callable
-                        };
-                        file.add_binding(PlannedBinding::new(
-                            binding.clone(),
-                            binding.clone(),
-                            binding_shape,
-                            true,
-                        ));
-                    }
-                }
+                emit_runtime_extra_alias_imports(
+                    path,
+                    &migrated_runtime_extra_runtime_dep_aliases,
+                    &mut file,
+                    &mut planned_bindings,
+                    &mut used_runtime_helper_files,
+                    &mut exported_runtime_helper_bindings,
+                    &mut required_runtime_helper_bindings,
+                );
+                emit_runtime_extra_deps_imports(
+                    program,
+                    module.id,
+                    path,
+                    &migrated_extra_runtime_deps_by_source,
+                    &mut file,
+                    &mut planned_bindings,
+                    &mut used_runtime_helper_files,
+                    &mut exported_runtime_helper_bindings,
+                    &mut required_runtime_helper_bindings,
+                );
+                push_migrated_runtime_snippets_and_namespaces(
+                    program,
+                    &migrated_extra_snippets,
+                    &migrated_extra_namespace_exports,
+                    &migrated_extra_runtime_dep_aliases,
+                    &mut file,
+                );
+                push_folded_noop_and_migrated_exports(
+                    folded,
+                    &runtime_stub_exports,
+                    &direct_stub_exports,
+                    &migrated_extra_noop_deps,
+                    &migrated_local_bindings,
+                    &migrated_extra_namespace_bindings,
+                    &mut file,
+                    &mut planned_bindings,
+                );
                 plan.push_file(file);
                 continue;
             }
 
-            for decision in program.package_imports_for(module.id) {
-                file.add_import(PlannedImport {
-                    namespace: decision.namespace_binding.clone(),
-                    resolution: decision.resolution.clone(),
-                    source_backed: decision.source_backed,
-                });
-            }
+            push_package_imports(program, module.id, &mut file);
 
             let mut has_runtime_edge_before_lazy_helpers = false;
             if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
@@ -2537,7 +2703,7 @@ pub(crate) fn emit_direct_owner_imports(
     }
 }
 
-fn emit_direct_owner_import_aliases(
+pub(crate) fn emit_direct_owner_import_aliases(
     program: &EnrichedProgram,
     module_path: &str,
     file: &mut PlannedFile,
@@ -6953,9 +7119,9 @@ fn expression_is_function_like_reader(source: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLazyFoldModule {
-    source_file_id: u32,
-    required_bindings: BTreeSet<BindingName>,
-    stub_exports: BTreeSet<BindingName>,
+    pub(crate) source_file_id: u32,
+    pub(crate) required_bindings: BTreeSet<BindingName>,
+    pub(crate) stub_exports: BTreeSet<BindingName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10508,7 +10674,7 @@ fn identifier_read_rename_site_is_safe(source: &str, start: usize, end: usize) -
     true
 }
 
-fn rename_identifier_reads_in_source(
+pub(crate) fn rename_identifier_reads_in_source(
     source: &str,
     aliases: &BTreeMap<BindingName, BindingName>,
 ) -> String {
