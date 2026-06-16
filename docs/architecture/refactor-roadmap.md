@@ -60,15 +60,31 @@ tests stayed green throughout.
 - `12cef62` `output_paths.rs` — `module_output_paths` +
   `relative_asset_specifier`
 
-`reverts-planner` Phase 3 kickoff (2 commits, `lib.rs` 33,930 → 33,658):
+`reverts-planner` Phase 3 kickoff (8 commits, `lib.rs` 33,930 → 32,998 = -2.7%):
 
 - `3732f04` `runtime_setter_migration_blocker.rs` — public diagnostic
   surface (`RuntimeSetterMigrationBlockerReport` + sub-types)
 - `4028f2f` `compiler_recovery.rs` — `SourceCompilerStrategy`,
   `CompilerRecoveryAction`, `CompilerRecoveryDecision`
+- `c183cd6` `statements.rs` — pure JS statement formatters (named import,
+  default+named import, namespace import, named export/reexport,
+  variable declaration, runtime helper setter, lazy module/value helper
+  source, node_require_prelude)
+- `70172c9` `relative_paths.rs` — POSIX relative-import-specifier
+  computation (`relative_import_specifier` + segment helpers)
+- `251334e` `plan_error.rs` — `PlanError` (Display + Error impls)
+- `20cbeba` `byte_lexer.rs` — byte-walking JS lexer helpers
+  (`skip_ws`, `skip_quoted`, `skip_template_literal`,
+  `skip_regex_literal`, `looks_like_regex_literal`, `find_matching_*`,
+  `find_byte`, `expect_arrow`)
+- `16c9526` `identifiers.rs` — `is_identifier_like`, `parse_identifier`,
+  `parse_identifier_after_keyword/function_keyword`, `keyword_at`
+- `1520b0e` `statement_parsers.rs` — reverse-parsers
+  (`parse_generated_named_import/default_import/named_reexport/named_export_statement`)
+  paired with `coalesce_consecutive_uninitialized_var_declarations`
 
-All workspace tests stayed green (84 pipeline + 290 planner + 376 matcher
-+ analyze/observe/etc).
+All workspace tests stayed green throughout (84 pipeline + 290 planner +
+376 matcher + analyze/observe/etc).
 
 Remaining in `reverts-cli` Phase 1 (~1 session):
 
