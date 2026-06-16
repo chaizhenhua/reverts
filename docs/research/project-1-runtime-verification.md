@@ -10,16 +10,17 @@ matcher/planner/emitter has not regressed project-1 runtime behavior.
 ./target/release/reverts-cli generate-project-v2 \
     --input ~/.reverts/.reverts.db --project-id 1 --output /tmp/p1
 cd /tmp/p1
-jq '.dependencies."@sentry/browser" = "7.120.4" |
-    .dependencies."@sentry/core" = "7.120.4" |
-    .dependencies."@sentry/utils" = "7.120.4"' \
-    package.json > package.json.tmp && mv package.json.tmp package.json
-rm -rf node_modules package-lock.json
 npm install --no-audit --no-fund --silent           # ~70s
 npm run build                                       # ~12s, 0 tsc errors
 node ./dist/cli.js --version                        # → "2.0.75 (Claude Code)"
 node ./dist/cli.js --help                           # → full CLI help
 ```
+
+> The historical manual `@sentry/*` pin is no longer required after
+> commit `878f66e` ("align package.json deps to a single major per
+> scope") landed scope-coherence picking. See the "Why the Sentry
+> pinning was needed" section below for the bug it papered over and
+> how the fix addresses it.
 
 ## Baseline numbers (matcher state of 2026-05-23, main = 9f3b6ae)
 
@@ -37,9 +38,9 @@ node ./dist/cli.js --help                           # → full CLI help
 | `--version` output | `2.0.75 (Claude Code)` |
 | `--help` output | full Claude CLI help text |
 
-## Why the Sentry pinning is needed
+## Why the Sentry pinning was needed (historical, fixed in 878f66e)
 
-Without it, `node ./dist/cli.js --version` crashes:
+Pre-878f66e, `node ./dist/cli.js --version` crashed without manual pinning:
 
 ```
 TypeError: Cannot read properties of undefined (reading 'call')
@@ -55,11 +56,15 @@ contract that the bundled `http-integration` module relies on, so
 `integration.setupOnce(addGlobalEventProcessor, getCurrentHub)` is called
 with `getCurrentHub === undefined`, then crashes in `_optionalChain`.
 
-Pinning every `@sentry/*` package to the same major (`7.120.4` works) restores
-runtime. This is a **matcher-side defect** — eventually it should be fixed by
-"version family coherence" logic that constrains related packages to a
-single major release. Until then, the manual pin is the verification
-workaround.
+`pick_scope_coherent_runtime_dependency_versions` in `crates/reverts-pipeline/src/lib.rs`
+now groups packages by `@scope` prefix, scores each candidate major by how
+many packages in the scope are attributed to it, and picks the winning
+major before per-package version selection. For project 1's Sentry case
+the v7 quartet (`core`, `node`, `tracing`, `utils`) wins the vote and
+`@sentry/core` drops from 8.55.0 to 7.120.3 to join them. The lone
+v8-only `@sentry/browser` still ships as 8.55.0 because no v7 attribution
+exists for it, but the v7 core/node/tracing/utils group now boots
+cleanly — that's enough for the runtime gate.
 
 ## What this gate covers
 
