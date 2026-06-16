@@ -14,7 +14,7 @@ use reverts_ir::ModuleKind;
 use reverts_js::{ParseGoal, parse_options_for, source_type_candidates};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 
-use crate::fingerprint::{SourceFingerprint, fingerprint_source};
+use super::{SourceFingerprint, fingerprint_source};
 use crate::package_helpers::{
     normalize_hint_text, package_semantic_path_prefixes, path_hint_tokens,
     strip_package_prefix_from_semantic_path, strip_source_extension,

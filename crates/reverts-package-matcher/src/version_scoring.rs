@@ -10,8 +10,8 @@ use reverts_input::PackageAttributionInput;
 use reverts_ir::split_bare_specifier;
 use semver::Version;
 
+use crate::index::ScoredPackageVersion;
 use crate::package_helpers::is_json_source_path;
-use crate::package_version_index::ScoredPackageVersion;
 use crate::{
     ModuleMatchFingerprint, ModuleMatchStrategy, ModulePackageMatch, PackageSourceFingerprint,
     PackageVersionCandidate, VersionMatchScore, VersionedPackageMatcherConfig,

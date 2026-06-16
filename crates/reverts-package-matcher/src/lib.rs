@@ -9,17 +9,15 @@ mod dependency_closure;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
 mod exported_members;
-mod external_import_source_index;
 mod externalization_policy;
-mod fingerprint;
 mod force_externalize;
 pub mod hungarian;
 mod import_targets;
 mod importable_ownership;
+mod index;
 mod model;
 mod package_file_graph_ownership;
 pub mod package_helpers;
-mod package_version_index;
 mod source_imports;
 mod source_text;
 pub mod structural_bag;
@@ -40,7 +38,6 @@ use exported_members::{
     export_member_set_is_strong, exported_members_from_source, is_identifier_name,
     is_usable_export_member,
 };
-pub(crate) use external_import_source_index::ExternalImportSourceIndex;
 use externalization_policy::{
     SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
     cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
@@ -52,12 +49,18 @@ use externalization_policy::{
     semantic_external_source_proof_rank, semantic_external_target_policies,
     semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
-use fingerprint::fingerprint_source;
 pub use hungarian::assign_max_weight;
 use import_targets::{
     commonjs_reexport_targets, export_all_reexport_targets, reexport_targets,
     relative_module_specifier_targets,
 };
+pub(crate) use index::ExternalImportSourceIndex;
+pub use index::package_module_source_quality;
+use index::{
+    PackageVersionIndex, fingerprint_modules_for_package, fingerprint_source,
+    is_strong_path_hint_token,
+};
+pub(crate) use index::{module_match_fingerprint, package_source_fingerprint};
 pub(crate) use model::PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES;
 pub use model::{
     BestVersionMatch, ModuleMatchFingerprint, ModuleMatchStrategy, ModulePackageMatch,
@@ -80,11 +83,6 @@ pub use package_helpers::{
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
 };
-pub use package_version_index::package_module_source_quality;
-use package_version_index::{
-    PackageVersionIndex, fingerprint_modules_for_package, is_strong_path_hint_token,
-};
-pub(crate) use package_version_index::{module_match_fingerprint, package_source_fingerprint};
 pub(crate) use source_imports::resolve_source_package_surfaces;
 pub use source_imports::{package_import_names_from_sources, package_import_sites_from_sources};
 pub(crate) use source_text::normalize_source;

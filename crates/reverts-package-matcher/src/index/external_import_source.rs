@@ -4,10 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 
+use super::{SourceFingerprint, fingerprint_source, package_source_fingerprint_from_source};
 use crate::exported_members::exported_members_from_source;
-use crate::fingerprint::{SourceFingerprint, fingerprint_source};
 use crate::package_helpers::{package_source_entry_path, package_source_external_import_rank};
-use crate::package_version_index::package_source_fingerprint_from_source;
 use crate::{
     PackageSource, PackageSourceFingerprint, normalize_source, package_source_dependency_entries,
     package_source_entry_path_from_source_path, source_entry_paths_match,
