@@ -13,6 +13,7 @@ mod package_runtime;
 mod plan_error;
 mod pure_reexport_bypass;
 mod relative_paths;
+mod runtime_externalized_scan;
 mod runtime_globals;
 mod runtime_helper_emission;
 mod runtime_helper_source_closure;
@@ -26,6 +27,7 @@ mod runtime_source_read;
 mod runtime_source_scan;
 mod runtime_var_migration;
 mod source_module_facts;
+mod top_level_definitions;
 
 use runtime_source_read::{
     RuntimeBindingReadProfile, RuntimeSourceReadIndex, runtime_binding_read_profile_diagnostic,
@@ -39,6 +41,9 @@ mod identifier_facts;
 mod lazy_initializer_parse;
 mod lazy_wrapper_inline;
 mod local_bindings;
+mod migratable_reader_snippet;
+mod module_dependency_index;
+mod named_specifiers;
 mod node_builtin_require;
 mod noop_runtime_helpers;
 mod pure_expression;
@@ -70,7 +75,20 @@ use runtime_source_scan::{
     value_identifiers_in_source,
 };
 
+#[allow(unused_imports)]
+use runtime_externalized_scan::{
+    RuntimeExternalizedBindingScan, runtime_module_owner_imports_for_source,
+    runtime_namespace_exports_for_helpers, scan_runtime_externalized_bindings,
+    unresolved_runtime_helper_references,
+};
 use runtime_globals::is_runtime_global_identifier;
+
+#[allow(unused_imports)]
+use top_level_definitions::{
+    collect_variable_declaration_binding_starts, collect_variable_declaration_definitions,
+    implicit_global_declarations_for_module, implicit_global_writes_in_source,
+    top_level_definitions_in_source, variable_declaration_binding_starts,
+};
 
 #[allow(unused_imports)]
 use runtime_helper_source_closure::{
@@ -79,6 +97,32 @@ use runtime_helper_source_closure::{
     runtime_entrypoint_root_bindings, runtime_entrypoint_side_effects, runtime_helper_source,
     runtime_prelude_snippet_is_noop, runtime_required_bindings_excluding,
     sanitize_identifier_fragment, simple_call_statement_binding,
+};
+
+#[allow(unused_imports)]
+use migratable_reader_snippet::{
+    class_body_has_eager_static_element, class_body_has_top_level_computed_key,
+    class_declaration_names_binding, expression_is_function_like_reader,
+    function_declaration_names_binding, is_migratable_namespace_reader_snippet,
+    is_migratable_private_runtime_function_dependency, is_migratable_reader_class,
+    is_migratable_reader_function_snippet, migratable_reader_class_header,
+    static_class_element_is_eager, static_field_initializer_is_eager,
+    variable_declaration_names_function_like_binding,
+};
+
+#[allow(unused_imports)]
+use module_dependency_index::{
+    direct_module_dependency_indexes, module_dependency_modules_by_owner,
+    module_dependency_path_exists, package_attribution_proves_package_ownership,
+    package_ownership_proven_module_ids, source_suppressed_consumer_is_boundary,
+    source_suppressed_package_dependency_closure, source_suppressed_same_package_consumer,
+};
+
+#[allow(unused_imports)]
+use named_specifiers::{
+    NamedImportSpecifier, NamedReexportSpecifier, local_named_export_specifiers,
+    named_import_specifiers, named_reexport_specifiers, parse_named_export_inner,
+    source_statements,
 };
 
 #[allow(unused_imports)]
@@ -135,8 +179,7 @@ use noop_runtime_helpers::{
     strip_runtime_noop_declarations,
 };
 use pure_expression::{
-    find_top_level_byte, is_pure_initializer_expression, looks_like_arrow_function_expression,
-    pure_class_expression,
+    is_pure_initializer_expression, looks_like_arrow_function_expression, pure_class_expression,
 };
 use runtime_orphan_prune::prune_orphan_runtime_bindings;
 use runtime_proxy_inline::inline_single_use_runtime_proxy_functions;
@@ -158,6 +201,7 @@ use runtime_var_migration::{
 
 use source_module_facts::SourceModuleFacts;
 
+#[allow(unused_imports)]
 use destructure_writes::{
     array_destructuring_assignment_writes, object_destructuring_assignment_writes,
     rewrite_array_destructuring_helper_writes, rewrite_object_destructuring_helper_writes,
@@ -186,13 +230,10 @@ use statement_parsers::{
 };
 
 use byte_lexer::{
-    find_matching_brace, find_matching_paren, looks_like_regex_literal, skip_non_code_at,
-    skip_quoted, skip_regex_literal, skip_ws, skip_ws_and_comments,
+    find_matching_brace, looks_like_regex_literal, skip_non_code_at, skip_quoted,
+    skip_regex_literal, skip_ws,
 };
-use identifiers::{
-    declaration_keyword_at_start, is_identifier_like, is_planner_synthetic_binding, keyword_at,
-    parse_identifier, parse_identifier_after_function_keyword, parse_identifier_after_keyword,
-};
+use identifiers::{declaration_keyword_at_start, keyword_at, parse_identifier};
 #[allow(unused_imports)]
 use import_coalesce::{
     coalesce_top_level_import_declarations, first_local_for_import,
@@ -227,10 +268,7 @@ use reverts_graph::{
     RevertsGraph, RuntimeNamespaceExport, RuntimePrelude, RuntimePreludeBindingKind,
     RuntimePreludeImport,
 };
-use reverts_input::{
-    ModuleDependencyTarget, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode,
-};
+use reverts_input::{ModuleDependencyTarget, ModuleInput};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     ParseGoal, collect_top_level_statement_facts, format_source_pretty,
@@ -6697,229 +6735,6 @@ pub(crate) fn folded_runtime_chunk_definitions(
         .collect()
 }
 
-pub(crate) fn module_dependency_path_exists(
-    dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-    from: ModuleId,
-    target: ModuleId,
-) -> bool {
-    from == target
-        || dependencies
-            .get(&from)
-            .is_some_and(|reachable| reachable.contains(&target))
-}
-
-pub(crate) fn module_dependency_modules_by_owner(
-    program: &EnrichedProgram,
-) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
-    let mut direct_dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    let mut modules = BTreeSet::<ModuleId>::new();
-    for dependency in &program.model().input().dependencies {
-        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
-            continue;
-        };
-        modules.insert(dependency.from_module_id);
-        modules.insert(target_module_id);
-        direct_dependencies
-            .entry(dependency.from_module_id)
-            .or_default()
-            .insert(target_module_id);
-    }
-    let mut transitive_dependencies = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    for module_id in modules {
-        let mut reachable = BTreeSet::<ModuleId>::new();
-        let mut stack = direct_dependencies
-            .get(&module_id)
-            .into_iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
-        while let Some(next) = stack.pop() {
-            if !reachable.insert(next) {
-                continue;
-            }
-            if let Some(next_modules) = direct_dependencies.get(&next) {
-                stack.extend(next_modules.iter().copied());
-            }
-        }
-        if !reachable.is_empty() {
-            transitive_dependencies.insert(module_id, reachable);
-        }
-    }
-    transitive_dependencies
-}
-
-pub(crate) fn source_suppressed_package_dependency_closure(
-    program: &EnrichedProgram,
-    seed_modules: &BTreeSet<ModuleId>,
-    source_preserved_packages: &BTreeSet<ModuleId>,
-    ownership_proven_packages: &BTreeSet<ModuleId>,
-) -> BTreeSet<ModuleId> {
-    let modules_by_id = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    let (outgoing_dependencies, incoming_dependencies) = direct_module_dependency_indexes(program);
-    let mut reachable = seed_modules
-        .iter()
-        .copied()
-        .filter(|module_id| {
-            modules_by_id
-                .get(module_id)
-                .is_some_and(|module| module.kind == ModuleKind::Package)
-                && !source_preserved_packages.contains(module_id)
-        })
-        .collect::<BTreeSet<_>>();
-    let mut stack = reachable.iter().copied().collect::<Vec<_>>();
-    while let Some(module_id) = stack.pop() {
-        for dependency_id in outgoing_dependencies
-            .get(&module_id)
-            .into_iter()
-            .flatten()
-            .copied()
-        {
-            let Some(dependency) = modules_by_id.get(&dependency_id) else {
-                continue;
-            };
-            if dependency.kind != ModuleKind::Package
-                || source_preserved_packages.contains(&dependency_id)
-                || !ownership_proven_packages.contains(&dependency_id)
-                || !reachable.insert(dependency_id)
-            {
-                continue;
-            }
-            stack.push(dependency_id);
-        }
-    }
-
-    loop {
-        let removed = reachable
-            .iter()
-            .copied()
-            .filter(|module_id| !seed_modules.contains(module_id))
-            .filter(|module_id| {
-                let Some(module) = modules_by_id.get(module_id).copied() else {
-                    return false;
-                };
-                incoming_dependencies
-                    .get(module_id)
-                    .into_iter()
-                    .flatten()
-                    .any(|consumer_id| {
-                        modules_by_id.get(consumer_id).is_some_and(|consumer| {
-                            !reachable.contains(consumer_id)
-                                && !source_suppressed_consumer_is_boundary(module, consumer)
-                        })
-                    })
-            })
-            .collect::<Vec<_>>();
-        if removed.is_empty() {
-            break;
-        }
-        for module_id in removed {
-            reachable.remove(&module_id);
-        }
-    }
-
-    reachable
-}
-
-pub(crate) fn source_suppressed_consumer_is_boundary(
-    module: &ModuleInput,
-    consumer: &ModuleInput,
-) -> bool {
-    match consumer.kind {
-        ModuleKind::Application => true,
-        ModuleKind::Package => !source_suppressed_same_package_consumer(module, consumer),
-        ModuleKind::Builtin => false,
-    }
-}
-
-pub(crate) fn source_suppressed_same_package_consumer(
-    module: &ModuleInput,
-    consumer: &ModuleInput,
-) -> bool {
-    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    !module_package.is_empty() && module_package == consumer_package
-}
-
-pub(crate) fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<ModuleId> {
-    let modules_by_id = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    program
-        .model()
-        .input()
-        .package_attributions
-        .iter()
-        .filter_map(|attribution| {
-            let module = modules_by_id.get(&attribution.module_id).copied()?;
-            package_attribution_proves_package_ownership(attribution, module)
-                .then_some(attribution.module_id)
-        })
-        .collect()
-}
-
-pub(crate) fn package_attribution_proves_package_ownership(
-    attribution: &PackageAttributionInput,
-    module: &ModuleInput,
-) -> bool {
-    if module.kind != ModuleKind::Package
-        || module.package_name.as_deref() != Some(attribution.package_name.as_str())
-    {
-        return false;
-    }
-    if let Some(attribution_version) = attribution.package_version.as_deref()
-        && module
-            .package_version
-            .as_deref()
-            .is_some_and(|module_version| {
-                !module_version.trim().is_empty() && module_version != attribution_version
-            })
-    {
-        return false;
-    }
-    (attribution.status == PackageAttributionStatus::Accepted
-        && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        && attribution.export_specifier.is_some())
-        || (attribution.status == PackageAttributionStatus::Rejected
-            && attribution.emission_mode == PackageEmissionMode::ApplicationSource
-            && attribution.package_version.is_some())
-}
-
-pub(crate) fn direct_module_dependency_indexes(
-    program: &EnrichedProgram,
-) -> (
-    BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-    BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-) {
-    let mut outgoing = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    let mut incoming = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
-    for dependency in &program.model().input().dependencies {
-        let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
-            continue;
-        };
-        outgoing
-            .entry(dependency.from_module_id)
-            .or_default()
-            .insert(target_module_id);
-        incoming
-            .entry(target_module_id)
-            .or_default()
-            .insert(dependency.from_module_id);
-    }
-    (outgoing, incoming)
-}
-
 pub(crate) fn runtime_binding_has_blocking_non_snippet_use(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
@@ -7016,297 +6831,6 @@ pub(crate) fn runtime_private_function_dependency_can_move(
         .into_iter()
         .filter(|write| !local_bindings.contains(write.as_str()))
         .any(|write| ctx.prelude.defines(&write))
-}
-
-pub(crate) fn is_migratable_private_runtime_function_dependency(
-    binding: &BindingName,
-    source: &str,
-) -> bool {
-    let source = source.trim();
-    if let Some(rest) = source.strip_prefix("async")
-        && rest.starts_with(|c: char| c.is_ascii_whitespace())
-    {
-        return function_declaration_names_binding(rest.trim_start(), binding);
-    }
-    function_declaration_names_binding(source, binding)
-}
-
-pub(crate) fn is_migratable_reader_function_snippet(binding: &BindingName, source: &str) -> bool {
-    let source = source.trim();
-    if let Some(rest) = source.strip_prefix("async")
-        && rest.starts_with(|c: char| c.is_ascii_whitespace())
-    {
-        let rest = rest.trim_start();
-        return function_declaration_names_binding(rest, binding);
-    }
-    class_declaration_names_binding(source, binding)
-        || function_declaration_names_binding(source, binding)
-        || variable_declaration_names_function_like_binding(source, binding)
-}
-
-pub(crate) fn is_migratable_namespace_reader_snippet(binding: &BindingName, source: &str) -> bool {
-    let source = source.trim();
-    for keyword in ["var", "let", "const"] {
-        let Some(rest) = source.strip_prefix(keyword) else {
-            continue;
-        };
-        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
-            continue;
-        }
-        let rest = rest.trim_start();
-        let Some(rest) = rest.strip_suffix(';') else {
-            continue;
-        };
-        let mut splitter = rest.splitn(2, '=');
-        let lhs = splitter.next().unwrap_or("").trim();
-        let rhs = splitter.next().unwrap_or("").trim();
-        if lhs != binding.as_str() {
-            continue;
-        }
-        let compact_rhs = rhs
-            .chars()
-            .filter(|character| !character.is_ascii_whitespace())
-            .collect::<String>();
-        if compact_rhs == "{}" {
-            return true;
-        }
-    }
-    false
-}
-
-pub(crate) fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
-    if !keyword_at(source, 0, "function") {
-        return false;
-    }
-    parse_identifier_after_function_keyword(source, 0)
-        .is_some_and(|(name, _)| name == binding.as_str())
-}
-
-pub(crate) fn class_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
-    if !keyword_at(source, 0, "class") {
-        return false;
-    }
-    parse_identifier_after_keyword(source, 0, "class")
-        .is_some_and(|(name, _)| name == binding.as_str())
-        && is_migratable_reader_class(source)
-}
-
-pub(crate) fn is_migratable_reader_class(source: &str) -> bool {
-    let Some(open) = find_top_level_byte(source, b'{') else {
-        return false;
-    };
-    let header = source[..open].trim();
-    if !migratable_reader_class_header(header) {
-        return false;
-    }
-    let Some(close) = find_matching_brace(source, open) else {
-        return false;
-    };
-    if skip_ws(source.as_bytes(), close + 1) != source.len() {
-        return false;
-    }
-    !class_body_has_top_level_computed_key(source) && !class_body_has_eager_static_element(source)
-}
-
-pub(crate) fn migratable_reader_class_header(header: &str) -> bool {
-    if header.contains('[') {
-        return false;
-    }
-    if let Some(extends) = header
-        .split_once("extends")
-        .map(|(_, extends)| extends.trim())
-    {
-        let (base, end) = match parse_identifier(extends, 0) {
-            Some(parsed) => parsed,
-            None => return false,
-        };
-        if end != extends.len() || !is_runtime_global_identifier(base) {
-            return false;
-        }
-    }
-    true
-}
-
-pub(crate) fn class_body_has_top_level_computed_key(source: &str) -> bool {
-    let Some(open) = find_top_level_byte(source, b'{') else {
-        return true;
-    };
-    let Some(close) = find_matching_brace(source, open) else {
-        return true;
-    };
-    let bytes = source.as_bytes();
-    let mut cursor = open + 1;
-    while cursor < close {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            // `field = [];` is an instance-field initializer, not a
-            // computed property key. It is evaluated when instances are
-            // constructed, so moving the class with its reader cluster does
-            // not introduce class-definition-time reads.
-            b'=' => {
-                cursor =
-                    find_statement_end(&source[..close], cursor + 1).map_or(close, |end| end + 1);
-            }
-            b'[' => return true,
-            b'(' => {
-                let Some(end) = find_matching_paren(source, cursor) else {
-                    return true;
-                };
-                cursor = end + 1;
-            }
-            b'{' => {
-                let Some(end) = find_matching_brace(source, cursor) else {
-                    return true;
-                };
-                cursor = end + 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    false
-}
-
-pub(crate) fn class_body_has_eager_static_element(source: &str) -> bool {
-    let Some(open) = find_top_level_byte(source, b'{') else {
-        return true;
-    };
-    let Some(close) = find_matching_brace(source, open) else {
-        return true;
-    };
-    let bytes = source.as_bytes();
-    let mut cursor = open + 1;
-    while cursor < close {
-        cursor = skip_ws_and_comments(bytes, cursor, close);
-        if cursor >= close {
-            break;
-        }
-        if keyword_at(source, cursor, "static")
-            && static_class_element_is_eager(source, cursor + "static".len(), close)
-        {
-            return true;
-        }
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'(' => {
-                let Some(end) = find_matching_paren(source, cursor) else {
-                    return true;
-                };
-                cursor = end + 1;
-            }
-            b'{' => {
-                let Some(end) = find_matching_brace(source, cursor) else {
-                    return true;
-                };
-                cursor = end + 1;
-            }
-            _ => cursor += 1,
-        }
-    }
-    false
-}
-
-pub(crate) fn static_class_element_is_eager(
-    source: &str,
-    after_static: usize,
-    close: usize,
-) -> bool {
-    let bytes = source.as_bytes();
-    let cursor = skip_ws_and_comments(bytes, after_static, close);
-    if cursor >= close {
-        return false;
-    }
-    match bytes[cursor] {
-        // `static() {}` / `static = ...` / `static;` are instance
-        // members named "static", not static elements, so they don't run
-        // during class definition.
-        b'(' | b'=' | b';' => return false,
-        // Static blocks run immediately while the class is being defined.
-        b'{' => return true,
-        _ => {}
-    }
-
-    let mut cursor = cursor;
-    while cursor < close {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            // Method/accessor parameter list: safe, because the body is not
-            // evaluated until the method is called after the writer module's
-            // same-module assignment has run.
-            b'(' => return false,
-            b'=' => return static_field_initializer_is_eager(source, cursor, close),
-            // Empty static fields don't read migrated runtime state.
-            b';' => return false,
-            // Static blocks run immediately while the class is being defined.
-            b'{' => return true,
-            _ => cursor += 1,
-        }
-    }
-    false
-}
-
-pub(crate) fn static_field_initializer_is_eager(source: &str, equals: usize, close: usize) -> bool {
-    let bytes = source.as_bytes();
-    let initializer_start = skip_ws_and_comments(bytes, equals + 1, close);
-    if initializer_start >= close {
-        return false;
-    }
-    let initializer_end = find_statement_end(&source[..close], initializer_start).unwrap_or(close);
-    let initializer = source[initializer_start..initializer_end].trim();
-    !initializer.is_empty() && !is_pure_initializer_expression(initializer)
-}
-
-pub(crate) fn variable_declaration_names_function_like_binding(
-    source: &str,
-    binding: &BindingName,
-) -> bool {
-    let source = source.trim();
-    for keyword in ["var", "let", "const"] {
-        let Some(rest) = source.strip_prefix(keyword) else {
-            continue;
-        };
-        if !rest.starts_with(|c: char| c.is_ascii_whitespace()) {
-            continue;
-        }
-        let Some(rest) = rest.trim_start().strip_suffix(';') else {
-            continue;
-        };
-        let mut splitter = rest.splitn(2, '=');
-        let lhs = splitter.next().unwrap_or("").trim();
-        let rhs = splitter.next().unwrap_or("").trim();
-        if lhs != binding.as_str() {
-            continue;
-        }
-        if expression_is_function_like_reader(rhs) {
-            return true;
-        }
-    }
-    false
-}
-
-pub(crate) fn expression_is_function_like_reader(source: &str) -> bool {
-    let source = source.trim();
-    if keyword_at(source, 0, "function") || looks_like_arrow_function_expression(source) {
-        return true;
-    }
-    if let Some(rest) = source.strip_prefix("async")
-        && rest.starts_with(|c: char| c.is_ascii_whitespace())
-    {
-        let rest = rest.trim_start();
-        return keyword_at(rest, 0, "function") || looks_like_arrow_function_expression(rest);
-    }
-    false
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8110,110 +7634,6 @@ pub(crate) fn contains_top_level_initializer_operator(source: &str, mut cursor: 
     false
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct RuntimeExternalizedBindingScan {
-    source_module_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    package_init_shims: BTreeSet<BindingName>,
-}
-
-pub(crate) fn scan_runtime_externalized_bindings(
-    program: &EnrichedProgram,
-    source: &str,
-    satisfied_runtime_bindings: &BTreeSet<BindingName>,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> RuntimeExternalizedBindingScan {
-    let local_bindings = local_bindings_in_source(source);
-    let call_identifiers = call_identifiers_in_source(source);
-
-    let definition_modules = unique_source_definition_modules(program, externalized_packages);
-    let mut source_module_imports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-    let mut runtime_import_identifiers = runtime_import_identifiers_in_source(source);
-    runtime_import_identifiers.extend(call_identifiers.iter().cloned());
-    for identifier in runtime_import_identifiers {
-        if local_bindings.contains(identifier.as_str()) {
-            continue;
-        }
-        let binding = BindingName::new(identifier);
-        if satisfied_runtime_bindings.contains(&binding) {
-            continue;
-        }
-        let Some(Some(module_id)) = definition_modules.get(&binding) else {
-            continue;
-        };
-        source_module_imports
-            .entry(*module_id)
-            .or_default()
-            .insert(binding);
-    }
-
-    let package_init_shims = if externalized_packages.is_empty() {
-        BTreeSet::new()
-    } else {
-        let all_definition_modules = unique_source_definition_modules(program, &BTreeSet::new());
-        call_identifiers
-            .into_iter()
-            .filter(|identifier| !local_bindings.contains(identifier))
-            .map(BindingName::new)
-            .filter(|binding| {
-                all_definition_modules
-                    .get(binding)
-                    .and_then(|module_id| *module_id)
-                    .is_some_and(|module_id| externalized_packages.contains(&module_id))
-            })
-            .collect()
-    };
-
-    RuntimeExternalizedBindingScan {
-        source_module_imports,
-        package_init_shims,
-    }
-}
-
-pub(crate) fn runtime_module_owner_imports_for_source(
-    source: &str,
-    satisfied_runtime_bindings: &BTreeSet<BindingName>,
-    module_owned_bindings_for_source: &BTreeMap<BindingName, ModuleId>,
-    mut imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    let mut identifiers = runtime_import_identifiers_in_source(source);
-    identifiers.extend(call_identifiers_in_source(source));
-    for identifier in identifiers {
-        let binding = BindingName::new(identifier);
-        if satisfied_runtime_bindings.contains(&binding) {
-            continue;
-        }
-        let Some(owner_module) = module_owned_bindings_for_source.get(&binding) else {
-            continue;
-        };
-        imports
-            .entry(*owner_module)
-            .or_default()
-            .insert(binding.clone());
-    }
-    imports
-}
-
-pub(crate) fn unresolved_runtime_helper_references(
-    prelude: &RuntimePrelude,
-    source: &str,
-    emitted_runtime_bindings: &BTreeSet<BindingName>,
-    imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-) -> BTreeSet<BindingName> {
-    let imported = imports
-        .values()
-        .flat_map(|bindings| bindings.iter().cloned())
-        .collect::<BTreeSet<_>>();
-
-    runtime_import_identifiers_in_source(source)
-        .into_iter()
-        .map(BindingName::new)
-        .filter(|binding| prelude.defines(binding))
-        .filter(|binding| !emitted_runtime_bindings.contains(binding))
-        .filter(|binding| !imported.contains(binding))
-        .filter(|binding| !is_planner_synthetic_binding(binding.as_str()))
-        .collect()
-}
-
 pub(crate) fn ensure_planned_module_exports(
     plan: &mut EmitPlan,
     program: &EnrichedProgram,
@@ -8243,18 +7663,6 @@ pub(crate) fn ensure_planned_module_exports(
     for binding in missing {
         file.add_export_with_source_backed(binding, true);
     }
-}
-
-pub(crate) fn runtime_namespace_exports_for_helpers(
-    prelude: &RuntimePrelude,
-    helper_bindings: &BTreeSet<BindingName>,
-) -> Vec<RuntimeNamespaceExport> {
-    prelude
-        .namespace_exports
-        .iter()
-        .filter(|namespace_export| helper_bindings.contains(&namespace_export.namespace))
-        .cloned()
-        .collect()
 }
 
 pub(crate) fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
@@ -8461,108 +7869,6 @@ pub(crate) fn pure_named_barrel_reexports(source: &str) -> Option<BTreeSet<Bindi
     }
     direct_reexports.extend(local_exports);
     (!direct_reexports.is_empty()).then_some(direct_reexports)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedReexportSpecifier {
-    exported: String,
-    is_aliased: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedImportSpecifier {
-    local: String,
-    is_aliased: bool,
-}
-
-pub(crate) fn source_statements(source: &str) -> Vec<&str> {
-    source
-        .split(';')
-        .map(str::trim)
-        .filter(|statement| !statement.is_empty())
-        .collect()
-}
-
-pub(crate) fn named_reexport_specifiers(statement: &str) -> Option<Vec<NamedReexportSpecifier>> {
-    let rest = statement.strip_prefix("export {")?;
-    let (inner, after) = rest.split_once('}')?;
-    if !after.trim_start().starts_with("from ") {
-        return None;
-    }
-    let mut specifiers = Vec::new();
-    for raw in inner.split(',') {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.starts_with("type ") {
-            return None;
-        }
-        let (imported, exported, is_aliased) = raw
-            .split_once(" as ")
-            .map_or((raw, raw, false), |(imported, exported)| {
-                (imported.trim(), exported.trim(), true)
-            });
-        if !is_identifier_like(imported) || !is_identifier_like(exported) {
-            return None;
-        }
-        specifiers.push(NamedReexportSpecifier {
-            exported: exported.to_string(),
-            is_aliased,
-        });
-    }
-    Some(specifiers)
-}
-
-pub(crate) fn local_named_export_specifiers(
-    statement: &str,
-) -> Option<Vec<NamedReexportSpecifier>> {
-    let rest = statement.strip_prefix("export {")?;
-    let (inner, after) = rest.split_once('}')?;
-    if !after.trim().is_empty() {
-        return None;
-    }
-    parse_named_export_inner(inner)
-}
-
-pub(crate) fn parse_named_export_inner(inner: &str) -> Option<Vec<NamedReexportSpecifier>> {
-    let mut specifiers = Vec::new();
-    for raw in inner.split(',') {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.starts_with("type ") {
-            return None;
-        }
-        let (imported, exported, is_aliased) = raw
-            .split_once(" as ")
-            .map_or((raw, raw, false), |(imported, exported)| {
-                (imported.trim(), exported.trim(), true)
-            });
-        if !is_identifier_like(imported) || !is_identifier_like(exported) {
-            return None;
-        }
-        specifiers.push(NamedReexportSpecifier {
-            exported: exported.to_string(),
-            is_aliased,
-        });
-    }
-    Some(specifiers)
-}
-
-pub(crate) fn named_import_specifiers(statement: &str) -> Option<Vec<NamedImportSpecifier>> {
-    let rest = statement.strip_prefix("import ")?.trim();
-    if rest.starts_with("type ") || rest.contains(" with ") || rest.contains(" assert ") {
-        return None;
-    }
-    let (clause, _specifier) = split_import_clause_and_specifier(rest)?;
-    if !clause.starts_with('{') {
-        return None;
-    }
-    Some(
-        parse_named_import_clause(clause)?
-            .into_iter()
-            .map(|(imported, local)| NamedImportSpecifier {
-                is_aliased: imported != local,
-                local,
-            })
-            .collect(),
-    )
 }
 
 pub(crate) fn extra_exports_for_module<'a>(
@@ -8915,310 +8221,6 @@ pub(crate) fn source_contains_top_level_call(source: &str, name: &str) -> bool {
 
 pub(crate) fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     value_identifiers_in_source(source)
-}
-
-pub(crate) fn top_level_definitions_in_source(source: &str) -> BTreeSet<BindingName> {
-    let mut definitions = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    let mut depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'{' => {
-                depth += 1;
-                cursor += 1;
-            }
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                cursor += 1;
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "function") => {
-                if let Some((binding, next)) =
-                    parse_identifier_after_function_keyword(source, cursor)
-                {
-                    definitions.insert(BindingName::new(binding));
-                    cursor = next;
-                } else {
-                    cursor += "function".len();
-                }
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "class") => {
-                if let Some((binding, next)) =
-                    parse_identifier_after_keyword(source, cursor, "class")
-                {
-                    definitions.insert(BindingName::new(binding));
-                    cursor = next;
-                } else {
-                    cursor += "class".len();
-                }
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "var") => {
-                cursor = collect_variable_declaration_definitions(
-                    source,
-                    cursor + "var".len(),
-                    &mut definitions,
-                );
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "let") => {
-                cursor = collect_variable_declaration_definitions(
-                    source,
-                    cursor + "let".len(),
-                    &mut definitions,
-                );
-            }
-            _ if depth == 0 && keyword_at(source, cursor, "const") => {
-                cursor = collect_variable_declaration_definitions(
-                    source,
-                    cursor + "const".len(),
-                    &mut definitions,
-                );
-            }
-            _ => cursor += 1,
-        }
-    }
-    definitions
-}
-
-pub(crate) fn implicit_global_declarations_for_module(
-    source: &str,
-    source_definitions: &BTreeSet<BindingName>,
-    source_imports: &BTreeSet<BindingName>,
-    planned_bindings: &BTreeSet<BindingName>,
-) -> BTreeSet<BindingName> {
-    let top_level_definitions = top_level_definitions_in_source(source);
-    implicit_global_writes_in_source(source)
-        .into_iter()
-        .filter(|binding| !top_level_definitions.contains(binding))
-        .filter(|binding| !source_definitions.contains(binding))
-        .filter(|binding| !source_imports.contains(binding))
-        .filter(|binding| !planned_bindings.contains(binding))
-        .filter(|binding| !is_planner_synthetic_binding(binding.as_str()))
-        .collect()
-}
-
-pub(crate) fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
-    let mut writes = BTreeSet::new();
-    let declaration_bindings = variable_declaration_binding_starts(source);
-    let class_field_bindings = class_field_bindings_in_source(source);
-    let bytes = source.as_bytes();
-    let mut cursor = 0;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'+' | b'-' if update_operator_at(bytes, cursor).is_some() => {
-                let target_start = skip_ws(bytes, cursor + 2);
-                if let Some((identifier, target_end)) = parse_identifier(source, target_start)
-                    && is_simple_update_target(source, target_start, target_end)
-                {
-                    writes.insert(BindingName::new(identifier));
-                }
-                cursor += 1;
-            }
-            b'{' => {
-                if let Some((end, bindings)) =
-                    object_destructuring_assignment_writes(source, cursor)
-                {
-                    writes.extend(bindings);
-                    cursor = end;
-                } else {
-                    cursor += 1;
-                }
-            }
-            b'[' => {
-                if let Some((end, bindings)) = array_destructuring_assignment_writes(source, cursor)
-                {
-                    writes.extend(bindings);
-                    cursor = end;
-                } else {
-                    cursor += 1;
-                }
-            }
-            byte if is_identifier_start(byte) => {
-                let start = cursor;
-                cursor += 1;
-                while cursor < bytes.len() && is_identifier_continue(bytes[cursor]) {
-                    cursor += 1;
-                }
-                if declaration_bindings.contains(&start) {
-                    continue;
-                }
-                let identifier = &source[start..cursor];
-                if !is_js_keyword(identifier)
-                    && start
-                        .checked_sub(1)
-                        .and_then(|index| bytes.get(index))
-                        .is_none_or(|byte| !matches!(*byte, b'.' | b'#'))
-                    && !class_field_bindings.contains_key(&start)
-                {
-                    let after = skip_ws(bytes, cursor);
-                    if (bytes.get(after) == Some(&b'=')
-                        && bytes.get(after + 1) != Some(&b'=')
-                        && bytes.get(after + 1) != Some(&b'>'))
-                        || update_operator_at(bytes, after).is_some()
-                    {
-                        writes.insert(BindingName::new(identifier));
-                    }
-                }
-            }
-            _ => cursor += 1,
-        }
-    }
-    writes
-}
-
-pub(crate) fn collect_variable_declaration_definitions(
-    source: &str,
-    mut cursor: usize,
-    definitions: &mut BTreeSet<BindingName>,
-) -> usize {
-    let bytes = source.as_bytes();
-    cursor = skip_ws(bytes, cursor);
-    if let Some((binding, next)) = parse_identifier(source, cursor) {
-        definitions.insert(BindingName::new(binding));
-        cursor = next;
-    }
-
-    let mut nested = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' | b'[' | b'{' => {
-                nested += 1;
-                cursor += 1;
-            }
-            b')' | b']' | b'}' => {
-                nested = nested.saturating_sub(1);
-                cursor += 1;
-            }
-            b',' if nested == 0 => {
-                cursor = skip_ws(bytes, cursor + 1);
-                if let Some((binding, next)) = parse_identifier(source, cursor) {
-                    definitions.insert(BindingName::new(binding));
-                    cursor = next;
-                }
-            }
-            b';' if nested == 0 => return cursor + 1,
-            _ => cursor += 1,
-        }
-    }
-    cursor
-}
-
-pub(crate) fn variable_declaration_binding_starts(source: &str) -> BTreeSet<usize> {
-    let mut starts = BTreeSet::new();
-    let bytes = source.as_bytes();
-    let mut cursor = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            _ if keyword_at(source, cursor, "var") => {
-                cursor = collect_variable_declaration_binding_starts(
-                    source,
-                    cursor + "var".len(),
-                    &mut starts,
-                );
-            }
-            _ if keyword_at(source, cursor, "let") => {
-                cursor = collect_variable_declaration_binding_starts(
-                    source,
-                    cursor + "let".len(),
-                    &mut starts,
-                );
-            }
-            _ if keyword_at(source, cursor, "const") => {
-                cursor = collect_variable_declaration_binding_starts(
-                    source,
-                    cursor + "const".len(),
-                    &mut starts,
-                );
-            }
-            _ => cursor += 1,
-        }
-    }
-    starts
-}
-
-pub(crate) fn collect_variable_declaration_binding_starts(
-    source: &str,
-    mut cursor: usize,
-    starts: &mut BTreeSet<usize>,
-) -> usize {
-    let bytes = source.as_bytes();
-    cursor = skip_ws(bytes, cursor);
-    if parse_identifier(source, cursor).is_some() {
-        starts.insert(cursor);
-    }
-
-    let mut nested = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' | b'[' | b'{' => {
-                nested += 1;
-                cursor += 1;
-            }
-            b')' if nested == 0 => return cursor + 1,
-            b')' | b']' | b'}' => {
-                nested = nested.saturating_sub(1);
-                cursor += 1;
-            }
-            b',' if nested == 0 => {
-                cursor = skip_ws(bytes, cursor + 1);
-                if parse_identifier(source, cursor).is_some() {
-                    starts.insert(cursor);
-                }
-            }
-            b';' if nested == 0 => return cursor + 1,
-            _ => cursor += 1,
-        }
-    }
-    cursor
 }
 
 pub(crate) fn contains_call_to_identifier(source: &str, identifier: &str) -> bool {
