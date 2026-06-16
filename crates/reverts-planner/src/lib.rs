@@ -757,6 +757,223 @@ fn emit_source_module_imports(
     has_runtime_edge_before_lazy_helpers
 }
 
+/// Re-filter `remaining_runtime_helpers` after applying the
+/// runtime-helper write rewrite. The write rewrite (`X = value` →
+/// `__reverts_set_X(value)`) can introduce new identifier references
+/// and erase others; this pass keeps only helpers that are still
+/// referenced or still pulled in via migration.
+#[allow(clippy::too_many_arguments)]
+fn filter_remaining_helpers_by_write_rewrite(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    migrated_extra_runtime_deps: &BTreeSet<BindingName>,
+    remaining_runtime_helpers: BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    let Some(lowered_source) = lowered_source else {
+        return remaining_runtime_helpers;
+    };
+    if written_runtime_helpers.is_empty() {
+        return remaining_runtime_helpers;
+    }
+    let source_text = node_builtin_require_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or_else(|| {
+            namespace_member_rewrite
+                .map(|rewrite| rewrite.source.as_str())
+                .unwrap_or(lowered_source.source.as_str())
+        });
+    let rewritten = rewrite_runtime_helper_writes(source_text, written_runtime_helpers);
+    let mut refs_after_write_rewrite = runtime_import_identifiers_in_source(&rewritten)
+        .into_iter()
+        .map(BindingName::new)
+        .collect::<BTreeSet<_>>();
+    refs_after_write_rewrite.extend(
+        program
+            .model()
+            .graph()
+            .import_export()
+            .exports_for(module_id),
+    );
+    if let Some(exports) = source_module_wiring.exports_by_module.get(&module_id) {
+        refs_after_write_rewrite.extend(exports.iter().cloned());
+    }
+    if let Some((_stripped, exports)) = strip_top_level_named_exports(&rewritten) {
+        refs_after_write_rewrite.extend(exports);
+    }
+    remaining_runtime_helpers
+        .into_iter()
+        .filter(|binding| {
+            migrated_extra_runtime_deps.contains(binding)
+                || refs_after_write_rewrite.contains(binding)
+        })
+        .collect()
+}
+
+/// Compute the union of runtime identifier references contained in
+/// the (already-rewritten) source plus every binding the module
+/// exports — both via explicit `export {…}` and via the source-module
+/// wiring's import set. Top-level named exports get stripped and
+/// folded back in so the binding's name survives even when the
+/// `export` statement is later removed.
+fn compute_source_runtime_refs(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    source_module_wiring: &SourceModuleWiring,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
+) -> BTreeSet<BindingName> {
+    let Some(source) = lowered_source else {
+        return BTreeSet::new();
+    };
+    let source_text = node_builtin_require_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or_else(|| {
+            namespace_member_rewrite
+                .map(|rewrite| rewrite.source.as_str())
+                .unwrap_or(source.source.as_str())
+        });
+    let mut refs = runtime_import_identifiers_in_source(source_text)
+        .into_iter()
+        .map(BindingName::new)
+        .collect::<BTreeSet<_>>();
+    refs.extend(
+        program
+            .model()
+            .graph()
+            .import_export()
+            .exports_for(module_id),
+    );
+    if let Some(exports) = source_module_wiring.exports_by_module.get(&module_id) {
+        refs.extend(exports.iter().cloned());
+    }
+    if let Some((_stripped, exports)) = strip_top_level_named_exports(source_text) {
+        refs.extend(exports);
+    }
+    refs
+}
+
+/// Compute the namespace-member-access rewrite for the lowered source,
+/// reserving the union of source-definitions / source-imports /
+/// already-planned bindings to avoid clobbering shadowable names.
+fn compute_namespace_member_rewrite(
+    program: &EnrichedProgram,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    runtime_import_groups: &BTreeMap<u32, BTreeSet<BindingName>>,
+    local_source_definitions: &BTreeSet<BindingName>,
+    source_imports: &BTreeSet<BindingName>,
+    planned_bindings: &BTreeSet<BindingName>,
+) -> Option<runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite> {
+    lowered_source.and_then(|source| {
+        let mut reserved_bindings = local_source_definitions.clone();
+        reserved_bindings.extend(source_imports.iter().cloned());
+        reserved_bindings.extend(planned_bindings.iter().cloned());
+        rewrite_runtime_namespace_member_accesses(
+            source.source.as_str(),
+            runtime_import_groups,
+            program.model().graph(),
+            &reserved_bindings,
+        )
+    })
+}
+
+/// Compute the per-source-file `runtime_create_require_helpers` map
+/// that the node-builtin-require rewriter needs.
+fn compute_node_builtin_require_helpers(
+    program: &EnrichedProgram,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    runtime_prelude_direct_imports: &BTreeMap<
+        u32,
+        BTreeMap<BindingName, RuntimePreludeDirectImport>,
+    >,
+) -> BTreeSet<BindingName> {
+    lowered_source
+        .and_then(|source| {
+            let prelude = program
+                .model()
+                .graph()
+                .runtime_prelude(source.source_file_id)?;
+            Some(runtime_create_require_helpers(
+                prelude,
+                runtime_prelude_direct_imports.get(&source.source_file_id),
+            ))
+        })
+        .unwrap_or_default()
+}
+
+/// Apply the node-builtin-require rewrite over the source that
+/// optionally already had its namespace members rewritten. The reserved
+/// binding set is recomputed so the new top-level definitions
+/// introduced by the namespace rewrite are visible.
+fn compute_node_builtin_require_rewrite(
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    node_builtin_require_helpers: &BTreeSet<BindingName>,
+    local_source_definitions: &BTreeSet<BindingName>,
+    source_imports: &BTreeSet<BindingName>,
+    planned_bindings: &BTreeSet<BindingName>,
+) -> Option<NodeBuiltinRequireRewrite> {
+    lowered_source.map(|source| {
+        let source_text = namespace_member_rewrite
+            .map(|rewrite| rewrite.source.as_str())
+            .unwrap_or(source.source.as_str());
+        let mut reserved_bindings = local_source_definitions.clone();
+        reserved_bindings.extend(source_imports.iter().cloned());
+        reserved_bindings.extend(planned_bindings.iter().cloned());
+        reserved_bindings.extend(top_level_definitions_in_source(source_text));
+        rewrite_node_builtin_require_calls(
+            source_text,
+            node_builtin_require_helpers,
+            &reserved_bindings,
+        )
+    })
+}
+
+/// Adjust the lowered-source `remaining_runtime_helpers` to reflect
+/// Phase 10b migrations: bindings the migration pulled in as extra
+/// runtime deps need to remain in the helper file, while bindings now
+/// owned locally are removed from the runtime side.
+fn adjust_remaining_runtime_helpers(
+    remaining: &BTreeSet<BindingName>,
+    migrated_extra_runtime_deps: &BTreeSet<BindingName>,
+    migrated_local_bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    remaining
+        .union(migrated_extra_runtime_deps)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .difference(migrated_local_bindings)
+        .cloned()
+        .collect()
+}
+
+/// Adjust the lowered-source `written_runtime_helpers` to reflect
+/// Phase 10b migrations: bindings now owned locally no longer write
+/// through the runtime setter, while moved reader snippets contribute
+/// new setter writes.
+fn adjust_written_runtime_helpers(
+    written: &BTreeSet<BindingName>,
+    migrated_locally: &BTreeSet<BindingName>,
+    migrated_extra_runtime_setter_deps: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    written
+        .difference(migrated_locally)
+        .cloned()
+        .chain(migrated_extra_runtime_setter_deps.iter().cloned())
+        .collect()
+}
+
 /// Per-owner snapshot of the runtime-var migration plan.
 ///
 /// Computing all of these per-owner views at the top of the per-module
@@ -1397,131 +1614,56 @@ impl ImportExportPlanner {
                 migrated_extra_noop_deps,
                 migrated_local_bindings,
             } = OwnerMigrationState::from_plan(&runtime_var_migrations, module.id);
-            let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
-                .union(&migrated_extra_runtime_deps)
-                .cloned()
-                .collect::<BTreeSet<_>>()
-                .difference(&migrated_local_bindings)
-                .cloned()
-                .collect();
-            let written_runtime_helpers: BTreeSet<BindingName> = written_runtime_helpers
-                .difference(&migrated_locally)
-                .cloned()
-                .chain(migrated_extra_runtime_setter_deps.iter().cloned())
-                .collect();
-            let namespace_member_rewrite = lowered_source.and_then(|source| {
-                let mut reserved_bindings = local_source_definitions.clone();
-                reserved_bindings.extend(source_imports.iter().cloned());
-                reserved_bindings.extend(planned_bindings.iter().cloned());
-                rewrite_runtime_namespace_member_accesses(
-                    source.source.as_str(),
-                    &runtime_import_groups,
-                    program.model().graph(),
-                    &reserved_bindings,
-                )
-            });
-            let node_builtin_require_helpers = lowered_source
-                .and_then(|source| {
-                    let prelude = program
-                        .model()
-                        .graph()
-                        .runtime_prelude(source.source_file_id)?;
-                    Some(runtime_create_require_helpers(
-                        prelude,
-                        runtime_prelude_direct_imports.get(&source.source_file_id),
-                    ))
-                })
-                .unwrap_or_default();
-            let node_builtin_require_rewrite = lowered_source.map(|source| {
-                let source_text = namespace_member_rewrite
-                    .as_ref()
-                    .map(|rewrite| rewrite.source.as_str())
-                    .unwrap_or(source.source.as_str());
-                let mut reserved_bindings = local_source_definitions.clone();
-                reserved_bindings.extend(source_imports.iter().cloned());
-                reserved_bindings.extend(planned_bindings.iter().cloned());
-                reserved_bindings.extend(top_level_definitions_in_source(source_text));
-                rewrite_node_builtin_require_calls(
-                    source_text,
-                    &node_builtin_require_helpers,
-                    &reserved_bindings,
-                )
-            });
-            let source_runtime_refs = lowered_source
-                .map(|source| {
-                    let source_text = node_builtin_require_rewrite
-                        .as_ref()
-                        .map(|rewrite| rewrite.source.as_str())
-                        .unwrap_or_else(|| {
-                            namespace_member_rewrite
-                                .as_ref()
-                                .map(|rewrite| rewrite.source.as_str())
-                                .unwrap_or(source.source.as_str())
-                        });
-                    let mut refs = runtime_import_identifiers_in_source(source_text)
-                        .into_iter()
-                        .map(BindingName::new)
-                        .collect::<BTreeSet<_>>();
-                    refs.extend(
-                        program
-                            .model()
-                            .graph()
-                            .import_export()
-                            .exports_for(module.id)
-                            .into_iter(),
-                    );
-                    if let Some(exports) = source_module_wiring.exports_by_module.get(&module.id) {
-                        refs.extend(exports.iter().cloned());
-                    }
-                    if let Some((_stripped, exports)) = strip_top_level_named_exports(source_text) {
-                        refs.extend(exports);
-                    }
-                    refs
-                })
-                .unwrap_or_default();
-            let remaining_runtime_helpers: BTreeSet<BindingName> = if let Some(lowered_source) =
-                lowered_source
-                && !written_runtime_helpers.is_empty()
-            {
-                let source_text = node_builtin_require_rewrite
-                    .as_ref()
-                    .map(|rewrite| rewrite.source.as_str())
-                    .unwrap_or_else(|| {
-                        namespace_member_rewrite
-                            .as_ref()
-                            .map(|rewrite| rewrite.source.as_str())
-                            .unwrap_or(lowered_source.source.as_str())
-                    });
-                let rewritten =
-                    rewrite_runtime_helper_writes(source_text, &written_runtime_helpers);
-                let mut refs_after_write_rewrite = runtime_import_identifiers_in_source(&rewritten)
-                    .into_iter()
-                    .map(BindingName::new)
-                    .collect::<BTreeSet<_>>();
-                refs_after_write_rewrite.extend(
-                    program
-                        .model()
-                        .graph()
-                        .import_export()
-                        .exports_for(module.id)
-                        .into_iter(),
-                );
-                if let Some(exports) = source_module_wiring.exports_by_module.get(&module.id) {
-                    refs_after_write_rewrite.extend(exports.iter().cloned());
-                }
-                if let Some((_stripped, exports)) = strip_top_level_named_exports(&rewritten) {
-                    refs_after_write_rewrite.extend(exports);
-                }
-                remaining_runtime_helpers
-                    .into_iter()
-                    .filter(|binding| {
-                        migrated_extra_runtime_deps.contains(binding)
-                            || refs_after_write_rewrite.contains(binding)
-                    })
-                    .collect()
-            } else {
-                remaining_runtime_helpers
-            };
+            let remaining_runtime_helpers = adjust_remaining_runtime_helpers(
+                &remaining_runtime_helpers,
+                &migrated_extra_runtime_deps,
+                &migrated_local_bindings,
+            );
+            let written_runtime_helpers = adjust_written_runtime_helpers(
+                &written_runtime_helpers,
+                &migrated_locally,
+                &migrated_extra_runtime_setter_deps,
+            );
+            let namespace_member_rewrite = compute_namespace_member_rewrite(
+                program,
+                lowered_source,
+                &runtime_import_groups,
+                &local_source_definitions,
+                &source_imports,
+                &planned_bindings,
+            );
+            let node_builtin_require_helpers = compute_node_builtin_require_helpers(
+                program,
+                lowered_source,
+                &runtime_prelude_direct_imports,
+            );
+            let node_builtin_require_rewrite = compute_node_builtin_require_rewrite(
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                &node_builtin_require_helpers,
+                &local_source_definitions,
+                &source_imports,
+                &planned_bindings,
+            );
+            let source_runtime_refs = compute_source_runtime_refs(
+                program,
+                module.id,
+                source_module_wiring,
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                node_builtin_require_rewrite.as_ref(),
+            );
+            let remaining_runtime_helpers = filter_remaining_helpers_by_write_rewrite(
+                program,
+                module.id,
+                source_module_wiring,
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                node_builtin_require_rewrite.as_ref(),
+                &written_runtime_helpers,
+                &migrated_extra_runtime_deps,
+                remaining_runtime_helpers,
+            );
             let namespace_export_helpers_for_source = lowered_source
                 .and_then(|source| {
                     program
