@@ -246,6 +246,30 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
+### Session of 2026-05-23 (continuation 8 — source-module import emission)
+
+1 commit, `plan_enriched_program` body 1,620 → 1,522 lines (-98 lines):
+
+- `857e6bf` `emit_source_module_imports` (130 lines) — the per-module
+  loop's source-module `import { … } from './target.ts'` /
+  `import { … } from runtime` emission with redirect handling and
+  folded-stub bypass routing. Returns `bool` for whether at least one
+  binding routed through a folded module's runtime helper file.
+
+Cumulative on the planner's main method: 2,155 → 1,522 lines
+(-633 lines / -29%) across all continuations.
+
+The next bounded chunks remaining are:
+- The ~50-line "per-module state setup" (computing `runtime_imports`,
+  `lowered_source`, `migrated_*` variables) — packageable as one
+  `compute_module_emission_state` helper returning a struct.
+- Two large `if`-branches that emit runtime imports + singletons +
+  package-runtime helpers (`if !has_runtime_edge_before_lazy_helpers
+  { ... } else { ... }`) — each ~200 lines.
+- The implicit-globals + readability-renames + final source push
+  tail (~80 lines).
+- The non-folded module's final `plan.push_file(file)`.
+
 ### Session of 2026-05-23 (continuation 7 — folded-module phase split)
 
 7 commits, `plan_enriched_program` body shrank from 1,818 → 1,620 lines
