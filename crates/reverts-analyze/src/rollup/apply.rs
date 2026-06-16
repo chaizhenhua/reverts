@@ -298,9 +298,12 @@ mod tests {
 
             -- Oracle externalizability depends on a top-level hint
             -- (export_specifier == package_name) for the (name, version) pair.
+            -- Hint MUST enumerate at least one public member or the oracle
+            -- now rejects externalization as "planner would still adapter-wrap"
+            -- — see crates/reverts-analyze/src/rollup/oracle.rs.
             INSERT INTO package_externalization_hints
                 (package_name, package_version, export_specifier, public_members_json)
-            VALUES ('lodash', '4.17.21', 'lodash', '[]');
+            VALUES ('lodash', '4.17.21', 'lodash', '["merge","cloneDeep","_root"]');
             "#,
         )
         .expect("seed");

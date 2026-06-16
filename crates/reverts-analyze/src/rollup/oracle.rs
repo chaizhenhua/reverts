@@ -103,9 +103,25 @@ pub fn build_oracle(snap: &Snapshot, cfg: OracleConfig) -> Oracle {
                 ),
             }
         } else if let Some(hint) = hint_index.top_level_for(&name, &version) {
-            OracleVerdict::Externalizable {
-                top_specifier: hint.top_specifier.clone(),
-                public_members: hint.public_members.clone(),
+            if hint.public_members.is_empty() {
+                // The hint exists (someone matched the package surface) but
+                // its `public_members_json` was empty when persisted. The
+                // planner cannot rewrite bundle-internal binding reads to a
+                // public-surface name without knowing what names exist on
+                // the surface, so it will keep these modules as adapters and
+                // never actually emit `import {…} from '<package>'`. Reporting
+                // them as Externalizable inflates the DB metric without
+                // changing emit behavior — be honest about the gap.
+                OracleVerdict::NotExternalizable {
+                    reason: "top-level hint has no public_members enumeration; \
+                             planner would still adapter-wrap"
+                        .into(),
+                }
+            } else {
+                OracleVerdict::Externalizable {
+                    top_specifier: hint.top_specifier.clone(),
+                    public_members: hint.public_members.clone(),
+                }
             }
         } else {
             OracleVerdict::NotExternalizable {
@@ -163,4 +179,89 @@ fn build_hint_index(rows: &[HintRow]) -> HintIndex {
         );
     }
     HintIndex { top_level }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rollup::db::{AttributionRow, HintRow, ModuleRow};
+
+    fn package_module(id: i64, name: &str, version: &str) -> ModuleRow {
+        ModuleRow {
+            id,
+            category: "package".to_string(),
+            package_name: Some(name.to_string()),
+            package_version: Some(version.to_string()),
+        }
+    }
+
+    fn accepted_external(module_id: i64, name: &str, version: &str) -> AttributionRow {
+        AttributionRow {
+            module_id,
+            package_name: name.to_string(),
+            package_version: Some(version.to_string()),
+            export_specifier: Some(name.to_string()),
+            emission_mode: "external_import".to_string(),
+            status: "accepted".to_string(),
+            evidence_json: Some(
+                "{\"external_import_proof\":\"matched_package_source\"}".to_string(),
+            ),
+            rejection_reason: None,
+        }
+    }
+
+    fn top_hint(name: &str, version: &str, members: &[&str]) -> HintRow {
+        HintRow {
+            package_name: name.to_string(),
+            package_version: version.to_string(),
+            export_specifier: name.to_string(),
+            public_members: members.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn oracle_rejects_externalization_when_top_level_hint_has_no_public_members() {
+        // The hint table can be populated by `package-externalization-hints`
+        // without enumerating public surface members — for example when the
+        // matcher finds the package by source-cache alone. Reporting these
+        // verdicts as Externalizable lies about what the planner can emit.
+        let snapshot = Snapshot {
+            modules: vec![package_module(1, "lodash", "4.17.21")],
+            attributions: vec![accepted_external(1, "lodash", "4.17.21")],
+            hints: vec![top_hint("lodash", "4.17.21", &[])],
+        };
+        let oracle = build_oracle(&snapshot, OracleConfig::default());
+        match oracle.lookup("lodash", "4.17.21") {
+            Some(OracleVerdict::NotExternalizable { reason }) => {
+                assert!(
+                    reason.contains("public_members"),
+                    "rejection reason must explain the empty-members gap: {reason}",
+                );
+            }
+            other => panic!("expected NotExternalizable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oracle_accepts_externalization_when_hint_enumerates_public_members() {
+        let snapshot = Snapshot {
+            modules: vec![package_module(1, "lodash", "4.17.21")],
+            attributions: vec![accepted_external(1, "lodash", "4.17.21")],
+            hints: vec![top_hint("lodash", "4.17.21", &["merge", "cloneDeep"])],
+        };
+        let oracle = build_oracle(&snapshot, OracleConfig::default());
+        match oracle.lookup("lodash", "4.17.21") {
+            Some(OracleVerdict::Externalizable {
+                top_specifier,
+                public_members,
+            }) => {
+                assert_eq!(top_specifier, "lodash");
+                assert_eq!(
+                    public_members,
+                    &vec!["merge".to_string(), "cloneDeep".to_string()],
+                );
+            }
+            other => panic!("expected Externalizable, got {other:?}"),
+        }
+    }
 }
