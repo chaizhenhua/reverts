@@ -246,6 +246,24 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
+### Session of 2026-05-23 (continuation 9 — OwnerMigrationState builder)
+
+1 commit, method body 1,522 → 1,499 lines (-23 lines):
+
+- `9e1f4ab` `OwnerMigrationState` struct + `from_plan` builder. Collapses
+  15 sequential `runtime_var_migrations.X_for_owner(module.id)` calls
+  into one destructure of a strongly-typed owner snapshot.
+
+Cumulative on `plan_enriched_program`: 2,155 → 1,499 lines
+(-656 lines / -30.4%).
+
+The next extraction targets are the `let
+remaining_runtime_helpers` / `written_runtime_helpers` / 
+`namespace_member_rewrite` / `node_builtin_require_*` / 
+`source_runtime_refs` chain at the head of the source-module emission
+path — each step depends on the previous so they want to extract as
+one "ModuleSourceRefs" builder rather than piecemeal.
+
 ### Session of 2026-05-23 (continuation 8 — source-module import emission)
 
 1 commit, `plan_enriched_program` body 1,620 → 1,522 lines (-98 lines):
