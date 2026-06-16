@@ -184,6 +184,42 @@ runtime_singleton_inline, runtime_var_migration, package_runtime). Most
 have heavy dependency chains; the remaining work belongs in future
 sessions where each extraction can stand alone as a focused commit.
 
+### Session of 2026-05-23 (continuation 3 — runtime-source-read consolidation)
+
+5 more commits (and one cleanup fix), `lib.rs` 31,358 → 31,131 = -227
+lines:
+
+- `f14d152` move declaration-keyword + `find_keyword`/`find_declaration_keyword`
+  helpers into `identifiers.rs`
+- `09a9f26` bump source-walking helpers (`local_bindings_in_source`,
+  `top_level_statement_slices`, `lowered_lazy_initializer_statement_binding`,
+  `runtime_import_identifiers_in_source`,
+  `identifier_read_facts_in_source`, `implicit_global_writes_in_source`,
+  `IdentifierReadUsage`) to `pub(crate)` to unblock follow-on extractions
+- `1348802` extract `RuntimeSourceReadIndex` + `runtime_source_read_index`
+  builder into `runtime_source_read.rs` (160 lines). 13 struct fields and
+  the type itself bumped to `pub(crate)` for downstream readers.
+- `2d7850b` move `RuntimeBindingReadProfile` +
+  `runtime_binding_read_profile` + `_diagnostic` + `runtime_readers_for_binding`
+  into the same module (now ~250 lines together)
+- `39d5bac` + `971b7ff` move `migratable_runtime_var_initializer` into
+  `runtime_helper_strip.rs` and clean up the unused
+  `classify_migratable_var_declaration` import
+
+The cumulative result of these three continuation sessions is the
+planner has grown from a 33,930-line monolith with 2 modules into a
+collection of 18 focused modules plus a 31,131-line `lib.rs` that's
+still ~94% of the original — but every extraction is now grounded by
+shared infrastructure (byte_lexer, identifiers, statements,
+statement_parsers, byte_lexer, runtime_helper_writes,
+runtime_helper_strip, runtime_source_read), which means the remaining
+big-fish subsystems (runtime_var_migration, runtime_singleton_inline,
+package_runtime) can be extracted in future sessions without first
+having to rebuild that foundation. The next session's most cost-
+effective move is `runtime_var_migration` (~1,100 lines including the
+535-line impl), now that all its supporting types and helpers are
+`pub(crate)` and reachable.
+
 Remaining in `reverts-cli` Phase 1 (~1 session):
 
 - `persist_package_attributions` cluster (~1500 lines, ~10 helper deps) into
