@@ -1,11 +1,11 @@
 //! Text-based fallback scanner for CommonJS-style export members. Used when
-//! the AST-driven [`ExportMemberCollector`](crate::exported_members::ExportMemberCollector)
+//! the AST-driven [`ExportMemberCollector`](crate::source::exported_members::ExportMemberCollector)
 //! path is unavailable or as a supplemental signal for sources that mix
 //! ES module and CommonJS export shapes.
 
 use std::collections::BTreeSet;
 
-use crate::source_text::{
+use super::source_text::{
     compact_ascii_ws, read_identifier_at, read_identifier_with_end_at, read_quoted_string_at,
     skip_ascii_ws,
 };

@@ -22,12 +22,12 @@ use oxc_ast::{
 use oxc_parser::Parser;
 use reverts_js::{ParseGoal, parse_options_for, source_type_candidates};
 
-use crate::ast_export_helpers::{
+use super::ast_export_helpers::{
     commonjs_create_binding_export_member, commonjs_export_property_name,
     commonjs_module_exports_target, declaration_binding_names, module_export_name,
     object_define_property_export_member, object_expression_static_keys,
 };
-use crate::commonjs_exports::commonjs_export_members_from_text;
+use super::commonjs_exports::commonjs_export_members_from_text;
 use crate::package_helpers::normalize_hint_text;
 
 #[must_use]

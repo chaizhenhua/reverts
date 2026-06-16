@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::source_text::{compact_ascii_ws, read_quoted_string_at};
+use super::source_text::{compact_ascii_ws, read_quoted_string_at};
 
 #[must_use]
 pub(crate) fn relative_module_specifier_targets(source: &str) -> BTreeSet<String> {

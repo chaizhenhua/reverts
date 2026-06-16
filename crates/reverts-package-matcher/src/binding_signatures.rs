@@ -6,8 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::exported_members::is_identifier_name;
-use crate::source_text::{previous_non_ascii_ws, read_identifier_with_end_at, skip_ascii_ws};
+use crate::source::exported_members::is_identifier_name;
+use crate::source::source_text::{
+    previous_non_ascii_ws, read_identifier_with_end_at, skip_ascii_ws,
+};
 
 #[must_use]
 pub(crate) fn binding_string_signatures_from_source(

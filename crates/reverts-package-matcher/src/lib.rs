@@ -1,25 +1,20 @@
 pub mod acceptance;
-mod ast_export_helpers;
 mod binding_signatures;
 pub mod cascade;
 pub mod cascade_match;
 mod cascade_ownership;
-mod commonjs_exports;
 mod dependency_closure;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
-mod exported_members;
 mod externalization_policy;
 mod force_externalize;
 pub mod hungarian;
-mod import_targets;
 mod importable_ownership;
 mod index;
 mod model;
 mod package_file_graph_ownership;
 pub mod package_helpers;
-mod source_imports;
-mod source_text;
+mod source;
 pub mod structural_bag;
 pub mod tier;
 mod version_scoring;
@@ -34,10 +29,6 @@ pub(crate) use dependency_closure::{
     dependency_neighborhood_source_path, has_direct_neighborhood_package_contradiction,
     package_dependency_components,
 };
-use exported_members::{
-    export_member_set_is_strong, exported_members_from_source, is_identifier_name,
-    is_usable_export_member,
-};
 use externalization_policy::{
     SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
     cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
@@ -50,10 +41,6 @@ use externalization_policy::{
     semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
 pub use hungarian::assign_max_weight;
-use import_targets::{
-    commonjs_reexport_targets, export_all_reexport_targets, reexport_targets,
-    relative_module_specifier_targets,
-};
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 use index::{
@@ -83,9 +70,19 @@ pub use package_helpers::{
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
 };
-pub(crate) use source_imports::resolve_source_package_surfaces;
-pub use source_imports::{package_import_names_from_sources, package_import_sites_from_sources};
-pub(crate) use source_text::normalize_source;
+use source::exported_members::{
+    export_member_set_is_strong, exported_members_from_source, is_identifier_name,
+    is_usable_export_member,
+};
+use source::import_targets::{
+    commonjs_reexport_targets, export_all_reexport_targets, reexport_targets,
+    relative_module_specifier_targets,
+};
+pub(crate) use source::source_imports::resolve_source_package_surfaces;
+pub use source::source_imports::{
+    package_import_names_from_sources, package_import_sites_from_sources,
+};
+pub(crate) use source::source_text::normalize_source;
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
 };
