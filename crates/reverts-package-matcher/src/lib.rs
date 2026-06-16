@@ -9,12 +9,14 @@ mod dependency_closure;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
 mod exported_members;
+mod external_import_source_index;
 mod externalization_policy;
 mod fingerprint;
 mod force_externalize;
 pub mod hungarian;
 mod import_targets;
 mod importable_ownership;
+mod model;
 mod package_file_graph_ownership;
 pub mod package_helpers;
 mod package_version_index;
@@ -38,18 +40,35 @@ use exported_members::{
     export_member_set_is_strong, exported_members_from_source, is_identifier_name,
     is_usable_export_member,
 };
+pub(crate) use external_import_source_index::ExternalImportSourceIndex;
 use externalization_policy::{
     SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
     cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
-    dependency_graph_source_fingerprint_policy_allows, public_export_member_policy_allows,
-    same_package_cross_version_source_policy_allows, semantic_external_target_policies,
+    dependency_graph_source_fingerprint_policy_allows, dependency_graph_source_proof_label,
+    dependency_graph_source_proof_rank, dependency_graph_source_proof_requires_unique_source_path,
+    export_member_source_proof_alias_source_is_matched, export_member_source_proof_label,
+    export_member_source_proof_rank, public_export_member_policy_allows,
+    same_package_cross_version_source_policy_allows, semantic_external_source_proof_label,
+    semantic_external_source_proof_rank, semantic_external_target_policies,
     semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
-use fingerprint::{SourceFingerprint, fingerprint_source};
+use fingerprint::fingerprint_source;
 pub use hungarian::assign_max_weight;
 use import_targets::{
     commonjs_reexport_targets, export_all_reexport_targets, reexport_targets,
     relative_module_specifier_targets,
+};
+pub(crate) use model::PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES;
+pub use model::{
+    BestVersionMatch, ModuleMatchFingerprint, ModuleMatchStrategy, ModulePackageMatch,
+    PackageImportSite, PackageMatch, PackageMatchingPipelineReport, PackageModuleSourceQuality,
+    PackagePublicExportProof, PackageSource, PackageSourceFingerprint, PackageVersionCandidate,
+    SourcePackageImportParseError, VersionMatchScore, VersionedPackageMatchReport,
+    VersionedPackageMatcherConfig,
+};
+pub(crate) use model::{
+    ConcretePackageSourcePath, CorrectedPackageExternalImportTarget, ExternalImportTarget,
+    package_module_source_quality_label,
 };
 pub use package_helpers::{
     SemanticPathHintMode, accepted_external_modules, canonical_public_path_segments,
@@ -65,11 +84,10 @@ pub use package_version_index::package_module_source_quality;
 use package_version_index::{
     PackageVersionIndex, fingerprint_modules_for_package, is_strong_path_hint_token,
 };
-pub(crate) use package_version_index::{
-    module_match_fingerprint, package_source_fingerprint, package_source_fingerprint_from_source,
-};
+pub(crate) use package_version_index::{module_match_fingerprint, package_source_fingerprint};
 pub(crate) use source_imports::resolve_source_package_surfaces;
 pub use source_imports::{package_import_names_from_sources, package_import_sites_from_sources};
+pub(crate) use source_text::normalize_source;
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
 };
@@ -83,46 +101,18 @@ pub(crate) use version_scoring::{
 };
 
 use std::cell::RefCell;
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 use std::time::Instant;
 
 use reverts_graph::FunctionExtractor;
 use reverts_input::{
     InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-    PackageSurfaceInput,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
-use reverts_js::{JsError, normalize_source_for_pipeline, parse_error_message};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::external_import_concrete_source_path;
 use semver::Version;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Package source candidate with a verified import surface.
-pub struct PackageSource {
-    /// npm package name.
-    pub package_name: String,
-    /// concrete package version.
-    pub package_version: String,
-    /// import specifier that may be emitted if the match is accepted.
-    pub export_specifier: String,
-    /// package source path used as the parser path hint.
-    pub source_path: String,
-    /// package source body.
-    pub source: String,
-    /// Whether a match against this source may be emitted as an external import.
-    ///
-    /// Full package source roots often include private/internal files that are
-    /// useful for ownership matching but are not guaranteed to be importable
-    /// through a package's `exports` map. Those sources must stay source-only
-    /// until an import-shape resolver proves the specifier is safe.
-    pub external_importable: bool,
-}
-
-const PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES: usize = 512 * 1024;
 
 #[must_use]
 pub fn package_source_normalized_hash(path: &str, source: &str) -> Option<String> {
@@ -134,15 +124,6 @@ pub fn package_source_normalized_hash(path: &str, source: &str) -> Option<String
 #[must_use]
 pub fn package_source_exported_members(path: &str, source: &str) -> BTreeSet<String> {
     exported_members_from_source(path, source)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackagePublicExportProof {
-    pub package_name: String,
-    pub package_version: String,
-    pub source_path: String,
-    pub export_specifier: String,
-    pub public_members: BTreeSet<String>,
 }
 
 #[must_use]
@@ -258,326 +239,6 @@ fn reexported_source_only_sources<'a>(
         }
     }
     results.into_values().collect()
-}
-
-impl PackageSource {
-    /// Creates an external package source candidate.
-    #[must_use]
-    pub fn external(
-        package_name: impl Into<String>,
-        package_version: impl Into<String>,
-        export_specifier: impl Into<String>,
-        source_path: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
-        Self {
-            package_name: package_name.into(),
-            package_version: package_version.into(),
-            export_specifier: export_specifier.into(),
-            source_path: source_path.into(),
-            source: source.into(),
-            external_importable: true,
-        }
-    }
-
-    /// Creates a package source candidate used only for ownership/source
-    /// matching. Matches against this source are reported but are not turned
-    /// into accepted `external_import` attributions.
-    #[must_use]
-    pub fn source_only(
-        package_name: impl Into<String>,
-        package_version: impl Into<String>,
-        export_specifier: impl Into<String>,
-        source_path: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Self {
-        Self {
-            package_name: package_name.into(),
-            package_version: package_version.into(),
-            export_specifier: export_specifier.into(),
-            source_path: source_path.into(),
-            source: source.into(),
-            external_importable: false,
-        }
-    }
-
-    pub(crate) fn is_within_fingerprint_budget(&self) -> bool {
-        self.source.len() <= PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-/// Source-backed bare package import/require site discovered in the original bundle source.
-pub struct PackageImportSite {
-    /// Source file id that contains the import expression.
-    pub source_file_id: u32,
-    /// Original source path.
-    pub source_file_path: String,
-    /// npm package name parsed from the bare specifier.
-    pub package_name: String,
-    /// Concrete bare specifier used by source, e.g. `undici` or `lodash/map`.
-    pub specifier: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Parse failure while extracting source-backed bare package imports.
-pub struct SourcePackageImportParseError {
-    /// Source file id that failed to parse.
-    pub source_file_id: u32,
-    /// Original source path.
-    pub source_file_path: String,
-    /// Parser error from the JavaScript frontend.
-    pub source: JsError,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Structural fingerprint used to compare one bundle module with package source candidates.
-pub struct ModuleMatchFingerprint {
-    /// module id in the input bundle.
-    pub module_id: ModuleId,
-    /// optional package hint attached to the module.
-    pub package_name: Option<String>,
-    /// optional concrete package version hint attached to the module.
-    pub package_version: Option<String>,
-    /// stable hash of the AST-normalized source body.
-    pub normalized_source_hash: String,
-    /// Stable hashes of normalized source variants produced by one
-    /// normalization pass. Includes `normalized_source_hash`.
-    pub normalized_source_hashes: BTreeSet<String>,
-    /// AST-derived function signature hashes.
-    pub function_signature_hashes: BTreeSet<String>,
-    /// string literal anchors collected from the AST.
-    pub string_anchors: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Fingerprint for one cached package source file.
-pub struct PackageSourceFingerprint<'a> {
-    /// cached source candidate.
-    pub source: &'a PackageSource,
-    /// stable hash of the AST-normalized source body.
-    pub normalized_source_hash: String,
-    /// Stable hashes of normalized source variants produced by one
-    /// normalization pass. Includes `normalized_source_hash`.
-    pub normalized_source_hashes: BTreeSet<String>,
-    /// AST-derived function signature hashes.
-    pub function_signature_hashes: BTreeSet<String>,
-    /// string literal anchors collected from the AST.
-    pub string_anchors: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Version bucket for one package.
-pub struct PackageVersionCandidate<'a> {
-    /// npm package name.
-    pub package_name: String,
-    /// concrete package version.
-    pub package_version: String,
-    /// cached source files belonging to this package version.
-    pub sources: Vec<PackageSourceFingerprint<'a>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-/// Strategy that proved a module-to-package-source match.
-pub enum ModuleMatchStrategy {
-    /// Full module source identity after AST normalization.
-    NormalizedSourceHash,
-    /// Function signatures plus string anchors matched the package source.
-    FunctionSignatureAndStringAnchors,
-    /// Prototype/member shape anchors plus string/property anchors uniquely
-    /// matched the package source after minification removed local function
-    /// names and bodies.
-    PropertyShapeAndStringAnchors,
-    /// Object-literal key shape anchors plus string/property anchors uniquely
-    /// matched the package source after minification removed local variable
-    /// names and function bodies.
-    ObjectShapeAndStringAnchors,
-    /// ES class method shape anchors plus string/property anchors uniquely
-    /// matched the package source after minification removed local class names
-    /// and function bodies.
-    ClassShapeAndStringAnchors,
-    /// Switch-case literal shape anchors plus string/property anchors uniquely
-    /// matched the package source after minification changed local control-flow
-    /// variable names but preserved public dispatch literals.
-    SwitchShapeAndStringAnchors,
-    /// Function signatures plus string anchors matched the package version as
-    /// an aggregate, but not one unique importable source file. This proves
-    /// package ownership only.
-    AggregateFunctionSignatureAndStringAnchors,
-    /// Every function fingerprint in the module was attributed to one package
-    /// version by the cascade matcher using exact function-level evidence.
-    CascadeFunctionCoverage,
-    /// Every function fingerprint in the module was attributed to one package
-    /// version by the cascade matcher, but at least one function only matched
-    /// through a weak/non-exact tier. This proves ownership only; it is not
-    /// sufficient to externalize the whole module as an import.
-    CascadeFunctionOwnership,
-    /// A dominant subset of function fingerprints in the module was
-    /// attributed to one package version by the cascade matcher. This proves
-    /// package ownership only; it is not sufficient to externalize the whole
-    /// module as an import.
-    CascadePartialFunctionCoverage,
-    /// Aggregate structural fingerprint axes matched one package version. This
-    /// proves package ownership only and intentionally does not prove a unique
-    /// importable source file.
-    AggregateStructuralBagSimilarity,
-    /// Direct module dependencies are already owned by one package version.
-    /// This proves ownership for dependency-only bundle wrappers/barrels, but
-    /// not a safe single external import.
-    DependencyClosureOwnership,
-}
-
-impl ModuleMatchStrategy {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::NormalizedSourceHash => "normalized_source_hash",
-            Self::FunctionSignatureAndStringAnchors => "function_signature_and_string_anchors",
-            Self::PropertyShapeAndStringAnchors => "property_shape_and_string_anchors",
-            Self::ObjectShapeAndStringAnchors => "object_shape_and_string_anchors",
-            Self::ClassShapeAndStringAnchors => "class_shape_and_string_anchors",
-            Self::SwitchShapeAndStringAnchors => "switch_shape_and_string_anchors",
-            Self::AggregateFunctionSignatureAndStringAnchors => {
-                "aggregate_function_signature_and_string_anchors"
-            }
-            Self::CascadeFunctionCoverage => "cascade_function_coverage",
-            Self::CascadeFunctionOwnership => "cascade_function_ownership",
-            Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
-            Self::AggregateStructuralBagSimilarity => "aggregate_structural_bag_similarity",
-            Self::DependencyClosureOwnership => "dependency_closure_ownership",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Evidence that one module matched one source inside a package version.
-pub struct ModulePackageMatch {
-    /// matched module id.
-    pub module_id: ModuleId,
-    /// matched npm package name.
-    pub package_name: String,
-    /// matched concrete package version.
-    pub package_version: String,
-    /// accepted import specifier.
-    pub export_specifier: String,
-    /// cached package source path.
-    pub source_path: String,
-    /// strategy that proved the match.
-    pub strategy: ModuleMatchStrategy,
-    /// stable hash of the normalized matched source.
-    pub normalized_source_hash: String,
-    /// overlapping function signatures.
-    pub function_signature_matches: usize,
-    /// overlapping string anchors.
-    pub string_anchor_matches: usize,
-    /// Whether this match is safe to turn into an external import attribution.
-    pub external_importable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Aggregate score for one package version.
-pub struct VersionMatchScore {
-    /// npm package name.
-    pub package_name: String,
-    /// concrete package version.
-    pub package_version: String,
-    /// package modules that were considered for this package.
-    pub total_modules: usize,
-    /// modules matched by any accepted strategy.
-    pub matched_modules: usize,
-    /// modules matched by normalized source identity.
-    pub source_hash_matches: usize,
-    /// total overlapping function signatures.
-    pub function_signature_matches: usize,
-    /// total overlapping string anchors.
-    pub string_anchor_matches: usize,
-    /// weighted score used for version ordering.
-    pub score: u32,
-    /// number of package versions probed by binary search before certification.
-    pub binary_search_probes: usize,
-}
-
-impl VersionMatchScore {
-    #[must_use]
-    pub const fn has_evidence(&self) -> bool {
-        self.score > 0 && self.matched_modules > 0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Selected or rejected best-version decision for one package.
-pub enum BestVersionMatch {
-    /// One concrete version has unique best evidence.
-    Selected {
-        /// selected score.
-        score: VersionMatchScore,
-        /// module-level source matches for the selected version.
-        module_matches: Vec<ModulePackageMatch>,
-    },
-    /// More than one version has the same best score.
-    Ambiguous {
-        /// package name.
-        package_name: String,
-        /// best tied scores.
-        scores: Vec<VersionMatchScore>,
-    },
-    /// No version produced usable evidence.
-    NoMatch {
-        /// package name.
-        package_name: String,
-        /// scores that were evaluated.
-        scores: Vec<VersionMatchScore>,
-    },
-    /// Evidence exists but does not satisfy the configured acceptance threshold.
-    InsufficientEvidence {
-        /// strongest score.
-        score: VersionMatchScore,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Configuration for version-level package matching.
-pub struct VersionedPackageMatcherConfig {
-    /// Minimum function signature overlap for non-source-identity matches.
-    pub min_function_signature_matches: usize,
-    /// Minimum string anchor overlap for non-source-identity matches.
-    pub min_string_anchor_matches: usize,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// Coarse trust classification for a source slice attached to a package module.
-///
-/// `Invalid` slices are not parseable as a standalone module body and are
-/// usually bad byte spans recovered from a bundle. They are excluded from
-/// source/hash and cascade matching so they do not pollute package evidence.
-/// `Weak` slices are parseable but do not contain any strong token from the
-/// package path hint; the exact source/hash matcher excludes them, while
-/// callers may still feed them to weaker ownership-only paths such as cascade
-/// because minification often erases source-path names.
-pub enum PackageModuleSourceQuality {
-    Trusted,
-    Weak,
-    Invalid,
-}
-
-#[must_use]
-pub(crate) fn package_module_source_quality_label(
-    quality: PackageModuleSourceQuality,
-) -> &'static str {
-    match quality {
-        PackageModuleSourceQuality::Trusted => "trusted",
-        PackageModuleSourceQuality::Weak => "weak",
-        PackageModuleSourceQuality::Invalid => "invalid",
-    }
-}
-
-impl Default for VersionedPackageMatcherConfig {
-    fn default() -> Self {
-        Self {
-            min_function_signature_matches: 2,
-            min_string_anchor_matches: 1,
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -719,40 +380,6 @@ fn collect_decision_outputs(
             .with_binding(package_name.clone()),
         );
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-/// Result of a versioned package matching pass.
-pub struct VersionedPackageMatchReport {
-    /// Accepted attributions that can be persisted by the caller.
-    pub attributions: Vec<PackageAttributionInput>,
-    /// Accepted project-level package surfaces discovered from source-backed bare imports.
-    pub surfaces: Vec<PackageSurfaceInput>,
-    /// Match evidence for accepted attributions.
-    pub matches: Vec<PackageMatch>,
-    /// Per package or package-version best-version decisions.
-    pub version_matches: Vec<BestVersionMatch>,
-    /// Ambiguity, missing source, and parse findings.
-    pub audit: AuditReport,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-/// Unified package matching pipeline output.
-///
-/// This is the single matcher-side orchestration point for the module/source
-/// version matcher, the function-level cascade matcher, structural-bag
-/// ownership, and dependency-closure ownership promotion.
-pub struct PackageMatchingPipelineReport {
-    /// Module-level package attributions/surfaces plus all promoted ownership
-    /// matches that generation and persistence consume. Matcher-stage audit
-    /// findings are merged here so callers do not have to wire side reports.
-    pub package_report: VersionedPackageMatchReport,
-    /// Function-level package evidence produced while matching. These rows are
-    /// diagnostics/persistence evidence, not a second module-generation path.
-    pub function_attributions: Vec<PackageAttributionInput>,
-    /// Count of function-level ownership matches, including source-only
-    /// evidence that cannot be emitted as an external import.
-    pub function_ownership_matches: usize,
 }
 
 /// Runs the complete package matching pipeline through one matcher-owned
@@ -1034,12 +661,6 @@ fn match_with_cascade_scoped_by_module_hints(
     merged
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExternalImportTarget {
-    pub(crate) export_specifier: String,
-    pub(crate) source_path: String,
-}
-
 /// Pass-local memoization for external-import proof strategies.
 ///
 /// This is scratch state for proof execution, not a package-source index and
@@ -1211,252 +832,6 @@ impl<'a> ExternalImportProofScratch<'a> {
             .and_then(|package_modules| package_modules.get(&module_id))
             .is_some_and(|(name, version)| name == package_name && version == package_version)
     }
-}
-
-#[derive(Debug, Default)]
-pub(crate) struct ExternalImportSourceIndex<'a> {
-    all_by_version_path:
-        BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
-    all_by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
-    by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
-    normalized_by_version_hash:
-        BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
-    normalized_by_hash: BTreeMap<String, Vec<&'a PackageSource>>,
-    export_members_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
-    fingerprints_by_source_path: RefCell<BTreeMap<String, Option<SourceFingerprint>>>,
-    dependency_entries_by_source_path: RefCell<BTreeMap<String, BTreeSet<String>>>,
-}
-
-impl<'a> ExternalImportSourceIndex<'a> {
-    pub(crate) fn build(package_sources: &'a [PackageSource]) -> Self {
-        let mut index = Self::default();
-        for source in package_sources {
-            index
-                .all_by_version_path
-                .entry(source.package_name.clone())
-                .or_default()
-                .entry(source.package_version.clone())
-                .or_default()
-                .entry(source.source_path.clone())
-                .or_default()
-                .push(source);
-            index
-                .all_by_version
-                .entry(source.package_name.clone())
-                .or_default()
-                .entry(source.package_version.clone())
-                .or_default()
-                .push(source);
-            if !source.external_importable {
-                continue;
-            }
-            index
-                .by_version
-                .entry(source.package_name.clone())
-                .or_default()
-                .entry(source.package_version.clone())
-                .or_default()
-                .push(source);
-            if let Ok(normalized) =
-                normalize_source(source.source_path.as_str(), source.source.as_str())
-            {
-                let normalized_hash = stable_hash(normalized.as_bytes());
-                index
-                    .normalized_by_version_hash
-                    .entry(source.package_name.clone())
-                    .or_default()
-                    .entry(source.package_version.clone())
-                    .or_default()
-                    .entry(normalized_hash.clone())
-                    .or_default()
-                    .push(source);
-                index
-                    .normalized_by_hash
-                    .entry(normalized_hash)
-                    .or_default()
-                    .push(source);
-            }
-        }
-        for versions in index.all_by_version_path.values_mut() {
-            for paths in versions.values_mut() {
-                for sources in paths.values_mut() {
-                    sort_external_sources(sources);
-                }
-            }
-        }
-        for versions in index.all_by_version.values_mut() {
-            for sources in versions.values_mut() {
-                sort_external_sources(sources);
-            }
-        }
-        for versions in index.by_version.values_mut() {
-            for sources in versions.values_mut() {
-                sort_external_sources(sources);
-            }
-        }
-        for versions in index.normalized_by_version_hash.values_mut() {
-            for hashes in versions.values_mut() {
-                for sources in hashes.values_mut() {
-                    sort_external_sources(sources);
-                }
-            }
-        }
-        for sources in index.normalized_by_hash.values_mut() {
-            sort_external_sources(sources);
-        }
-        index
-    }
-
-    fn all_sources_by_path(
-        &self,
-        package_name: &str,
-        package_version: &str,
-        source_path: &str,
-    ) -> &[&'a PackageSource] {
-        self.all_by_version_path
-            .get(package_name)
-            .and_then(|versions| versions.get(package_version))
-            .and_then(|paths| paths.get(source_path))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    fn all_sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
-        self.all_by_version
-            .get(package_name)
-            .and_then(|versions| versions.get(package_version))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    fn all_sources_for_package(&self, package_name: &str) -> Vec<&'a PackageSource> {
-        self.all_by_version
-            .get(package_name)
-            .into_iter()
-            .flat_map(BTreeMap::values)
-            .flat_map(|sources| sources.iter().copied())
-            .collect()
-    }
-
-    fn normalized_sources_for_any_package(
-        &self,
-        normalized_hashes: &BTreeSet<String>,
-    ) -> Vec<&'a PackageSource> {
-        normalized_hashes
-            .iter()
-            .filter_map(|hash| self.normalized_by_hash.get(hash))
-            .flat_map(|sources| sources.iter().copied())
-            .collect()
-    }
-
-    fn sources(&self, package_name: &str, package_version: &str) -> &[&'a PackageSource] {
-        self.by_version
-            .get(package_name)
-            .and_then(|versions| versions.get(package_version))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    fn normalized_sources(
-        &self,
-        package_name: &str,
-        package_version: &str,
-        normalized_hash: &str,
-    ) -> &[&'a PackageSource] {
-        self.normalized_by_version_hash
-            .get(package_name)
-            .and_then(|versions| versions.get(package_version))
-            .and_then(|hashes| hashes.get(normalized_hash))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    fn export_members(&self, source: &PackageSource) -> BTreeSet<String> {
-        let key = format!(
-            "{}@{}:{}",
-            source.package_name, source.package_version, source.source_path
-        );
-        if let Some(members) = self.export_members_by_source_path.borrow().get(&key) {
-            return members.clone();
-        }
-        let members =
-            exported_members_from_source(source.source_path.as_str(), source.source.as_str());
-        self.export_members_by_source_path
-            .borrow_mut()
-            .insert(key, members.clone());
-        members
-    }
-
-    fn source_fingerprint(
-        &self,
-        source: &'a PackageSource,
-    ) -> Option<PackageSourceFingerprint<'a>> {
-        let key = format!(
-            "{}@{}:{}",
-            source.package_name, source.package_version, source.source_path
-        );
-        if let Some(fingerprint) = self.fingerprints_by_source_path.borrow().get(&key) {
-            return fingerprint
-                .clone()
-                .map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint));
-        }
-        let fingerprint =
-            fingerprint_source(source.source_path.as_str(), source.source.as_str()).ok();
-        self.fingerprints_by_source_path
-            .borrow_mut()
-            .insert(key, fingerprint.clone());
-        fingerprint.map(|fingerprint| package_source_fingerprint_from_source(source, fingerprint))
-    }
-
-    fn dependency_entries(&self, source: &PackageSource) -> BTreeSet<String> {
-        let key = format!(
-            "{}@{}:{}",
-            source.package_name, source.package_version, source.source_path
-        );
-        if let Some(entries) = self.dependency_entries_by_source_path.borrow().get(&key) {
-            return entries.clone();
-        }
-        let entries = package_source_dependency_entries(source);
-        self.dependency_entries_by_source_path
-            .borrow_mut()
-            .insert(key, entries.clone());
-        entries
-    }
-
-    fn sources_matching_concrete_path(
-        &self,
-        package_name: &str,
-        package_version: &str,
-        source_path: &str,
-    ) -> Vec<&'a PackageSource> {
-        let exact = self.all_sources_by_path(package_name, package_version, source_path);
-        if !exact.is_empty() {
-            return exact.to_vec();
-        }
-        let source_entry =
-            package_source_entry_path_from_source_path(package_name, package_version, source_path);
-        self.all_sources(package_name, package_version)
-            .iter()
-            .copied()
-            .filter(|source| {
-                source_entry_paths_match(
-                    package_source_entry_path(source).as_str(),
-                    source_entry.as_str(),
-                )
-            })
-            .collect()
-    }
-}
-
-fn sort_external_sources(sources: &mut [&PackageSource]) {
-    sources.sort_by(|left, right| compare_external_sources(left, right));
-}
-
-fn compare_external_sources(left: &PackageSource, right: &PackageSource) -> Ordering {
-    package_source_external_import_rank(left)
-        .cmp(&package_source_external_import_rank(right))
-        .then_with(|| left.export_specifier.cmp(&right.export_specifier))
-        .then_with(|| left.source_path.cmp(&right.source_path))
 }
 
 pub(crate) fn importable_package_source_for_module(
@@ -1721,9 +1096,10 @@ fn semantic_external_package_source(
                 .iter()
                 .map(|hint| semantic_external_source_score(source, hint))
                 .max_by(|left, right| {
-                    left.0
-                        .cmp(&right.0)
-                        .then_with(|| left.1.rank().cmp(&right.1.rank()))
+                    left.0.cmp(&right.0).then_with(|| {
+                        semantic_external_source_proof_rank(left.1)
+                            .cmp(&semantic_external_source_proof_rank(right.1))
+                    })
                 })
                 .unwrap_or((0, SemanticExternalSourceProof::SourcePath));
             (score >= min_score).then_some((source, score, proof))
@@ -1733,7 +1109,10 @@ fn semantic_external_package_source(
         right
             .1
             .cmp(&left.1)
-            .then_with(|| right.2.rank().cmp(&left.2.rank()))
+            .then_with(|| {
+                semantic_external_source_proof_rank(right.2)
+                    .cmp(&semantic_external_source_proof_rank(left.2))
+            })
             .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
             .then_with(|| left.0.source_path.cmp(&right.0.source_path))
     });
@@ -1754,7 +1133,7 @@ fn semantic_external_package_source(
             export_specifier: source.export_specifier.clone(),
             source_path: format!(
                 "forced-external:{}:build-variant:{}",
-                best_proof.label(),
+                semantic_external_source_proof_label(best_proof),
                 source.source_path
             ),
         });
@@ -1769,7 +1148,7 @@ fn semantic_external_package_source(
         export_specifier: export_specifier.to_string(),
         source_path: format!(
             "forced-external:{}:{}",
-            best_proof.label(),
+            semantic_external_source_proof_label(best_proof),
             source.source_path
         ),
     })
@@ -1999,9 +1378,10 @@ fn semantic_source_only_export_member_package_source(
                     semantic_source_only_external_source_score(source, &export_members, hint)
                 })
                 .max_by(|left, right| {
-                    left.0
-                        .cmp(&right.0)
-                        .then_with(|| left.1.rank().cmp(&right.1.rank()))
+                    left.0.cmp(&right.0).then_with(|| {
+                        semantic_external_source_proof_rank(left.1)
+                            .cmp(&semantic_external_source_proof_rank(right.1))
+                    })
                 })
                 .unwrap_or((0, SemanticExternalSourceProof::SourcePath));
             (score >= min_score).then_some((source, score, proof))
@@ -2011,7 +1391,10 @@ fn semantic_source_only_export_member_package_source(
         right
             .1
             .cmp(&left.1)
-            .then_with(|| right.2.rank().cmp(&left.2.rank()))
+            .then_with(|| {
+                semantic_external_source_proof_rank(right.2)
+                    .cmp(&semantic_external_source_proof_rank(left.2))
+            })
             .then_with(|| left.0.source_path.cmp(&right.0.source_path))
             .then_with(|| left.0.export_specifier.cmp(&right.0.export_specifier))
     });
@@ -2046,28 +1429,10 @@ fn semantic_source_only_export_member_package_source(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum SemanticExternalSourceProof {
+pub(crate) enum SemanticExternalSourceProof {
     SourcePath,
     ExportSurface,
     ExportMember,
-}
-
-impl SemanticExternalSourceProof {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::SourcePath => "semantic-source",
-            Self::ExportSurface => "semantic-export",
-            Self::ExportMember => "semantic-member",
-        }
-    }
-
-    const fn rank(self) -> u8 {
-        match self {
-            Self::SourcePath => 0,
-            Self::ExportSurface => 1,
-            Self::ExportMember => 2,
-        }
-    }
 }
 
 fn semantic_external_source_score(
@@ -2099,7 +1464,8 @@ fn semantic_source_only_external_source_score(
     if member_score > path_score
         || (member_score == path_score
             && member_score > 0
-            && SemanticExternalSourceProof::ExportMember.rank() > path_proof.rank())
+            && semantic_external_source_proof_rank(SemanticExternalSourceProof::ExportMember)
+                > semantic_external_source_proof_rank(path_proof))
     {
         (member_score, SemanticExternalSourceProof::ExportMember)
     } else {
@@ -2226,41 +1592,13 @@ fn normalized_source_external_package_source(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ExportMemberSourceProof {
+pub(crate) enum ExportMemberSourceProof {
     BarrelReference,
     BuildVariantPeer,
     CommonJsReexport,
     ExportAllReexport,
     NamedReexport,
     SourceEquivalent,
-}
-
-impl ExportMemberSourceProof {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::BarrelReference => "barrel-reference",
-            Self::BuildVariantPeer => "build-variant-peer",
-            Self::CommonJsReexport => "commonjs-reexport",
-            Self::ExportAllReexport => "export-all-reexport",
-            Self::NamedReexport => "named-reexport",
-            Self::SourceEquivalent => "source-equivalent",
-        }
-    }
-
-    const fn rank(self) -> u8 {
-        match self {
-            Self::BarrelReference => 1,
-            Self::BuildVariantPeer => 2,
-            Self::CommonJsReexport => 2,
-            Self::ExportAllReexport => 2,
-            Self::NamedReexport => 2,
-            Self::SourceEquivalent => 3,
-        }
-    }
-
-    const fn alias_source_is_matched(self) -> bool {
-        matches!(self, Self::CommonJsReexport)
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2454,7 +1792,10 @@ fn export_member_external_package_source_for_source_path(
                 )?;
                 Some((*matched, proof))
             })
-            .max_by(|left, right| left.1.rank().cmp(&right.1.rank()))
+            .max_by(|left, right| {
+                export_member_source_proof_rank(left.1)
+                    .cmp(&export_member_source_proof_rank(right.1))
+            })
         else {
             continue;
         };
@@ -2468,10 +1809,8 @@ fn export_member_external_package_source_for_source_path(
         return None;
     }
     candidates.sort_by(|left, right| {
-        right
-            .proof
-            .rank()
-            .cmp(&left.proof.rank())
+        export_member_source_proof_rank(right.proof)
+            .cmp(&export_member_source_proof_rank(left.proof))
             .then_with(|| {
                 package_source_external_import_rank(left.external)
                     .cmp(&package_source_external_import_rank(right.external))
@@ -2507,12 +1846,12 @@ fn export_member_external_package_source_for_source_path(
             .then_with(|| left.external.source_path.cmp(&right.external.source_path))
             .then_with(|| left.matched.source_path.cmp(&right.matched.source_path))
     })?;
-    let alias_source = if best_proof.alias_source_is_matched() {
+    let alias_source = if export_member_source_proof_alias_source_is_matched(best_proof) {
         source.matched
     } else {
         source.external
     };
-    let alias_members = if best_proof.alias_source_is_matched() {
+    let alias_members = if export_member_source_proof_alias_source_is_matched(best_proof) {
         matched_members.clone()
     } else {
         external_source_index.export_members(alias_source)
@@ -2827,7 +2166,7 @@ fn package_source_reexport_entries(source: &PackageSource) -> BTreeSet<String> {
         .collect()
 }
 
-fn package_source_dependency_entries(source: &PackageSource) -> BTreeSet<String> {
+pub(crate) fn package_source_dependency_entries(source: &PackageSource) -> BTreeSet<String> {
     relative_module_specifier_targets(source.source.as_str())
         .into_iter()
         .filter_map(|target| {
@@ -2885,7 +2224,7 @@ fn resolve_package_relative_require(from_entry: &str, target: &str) -> Option<St
     (!segments.is_empty()).then(|| segments.join("/"))
 }
 
-fn source_entry_paths_match(left: &str, right: &str) -> bool {
+pub(crate) fn source_entry_paths_match(left: &str, right: &str) -> bool {
     let left = strip_source_extension(left)
         .trim_matches('/')
         .to_ascii_lowercase();
@@ -2895,7 +2234,7 @@ fn source_entry_paths_match(left: &str, right: &str) -> bool {
     left == right || format!("{left}/index") == right || left == format!("{right}/index")
 }
 
-fn package_source_entry_path_from_source_path(
+pub(crate) fn package_source_entry_path_from_source_path(
     package_name: &str,
     package_version: &str,
     source_path: &str,
@@ -2957,7 +2296,7 @@ fn export_member_proof_source_path(
     if !alias_proof.is_empty() {
         return format!(
             "forced-external:export-members:{}:{}:aliases={}:{}",
-            proof.label(),
+            export_member_source_proof_label(proof),
             members,
             alias_proof,
             source.source_path
@@ -2965,7 +2304,7 @@ fn export_member_proof_source_path(
     }
     format!(
         "forced-external:export-members:{}:{}:{}",
-        proof.label(),
+        export_member_source_proof_label(proof),
         members,
         source.source_path
     )
@@ -3075,13 +2414,6 @@ fn unmatched_package_scope(rows: &InputRows) -> BTreeSet<String> {
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConcretePackageSourcePath {
-    pub(crate) package_name: String,
-    pub(crate) package_version: String,
-    pub(crate) source_path: String,
-}
-
 pub(crate) fn concrete_package_sources_by_module(
     rows: &InputRows,
     report: &VersionedPackageMatchReport,
@@ -3170,35 +2502,11 @@ pub(crate) fn package_version_from_proof_path(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum DependencyGraphSourceProof {
+pub(crate) enum DependencyGraphSourceProof {
     ExactSourceHash,
     FunctionStringFingerprint,
     DependencyNeighborhood,
     StringFingerprintWithGraph,
-}
-
-impl DependencyGraphSourceProof {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::ExactSourceHash => "source-hash",
-            Self::FunctionStringFingerprint => "function-string",
-            Self::DependencyNeighborhood => "dependency-neighborhood",
-            Self::StringFingerprintWithGraph => "string-graph",
-        }
-    }
-
-    const fn rank(self) -> usize {
-        match self {
-            Self::ExactSourceHash => 300,
-            Self::FunctionStringFingerprint => 200,
-            Self::DependencyNeighborhood => 150,
-            Self::StringFingerprintWithGraph => 100,
-        }
-    }
-
-    const fn requires_unique_source_path(self) -> bool {
-        matches!(self, Self::DependencyNeighborhood)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3302,7 +2610,7 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
     if export_specifiers.len() != 1 {
         return None;
     }
-    if best_proof.requires_unique_source_path() {
+    if dependency_graph_source_proof_requires_unique_source_path(best_proof) {
         let targets = best
             .iter()
             .map(|candidate| {
@@ -3326,7 +2634,7 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
             export_specifier: selected.source.export_specifier.clone(),
             source_path: format!(
                 "forced-external:dependency-graph-source:{}:graph={}/{}:functions={}:strings={}:{}",
-                selected.proof.label(),
+                dependency_graph_source_proof_label(selected.proof),
                 selected.graph.matched_edges,
                 selected.graph.known_edges,
                 selected.function_matches,
@@ -3347,7 +2655,7 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
 fn dependency_graph_source_candidate_score(
     candidate: &DependencyGraphSourceCandidate<'_>,
 ) -> usize {
-    candidate.proof.rank()
+    dependency_graph_source_proof_rank(candidate.proof)
         + candidate.graph.matched_edges * 20
         + candidate.function_matches * 3
         + candidate.string_matches
@@ -3623,15 +2931,6 @@ fn sources_matching_entry<'a>(
             source_entry_paths_match(package_source_entry_path(source).as_str(), entry)
         })
         .collect()
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct CorrectedPackageExternalImportTarget {
-    pub(crate) package_name: String,
-    pub(crate) package_version: String,
-    pub(crate) target: ExternalImportTarget,
-    pub(crate) function_signature_matches: usize,
-    pub(crate) string_anchor_matches: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -4023,48 +3322,6 @@ pub(crate) fn forced_external_import_target(
     )
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// Exact package match evidence.
-pub struct PackageMatch {
-    /// matched module id.
-    pub module_id: ModuleId,
-    /// matched npm package name.
-    pub package_name: String,
-    /// matched concrete package version.
-    pub package_version: String,
-    /// accepted import specifier.
-    pub export_specifier: String,
-    /// package source path that matched the module body.
-    pub source_path: String,
-    /// stable hash of the normalized matched source.
-    pub normalized_source_hash: String,
-    /// strategy that proved this module/source match.
-    pub strategy: ModuleMatchStrategy,
-    /// overlapping function signatures.
-    pub function_signature_matches: usize,
-    /// overlapping string anchors.
-    pub string_anchor_matches: usize,
-    /// Whether this match was eligible for external import emission.
-    pub external_importable: bool,
-}
-
-impl PackageMatch {
-    pub(crate) fn from_module_match(module_match: &ModulePackageMatch) -> Self {
-        Self {
-            module_id: module_match.module_id,
-            package_name: module_match.package_name.clone(),
-            package_version: module_match.package_version.clone(),
-            export_specifier: module_match.export_specifier.clone(),
-            source_path: module_match.source_path.clone(),
-            normalized_source_hash: module_match.normalized_source_hash.clone(),
-            strategy: module_match.strategy,
-            function_signature_matches: module_match.function_signature_matches,
-            string_anchor_matches: module_match.string_anchor_matches,
-            external_importable: module_match.external_importable,
-        }
-    }
-}
-
 fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     rows.package_attributions.iter().any(|attribution| {
         attribution.module_id == module_id
@@ -4095,11 +3352,6 @@ fn package_names_for_matching(
         names.retain(|package_name| package_filter.contains(package_name));
     }
     names
-}
-
-pub(crate) fn normalize_source(path: &str, source: &str) -> Result<String, String> {
-    normalize_source_for_pipeline(source, Some(Path::new(path)))
-        .map_err(|error| parse_error_message(&error, "source could not be parsed"))
 }
 
 const CASCADE_MATCHED_MODULE_SOURCE_LIMIT: usize = 8;

@@ -2,6 +2,10 @@
 //! full parser. Shared by the CommonJS export scanner, the static-import
 //! target collectors, and the signature/string-anchor extractors.
 
+use std::path::Path;
+
+use reverts_js::{normalize_source_for_pipeline, parse_error_message};
+
 #[must_use]
 pub(crate) fn compact_ascii_ws(source: &str) -> String {
     source
@@ -74,4 +78,10 @@ pub(crate) fn read_quoted_string_at(source: &str, start: usize) -> Option<(Strin
         out.push(ch);
     }
     None
+}
+
+#[must_use]
+pub(crate) fn normalize_source(path: &str, source: &str) -> Result<String, String> {
+    normalize_source_for_pipeline(source, Some(Path::new(path)))
+        .map_err(|error| parse_error_message(&error, "source could not be parsed"))
 }

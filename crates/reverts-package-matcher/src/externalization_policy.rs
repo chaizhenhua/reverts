@@ -4,7 +4,10 @@
 //! externalization. Data records such as [`PackageMatch`] and index structures
 //! stay policy-free; resolver/proof code asks these functions explicitly.
 
-use crate::{ModuleMatchStrategy, PackageMatch, SemanticPathHintMode};
+use crate::{
+    DependencyGraphSourceProof, ExportMemberSourceProof, ModuleMatchStrategy, PackageMatch,
+    SemanticExternalSourceProof, SemanticPathHintMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticExternalTargetPolicy {
@@ -217,4 +220,78 @@ pub(crate) fn same_package_cross_version_source_policy_allows(
 pub(crate) fn cross_package_exact_source_policy_allows(package_match: &PackageMatch) -> bool {
     package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
         && package_match.source_path.starts_with("exact-hint:")
+}
+
+pub(crate) const fn semantic_external_source_proof_label(
+    proof: SemanticExternalSourceProof,
+) -> &'static str {
+    match proof {
+        SemanticExternalSourceProof::SourcePath => "semantic-source",
+        SemanticExternalSourceProof::ExportSurface => "semantic-export",
+        SemanticExternalSourceProof::ExportMember => "semantic-member",
+    }
+}
+
+pub(crate) const fn semantic_external_source_proof_rank(proof: SemanticExternalSourceProof) -> u8 {
+    match proof {
+        SemanticExternalSourceProof::SourcePath => 0,
+        SemanticExternalSourceProof::ExportSurface => 1,
+        SemanticExternalSourceProof::ExportMember => 2,
+    }
+}
+
+pub(crate) const fn export_member_source_proof_label(
+    proof: ExportMemberSourceProof,
+) -> &'static str {
+    match proof {
+        ExportMemberSourceProof::BarrelReference => "barrel-reference",
+        ExportMemberSourceProof::BuildVariantPeer => "build-variant-peer",
+        ExportMemberSourceProof::CommonJsReexport => "commonjs-reexport",
+        ExportMemberSourceProof::ExportAllReexport => "export-all-reexport",
+        ExportMemberSourceProof::NamedReexport => "named-reexport",
+        ExportMemberSourceProof::SourceEquivalent => "source-equivalent",
+    }
+}
+
+pub(crate) const fn export_member_source_proof_rank(proof: ExportMemberSourceProof) -> u8 {
+    match proof {
+        ExportMemberSourceProof::BarrelReference => 1,
+        ExportMemberSourceProof::BuildVariantPeer => 2,
+        ExportMemberSourceProof::CommonJsReexport => 2,
+        ExportMemberSourceProof::ExportAllReexport => 2,
+        ExportMemberSourceProof::NamedReexport => 2,
+        ExportMemberSourceProof::SourceEquivalent => 3,
+    }
+}
+
+pub(crate) const fn export_member_source_proof_alias_source_is_matched(
+    proof: ExportMemberSourceProof,
+) -> bool {
+    matches!(proof, ExportMemberSourceProof::CommonJsReexport)
+}
+
+pub(crate) const fn dependency_graph_source_proof_label(
+    proof: DependencyGraphSourceProof,
+) -> &'static str {
+    match proof {
+        DependencyGraphSourceProof::ExactSourceHash => "source-hash",
+        DependencyGraphSourceProof::FunctionStringFingerprint => "function-string",
+        DependencyGraphSourceProof::DependencyNeighborhood => "dependency-neighborhood",
+        DependencyGraphSourceProof::StringFingerprintWithGraph => "string-graph",
+    }
+}
+
+pub(crate) const fn dependency_graph_source_proof_rank(proof: DependencyGraphSourceProof) -> usize {
+    match proof {
+        DependencyGraphSourceProof::ExactSourceHash => 300,
+        DependencyGraphSourceProof::FunctionStringFingerprint => 200,
+        DependencyGraphSourceProof::DependencyNeighborhood => 150,
+        DependencyGraphSourceProof::StringFingerprintWithGraph => 100,
+    }
+}
+
+pub(crate) const fn dependency_graph_source_proof_requires_unique_source_path(
+    proof: DependencyGraphSourceProof,
+) -> bool {
+    matches!(proof, DependencyGraphSourceProof::DependencyNeighborhood)
 }
