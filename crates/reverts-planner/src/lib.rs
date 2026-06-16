@@ -8237,6 +8237,23 @@ fn classify_unfoldable_non_snippet_use(
 /// runtime vars targeting the same owner, or as source bindings the
 /// owner can already import by name. The namespace itself then lands in
 /// owner, observing identities the owner can supply directly.
+/// Returns true when the bundle entrypoint callee is reachable from
+/// `owner_module` post-migration — either as a same-owner movable
+/// runtime var, an owner-local binding, or a source-defined binding the
+/// owner can import. The helper file then invokes the callee via ESM
+/// import; the lazy-init cycle guard (LazyInitCycleImport) blocks any
+/// unsafe runtime→owner→runtime cycle this could synthesize.
+fn can_co_migrate_entrypoint_callee(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    reader: &BindingName,
+) -> bool {
+    if ctx.read_index.entrypoint_callee.as_ref() != Some(reader) {
+        return false;
+    }
+    namespace_contributor_resolvable_in_owner(ctx, owner_module, reader)
+}
+
 fn can_co_migrate_namespace_target(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,
@@ -9124,22 +9141,32 @@ fn migratable_runtime_reader_cluster_result(
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
             if !runtime_reader_folded_non_snippet_use_can_move(ctx, &reader) {
+                let detail = classify_unfoldable_non_snippet_use(ctx, &reader);
                 // Phase 2: if the only thing blocking `can_move` is that
                 // `reader` is itself a namespace target, try to co-migrate
                 // the namespace: enqueue its contributors + helper so they
                 // all land in the same owner. Only safe when every
                 // contributor is itself movable (otherwise the namespace
                 // would observe stale identities post-migration).
-                if classify_unfoldable_non_snippet_use(ctx, &reader)
-                    == ReaderNonSnippetUseKind::UnfoldableNamespaceObject
+                if detail == ReaderNonSnippetUseKind::UnfoldableNamespaceObject
                     && can_co_migrate_namespace_target(ctx, owner_module, &reader)
                 {
                     enqueue_namespace_co_migration(ctx, &reader, &moved_snippets, &mut queue);
                     folded_non_snippet_snippets.insert(reader.clone());
+                } else if detail == ReaderNonSnippetUseKind::UnfoldableEntrypointCallee
+                    && can_co_migrate_entrypoint_callee(ctx, owner_module, &reader)
+                {
+                    // Phase 3: the bundle entrypoint callee can co-migrate
+                    // when its definition is reachable from the cluster's
+                    // owner (either by being a same-owner movable binding
+                    // or by being importable from a source module). The
+                    // runtime helper's `__entry()` call site keeps working
+                    // because the helper imports the callee from its new
+                    // home; the lazy-init cycle guard catches any unsafe
+                    // helper→owner→helper cycle that would result.
+                    folded_non_snippet_snippets.insert(reader.clone());
                 } else {
-                    return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
-                        classify_unfoldable_non_snippet_use(ctx, &reader),
-                    ));
+                    return Err(RuntimeReaderClusterBlocker::NonSnippetUse(detail));
                 }
             } else {
                 folded_non_snippet_snippets.insert(reader.clone());
