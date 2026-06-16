@@ -8232,6 +8232,88 @@ fn classify_unfoldable_non_snippet_use(
     ReaderNonSnippetUseKind::UnfoldableUnfoldedNonSnippetRead
 }
 
+/// Returns true when `reader` is a namespace target whose contributors
+/// and helper are all reachable from `owner_module` — either as movable
+/// runtime vars targeting the same owner, or as source bindings the
+/// owner can already import by name. The namespace itself then lands in
+/// owner, observing identities the owner can supply directly.
+fn can_co_migrate_namespace_target(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    reader: &BindingName,
+) -> bool {
+    let Some(namespace_export) = ctx.read_index.namespace_exports_by_namespace.get(reader) else {
+        return false;
+    };
+    for contributor in namespace_export.exports.values() {
+        if contributor == reader {
+            continue;
+        }
+        if !namespace_contributor_resolvable_in_owner(ctx, owner_module, contributor) {
+            return false;
+        }
+    }
+    let helper = &namespace_export.helper;
+    if helper == reader {
+        return true;
+    }
+    namespace_contributor_resolvable_in_owner(ctx, owner_module, helper)
+}
+
+fn namespace_contributor_resolvable_in_owner(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    // Same-owner candidate runtime var — will migrate together with the cluster.
+    if ctx
+        .candidate_owners
+        .get(binding)
+        .is_some_and(|other| *other == owner_module)
+    {
+        return true;
+    }
+    // Already declared/imported in the owner module — importable by name.
+    if ctx
+        .owner_available_bindings
+        .get(&owner_module)
+        .is_some_and(|set| set.contains(binding))
+    {
+        return true;
+    }
+    // Defined by some other source module — owner can `import { x } from ...`.
+    if matches!(
+        ctx.all_source_definition_modules.get(binding),
+        Some(Some(_))
+    ) {
+        return true;
+    }
+    false
+}
+
+/// Push the contributor bindings + helper of `reader`'s namespace export
+/// onto the cluster walker's queue so they migrate together with the
+/// namespace target itself. Already-moved bindings are skipped.
+fn enqueue_namespace_co_migration(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    reader: &BindingName,
+    moved_snippets: &BTreeSet<BindingName>,
+    queue: &mut Vec<BindingName>,
+) {
+    let Some(namespace_export) = ctx.read_index.namespace_exports_by_namespace.get(reader) else {
+        return;
+    };
+    for contributor in namespace_export.exports.values() {
+        if contributor == reader || moved_snippets.contains(contributor) {
+            continue;
+        }
+        queue.push(contributor.clone());
+    }
+    if &namespace_export.helper != reader && !moved_snippets.contains(&namespace_export.helper) {
+        queue.push(namespace_export.helper.clone());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RuntimeReaderClusterMigration {
     /// Primary runtime vars that can move as one same-writer component.
@@ -9042,11 +9124,26 @@ fn migratable_runtime_reader_cluster_result(
         }
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
             if !runtime_reader_folded_non_snippet_use_can_move(ctx, &reader) {
-                return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
-                    classify_unfoldable_non_snippet_use(ctx, &reader),
-                ));
+                // Phase 2: if the only thing blocking `can_move` is that
+                // `reader` is itself a namespace target, try to co-migrate
+                // the namespace: enqueue its contributors + helper so they
+                // all land in the same owner. Only safe when every
+                // contributor is itself movable (otherwise the namespace
+                // would observe stale identities post-migration).
+                if classify_unfoldable_non_snippet_use(ctx, &reader)
+                    == ReaderNonSnippetUseKind::UnfoldableNamespaceObject
+                    && can_co_migrate_namespace_target(ctx, owner_module, &reader)
+                {
+                    enqueue_namespace_co_migration(ctx, &reader, &moved_snippets, &mut queue);
+                    folded_non_snippet_snippets.insert(reader.clone());
+                } else {
+                    return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                        classify_unfoldable_non_snippet_use(ctx, &reader),
+                    ));
+                }
+            } else {
+                folded_non_snippet_snippets.insert(reader.clone());
             }
-            folded_non_snippet_snippets.insert(reader.clone());
         }
         let snippet = ctx
             .prelude
