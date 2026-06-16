@@ -150,6 +150,40 @@ later A-tier extractions all import `super::analysis::*` cleanly
 instead of relying on long `pub(crate)` chains scattered through
 lib.rs.
 
+### Session of 2026-05-23 (continuation 2 — phase 3-B kickoff + utility consolidation)
+
+8 commits, `lib.rs` 32,278 → 31,358 = -920 lines (-2.8%):
+
+- `f84cede` move `skip_non_code_at` + `arg_text_is_single_expression`
+  into `byte_lexer.rs` (shared byte-walking utilities)
+- `9a5a54e` move `inline_internal_setter_calls`* into
+  `runtime_helper_writes.rs` (logical pairing with the write rewriter)
+- `fba5c07` extract `SourceModuleFacts` analysis bus into
+  `source_module_facts.rs` (3 indexes + `from_program`)
+- `3286cde` move `runtime_namespace_export_statement` +
+  `noop_function_statement` + `property_key_source` into `statements.rs`
+- `136ab3f` extract `BindingOwnerPlan` / `BindingOwner` /
+  `RuntimeOwnerImportPartition` into `binding_owner.rs` (175 lines).
+  Required `pub(crate)` field bumps on `RuntimeVarMigrationPlan`,
+  `RuntimeVarMigration`, `RuntimeOwnedSnippetMigration`,
+  `PackageRuntimeOwner`, `PackageRuntimeIslandPlan`,
+  `RuntimePreludeDirectImport`, `RuntimePreludeDirectImportKind`.
+- `259aa14` extract runtime-helper body strip helpers
+  (`classify_migratable_var_declaration`,
+  `strip_runtime_var_declarations`, `strip_runtime_snippet_sources`,
+  `strip_runtime_namespace_export_sources`,
+  `find_runtime_source_chunk`) into `runtime_helper_strip.rs`
+- `7d95c4d` extract top-level import-declaration coalescing
+  (`coalesce_top_level_import_declarations` + 8 supporting parsers and
+  `MergeableImportDeclaration`) into `import_coalesce.rs` (430 lines —
+  biggest single extraction this session)
+
+Phase 3-A: 4 of 10 still pending (eager_safe_analysis,
+runtime_prelude_imports, runtime_setter_migration computation,
+runtime_singleton_inline, runtime_var_migration, package_runtime). Most
+have heavy dependency chains; the remaining work belongs in future
+sessions where each extraction can stand alone as a focused commit.
+
 Remaining in `reverts-cli` Phase 1 (~1 session):
 
 - `persist_package_attributions` cluster (~1500 lines, ~10 helper deps) into
