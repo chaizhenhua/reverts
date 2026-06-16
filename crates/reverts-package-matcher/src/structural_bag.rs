@@ -19,7 +19,9 @@ use semver::Version;
 
 use crate::{
     ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
-    has_accepted_external_attribution, package_module_source_quality,
+    VersionedPackageMatchReport, accepted_external_modules, has_accepted_external_attribution,
+    has_direct_neighborhood_package_contradiction, ownership_by_module,
+    package_module_source_quality,
 };
 
 /// Result of aggregate structural-bag ownership matching.
@@ -1092,5 +1094,40 @@ mod tests {
             best_package_score(&module, &[&package]).is_none(),
             "single-function wrappers are too risky for shape-only ownership"
         );
+    }
+}
+
+/// Promote aggregate structural-bag matches into the project's matching
+/// report. Each candidate is admitted unless its target module is already
+/// accepted, already covered by a stronger match, or contradicted by its
+/// direct neighborhood's package ownership profile.
+pub(crate) fn promote_structural_bag_ownership_matches(
+    rows: &InputRows,
+    structural_matches: &[PackageMatch],
+    report: &mut VersionedPackageMatchReport,
+) {
+    let already_accepted = accepted_external_modules(rows, report);
+    let mut matched_modules = report
+        .matches
+        .iter()
+        .map(|package_match| package_match.module_id)
+        .collect::<BTreeSet<_>>();
+    let ownership_by_module = ownership_by_module(rows, report);
+
+    for package_match in structural_matches {
+        if package_match.external_importable
+            || already_accepted.contains(&package_match.module_id)
+            || matched_modules.contains(&package_match.module_id)
+            || has_direct_neighborhood_package_contradiction(
+                rows,
+                package_match.module_id,
+                package_match.package_name.as_str(),
+                &ownership_by_module,
+            )
+        {
+            continue;
+        }
+        matched_modules.insert(package_match.module_id);
+        report.matches.push(package_match.clone());
     }
 }

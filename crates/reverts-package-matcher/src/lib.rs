@@ -1,10 +1,16 @@
 pub mod acceptance;
 pub mod cascade;
 pub mod cascade_match;
+mod cascade_ownership;
+mod dependency_neighborhood;
+mod exact_hint_ownership;
 pub mod hungarian;
+mod importable_ownership;
+mod package_file_graph_ownership;
 pub mod package_helpers;
 pub mod structural_bag;
 pub mod tier;
+mod weak_source_equivalent;
 
 pub use acceptance::{AcceptanceDecision, classify};
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
@@ -532,7 +538,9 @@ pub enum PackageModuleSourceQuality {
 }
 
 #[must_use]
-fn package_module_source_quality_label(quality: PackageModuleSourceQuality) -> &'static str {
+pub(crate) fn package_module_source_quality_label(
+    quality: PackageModuleSourceQuality,
+) -> &'static str {
     match quality {
         PackageModuleSourceQuality::Trusted => "trusted",
         PackageModuleSourceQuality::Weak => "weak",
@@ -797,7 +805,7 @@ pub fn match_packages_with_pipeline(
         match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources)
     };
     mark_timing!("cascade_match");
-    promote_cascade_function_coverage_to_module_attributions(
+    cascade_ownership::promote_cascade_function_coverage_to_module_attributions(
         rows,
         &fingerprints_by_module,
         &cascade_report,
@@ -827,24 +835,45 @@ pub fn match_packages_with_pipeline(
         )
     };
     mark_timing!("structural_bag");
-    promote_structural_bag_ownership_matches(
+    structural_bag::promote_structural_bag_ownership_matches(
         rows,
         structural_bag_report.matches.as_slice(),
         &mut package_report,
     );
     mark_timing!("structural_promote");
     package_report.audit.extend(structural_bag_report.audit);
-    promote_weak_source_equivalent_matches(rows, package_sources, &mut package_report);
+    weak_source_equivalent::promote_weak_source_equivalent_matches(
+        rows,
+        package_sources,
+        &mut package_report,
+    );
     mark_timing!("weak_source_equivalent");
-    promote_exact_hint_ownership_matches(rows, package_sources, &mut package_report);
+    exact_hint_ownership::promote_exact_hint_ownership_matches(
+        rows,
+        package_sources,
+        &mut package_report,
+    );
     mark_timing!("exact_hint_promote");
-    promote_dependency_closure_ownership_matches(rows, &mut package_report);
+    dependency_neighborhood::promote_dependency_closure_ownership_matches(
+        rows,
+        &mut package_report,
+    );
     mark_timing!("dependency_closure");
-    promote_dependency_cluster_ownership_matches(rows, &mut package_report);
+    dependency_neighborhood::promote_dependency_cluster_ownership_matches(
+        rows,
+        &mut package_report,
+    );
     mark_timing!("dependency_cluster");
-    promote_package_file_graph_ownership_matches(rows, &mut package_report);
+    package_file_graph_ownership::promote_package_file_graph_ownership_matches(
+        rows,
+        &mut package_report,
+    );
     mark_timing!("package_file_graph");
-    promote_importable_ownership_matches(rows, package_sources, &mut package_report);
+    importable_ownership::promote_importable_ownership_matches(
+        rows,
+        package_sources,
+        &mut package_report,
+    );
     mark_timing!("importable_promote");
     let matched_package_names = package_filter
         .cloned()
@@ -982,897 +1011,7 @@ fn match_with_cascade_scoped_by_module_hints(
     merged
 }
 
-fn promote_cascade_function_coverage_to_module_attributions(
-    rows: &InputRows,
-    fingerprints_by_module: &BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
-    cascade_report: &CascadeMatchReport,
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = report
-        .attributions
-        .iter()
-        .chain(rows.package_attributions.iter())
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
-        .map(|attribution| attribution.module_id)
-        .collect::<BTreeSet<_>>();
-    let matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let cascade_ownership_by_module = cascade_report.ownership_matches.iter().fold(
-        BTreeMap::<ModuleId, Vec<&CascadeOwnershipMatch>>::new(),
-        |mut by_module, ownership| {
-            by_module
-                .entry(ownership.module_id)
-                .or_default()
-                .push(ownership);
-            by_module
-        },
-    );
-
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package
-            || already_accepted.contains(&module.id)
-            || matched_modules.contains(&module.id)
-        {
-            continue;
-        }
-        let Some(expected_package_name) = module.package_name.as_deref() else {
-            continue;
-        };
-        let Some(fingerprints) = fingerprints_by_module.get(&module.id) else {
-            continue;
-        };
-        let Some(cascade_ownership) = cascade_ownership_by_module.get(&module.id) else {
-            continue;
-        };
-        if fingerprints.is_empty() {
-            continue;
-        }
-        let mut ownership_by_package_version =
-            BTreeMap::<(&str, &str), Vec<&CascadeOwnershipMatch>>::new();
-        for ownership in cascade_ownership {
-            ownership_by_package_version
-                .entry((
-                    ownership.package_name.as_str(),
-                    ownership.package_version.as_str(),
-                ))
-                .or_default()
-                .push(*ownership);
-        }
-        let mut ranked_ownership = ownership_by_package_version
-            .into_iter()
-            .map(|(package_version, ownership)| {
-                let covered_spans = ownership
-                    .iter()
-                    .map(|ownership| ownership.function_span)
-                    .collect::<BTreeSet<_>>();
-                (package_version, ownership, covered_spans)
-            })
-            .collect::<Vec<_>>();
-        ranked_ownership.sort_by(|left, right| {
-            right
-                .2
-                .len()
-                .cmp(&left.2.len())
-                .then_with(|| left.0.cmp(&right.0))
-        });
-        let Some(((package_name, package_version), selected_ownership, covered_spans)) =
-            ranked_ownership.first()
-        else {
-            continue;
-        };
-        let package_name = *package_name;
-        let package_version = *package_version;
-        if package_name != expected_package_name {
-            continue;
-        }
-        if module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .is_some_and(|expected_version| package_version != expected_version)
-        {
-            continue;
-        }
-
-        let covered_count = covered_spans.len();
-        let runner_up_count = ranked_ownership.get(1).map_or(0, |ranked| ranked.2.len());
-        let is_full_coverage =
-            covered_count == fingerprints.len() && cascade_ownership.len() == fingerprints.len();
-        if !is_full_coverage
-            && !accept_partial_cascade_coverage(
-                fingerprints.len(),
-                covered_count,
-                cascade_ownership
-                    .iter()
-                    .map(|ownership| ownership.function_span)
-                    .collect::<BTreeSet<_>>()
-                    .len(),
-                runner_up_count,
-            )
-        {
-            continue;
-        }
-
-        let export_specifiers = selected_ownership
-            .iter()
-            .map(|ownership| ownership.export_specifier.as_str())
-            .collect::<BTreeSet<_>>();
-        let has_exact_function_import_proof = selected_ownership
-            .iter()
-            .all(cascade_ownership_has_exact_import_proof);
-        let can_externalize = is_full_coverage
-            && has_exact_function_import_proof
-            && selected_ownership
-                .iter()
-                .all(|ownership| ownership.external_importable)
-            && export_specifiers.len() == 1;
-        let strategy = if is_full_coverage && has_exact_function_import_proof {
-            ModuleMatchStrategy::CascadeFunctionCoverage
-        } else if is_full_coverage {
-            ModuleMatchStrategy::CascadeFunctionOwnership
-        } else {
-            ModuleMatchStrategy::CascadePartialFunctionCoverage
-        };
-        let export_specifier = export_specifiers.first().copied().unwrap_or(package_name);
-
-        if can_externalize {
-            let mut attribution = PackageAttributionInput::accepted_external(
-                module.id,
-                package_name,
-                package_version,
-                export_specifier,
-            );
-            if let Some((_package_name, Some(subpath))) = split_bare_specifier(export_specifier) {
-                attribution = attribution.with_subpath(subpath);
-            }
-            report.attributions.push(attribution);
-        }
-        report.matches.push(PackageMatch {
-            module_id: module.id,
-            package_name: package_name.to_string(),
-            package_version: package_version.to_string(),
-            export_specifier: export_specifier.to_string(),
-            source_path: format!("cascade:{export_specifier}"),
-            normalized_source_hash: String::new(),
-            strategy,
-            function_signature_matches: covered_count,
-            string_anchor_matches: 0,
-            external_importable: can_externalize,
-        });
-    }
-}
-
-fn cascade_ownership_has_exact_import_proof(ownership: &&CascadeOwnershipMatch) -> bool {
-    matches!(
-        ownership.confidence.tier,
-        reverts_ir::MatchTier::Exact | reverts_ir::MatchTier::ExactAlternate
-    )
-}
-
-fn promote_structural_bag_ownership_matches(
-    rows: &InputRows,
-    structural_matches: &[PackageMatch],
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let ownership_by_module = ownership_by_module(rows, report);
-
-    for package_match in structural_matches {
-        if package_match.external_importable
-            || already_accepted.contains(&package_match.module_id)
-            || matched_modules.contains(&package_match.module_id)
-            || has_direct_neighborhood_package_contradiction(
-                rows,
-                package_match.module_id,
-                package_match.package_name.as_str(),
-                &ownership_by_module,
-            )
-        {
-            continue;
-        }
-        matched_modules.insert(package_match.module_id);
-        report.matches.push(package_match.clone());
-    }
-}
-
-fn promote_weak_source_equivalent_matches(
-    rows: &InputRows,
-    package_sources: &[PackageSource],
-    report: &mut VersionedPackageMatchReport,
-) {
-    let mut source_fingerprints = Vec::<PackageSourceFingerprint<'_>>::new();
-    let mut source_indices_by_version_hash =
-        BTreeMap::<(String, String, String), Vec<usize>>::new();
-    for source in package_sources {
-        let Ok(fingerprint) = package_source_fingerprint(source) else {
-            continue;
-        };
-        let source_index = source_fingerprints.len();
-        for hash in &fingerprint.normalized_source_hashes {
-            source_indices_by_version_hash
-                .entry((
-                    source.package_name.clone(),
-                    source.package_version.clone(),
-                    hash.clone(),
-                ))
-                .or_default()
-                .push(source_index);
-        }
-        source_fingerprints.push(fingerprint);
-    }
-    if source_fingerprints.is_empty() {
-        return;
-    }
-
-    let mut already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package
-            || already_accepted.contains(&module.id)
-            || matched_modules.contains(&module.id)
-        {
-            continue;
-        }
-        let Some(package_name) = module
-            .package_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|package_name| !package_name.is_empty())
-        else {
-            continue;
-        };
-        let Some(package_version) = module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|package_version| is_exact_package_version_hint(package_version))
-        else {
-            continue;
-        };
-        let Some(slice) = rows.module_source_slice(module.id) else {
-            continue;
-        };
-        if package_module_source_quality(module, slice.source_file_path, slice.source)
-            != PackageModuleSourceQuality::Weak
-        {
-            continue;
-        }
-        let Ok(module_fingerprint) =
-            module_match_fingerprint(module, slice.source_file_path, slice.source)
-        else {
-            continue;
-        };
-        let candidate_indices = module_fingerprint
-            .normalized_source_hashes
-            .iter()
-            .filter_map(|hash| {
-                source_indices_by_version_hash.get(&(
-                    package_name.to_string(),
-                    package_version.to_string(),
-                    hash.clone(),
-                ))
-            })
-            .flat_map(|indices| indices.iter().copied())
-            .collect::<BTreeSet<_>>();
-        if candidate_indices.is_empty() {
-            continue;
-        }
-        let candidates = candidate_indices
-            .iter()
-            .filter_map(|index| source_fingerprints.get(*index))
-            .collect::<Vec<_>>();
-        let Some(selection) = disambiguate_exact_source_candidate(candidates.as_slice()) else {
-            continue;
-        };
-        let module_match = module_package_match(
-            &module_fingerprint,
-            selection.source,
-            ModuleMatchStrategy::NormalizedSourceHash,
-            selection
-                .source
-                .function_signature_hashes
-                .intersection(&module_fingerprint.function_signature_hashes)
-                .count(),
-            selection
-                .source
-                .string_anchors
-                .intersection(&module_fingerprint.string_anchors)
-                .count(),
-            selection.external_importable,
-        );
-        if module_match.external_importable {
-            report
-                .attributions
-                .push(accepted_attribution_from_match(&module_match));
-            already_accepted.insert(module.id);
-        }
-        report
-            .matches
-            .push(PackageMatch::from_module_match(&module_match));
-        matched_modules.insert(module.id);
-    }
-}
-
-fn promote_exact_hint_ownership_matches(
-    rows: &InputRows,
-    package_sources: &[PackageSource],
-    report: &mut VersionedPackageMatchReport,
-) {
-    let available_versions = package_sources
-        .iter()
-        .map(|source| {
-            (
-                source.package_name.as_str().to_string(),
-                source.package_version.as_str().to_string(),
-            )
-        })
-        .collect::<BTreeSet<_>>();
-    if available_versions.is_empty() {
-        return;
-    }
-
-    let mut already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package || already_accepted.contains(&module.id) {
-            continue;
-        }
-        let Some(package_name) = module
-            .package_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|package_name| !package_name.is_empty())
-        else {
-            continue;
-        };
-        let Some(package_version) = module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|package_version| !package_version.is_empty())
-            .filter(|package_version| Version::parse(package_version).is_ok())
-        else {
-            continue;
-        };
-        if !available_versions.contains(&(package_name.to_string(), package_version.to_string())) {
-            continue;
-        }
-        let Some(slice) = rows.module_source_slice(module.id) else {
-            continue;
-        };
-        let quality = package_module_source_quality(module, slice.source_file_path, slice.source);
-        if quality == PackageModuleSourceQuality::Invalid {
-            continue;
-        }
-        let external_specifier = (quality == PackageModuleSourceQuality::Trusted)
-            .then(|| {
-                exact_hint_external_specifier(
-                    package_sources,
-                    package_name,
-                    package_version,
-                    module.semantic_path.as_str(),
-                )
-            })
-            .flatten();
-        let external_importable = external_specifier.is_some();
-        let export_specifier = external_specifier.unwrap_or_else(|| package_name.to_string());
-        if matched_modules.contains(&module.id) {
-            if external_importable
-                && let Some(existing_match) = report.matches.iter_mut().find(|package_match| {
-                    package_match.module_id == module.id
-                        && package_match.package_name == package_name
-                        && package_match.package_version == package_version
-                })
-            {
-                existing_match.export_specifier = export_specifier.clone();
-                existing_match.source_path = exact_hint_source_path(
-                    package_name,
-                    package_version,
-                    quality,
-                    module.semantic_path.as_str(),
-                );
-                existing_match.external_importable = true;
-                report
-                    .attributions
-                    .push(accepted_external_attribution_for_module(
-                        module.id,
-                        package_name,
-                        package_version,
-                        export_specifier.as_str(),
-                    ));
-                already_accepted.insert(module.id);
-            }
-            continue;
-        }
-        matched_modules.insert(module.id);
-        if external_importable {
-            report
-                .attributions
-                .push(accepted_external_attribution_for_module(
-                    module.id,
-                    package_name,
-                    package_version,
-                    export_specifier.as_str(),
-                ));
-            already_accepted.insert(module.id);
-        }
-        report.matches.push(PackageMatch {
-            module_id: module.id,
-            package_name: package_name.to_string(),
-            package_version: package_version.to_string(),
-            export_specifier,
-            source_path: exact_hint_source_path(
-                package_name,
-                package_version,
-                quality,
-                module.semantic_path.as_str(),
-            ),
-            normalized_source_hash: String::new(),
-            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-            function_signature_matches: 0,
-            string_anchor_matches: 0,
-            external_importable,
-        });
-    }
-}
-
-fn accepted_external_attribution_for_module(
-    module_id: ModuleId,
-    package_name: &str,
-    package_version: &str,
-    export_specifier: &str,
-) -> PackageAttributionInput {
-    let mut attribution = PackageAttributionInput::accepted_external(
-        module_id,
-        package_name,
-        package_version,
-        export_specifier,
-    );
-    if let Some((_package_name, Some(subpath))) = split_bare_specifier(export_specifier) {
-        attribution = attribution.with_subpath(subpath);
-    }
-    attribution
-}
-
-fn exact_hint_source_path(
-    package_name: &str,
-    package_version: &str,
-    quality: PackageModuleSourceQuality,
-    semantic_path: &str,
-) -> String {
-    format!(
-        "exact-hint:{package_name}@{package_version}:quality={}:semantic_path={semantic_path}",
-        package_module_source_quality_label(quality),
-    )
-}
-
-fn exact_hint_external_specifier(
-    package_sources: &[PackageSource],
-    package_name: &str,
-    package_version: &str,
-    semantic_path: &str,
-) -> Option<String> {
-    let specifiers = package_sources
-        .iter()
-        .filter(|source| {
-            source.package_name == package_name
-                && source.package_version == package_version
-                && source.external_importable
-                && !is_json_source_path(source.source_path.as_str())
-                && source.export_specifier == package_name
-                && (semantic_path_is_package_root(package_name, semantic_path)
-                    || semantic_path_matches_package_source_entry(semantic_path, source))
-        })
-        .map(|source| source.export_specifier.clone())
-        .collect::<BTreeSet<_>>();
-    (specifiers.len() == 1).then(|| {
-        specifiers
-            .into_iter()
-            .next()
-            .expect("one root external specifier")
-    })
-}
-
-fn semantic_path_matches_package_source_entry(semantic_path: &str, source: &PackageSource) -> bool {
-    normalized_semantic_path(semantic_path)
-        .is_some_and(|semantic_path| semantic_path == package_source_semantic_entry_path(source))
-}
-
-fn normalized_semantic_path(path: &str) -> Option<String> {
-    let clean = path
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .replace('\\', "/");
-    let clean = strip_source_extension(clean.as_str()).trim_matches('/');
-    let clean = strip_generated_module_semantic_prefix(clean);
-    (!clean.is_empty()).then(|| clean.to_string())
-}
-
-fn strip_generated_module_semantic_prefix(path: &str) -> &str {
-    let Some(rest) = path.strip_prefix("modules/") else {
-        return path;
-    };
-    let Some((id, semantic_path)) = rest.split_once('-') else {
-        return path;
-    };
-    if !id.is_empty() && id.chars().all(|ch| ch.is_ascii_digit()) && !semantic_path.is_empty() {
-        semantic_path
-    } else {
-        path
-    }
-}
-
-fn package_source_semantic_entry_path(source: &PackageSource) -> String {
-    let prefix = format!("{}@{}/", source.package_name, source.package_version);
-    let entry_path = source
-        .source_path
-        .strip_prefix(prefix.as_str())
-        .unwrap_or(source.source_path.as_str());
-    normalized_semantic_path(entry_path).unwrap_or_default()
-}
-
-fn semantic_path_is_package_root(package_name: &str, semantic_path: &str) -> bool {
-    let Some(clean) = normalized_semantic_path(semantic_path) else {
-        return false;
-    };
-    for prefix in package_semantic_path_prefixes(package_name) {
-        let prefix = prefix.trim_matches('/');
-        if clean.as_str() == prefix {
-            return true;
-        }
-        if let Some(rest) = clean.as_str().strip_prefix(format!("{prefix}/").as_str()) {
-            let rest = strip_source_extension(rest).trim_matches('/');
-            if rest.is_empty()
-                || rest == "index"
-                || rest
-                    .split('/')
-                    .all(|segment| is_build_path_segment(segment) || segment == "index")
-            {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn promote_dependency_closure_ownership_matches(
-    rows: &InputRows,
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let mut ownership_by_module = ownership_by_module(rows, report);
-
-    let mut round = 0usize;
-    loop {
-        round += 1;
-        let mut promoted = Vec::<(PackageMatch, DependencyNeighborhoodEvidence)>::new();
-        for module in &rows.modules {
-            if module.kind != ModuleKind::Package
-                || already_accepted.contains(&module.id)
-                || matched_modules.contains(&module.id)
-            {
-                continue;
-            }
-            let Some(package_name) = module.package_name.as_deref() else {
-                continue;
-            };
-            let Some(evidence) = dependency_neighborhood_ownership_evidence(
-                rows,
-                module,
-                package_name,
-                &ownership_by_module,
-            ) else {
-                continue;
-            };
-            promoted.push((
-                PackageMatch {
-                    module_id: module.id,
-                    package_name: package_name.to_string(),
-                    package_version: evidence.package_version.clone(),
-                    export_specifier: package_name.to_string(),
-                    source_path: dependency_neighborhood_source_path(
-                        package_name,
-                        &evidence,
-                        round,
-                    ),
-                    normalized_source_hash: String::new(),
-                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-                    function_signature_matches: evidence.same_package_owned_neighbors,
-                    string_anchor_matches: evidence.owned_neighbors,
-                    external_importable: false,
-                },
-                evidence,
-            ));
-        }
-        if promoted.is_empty() {
-            break;
-        }
-        for (package_match, evidence) in promoted {
-            matched_modules.insert(package_match.module_id);
-            ownership_by_module.insert(
-                package_match.module_id,
-                (
-                    package_match.package_name.clone(),
-                    evidence.package_version.clone(),
-                ),
-            );
-            report.matches.push(package_match);
-        }
-    }
-}
-
-fn promote_dependency_cluster_ownership_matches(
-    rows: &InputRows,
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let mut ownership_by_module = ownership_by_module(rows, report);
-    let modules_by_id = rows
-        .modules
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-
-    for component in package_dependency_components(rows) {
-        let component_modules = component
-            .iter()
-            .filter_map(|module_id| modules_by_id.get(module_id).copied())
-            .collect::<Vec<_>>();
-        let package_named_count = component_modules
-            .iter()
-            .filter(|module| module.package_name.is_some())
-            .count();
-        if package_named_count < 4 {
-            continue;
-        }
-        let component_owned_total = component
-            .iter()
-            .filter(|module_id| ownership_by_module.contains_key(module_id))
-            .count();
-        if component_owned_total < 3 {
-            continue;
-        }
-        let mut hint_counts = BTreeMap::<String, usize>::new();
-        let mut seed_counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
-        for module in &component_modules {
-            if let Some(package_name) = module.package_name.as_deref() {
-                *hint_counts.entry(package_name.to_string()).or_default() += 1;
-            }
-            if let Some((package_name, package_version)) = ownership_by_module.get(&module.id) {
-                *seed_counts
-                    .entry(package_name.clone())
-                    .or_default()
-                    .entry(package_version.clone())
-                    .or_default() += 1;
-            }
-        }
-
-        for (package_name, hint_count) in hint_counts {
-            let Some(version_counts) = seed_counts.get(&package_name) else {
-                continue;
-            };
-            let same_package_seed_count = version_counts.values().sum::<usize>();
-            if same_package_seed_count < 3
-                || same_package_seed_count * 100 < component_owned_total * 70
-                || same_package_seed_count * 100 < hint_count * 10
-            {
-                continue;
-            }
-            let Some((package_version, version_seed_count)) = version_counts
-                .iter()
-                .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
-            else {
-                continue;
-            };
-            if *version_seed_count * 100 < same_package_seed_count * 70 {
-                continue;
-            }
-
-            let target_modules = component_modules
-                .iter()
-                .copied()
-                .filter(|module| {
-                    module.package_name.as_deref() == Some(package_name.as_str())
-                        && !already_accepted.contains(&module.id)
-                        && !matched_modules.contains(&module.id)
-                        && module.package_version.as_deref().is_none_or(|expected| {
-                            expected.trim().is_empty() || expected.trim() == package_version
-                        })
-                        && !has_direct_neighborhood_package_contradiction(
-                            rows,
-                            module.id,
-                            package_name.as_str(),
-                            &ownership_by_module,
-                        )
-                })
-                .collect::<Vec<_>>();
-            if target_modules.is_empty() {
-                continue;
-            }
-
-            for module in target_modules {
-                matched_modules.insert(module.id);
-                ownership_by_module
-                    .insert(module.id, (package_name.clone(), package_version.clone()));
-                report.matches.push(PackageMatch {
-                    module_id: module.id,
-                    package_name: package_name.clone(),
-                    package_version: package_version.clone(),
-                    export_specifier: package_name.clone(),
-                    source_path: format!(
-                        "dependency-cluster:{package_name}@{package_version}:owned_seeds={same_package_seed_count}/{component_owned_total}:version_seeds={version_seed_count}:hinted={hint_count}/{package_named_count}:component_size={}",
-                        component.len(),
-                    ),
-                    normalized_source_hash: String::new(),
-                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-                    function_signature_matches: same_package_seed_count,
-                    string_anchor_matches: hint_count,
-                    external_importable: false,
-                });
-            }
-        }
-    }
-}
-
-fn promote_package_file_graph_ownership_matches(
-    rows: &InputRows,
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let mut matched_modules = report
-        .matches
-        .iter()
-        .map(|package_match| package_match.module_id)
-        .collect::<BTreeSet<_>>();
-    let mut ownership_by_module = ownership_by_module(rows, report);
-    let mut modules_by_file = BTreeMap::<u32, Vec<&ModuleInput>>::new();
-    for module in &rows.modules {
-        if module.kind != ModuleKind::Package || module.source_span.is_none() {
-            continue;
-        }
-        let Some(source_file_id) = module.source_file_id else {
-            continue;
-        };
-        modules_by_file
-            .entry(source_file_id)
-            .or_default()
-            .push(module);
-    }
-
-    for (source_file_id, mut file_modules) in modules_by_file {
-        file_modules.sort_by(|left, right| {
-            module_file_order_key(left)
-                .cmp(&module_file_order_key(right))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        for run in package_file_graph_runs(file_modules.as_slice()) {
-            promote_package_file_graph_run(
-                rows,
-                source_file_id,
-                run.as_slice(),
-                &already_accepted,
-                &mut matched_modules,
-                &mut ownership_by_module,
-                report,
-            );
-        }
-    }
-}
-
-fn promote_importable_ownership_matches(
-    rows: &InputRows,
-    package_sources: &[PackageSource],
-    report: &mut VersionedPackageMatchReport,
-) {
-    let already_accepted = accepted_external_modules(rows, report);
-    let modules_by_id = rows
-        .modules
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    let external_source_index = ExternalImportSourceIndex::build(package_sources);
-    let mut promotions = Vec::<(usize, PackageAttributionInput, String, String)>::new();
-
-    for (idx, package_match) in report.matches.iter().enumerate() {
-        if package_match.external_importable || already_accepted.contains(&package_match.module_id)
-        {
-            continue;
-        }
-        if !source_only_match_can_be_promoted_to_import(package_match.strategy) {
-            continue;
-        }
-        let Some(module) = modules_by_id.get(&package_match.module_id).copied() else {
-            continue;
-        };
-        if module.kind != ModuleKind::Package
-            || module.package_name.as_deref() != Some(package_match.package_name.as_str())
-            || module.package_version.as_deref().is_some_and(|expected| {
-                let expected = expected.trim();
-                !expected.is_empty() && expected != package_match.package_version
-            })
-        {
-            continue;
-        }
-        let Some(slice) = rows.module_source_slice(module.id) else {
-            continue;
-        };
-        if package_module_source_quality(module, slice.source_file_path, slice.source)
-            != PackageModuleSourceQuality::Trusted
-        {
-            continue;
-        }
-        let Some(import_target) = importable_package_source_for_module(
-            module,
-            package_match,
-            &external_source_index,
-            slice.source,
-        ) else {
-            continue;
-        };
-        let mut attribution = PackageAttributionInput::accepted_external(
-            module.id,
-            package_match.package_name.as_str(),
-            package_match.package_version.as_str(),
-            import_target.export_specifier.as_str(),
-        )
-        .with_resolved_file(import_target.source_path.as_str());
-        if let Some((_package_name, Some(subpath))) =
-            split_bare_specifier(import_target.export_specifier.as_str())
-        {
-            attribution = attribution.with_subpath(subpath);
-        }
-        promotions.push((
-            idx,
-            attribution,
-            import_target.export_specifier,
-            import_target.source_path,
-        ));
-    }
-
-    for (idx, attribution, export_specifier, source_path) in promotions {
-        if let Some(package_match) = report.matches.get_mut(idx) {
-            package_match.external_importable = true;
-            package_match.export_specifier = export_specifier;
-            package_match.source_path = source_path;
-        }
-        report.attributions.push(attribution);
-    }
-}
-
-fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) -> bool {
+pub(crate) fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) -> bool {
     matches!(
         strategy,
         ModuleMatchStrategy::NormalizedSourceHash
@@ -2058,7 +1197,7 @@ impl<'a> ForceExternalizeCache<'a> {
 }
 
 #[derive(Debug, Default)]
-struct ExternalImportSourceIndex<'a> {
+pub(crate) struct ExternalImportSourceIndex<'a> {
     all_by_version_path:
         BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>>,
     all_by_version: BTreeMap<String, BTreeMap<String, Vec<&'a PackageSource>>>,
@@ -2072,7 +1211,7 @@ struct ExternalImportSourceIndex<'a> {
 }
 
 impl<'a> ExternalImportSourceIndex<'a> {
-    fn build(package_sources: &'a [PackageSource]) -> Self {
+    pub(crate) fn build(package_sources: &'a [PackageSource]) -> Self {
         let mut index = Self::default();
         for source in package_sources {
             index
@@ -2303,7 +1442,7 @@ fn compare_external_sources(left: &PackageSource, right: &PackageSource) -> Orde
         .then_with(|| left.source_path.cmp(&right.source_path))
 }
 
-fn importable_package_source_for_module(
+pub(crate) fn importable_package_source_for_module(
     module: &ModuleInput,
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'_>,
@@ -5103,148 +4242,6 @@ fn read_quoted_string_at(source: &str, start: usize) -> Option<(String, usize)> 
     None
 }
 
-fn module_file_order_key(module: &ModuleInput) -> (u32, u32) {
-    module
-        .source_span
-        .map(|span| (span.byte_start, span.byte_end))
-        .unwrap_or((u32::MAX, u32::MAX))
-}
-
-fn package_file_graph_runs<'a>(file_modules: &'a [&'a ModuleInput]) -> Vec<Vec<&'a ModuleInput>> {
-    let mut runs = Vec::new();
-    let mut current = Vec::<&ModuleInput>::new();
-    let mut current_package_name: Option<&str> = None;
-    for module in file_modules.iter().copied() {
-        let module_package_name = module.package_name.as_deref();
-        if !current.is_empty() && module_package_name != current_package_name {
-            runs.push(std::mem::take(&mut current));
-        }
-        current_package_name = module_package_name;
-        current.push(module);
-    }
-    if !current.is_empty() {
-        runs.push(current);
-    }
-    runs
-}
-
-fn promote_package_file_graph_run(
-    rows: &InputRows,
-    source_file_id: u32,
-    run: &[&ModuleInput],
-    already_accepted: &BTreeSet<ModuleId>,
-    matched_modules: &mut BTreeSet<ModuleId>,
-    ownership_by_module: &mut BTreeMap<ModuleId, (String, String)>,
-    report: &mut VersionedPackageMatchReport,
-) {
-    if run.len() < 3 {
-        return;
-    }
-    let Some(package_name) = run
-        .first()
-        .and_then(|module| module.package_name.as_deref())
-        .filter(|package_name| !package_name.trim().is_empty())
-    else {
-        return;
-    };
-    let mut owned_seed_count = 0usize;
-    let mut same_package_versions = BTreeMap::<String, usize>::new();
-    for module in run {
-        let Some((owned_package_name, owned_package_version)) = ownership_by_module.get(&module.id)
-        else {
-            continue;
-        };
-        owned_seed_count += 1;
-        if owned_package_name == package_name {
-            *same_package_versions
-                .entry(owned_package_version.clone())
-                .or_default() += 1;
-        }
-    }
-    let same_package_seed_count = same_package_versions.values().sum::<usize>();
-    if owned_seed_count == 0
-        || same_package_seed_count < 2
-        || same_package_seed_count * 100 < owned_seed_count * 70
-    {
-        return;
-    }
-    let Some((package_version, version_seed_count)) = same_package_versions
-        .iter()
-        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))
-    else {
-        return;
-    };
-    if *version_seed_count * 100 < same_package_seed_count * 70 {
-        return;
-    }
-    let Some((run_start, run_end)) = package_file_graph_run_span(run) else {
-        return;
-    };
-
-    for module in run {
-        if already_accepted.contains(&module.id) || matched_modules.contains(&module.id) {
-            continue;
-        }
-        if module.package_version.as_deref().is_some_and(|expected| {
-            let expected = expected.trim();
-            !expected.is_empty() && expected != package_version
-        }) {
-            continue;
-        }
-        if !package_file_graph_module_has_usable_source(rows, module) {
-            continue;
-        }
-        if has_direct_neighborhood_package_contradiction(
-            rows,
-            module.id,
-            package_name,
-            ownership_by_module,
-        ) {
-            continue;
-        }
-        matched_modules.insert(module.id);
-        ownership_by_module.insert(
-            module.id,
-            (package_name.to_string(), package_version.clone()),
-        );
-        report.matches.push(PackageMatch {
-            module_id: module.id,
-            package_name: package_name.to_string(),
-            package_version: package_version.clone(),
-            export_specifier: package_name.to_string(),
-            source_path: format!(
-                "package-file-graph:{package_name}@{package_version}:file={source_file_id}:owned_seeds={same_package_seed_count}/{owned_seed_count}:version_seeds={version_seed_count}:run_size={}:span={run_start}..{run_end}",
-                run.len(),
-            ),
-            normalized_source_hash: String::new(),
-            strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-            function_signature_matches: same_package_seed_count,
-            string_anchor_matches: run.len(),
-            external_importable: false,
-        });
-    }
-}
-
-fn package_file_graph_run_span(run: &[&ModuleInput]) -> Option<(u32, u32)> {
-    let start = run
-        .iter()
-        .filter_map(|module| module.source_span.map(|span| span.byte_start))
-        .min()?;
-    let end = run
-        .iter()
-        .filter_map(|module| module.source_span.map(|span| span.byte_end))
-        .max()?;
-    Some((start, end))
-}
-
-fn package_file_graph_module_has_usable_source(rows: &InputRows, module: &ModuleInput) -> bool {
-    let Some(slice) = rows.module_source_slice(module.id) else {
-        return false;
-    };
-    package_module_source_quality(module, slice.source_file_path, slice.source)
-        != PackageModuleSourceQuality::Invalid
-}
-
 fn unmatched_package_scope(rows: &InputRows) -> BTreeSet<String> {
     rows.modules
         .iter()
@@ -6441,7 +5438,7 @@ fn forced_external_import_target(
     )
 }
 
-fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
+pub(crate) fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
     let package_modules = rows
         .modules
         .iter()
@@ -6490,7 +5487,7 @@ fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
     components
 }
 
-fn has_direct_neighborhood_package_contradiction(
+pub(crate) fn has_direct_neighborhood_package_contradiction(
     rows: &InputRows,
     module_id: ModuleId,
     package_name: &str,
@@ -6507,18 +5504,18 @@ fn has_direct_neighborhood_package_contradiction(
 }
 
 #[derive(Debug, Clone)]
-struct DependencyNeighborhoodEvidence {
-    package_version: String,
-    same_package_owned_neighbors: usize,
-    owned_neighbors: usize,
-    same_version_owned_neighbors: usize,
-    same_outgoing_neighbors: usize,
-    owned_outgoing_neighbors: usize,
-    same_incoming_neighbors: usize,
-    owned_incoming_neighbors: usize,
+pub(crate) struct DependencyNeighborhoodEvidence {
+    pub(crate) package_version: String,
+    pub(crate) same_package_owned_neighbors: usize,
+    pub(crate) owned_neighbors: usize,
+    pub(crate) same_version_owned_neighbors: usize,
+    pub(crate) same_outgoing_neighbors: usize,
+    pub(crate) owned_outgoing_neighbors: usize,
+    pub(crate) same_incoming_neighbors: usize,
+    pub(crate) owned_incoming_neighbors: usize,
 }
 
-fn dependency_neighborhood_ownership_evidence(
+pub(crate) fn dependency_neighborhood_ownership_evidence(
     rows: &InputRows,
     module: &ModuleInput,
     package_name: &str,
@@ -6607,7 +5604,7 @@ fn directional_owned_neighbor_counts(
     (same, owned)
 }
 
-fn dependency_neighborhood_source_path(
+pub(crate) fn dependency_neighborhood_source_path(
     package_name: &str,
     evidence: &DependencyNeighborhoodEvidence,
     round: usize,
@@ -6632,24 +5629,6 @@ fn direct_module_neighborhood(rows: &InputRows, module_id: ModuleId) -> BTreeSet
         .into_iter()
         .chain(direct_module_dependents(rows, module_id))
         .collect()
-}
-
-fn accept_partial_cascade_coverage(
-    total_functions: usize,
-    covered_functions: usize,
-    ownership_spans: usize,
-    runner_up_functions: usize,
-) -> bool {
-    if total_functions < 3 || covered_functions < 2 {
-        return false;
-    }
-    if covered_functions * 100 < total_functions * 65 {
-        return false;
-    }
-    if ownership_spans == 0 || covered_functions * 100 < ownership_spans * 80 {
-        return false;
-    }
-    runner_up_functions == 0 || covered_functions >= runner_up_functions.saturating_mul(3)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6678,7 +5657,7 @@ pub struct PackageMatch {
 }
 
 impl PackageMatch {
-    fn from_module_match(module_match: &ModulePackageMatch) -> Self {
+    pub(crate) fn from_module_match(module_match: &ModulePackageMatch) -> Self {
         Self {
             module_id: module_match.module_id,
             package_name: module_match.package_name.clone(),
@@ -7292,7 +6271,7 @@ fn is_strong_path_hint_token(token: &str) -> bool {
         )
 }
 
-fn module_match_fingerprint(
+pub(crate) fn module_match_fingerprint(
     module: &ModuleInput,
     path: &str,
     source: &str,
@@ -7309,7 +6288,7 @@ fn module_match_fingerprint(
     })
 }
 
-fn package_source_fingerprint<'a>(
+pub(crate) fn package_source_fingerprint<'a>(
     source: &'a PackageSource,
 ) -> Result<PackageSourceFingerprint<'a>, String> {
     let fingerprint = fingerprint_source(source.source_path.as_str(), source.source.as_str())?;
@@ -8129,7 +7108,7 @@ struct ExactCandidateSelection<'a> {
     external_importable: bool,
 }
 
-fn disambiguate_exact_source_candidate<'a>(
+pub(crate) fn disambiguate_exact_source_candidate<'a>(
     candidates: &[&'a PackageSourceFingerprint<'a>],
 ) -> Option<ExactCandidateSelection<'a>> {
     let unique_keys = candidates
@@ -8178,7 +7157,7 @@ fn disambiguate_exact_source_candidate<'a>(
     None
 }
 
-fn module_package_match(
+pub(crate) fn module_package_match(
     module: &ModuleMatchFingerprint,
     source: &PackageSourceFingerprint<'_>,
     strategy: ModuleMatchStrategy,
@@ -8226,7 +7205,9 @@ fn module_package_aggregate_match(
     }
 }
 
-fn accepted_attribution_from_match(module_match: &ModulePackageMatch) -> PackageAttributionInput {
+pub(crate) fn accepted_attribution_from_match(
+    module_match: &ModulePackageMatch,
+) -> PackageAttributionInput {
     let mut attribution = PackageAttributionInput::accepted_external(
         module_match.module_id,
         module_match.package_name.as_str(),
@@ -8302,13 +7283,11 @@ mod tests {
         BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ConcretePackageSourcePath,
         ExternalImportSourceIndex, ForceExternalizeCache, ModuleMatchStrategy,
         PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality,
-        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher,
-        match_packages_with_pipeline, match_structural_bags,
+        PackageSource, VersionedPackageMatchReport, VersionedPackageMatcher, cascade_ownership,
+        exact_hint_ownership, match_packages_with_pipeline, match_structural_bags,
         match_structural_bags_with_excluded_modules, package_import_names_from_sources,
         package_module_source_quality, package_source_public_export_proofs,
-        promote_cascade_function_coverage_to_module_attributions,
-        promote_exact_hint_ownership_matches, resolve_external_import_target,
-        same_package_cross_version_source_external_import_target,
+        resolve_external_import_target, same_package_cross_version_source_external_import_target,
     };
     use reverts_graph::FunctionExtractor;
     use reverts_input::{
@@ -8999,7 +7978,7 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             audit: Default::default(),
         };
 
-        promote_cascade_function_coverage_to_module_attributions(
+        cascade_ownership::promote_cascade_function_coverage_to_module_attributions(
             &rows,
             &BTreeMap::from([(ModuleId(10), fingerprints)]),
             &cascade_report,
@@ -9049,7 +8028,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             audit: Default::default(),
         };
 
-        promote_exact_hint_ownership_matches(&rows, &package_sources, &mut report);
+        exact_hint_ownership::promote_exact_hint_ownership_matches(
+            &rows,
+            &package_sources,
+            &mut report,
+        );
 
         assert_eq!(report.matches.len(), 1);
         assert!(report.matches[0].external_importable);
@@ -9082,7 +8065,11 @@ Object.defineProperty(exports, "add", { enumerable: true, get: function () { ret
             audit: Default::default(),
         };
 
-        promote_exact_hint_ownership_matches(&rows, &package_sources, &mut report);
+        exact_hint_ownership::promote_exact_hint_ownership_matches(
+            &rows,
+            &package_sources,
+            &mut report,
+        );
 
         assert_eq!(report.matches.len(), 1);
         assert!(report.matches[0].external_importable);
