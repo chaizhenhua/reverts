@@ -5,6 +5,7 @@ mod destructure_writes;
 mod eager_safe_analysis;
 mod identifiers;
 mod import_coalesce;
+mod package_runtime;
 mod plan_error;
 mod pure_reexport_bypass;
 mod relative_paths;
@@ -12,6 +13,7 @@ mod runtime_helper_strip;
 mod runtime_helper_writes;
 mod runtime_namespace_rewrite;
 mod runtime_setter_migration_blocker;
+mod runtime_singleton_inline;
 mod runtime_source_read;
 mod runtime_var_migration;
 mod source_module_facts;
@@ -24,6 +26,17 @@ mod statement_parsers;
 mod statements;
 
 use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition};
+use package_runtime::{
+    PackageRuntimeHelperKey, PackageRuntimeHelperUsage, PackageRuntimeImportEmitter,
+    emit_package_runtime_helper_files, emit_package_runtime_helper_import,
+    package_runtime_island_plan, package_runtime_owner_for_module,
+    partition_package_runtime_bindings, push_packed_runtime_helper_imports,
+};
+use runtime_singleton_inline::{
+    RuntimeSingletonInlineEmitContext, emit_runtime_singleton_inline_helpers,
+    module_exported_bindings, partition_runtime_singleton_inline_bindings,
+    runtime_singleton_inline_plan,
+};
 use runtime_var_migration::{
     RuntimeOwnedSnippetMigration, RuntimeVarMigrationPlan, compute_runtime_var_migration_plan,
 };
@@ -45,8 +58,8 @@ use runtime_helper_strip::{
     strip_runtime_snippet_sources, strip_runtime_var_declarations,
 };
 use runtime_helper_writes::{
-    inline_internal_setter_calls, inline_internal_setter_calls_for_bindings,
-    is_simple_update_target, rewrite_runtime_helper_writes, update_operator_at,
+    inline_internal_setter_calls, is_simple_update_target, rewrite_runtime_helper_writes,
+    update_operator_at,
 };
 
 use pure_reexport_bypass::{
@@ -410,7 +423,7 @@ impl PlannedBinding {
 /// solver, and `known_members` are attached only for `NamespaceObject`
 /// (paper #7 downstream). Sites that synthesise runtime helpers bypass
 /// this and use `PlannedBinding::new` directly with their known shape.
-fn plan_binding_from_program(
+pub(crate) fn plan_binding_from_program(
     program: &EnrichedProgram,
     module_id: ModuleId,
     original: BindingName,
@@ -2779,1233 +2792,6 @@ pub(crate) struct RuntimeLazyFoldPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeSingletonInlineSnippet {
-    consumer_module: ModuleId,
-    byte_start: u32,
-    snippets: Vec<RuntimeSingletonInlineSnippetSource>,
-    direct_prelude_imports: BTreeMap<BindingName, RuntimePreludeDirectImport>,
-    source_imports: BTreeMap<ModuleId, BTreeSet<BindingName>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RuntimeSingletonInlineSnippetSource {
-    binding: BindingName,
-    byte_start: u32,
-    source: String,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeSingletonInlinePlan {
-    snippets_by_binding: BTreeMap<(u32, BindingName), RuntimeSingletonInlineSnippet>,
-}
-
-fn runtime_singleton_inline_plan(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    runtime_lazy_folds: &RuntimeLazyFoldPlan,
-    runtime_var_migrations: &RuntimeVarMigrationPlan,
-    direct_prelude_imports: &BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> RuntimeSingletonInlinePlan {
-    let modules_by_id = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    let source_definition_modules =
-        runtime_owner_definition_modules(program, externalized_packages);
-    let source_exported_bindings_by_module =
-        source_exported_bindings_by_module(program, source_module_wiring);
-    let module_dependencies_by_owner = module_dependency_modules_by_owner(program);
-    let mut consumers_by_binding = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
-    let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
-
-    for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
-            continue;
-        }
-        let mut used_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        for import in program.model().graph().runtime_imports_for(module.id) {
-            used_by_source
-                .entry(import.source_file_id)
-                .or_default()
-                .insert(import.binding);
-        }
-        if let Some(source) = lowered_runtime_sources.get(&module.id) {
-            used_by_source
-                .entry(source.source_file_id)
-                .or_default()
-                .extend(source.remaining_helpers.iter().cloned());
-            for written in &source.written_helpers {
-                blocked_bindings.insert((source.source_file_id, written.clone()));
-            }
-        }
-        for (source_file_id, bindings) in used_by_source {
-            for binding in bindings {
-                let key = (source_file_id, binding.clone());
-                if is_runtime_singleton_inline_excluded_binding(&binding)
-                    || runtime_var_migrations
-                        .migrated_owner(source_file_id, &binding)
-                        .is_some()
-                {
-                    blocked_bindings.insert(key);
-                    continue;
-                }
-                consumers_by_binding
-                    .entry(key)
-                    .or_default()
-                    .insert(module.id);
-            }
-        }
-    }
-
-    let mut plan = RuntimeSingletonInlinePlan::default();
-    let mut read_indices_by_source = BTreeMap::<u32, RuntimeSourceReadIndex>::new();
-    for ((source_file_id, binding), consumers) in &consumers_by_binding {
-        if consumers.len() != 1 || blocked_bindings.contains(&(*source_file_id, binding.clone())) {
-            continue;
-        }
-        let consumer_module = *consumers
-            .iter()
-            .next()
-            .expect("singleton consumer set must contain one module");
-        let Some(consumer) = modules_by_id.get(&consumer_module).copied() else {
-            continue;
-        };
-        if consumer.kind == ModuleKind::Package && externalized_packages.contains(&consumer_module)
-        {
-            continue;
-        }
-        if runtime_singleton_inline_consumer_has_name_conflict(
-            program,
-            lowered_runtime_sources,
-            consumer_module,
-            binding,
-        ) {
-            continue;
-        }
-        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
-            continue;
-        };
-        read_indices_by_source
-            .entry(*source_file_id)
-            .or_insert_with(|| {
-                let folded_chunks = runtime_lazy_folds
-                    .chunks_by_source_file
-                    .get(source_file_id)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
-                runtime_source_read_index(prelude, folded_chunks)
-            });
-        let read_index = read_indices_by_source
-            .get(source_file_id)
-            .expect("runtime read index should be cached");
-        let singleton_ctx = RuntimeSingletonInlineContext {
-            program,
-            lowered_runtime_sources,
-            runtime_var_migrations,
-            prelude,
-            read_index,
-            source_file_id: *source_file_id,
-            consumers_by_binding: &consumers_by_binding,
-            blocked_bindings: &blocked_bindings,
-            direct_prelude_imports: direct_prelude_imports.get(source_file_id),
-            source_definition_modules: &source_definition_modules,
-            source_exported_bindings_by_module: &source_exported_bindings_by_module,
-            module_dependencies_by_owner: &module_dependencies_by_owner,
-        };
-        let Some(inline_snippet) =
-            resolve_runtime_singleton_inline_snippet(&singleton_ctx, binding, consumer_module)
-        else {
-            continue;
-        };
-        plan.snippets_by_binding
-            .insert((*source_file_id, binding.clone()), inline_snippet);
-    }
-
-    plan
-}
-
-struct RuntimeSingletonInlineContext<'a> {
-    program: &'a EnrichedProgram,
-    lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    runtime_var_migrations: &'a RuntimeVarMigrationPlan,
-    prelude: &'a RuntimePrelude,
-    read_index: &'a RuntimeSourceReadIndex,
-    source_file_id: u32,
-    consumers_by_binding: &'a BTreeMap<(u32, BindingName), BTreeSet<ModuleId>>,
-    blocked_bindings: &'a BTreeSet<(u32, BindingName)>,
-    direct_prelude_imports: Option<&'a BTreeMap<BindingName, RuntimePreludeDirectImport>>,
-    source_definition_modules: &'a BTreeMap<BindingName, Option<ModuleId>>,
-    source_exported_bindings_by_module: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    module_dependencies_by_owner: &'a BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-}
-
-fn resolve_runtime_singleton_inline_snippet(
-    ctx: &RuntimeSingletonInlineContext<'_>,
-    root_binding: &BindingName,
-    consumer_module: ModuleId,
-) -> Option<RuntimeSingletonInlineSnippet> {
-    let mut cluster_bindings = BTreeSet::<BindingName>::new();
-    let mut direct_imports = BTreeMap::<BindingName, RuntimePreludeDirectImport>::new();
-    let mut source_imports = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-    let mut queue = vec![root_binding.clone()];
-
-    while let Some(binding) = queue.pop() {
-        if !cluster_bindings.insert(binding.clone()) {
-            continue;
-        }
-        let key = (ctx.source_file_id, binding.clone());
-        if ctx.blocked_bindings.contains(&key)
-            || ctx
-                .runtime_var_migrations
-                .migrated_owner(ctx.source_file_id, &binding)
-                .is_some()
-            || is_runtime_singleton_inline_excluded_binding(&binding)
-        {
-            return None;
-        }
-        if ctx.consumers_by_binding.get(&key).is_some_and(|consumers| {
-            consumers
-                .iter()
-                .any(|consumer| *consumer != consumer_module)
-        }) {
-            return None;
-        }
-        if runtime_singleton_inline_consumer_has_name_conflict(
-            ctx.program,
-            ctx.lowered_runtime_sources,
-            consumer_module,
-            &binding,
-        ) {
-            return None;
-        }
-        if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &binding)
-            || ctx
-                .read_index
-                .namespace_exports_by_namespace
-                .contains_key(&binding)
-        {
-            return None;
-        }
-        let snippet = ctx.prelude.snippets.get(&binding)?;
-        if !is_runtime_singleton_inline_snippet(&binding, snippet.source.as_str()) {
-            return None;
-        }
-        if implicit_global_writes_in_source(snippet.source.as_str())
-            .into_iter()
-            .any(|write| ctx.prelude.defines(&write))
-        {
-            return None;
-        }
-        let free_bindings = ctx.read_index.free_bindings_by_snippet.get(&binding)?;
-        for free_binding in free_bindings {
-            if cluster_bindings.contains(free_binding) {
-                continue;
-            }
-            if let Some(import) = ctx
-                .direct_prelude_imports
-                .and_then(|imports| imports.get(free_binding))
-            {
-                if runtime_singleton_inline_consumer_has_name_conflict(
-                    ctx.program,
-                    ctx.lowered_runtime_sources,
-                    consumer_module,
-                    free_binding,
-                ) {
-                    return None;
-                }
-                direct_imports.insert(free_binding.clone(), import.clone());
-                continue;
-            }
-            if ctx.prelude.defines(free_binding) {
-                queue.push(free_binding.clone());
-                continue;
-            }
-            if let Some(dep_module) = ctx
-                .source_definition_modules
-                .get(free_binding)
-                .and_then(|module_id| *module_id)
-            {
-                if dep_module == consumer_module
-                    || !ctx
-                        .source_exported_bindings_by_module
-                        .get(&dep_module)
-                        .is_some_and(|exports| exports.contains(free_binding))
-                    || module_dependency_path_exists(
-                        ctx.module_dependencies_by_owner,
-                        dep_module,
-                        consumer_module,
-                    )
-                    || runtime_singleton_inline_consumer_has_name_conflict(
-                        ctx.program,
-                        ctx.lowered_runtime_sources,
-                        consumer_module,
-                        free_binding,
-                    )
-                {
-                    return None;
-                }
-                source_imports
-                    .entry(dep_module)
-                    .or_default()
-                    .insert(free_binding.clone());
-                continue;
-            }
-            return None;
-        }
-    }
-
-    if !cluster_bindings.iter().all(|binding| {
-        runtime_readers_for_binding(ctx.read_index, binding)
-            .into_iter()
-            .all(|reader| reader == *binding || cluster_bindings.contains(&reader))
-    }) {
-        return None;
-    }
-    if cluster_bindings.iter().any(|binding| {
-        ctx.consumers_by_binding
-            .get(&(ctx.source_file_id, binding.clone()))
-            .is_some_and(|consumers| {
-                consumers
-                    .iter()
-                    .any(|consumer| *consumer != consumer_module)
-            })
-    }) {
-        return None;
-    }
-
-    let mut snippets = cluster_bindings
-        .iter()
-        .filter_map(|binding| {
-            let snippet = ctx.prelude.snippets.get(binding)?;
-            Some(RuntimeSingletonInlineSnippetSource {
-                binding: binding.clone(),
-                byte_start: snippet.byte_start,
-                source: snippet.source.clone(),
-            })
-        })
-        .collect::<Vec<_>>();
-    snippets.sort_by_key(|snippet| (snippet.byte_start, snippet.binding.clone()));
-    let byte_start = snippets
-        .iter()
-        .map(|snippet| snippet.byte_start)
-        .min()
-        .unwrap_or_default();
-
-    Some(RuntimeSingletonInlineSnippet {
-        consumer_module,
-        byte_start,
-        snippets,
-        direct_prelude_imports: direct_imports,
-        source_imports,
-    })
-}
-
-fn source_exported_bindings_by_module(
-    program: &EnrichedProgram,
-    source_module_wiring: &SourceModuleWiring,
-) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
-    program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| {
-            let mut exports = program
-                .model()
-                .graph()
-                .import_export()
-                .exports_for(module.id)
-                .into_iter()
-                .collect::<BTreeSet<_>>();
-            if let Some(wiring_exports) = source_module_wiring.exports_by_module.get(&module.id) {
-                exports.extend(wiring_exports.iter().cloned());
-            }
-            (module.id, exports)
-        })
-        .collect()
-}
-
-fn module_exported_bindings(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    wired_exports: Option<&BTreeSet<BindingName>>,
-    source: &str,
-) -> BTreeSet<BindingName> {
-    let mut exports = program
-        .model()
-        .graph()
-        .import_export()
-        .exports_for(module_id)
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    if let Some(wired_exports) = wired_exports {
-        exports.extend(wired_exports.iter().cloned());
-    }
-    if let Some((_stripped, named_exports)) = strip_top_level_named_exports(source) {
-        exports.extend(named_exports);
-    }
-    exports
-}
-
-fn is_runtime_singleton_inline_excluded_binding(binding: &BindingName) -> bool {
-    let name = binding.as_str();
-    name == "lazyModule"
-        || name == "lazyValue"
-        || name.starts_with("__reverts_set_")
-        || is_planner_synthetic_binding(name)
-}
-
-fn is_runtime_singleton_inline_snippet(binding: &BindingName, source: &str) -> bool {
-    is_migratable_reader_function_snippet(binding, source)
-        || classify_runtime_singleton_var_declaration(source, binding.as_str()).is_some()
-}
-
-fn classify_runtime_singleton_var_declaration<'a>(
-    snippet: &'a str,
-    binding: &str,
-) -> Option<Option<&'a str>> {
-    let trimmed = snippet.trim();
-    for keyword in ["var", "let", "const"] {
-        if let Some(rest) = trimmed.strip_prefix(keyword)
-            && rest.starts_with(|c: char| c.is_ascii_whitespace())
-        {
-            let rest = rest.trim_start();
-            let Some(rest) = rest.strip_suffix(';') else {
-                continue;
-            };
-            let rest = rest.trim();
-            if rest == binding && keyword != "const" {
-                return Some(None);
-            }
-            let mut splitter = rest.splitn(2, '=');
-            let lhs = splitter.next()?.trim();
-            let rhs = splitter.next()?.trim();
-            if lhs == binding && is_pure_initializer_expression(rhs) {
-                return Some(Some(rhs));
-            }
-        }
-    }
-    None
-}
-
-fn runtime_singleton_inline_consumer_has_name_conflict(
-    program: &EnrichedProgram,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    consumer_module: ModuleId,
-    binding: &BindingName,
-) -> bool {
-    program
-        .model()
-        .graph()
-        .ast_imports_for(consumer_module)
-        .contains(binding)
-        || program
-            .model()
-            .graph()
-            .ast_definitions_for(consumer_module)
-            .contains(binding)
-        || lowered_runtime_sources
-            .get(&consumer_module)
-            .is_some_and(|source| source.local_definitions.contains(binding))
-}
-
-fn partition_runtime_singleton_inline_bindings(
-    plan: &RuntimeSingletonInlinePlan,
-    current_module: ModuleId,
-    source_file_id: u32,
-    bindings: &BTreeSet<BindingName>,
-) -> (BTreeSet<BindingName>, BTreeSet<BindingName>) {
-    let mut inline_bindings = BTreeSet::<BindingName>::new();
-    let mut runtime_bindings = BTreeSet::<BindingName>::new();
-    for binding in bindings {
-        if plan
-            .snippets_by_binding
-            .get(&(source_file_id, binding.clone()))
-            .is_some_and(|snippet| snippet.consumer_module == current_module)
-        {
-            inline_bindings.insert(binding.clone());
-        } else {
-            runtime_bindings.insert(binding.clone());
-        }
-    }
-    (inline_bindings, runtime_bindings)
-}
-
-struct RuntimeSingletonInlineEmitContext<'a> {
-    program: &'a EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &'a str,
-}
-
-fn emit_runtime_singleton_inline_helpers(
-    ctx: RuntimeSingletonInlineEmitContext<'_>,
-    plan: &RuntimeSingletonInlinePlan,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    emitted_inline_runtime_helpers: &mut BTreeSet<(u32, BindingName)>,
-    source_file_id: u32,
-    bindings: &BTreeSet<BindingName>,
-) {
-    let mut snippets = bindings
-        .iter()
-        .filter_map(|binding| {
-            let key = (source_file_id, binding.clone());
-            let snippet = plan.snippets_by_binding.get(&key)?;
-            Some((key, snippet))
-        })
-        .collect::<Vec<_>>();
-    snippets.sort_by_key(|((_, binding), snippet)| (snippet.byte_start, binding.clone()));
-    for ((source_file_id, _binding), snippet) in snippets {
-        if !snippet.snippets.iter().any(|part| {
-            !planned_bindings.contains(&part.binding)
-                && !emitted_inline_runtime_helpers.contains(&(source_file_id, part.binding.clone()))
-        }) {
-            continue;
-        }
-        emit_direct_owner_imports(
-            ctx.program,
-            ctx.module_id,
-            ctx.module_path,
-            file,
-            planned_bindings,
-            &snippet.source_imports,
-        );
-        emit_direct_prelude_imports(file, planned_bindings, &snippet.direct_prelude_imports);
-        for part in &snippet.snippets {
-            if planned_bindings.contains(&part.binding)
-                || !emitted_inline_runtime_helpers.insert((source_file_id, part.binding.clone()))
-            {
-                continue;
-            }
-            file.push_source(part.source.clone());
-            planned_bindings.insert(part.binding.clone());
-            file.add_binding(PlannedBinding::new(
-                part.binding.clone(),
-                part.binding.clone(),
-                BindingShape::Unknown,
-                true,
-            ));
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct PackageRuntimeOwner {
-    pub(crate) name: String,
-    pub(crate) version: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PackageRuntimeHelperKey {
-    owner: PackageRuntimeOwner,
-    source_file_id: u32,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct PackageRuntimeHelperUsage {
-    public_bindings: BTreeSet<BindingName>,
-    required_bindings: BTreeSet<BindingName>,
-    setter_bindings: BTreeSet<BindingName>,
-    consumer_modules: BTreeSet<ModuleId>,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct PackageRuntimeIslandPlan {
-    pub(crate) owners_by_binding: BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
-}
-
-fn package_runtime_owner_for_module(
-    module: &ModuleInput,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> Option<PackageRuntimeOwner> {
-    if module.kind != ModuleKind::Package || externalized_packages.contains(&module.id) {
-        return None;
-    }
-    Some(PackageRuntimeOwner {
-        name: module.package_name.clone()?,
-        version: module.package_version.clone()?,
-    })
-}
-
-fn package_runtime_helpers_path(owner: &PackageRuntimeOwner, source_file_id: u32) -> String {
-    let package = sanitize_package_runtime_path_segment(owner.name.as_str());
-    let version = sanitize_package_runtime_path_segment(owner.version.as_str());
-    format!("modules/package-runtime/{package}-{version}/source-{source_file_id}-helpers.ts")
-}
-
-fn sanitize_package_runtime_path_segment(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "unknown".to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn package_runtime_island_plan(
-    program: &EnrichedProgram,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    runtime_lazy_folds: &RuntimeLazyFoldPlan,
-    runtime_var_migrations: &RuntimeVarMigrationPlan,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> PackageRuntimeIslandPlan {
-    let module_owners = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| {
-            (
-                module.id,
-                package_runtime_owner_for_module(module, externalized_packages),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    let modules_by_id = program
-        .model()
-        .modules()
-        .iter()
-        .map(|module| (module.id, module))
-        .collect::<BTreeMap<_, _>>();
-    let mut owners_by_binding = BTreeMap::<(u32, BindingName), PackageRuntimeOwner>::new();
-    let mut consumers_by_binding = BTreeMap::<(u32, BindingName), BTreeSet<ModuleId>>::new();
-    let mut blocked_bindings = BTreeSet::<(u32, BindingName)>::new();
-
-    for module in program.model().modules() {
-        if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
-            continue;
-        }
-        let owner = module_owners.get(&module.id).and_then(Option::as_ref);
-        let mut used_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        for import in program.model().graph().runtime_imports_for(module.id) {
-            used_by_source
-                .entry(import.source_file_id)
-                .or_default()
-                .insert(import.binding);
-        }
-        if let Some(source) = lowered_runtime_sources.get(&module.id) {
-            used_by_source
-                .entry(source.source_file_id)
-                .or_default()
-                .extend(source.remaining_helpers.iter().cloned());
-            used_by_source
-                .entry(source.source_file_id)
-                .or_default()
-                .extend(source.written_helpers.iter().cloned());
-        }
-
-        for (source_file_id, bindings) in used_by_source {
-            for binding in bindings {
-                let key = (source_file_id, binding.clone());
-                if is_package_runtime_excluded_binding(&binding)
-                    || runtime_var_migrations
-                        .migrated_owner(source_file_id, &binding)
-                        .is_some()
-                {
-                    blocked_bindings.insert(key);
-                    continue;
-                }
-                let Some(owner) = owner else {
-                    blocked_bindings.insert(key);
-                    continue;
-                };
-                consumers_by_binding
-                    .entry(key.clone())
-                    .or_default()
-                    .insert(module.id);
-                match owners_by_binding.get(&key) {
-                    Some(existing_owner) if existing_owner != owner => {
-                        blocked_bindings.insert(key);
-                    }
-                    Some(_) => {}
-                    None => {
-                        owners_by_binding.insert(key, owner.clone());
-                    }
-                }
-            }
-        }
-    }
-
-    for key in &blocked_bindings {
-        owners_by_binding.remove(key);
-    }
-
-    let mut roots_by_key = BTreeMap::<PackageRuntimeHelperKey, BTreeSet<BindingName>>::new();
-    for ((source_file_id, binding), owner) in &owners_by_binding {
-        if blocked_bindings.contains(&(*source_file_id, binding.clone())) {
-            continue;
-        }
-        if let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id)
-            && prelude.defines(binding)
-        {
-            roots_by_key
-                .entry(PackageRuntimeHelperKey {
-                    owner: owner.clone(),
-                    source_file_id: *source_file_id,
-                })
-                .or_default()
-                .insert(binding.clone());
-        }
-    }
-
-    let mut plan = PackageRuntimeIslandPlan::default();
-    for (key, mut root_bindings) in roots_by_key {
-        let Some(prelude) = program.model().graph().runtime_prelude(key.source_file_id) else {
-            continue;
-        };
-        root_bindings.retain(|binding| {
-            !is_package_runtime_excluded_binding(binding)
-                && runtime_var_migrations
-                    .migrated_owner(key.source_file_id, binding)
-                    .is_none()
-                && prelude.defines(binding)
-        });
-        if root_bindings.is_empty() {
-            continue;
-        }
-        let folded_chunks = runtime_lazy_folds
-            .chunks_by_source_file
-            .get(&key.source_file_id)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        let read_index = runtime_source_read_index(prelude, folded_chunks);
-        let mut helper_closure = close_runtime_helper_source(prelude, &root_bindings, None, &[]);
-        helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
-        helper_closure.source = purify_private_runtime_lazy_initializers(
-            helper_closure.source.as_str(),
-            &helper_closure.emitted_bindings,
-        );
-        let gate = PackageRuntimeClosureGate {
-            prelude,
-            read_index: &read_index,
-            source_file_id: key.source_file_id,
-            owner: &key.owner,
-            owners_by_binding: &owners_by_binding,
-            blocked_bindings: &blocked_bindings,
-            runtime_var_migrations,
-        };
-        if helper_closure.emitted_bindings.is_empty()
-            || !package_runtime_closure_is_safe(&gate, &helper_closure)
-        {
-            continue;
-        }
-        let runtime_externalized_binding_scan = scan_runtime_externalized_bindings(
-            program,
-            helper_closure.source.as_str(),
-            &helper_closure.emitted_bindings,
-            externalized_packages,
-        );
-        let helper_imports = runtime_externalized_binding_scan.source_module_imports;
-        let consumers = root_bindings
-            .iter()
-            .flat_map(|binding| {
-                consumers_by_binding
-                    .get(&(key.source_file_id, binding.clone()))
-                    .into_iter()
-                    .flatten()
-                    .copied()
-            })
-            .collect::<BTreeSet<_>>();
-        if !package_runtime_helper_imports_are_safe(
-            program,
-            externalized_packages,
-            &modules_by_id,
-            &key.owner,
-            &consumers,
-            &helper_imports,
-        ) {
-            continue;
-        }
-        let unresolved = unresolved_runtime_helper_references(
-            prelude,
-            helper_closure.source.as_str(),
-            &helper_closure.emitted_bindings,
-            &helper_imports,
-        );
-        if !unresolved.is_empty() {
-            continue;
-        }
-        for binding in &helper_closure.emitted_bindings {
-            plan.owners_by_binding
-                .insert((key.source_file_id, binding.clone()), key.owner.clone());
-        }
-    }
-
-    plan
-}
-
-fn is_package_runtime_excluded_binding(binding: &BindingName) -> bool {
-    let name = binding.as_str();
-    name == "lazyModule"
-        || name == "lazyValue"
-        || name.starts_with("__reverts_set_")
-        || is_planner_synthetic_binding(name)
-}
-
-struct PackageRuntimeClosureGate<'a> {
-    prelude: &'a RuntimePrelude,
-    read_index: &'a RuntimeSourceReadIndex,
-    source_file_id: u32,
-    owner: &'a PackageRuntimeOwner,
-    owners_by_binding: &'a BTreeMap<(u32, BindingName), PackageRuntimeOwner>,
-    blocked_bindings: &'a BTreeSet<(u32, BindingName)>,
-    runtime_var_migrations: &'a RuntimeVarMigrationPlan,
-}
-
-fn package_runtime_closure_is_safe(
-    gate: &PackageRuntimeClosureGate<'_>,
-    helper_closure: &ClosedRuntimeHelperSource,
-) -> bool {
-    for binding in &helper_closure.emitted_bindings {
-        if !gate.prelude.defines(binding)
-            || is_package_runtime_excluded_binding(binding)
-            || gate
-                .runtime_var_migrations
-                .migrated_owner(gate.source_file_id, binding)
-                .is_some()
-            || runtime_binding_has_blocking_non_snippet_use(gate.read_index, binding)
-            || gate
-                .blocked_bindings
-                .contains(&(gate.source_file_id, binding.clone()))
-        {
-            return false;
-        }
-        if let Some(existing_owner) = gate
-            .owners_by_binding
-            .get(&(gate.source_file_id, binding.clone()))
-            && existing_owner != gate.owner
-        {
-            return false;
-        }
-        if runtime_readers_for_binding(gate.read_index, binding)
-            .into_iter()
-            .any(|reader| !helper_closure.emitted_bindings.contains(&reader))
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn package_runtime_helper_imports_are_safe(
-    program: &EnrichedProgram,
-    externalized_packages: &BTreeSet<ModuleId>,
-    modules_by_id: &BTreeMap<ModuleId, &ModuleInput>,
-    owner: &PackageRuntimeOwner,
-    consumers: &BTreeSet<ModuleId>,
-    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-) -> bool {
-    for module_id in helper_imports.keys() {
-        let Some(module) = modules_by_id.get(module_id).copied() else {
-            return false;
-        };
-        if package_runtime_owner_for_module(module, externalized_packages).as_ref() != Some(owner) {
-            return false;
-        }
-        if consumers.contains(module_id)
-            || module_dependency_reaches_any(program, *module_id, consumers)
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn module_dependency_reaches_any(
-    program: &EnrichedProgram,
-    start: ModuleId,
-    targets: &BTreeSet<ModuleId>,
-) -> bool {
-    if targets.is_empty() {
-        return false;
-    }
-    let dependencies = module_dependency_modules_by_owner(program);
-    let mut seen = BTreeSet::<ModuleId>::new();
-    let mut stack = dependencies
-        .get(&start)
-        .into_iter()
-        .flatten()
-        .copied()
-        .collect::<Vec<_>>();
-    while let Some(module_id) = stack.pop() {
-        if targets.contains(&module_id) {
-            return true;
-        }
-        if !seen.insert(module_id) {
-            continue;
-        }
-        if let Some(next) = dependencies.get(&module_id) {
-            stack.extend(next.iter().copied());
-        }
-    }
-    false
-}
-
-fn partition_package_runtime_bindings(
-    binding_owners: &BindingOwnerPlan,
-    package_runtime_owner: Option<&PackageRuntimeOwner>,
-    source_file_id: u32,
-    bindings: &BTreeSet<BindingName>,
-) -> (BTreeSet<BindingName>, BTreeSet<BindingName>) {
-    let mut package_bindings = BTreeSet::<BindingName>::new();
-    let mut runtime_bindings = BTreeSet::<BindingName>::new();
-    for binding in bindings {
-        if let Some(owner) = package_runtime_owner
-            && binding_owners
-                .package_runtime_owner(source_file_id, binding)
-                .is_some_and(|candidate| candidate == owner)
-        {
-            package_bindings.insert(binding.clone());
-            continue;
-        }
-        runtime_bindings.insert(binding.clone());
-    }
-    (package_bindings, runtime_bindings)
-}
-
-struct PackageRuntimeImportEmitter<'a> {
-    program: &'a EnrichedProgram,
-    used_package_runtime_helper_files:
-        &'a mut BTreeMap<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>,
-    file: &'a mut PlannedFile,
-    planned_bindings: &'a mut BTreeSet<BindingName>,
-    module_id: ModuleId,
-    module_path: &'a str,
-    owner: &'a PackageRuntimeOwner,
-    source_file_id: u32,
-}
-
-fn emit_package_runtime_helper_import(
-    emitter: &mut PackageRuntimeImportEmitter<'_>,
-    bindings: &BTreeSet<BindingName>,
-    setter_bindings: &BTreeSet<BindingName>,
-) {
-    let key = PackageRuntimeHelperKey {
-        owner: emitter.owner.clone(),
-        source_file_id: emitter.source_file_id,
-    };
-    let usage = emitter
-        .used_package_runtime_helper_files
-        .entry(key.clone())
-        .or_default();
-    usage.consumer_modules.insert(emitter.module_id);
-    usage.public_bindings.extend(bindings.iter().cloned());
-    usage.required_bindings.extend(bindings.iter().cloned());
-    usage
-        .required_bindings
-        .extend(setter_bindings.iter().cloned());
-    usage
-        .setter_bindings
-        .extend(setter_bindings.iter().cloned());
-
-    let helper_path = package_runtime_helpers_path(emitter.owner, emitter.source_file_id);
-    let specifier = relative_import_specifier(emitter.module_path, helper_path.as_str());
-    emitter.file.push_source(runtime_helper_import_statement(
-        bindings,
-        setter_bindings,
-        &[],
-        specifier.as_str(),
-    ));
-    for binding in bindings {
-        if emitter.planned_bindings.contains(binding) {
-            continue;
-        }
-        emitter.planned_bindings.insert(binding.clone());
-        emitter.file.add_binding(plan_binding_from_program(
-            emitter.program,
-            emitter.module_id,
-            binding.clone(),
-            binding.clone(),
-            true,
-            None,
-        ));
-    }
-}
-
-fn inline_package_runtime_helper_into_single_consumer(
-    program: &EnrichedProgram,
-    plan: &mut EmitPlan,
-    usage: &PackageRuntimeHelperUsage,
-    helper_path: &str,
-    helper_closure: &ClosedRuntimeHelperSource,
-    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    package_init_shims: &BTreeSet<BindingName>,
-) -> Result<bool, PlanError> {
-    let Some(consumer_module) = usage.consumer_modules.iter().next().copied() else {
-        return Ok(false);
-    };
-    if usage.consumer_modules.len() != 1 {
-        return Ok(false);
-    }
-    if helper_closure.source.contains("lazyModule(") || helper_closure.source.contains("lazyValue(")
-    {
-        return Ok(false);
-    }
-    let Some(consumer_path) = module_output_path(program, consumer_module) else {
-        return Ok(false);
-    };
-    let helper_specifier = relative_import_specifier(consumer_path.as_str(), helper_path);
-
-    for (module_id, bindings) in helper_imports {
-        ensure_planned_module_exports(plan, program, *module_id, bindings);
-    }
-
-    let mut replacement = Vec::<String>::new();
-    for (module_id, bindings) in helper_imports {
-        let Some(module_path) = module_output_path(program, *module_id) else {
-            continue;
-        };
-        let specifier = relative_import_specifier(consumer_path.as_str(), module_path.as_str());
-        replacement.push(named_import_statement(bindings.iter(), specifier.as_str()));
-    }
-    for binding in package_init_shims {
-        replacement.push(noop_function_statement(binding));
-    }
-    if !helper_closure.source.trim().is_empty() {
-        replacement.push(helper_closure.source.clone());
-    }
-
-    let Some(file) = plan
-        .files
-        .iter_mut()
-        .find(|file| file.path == consumer_path)
-    else {
-        return Ok(false);
-    };
-    let mut inserted = false;
-    let mut body = Vec::<String>::new();
-    for source in std::mem::take(&mut file.body) {
-        if parse_generated_named_import_statement(source.as_str())
-            .is_some_and(|(_bindings, specifier)| specifier == helper_specifier)
-        {
-            if !inserted {
-                body.extend(replacement.iter().cloned());
-                inserted = true;
-            }
-            continue;
-        }
-        body.push(source);
-    }
-    if !inserted {
-        file.body = body;
-        return Ok(false);
-    }
-
-    if !usage.setter_bindings.is_empty() {
-        for source in &mut body {
-            *source =
-                inline_internal_setter_calls_for_bindings(source.as_str(), &usage.setter_bindings);
-        }
-    }
-    file.body = body;
-    file.coalesce_generated_named_imports();
-
-    Ok(true)
-}
-
-fn emit_package_runtime_helper_files(
-    program: &EnrichedProgram,
-    plan: &mut EmitPlan,
-    used_package_runtime_helper_files: &BTreeMap<
-        PackageRuntimeHelperKey,
-        PackageRuntimeHelperUsage,
-    >,
-    externalized_packages: &BTreeSet<ModuleId>,
-) -> Result<(), PlanError> {
-    for (key, usage) in used_package_runtime_helper_files {
-        let Some(prelude) = program.model().graph().runtime_prelude(key.source_file_id) else {
-            continue;
-        };
-        let mut root_bindings = usage.required_bindings.clone();
-        root_bindings.extend(usage.setter_bindings.iter().cloned());
-        if root_bindings.is_empty() {
-            continue;
-        }
-        let mut helper_closure = close_runtime_helper_source(prelude, &root_bindings, None, &[]);
-        helper_closure.source = inline_internal_setter_calls(&helper_closure.source);
-        helper_closure.source = purify_private_runtime_lazy_initializers(
-            helper_closure.source.as_str(),
-            &helper_closure.emitted_bindings,
-        );
-        helper_closure.source =
-            coalesce_runtime_lazy_initializer_call_runs(helper_closure.source.as_str());
-        helper_closure.source =
-            compact_pure_static_runtime_literals(helper_closure.source.as_str());
-        helper_closure.source =
-            coalesce_top_level_import_declarations(helper_closure.source.as_str());
-        let mut runtime_binding_roots = usage.public_bindings.clone();
-        runtime_binding_roots.extend(usage.setter_bindings.iter().cloned());
-        let orphan_prune =
-            prune_orphan_runtime_bindings(helper_closure.source.as_str(), &runtime_binding_roots);
-        helper_closure.source = orphan_prune.source;
-        for binding in &orphan_prune.dropped_bindings {
-            helper_closure.emitted_bindings.remove(binding);
-        }
-        let helper_path = package_runtime_helpers_path(&key.owner, key.source_file_id);
-        let runtime_externalized_binding_scan = scan_runtime_externalized_bindings(
-            program,
-            helper_closure.source.as_str(),
-            &helper_closure.emitted_bindings,
-            externalized_packages,
-        );
-        let helper_imports = runtime_externalized_binding_scan.source_module_imports;
-        let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
-        let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
-        emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
-        let unresolved = unresolved_runtime_helper_references(
-            prelude,
-            helper_closure.source.as_str(),
-            &emitted_runtime_bindings,
-            &helper_imports,
-        );
-        if !unresolved.is_empty() {
-            return Err(PlanError::UnresolvedRuntimeHelperReferences {
-                path: helper_path,
-                bindings: unresolved.into_iter().collect(),
-            });
-        }
-
-        if inline_package_runtime_helper_into_single_consumer(
-            program,
-            plan,
-            usage,
-            helper_path.as_str(),
-            &helper_closure,
-            &helper_imports,
-            &package_init_shims,
-        )? {
-            continue;
-        }
-
-        let mut file = PlannedFile::new(helper_path.clone());
-        push_packed_runtime_helper_imports(
-            program,
-            plan,
-            &mut file,
-            helper_path.as_str(),
-            &helper_imports,
-        );
-        for binding in &package_init_shims {
-            file.push_source(noop_function_statement(binding));
-        }
-        let emits_lazy_module = helper_closure.source.contains("lazyModule(");
-        let emits_lazy_value = helper_closure.source.contains("lazyValue(");
-        if !helper_closure.source.trim().is_empty() {
-            file.push_source(helper_closure.source);
-        }
-        if !usage.setter_bindings.is_empty() {
-            file.push_source(runtime_helper_setter_declarations(&usage.setter_bindings));
-        }
-        if emits_lazy_module {
-            file.push_source(lazy_module_helper_source());
-        }
-        if emits_lazy_value {
-            file.push_source(lazy_value_helper_source());
-        }
-
-        let mut exported_bindings = usage.public_bindings.clone();
-        exported_bindings.extend(
-            usage
-                .setter_bindings
-                .iter()
-                .map(|binding| BindingName::new(runtime_helper_setter_name(binding))),
-        );
-        if !exported_bindings.is_empty() {
-            file.push_source(named_export_statement(exported_bindings.iter()));
-        }
-        for binding in &usage.public_bindings {
-            file.add_binding(PlannedBinding::new(
-                binding.clone(),
-                binding.clone(),
-                BindingShape::Unknown,
-                true,
-            ));
-            file.add_export_with_source_backed(binding.clone(), true);
-        }
-        for setter in usage
-            .setter_bindings
-            .iter()
-            .map(|binding| BindingName::new(runtime_helper_setter_name(binding)))
-        {
-            file.add_binding(PlannedBinding::new(
-                setter.clone(),
-                setter.clone(),
-                BindingShape::Callable,
-                true,
-            ));
-            file.add_export_with_source_backed(setter, true);
-        }
-        if file.body.is_empty() {
-            continue;
-        }
-        plan.push_file(file);
-    }
-    Ok(())
-}
-
-fn push_packed_runtime_helper_imports(
-    program: &EnrichedProgram,
-    plan: &mut EmitPlan,
-    file: &mut PlannedFile,
-    helper_path: &str,
-    helper_imports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-) {
-    let mut imports = Vec::<(String, BTreeSet<BindingName>)>::new();
-    for (module_id, bindings) in helper_imports {
-        ensure_planned_module_exports(plan, program, *module_id, bindings);
-        let Some(module_path) = module_output_path(program, *module_id) else {
-            continue;
-        };
-        imports.push((
-            relative_import_specifier(helper_path, module_path.as_str()),
-            bindings.clone(),
-        ));
-    }
-    if let Some(source) = packed_named_import_statements(imports) {
-        file.push_source(source);
-    }
-}
-
-fn packed_named_import_statements(
-    imports: impl IntoIterator<Item = (String, BTreeSet<BindingName>)>,
-) -> Option<String> {
-    let mut ordered = Vec::<(String, BTreeSet<BindingName>)>::new();
-    let mut index_by_specifier = BTreeMap::<String, usize>::new();
-    for (specifier, bindings) in imports {
-        if bindings.is_empty() {
-            continue;
-        }
-        if let Some(index) = index_by_specifier.get(&specifier).copied() {
-            ordered[index].1.extend(bindings);
-            continue;
-        }
-        index_by_specifier.insert(specifier.clone(), ordered.len());
-        ordered.push((specifier, bindings));
-    }
-    if ordered.is_empty() {
-        return None;
-    }
-    Some(
-        ordered
-            .iter()
-            .map(|(specifier, bindings)| named_import_statement(bindings.iter(), specifier))
-            .collect::<Vec<_>>()
-            .join(""),
-    )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimePreludeDirectImport {
     pub(crate) source: String,
     pub(crate) snippet_source: String,
@@ -4075,7 +2861,7 @@ fn planned_runtime_helper_consumed_bindings(
     consumed
 }
 
-fn emit_direct_owner_imports(
+pub(crate) fn emit_direct_owner_imports(
     program: &EnrichedProgram,
     module_id: ModuleId,
     module_path: &str,
@@ -4169,7 +2955,7 @@ fn emit_node_builtin_default_imports(
     }
 }
 
-fn emit_direct_prelude_imports(
+pub(crate) fn emit_direct_prelude_imports(
     file: &mut PlannedFile,
     planned_bindings: &mut BTreeSet<BindingName>,
     direct_imports: &BTreeMap<BindingName, RuntimePreludeDirectImport>,
@@ -8146,7 +6932,7 @@ fn direct_module_dependency_indexes(
     (outgoing, incoming)
 }
 
-fn runtime_binding_has_blocking_non_snippet_use(
+pub(crate) fn runtime_binding_has_blocking_non_snippet_use(
     read_index: &RuntimeSourceReadIndex,
     binding: &BindingName,
 ) -> bool {
@@ -8254,7 +7040,7 @@ fn is_migratable_private_runtime_function_dependency(binding: &BindingName, sour
     function_declaration_names_binding(source, binding)
 }
 
-fn is_migratable_reader_function_snippet(binding: &BindingName, source: &str) -> bool {
+pub(crate) fn is_migratable_reader_function_snippet(binding: &BindingName, source: &str) -> bool {
     let source = source.trim();
     if let Some(rest) = source.strip_prefix("async")
         && rest.starts_with(|c: char| c.is_ascii_whitespace())
@@ -9024,7 +7810,9 @@ fn runtime_lazy_fold_can_stay_local(
     covered_primary_bindings == source.written_helpers
 }
 
-fn strip_top_level_named_exports(source: &str) -> Option<(String, BTreeSet<BindingName>)> {
+pub(crate) fn strip_top_level_named_exports(
+    source: &str,
+) -> Option<(String, BTreeSet<BindingName>)> {
     let bytes = source.as_bytes();
     let mut output = String::new();
     let mut exports = BTreeSet::new();
@@ -9171,7 +7959,7 @@ fn purify_folded_lazy_initializers(
         .join("\n")
 }
 
-fn purify_private_runtime_lazy_initializers(
+pub(crate) fn purify_private_runtime_lazy_initializers(
     source: &str,
     writable_helpers: &BTreeSet<BindingName>,
 ) -> String {
@@ -9220,7 +8008,7 @@ fn purify_private_runtime_lazy_initializers(
     apply_text_edits(source, &edits)
 }
 
-fn coalesce_runtime_lazy_initializer_call_runs(source: &str) -> String {
+pub(crate) fn coalesce_runtime_lazy_initializer_call_runs(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut edits = Vec::<(usize, usize, String)>::new();
     let mut cursor = 0usize;
@@ -9340,7 +8128,7 @@ fn coalescible_lazy_body_expression(statement: &str) -> Option<String> {
     (skip_ws(bytes, close + 1) == expression.len()).then(|| expression.to_string())
 }
 
-fn compact_pure_static_runtime_literals(source: &str) -> String {
+pub(crate) fn compact_pure_static_runtime_literals(source: &str) -> String {
     let mut edits = Vec::<(usize, usize, String)>::new();
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -10416,12 +9204,12 @@ fn runtime_entrypoint_root_bindings(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ClosedRuntimeHelperSource {
-    emitted_bindings: BTreeSet<BindingName>,
-    source: String,
+pub(crate) struct ClosedRuntimeHelperSource {
+    pub(crate) emitted_bindings: BTreeSet<BindingName>,
+    pub(crate) source: String,
 }
 
-fn close_runtime_helper_source(
+pub(crate) fn close_runtime_helper_source(
     prelude: &RuntimePrelude,
     root_bindings: &BTreeSet<BindingName>,
     entrypoint: Option<&RuntimeEntrypoint>,
@@ -11080,7 +9868,7 @@ struct RuntimeBindingGraphStatement {
     prunable: bool,
 }
 
-fn prune_orphan_runtime_bindings(
+pub(crate) fn prune_orphan_runtime_bindings(
     source: &str,
     root_bindings: &BTreeSet<BindingName>,
 ) -> RuntimeOrphanPrune {
@@ -11627,7 +10415,7 @@ struct RuntimeExternalizedBindingScan {
     package_init_shims: BTreeSet<BindingName>,
 }
 
-fn scan_runtime_externalized_bindings(
+pub(crate) fn scan_runtime_externalized_bindings(
     program: &EnrichedProgram,
     source: &str,
     satisfied_runtime_bindings: &BTreeSet<BindingName>,
@@ -11704,7 +10492,7 @@ fn runtime_module_owner_imports_for_source(
     imports
 }
 
-fn unresolved_runtime_helper_references(
+pub(crate) fn unresolved_runtime_helper_references(
     prelude: &RuntimePrelude,
     source: &str,
     emitted_runtime_bindings: &BTreeSet<BindingName>,
@@ -12868,7 +11656,7 @@ fn is_runtime_global_identifier(identifier: &str) -> bool {
     )
 }
 
-fn ensure_planned_module_exports(
+pub(crate) fn ensure_planned_module_exports(
     plan: &mut EmitPlan,
     program: &EnrichedProgram,
     module_id: ModuleId,
@@ -14248,7 +13036,7 @@ pub(crate) fn unique_source_definition_modules(
     )
 }
 
-fn runtime_owner_definition_modules(
+pub(crate) fn runtime_owner_definition_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
 ) -> BTreeMap<BindingName, Option<ModuleId>> {
@@ -14346,7 +13134,7 @@ fn unique_source_definition_modules_by_source_from_bindings(
     definitions
 }
 
-fn module_output_path(program: &EnrichedProgram, module_id: ModuleId) -> Option<String> {
+pub(crate) fn module_output_path(program: &EnrichedProgram, module_id: ModuleId) -> Option<String> {
     let module = program
         .model()
         .modules()
@@ -16589,7 +15377,7 @@ var init = lazyValue(() => {\n\
 
     #[test]
     fn packed_named_import_statements_preserve_order_and_merge_duplicates() {
-        let source = super::packed_named_import_statements([
+        let source = super::package_runtime::packed_named_import_statements([
             (
                 "./first.js".to_string(),
                 BTreeSet::from([BindingName::new("beta")]),
@@ -16622,7 +15410,7 @@ var init = lazyValue(() => {\n\
         let prelude_imported = BindingName::new("pathJoin");
         let package_owned = BindingName::new("packageHelper");
         let runtime_owned = BindingName::new("sharedRuntime");
-        let package_owner = super::PackageRuntimeOwner {
+        let package_owner = super::package_runtime::PackageRuntimeOwner {
             name: "pkg".to_string(),
             version: "1.0.0".to_string(),
         };
@@ -16662,7 +15450,7 @@ var init = lazyValue(() => {\n\
                 (migrated.clone(), direct_import.clone()),
             ]),
         )]);
-        let package_islands = super::PackageRuntimeIslandPlan {
+        let package_islands = super::package_runtime::PackageRuntimeIslandPlan {
             owners_by_binding: BTreeMap::from([
                 (
                     (source_file_id, package_owned.clone()),
@@ -23131,7 +21919,7 @@ function migratedDep() { return 1; }\n";
         let consumers_by_binding =
             BTreeMap::from([((1, BindingName::new("root")), BTreeSet::from([ModuleId(7)]))]);
 
-        let ctx = super::RuntimeSingletonInlineContext {
+        let ctx = super::runtime_singleton_inline::RuntimeSingletonInlineContext {
             program: &program,
             lowered_runtime_sources: &BTreeMap::new(),
             runtime_var_migrations: &runtime_var_migrations,
@@ -23147,7 +21935,7 @@ function migratedDep() { return 1; }\n";
         };
 
         assert!(
-            super::resolve_runtime_singleton_inline_snippet(
+            super::runtime_singleton_inline::resolve_runtime_singleton_inline_snippet(
                 &ctx,
                 &BindingName::new("root"),
                 ModuleId(7)

@@ -29,10 +29,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::{BindingName, ModuleId};
 
-use crate::{
-    PackageRuntimeIslandPlan, PackageRuntimeOwner, RuntimePreludeDirectImport,
-    RuntimeVarMigrationPlan,
-};
+use crate::package_runtime::{PackageRuntimeIslandPlan, PackageRuntimeOwner};
+use crate::{RuntimePreludeDirectImport, RuntimeVarMigrationPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BindingOwner {
