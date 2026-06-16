@@ -5,6 +5,7 @@ pub mod cascade;
 pub mod cascade_match;
 mod cascade_ownership;
 mod commonjs_exports;
+mod dependency_closure;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
 mod exported_members;
@@ -16,6 +17,7 @@ mod importable_ownership;
 mod package_file_graph_ownership;
 pub mod package_helpers;
 mod package_version_index;
+mod source_imports;
 mod source_text;
 pub mod structural_bag;
 pub mod tier;
@@ -26,6 +28,11 @@ pub use acceptance::{AcceptanceDecision, classify};
 use binding_signatures::binding_string_signatures_from_source;
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
+pub(crate) use dependency_closure::{
+    DependencyNeighborhoodEvidence, dependency_neighborhood_ownership_evidence,
+    dependency_neighborhood_source_path, has_direct_neighborhood_package_contradiction,
+    package_dependency_components,
+};
 use exported_members::{
     export_member_set_is_strong, exported_members_from_source, is_identifier_name,
     is_usable_export_member,
@@ -53,6 +60,8 @@ use package_version_index::{
 pub(crate) use package_version_index::{
     module_match_fingerprint, package_source_fingerprint, package_source_fingerprint_from_source,
 };
+pub(crate) use source_imports::resolve_source_package_surfaces;
+pub use source_imports::{package_import_names_from_sources, package_import_sites_from_sources};
 pub use structural_bag::{
     StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
 };
@@ -71,32 +80,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
 
-use oxc_allocator::Allocator;
-use oxc_ast::{
-    Visit,
-    ast::{
-        Argument, CallExpression, ExportAllDeclaration, ExportNamedDeclaration, Expression,
-        ImportDeclaration, ImportExpression,
-    },
-    visit::walk::{
-        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
-        walk_import_expression,
-    },
-};
-use oxc_parser::Parser;
 use reverts_graph::FunctionExtractor;
 use reverts_input::{
-    InputRows, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
-    PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+    InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+    PackageSurfaceInput,
 };
 use reverts_ir::hash::fnv1a_hex as stable_hash;
-use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
-use reverts_js::{
-    JsError, ParseError, ParseGoal, normalize_source_for_pipeline, parse_error_message,
-    parse_options_for, source_type_candidates,
-};
+use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
+use reverts_js::{JsError, normalize_source_for_pipeline, parse_error_message};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-use reverts_package::{external_import_concrete_source_path, is_node_builtin};
+use reverts_package::external_import_concrete_source_path;
 use semver::Version;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4223,199 +4216,6 @@ pub(crate) fn forced_external_import_target(
     )
 }
 
-pub(crate) fn package_dependency_components(rows: &InputRows) -> Vec<BTreeSet<ModuleId>> {
-    let package_modules = rows
-        .modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Package)
-        .map(|module| module.id)
-        .collect::<BTreeSet<_>>();
-    let mut adjacency = package_modules
-        .iter()
-        .map(|module_id| (*module_id, BTreeSet::new()))
-        .collect::<BTreeMap<_, _>>();
-    for dependency in &rows.dependencies {
-        let from = dependency.from_module_id;
-        let ModuleDependencyTarget::Module(to) = dependency.target else {
-            continue;
-        };
-        if !package_modules.contains(&from) || !package_modules.contains(&to) {
-            continue;
-        }
-        adjacency.entry(from).or_default().insert(to);
-        adjacency.entry(to).or_default().insert(from);
-    }
-
-    let mut seen = BTreeSet::new();
-    let mut components = Vec::new();
-    for module_id in package_modules {
-        if seen.contains(&module_id) {
-            continue;
-        }
-        let mut stack = vec![module_id];
-        let mut component = BTreeSet::new();
-        while let Some(current) = stack.pop() {
-            if !seen.insert(current) {
-                continue;
-            }
-            component.insert(current);
-            if let Some(neighbors) = adjacency.get(&current) {
-                for neighbor in neighbors {
-                    if !seen.contains(neighbor) {
-                        stack.push(*neighbor);
-                    }
-                }
-            }
-        }
-        components.push(component);
-    }
-    components
-}
-
-pub(crate) fn has_direct_neighborhood_package_contradiction(
-    rows: &InputRows,
-    module_id: ModuleId,
-    package_name: &str,
-    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
-) -> bool {
-    let (same, owned) = directional_owned_neighbor_counts(
-        direct_module_neighborhood(rows, module_id)
-            .into_iter()
-            .collect(),
-        package_name,
-        ownership_by_module,
-    );
-    owned > 0 && same * 100 < owned * 50
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct DependencyNeighborhoodEvidence {
-    pub(crate) package_version: String,
-    pub(crate) same_package_owned_neighbors: usize,
-    pub(crate) owned_neighbors: usize,
-    pub(crate) same_version_owned_neighbors: usize,
-    pub(crate) same_outgoing_neighbors: usize,
-    pub(crate) owned_outgoing_neighbors: usize,
-    pub(crate) same_incoming_neighbors: usize,
-    pub(crate) owned_incoming_neighbors: usize,
-}
-
-pub(crate) fn dependency_neighborhood_ownership_evidence(
-    rows: &InputRows,
-    module: &ModuleInput,
-    package_name: &str,
-    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
-) -> Option<DependencyNeighborhoodEvidence> {
-    let mut same_package_by_version = BTreeMap::<String, usize>::new();
-    let mut owned_neighbors = 0usize;
-    for neighbor_id in direct_module_neighborhood(rows, module.id) {
-        let Some((neighbor_package, neighbor_version)) = ownership_by_module.get(&neighbor_id)
-        else {
-            continue;
-        };
-        owned_neighbors += 1;
-        if neighbor_package == package_name {
-            *same_package_by_version
-                .entry(neighbor_version.clone())
-                .or_default() += 1;
-        }
-    }
-    let same_package_owned_neighbors = same_package_by_version.values().sum::<usize>();
-    if same_package_owned_neighbors < 2
-        || owned_neighbors == 0
-        || same_package_owned_neighbors * 100 < owned_neighbors * 70
-    {
-        return None;
-    }
-    let (package_version, same_version_owned_neighbors) = same_package_by_version
-        .iter()
-        .max_by(|left, right| left.1.cmp(right.1).then_with(|| right.0.cmp(left.0)))?;
-    if let Some(expected_version) = module
-        .package_version
-        .as_deref()
-        .map(str::trim)
-        .filter(|version| !version.is_empty())
-        && expected_version != package_version
-    {
-        return None;
-    }
-    if *same_version_owned_neighbors * 100 < same_package_owned_neighbors * 70 {
-        return None;
-    }
-
-    let (same_outgoing_neighbors, owned_outgoing_neighbors) = directional_owned_neighbor_counts(
-        direct_module_dependencies(rows, module.id),
-        package_name,
-        ownership_by_module,
-    );
-    let (same_incoming_neighbors, owned_incoming_neighbors) = directional_owned_neighbor_counts(
-        direct_module_dependents(rows, module.id),
-        package_name,
-        ownership_by_module,
-    );
-
-    Some(DependencyNeighborhoodEvidence {
-        package_version: package_version.clone(),
-        same_package_owned_neighbors,
-        owned_neighbors,
-        same_version_owned_neighbors: *same_version_owned_neighbors,
-        same_outgoing_neighbors,
-        owned_outgoing_neighbors,
-        same_incoming_neighbors,
-        owned_incoming_neighbors,
-    })
-}
-
-fn directional_owned_neighbor_counts(
-    neighbor_ids: Vec<ModuleId>,
-    package_name: &str,
-    ownership_by_module: &BTreeMap<ModuleId, (String, String)>,
-) -> (usize, usize) {
-    let mut seen = BTreeSet::new();
-    let mut same = 0usize;
-    let mut owned = 0usize;
-    for neighbor_id in neighbor_ids {
-        if !seen.insert(neighbor_id) {
-            continue;
-        }
-        let Some((neighbor_package, _)) = ownership_by_module.get(&neighbor_id) else {
-            continue;
-        };
-        owned += 1;
-        if neighbor_package == package_name {
-            same += 1;
-        }
-    }
-    (same, owned)
-}
-
-pub(crate) fn dependency_neighborhood_source_path(
-    package_name: &str,
-    evidence: &DependencyNeighborhoodEvidence,
-    round: usize,
-) -> String {
-    format!(
-        "dependency-closure:{}@{}:owned_neighbors={}/{}:version_neighbors={}:out={}/{}:in={}/{}:round={}",
-        package_name,
-        evidence.package_version,
-        evidence.same_package_owned_neighbors,
-        evidence.owned_neighbors,
-        evidence.same_version_owned_neighbors,
-        evidence.same_outgoing_neighbors,
-        evidence.owned_outgoing_neighbors,
-        evidence.same_incoming_neighbors,
-        evidence.owned_incoming_neighbors,
-        round,
-    )
-}
-
-fn direct_module_neighborhood(rows: &InputRows, module_id: ModuleId) -> BTreeSet<ModuleId> {
-    direct_module_dependencies(rows, module_id)
-        .into_iter()
-        .chain(direct_module_dependents(rows, module_id))
-        .collect()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Exact package match evidence.
 pub struct PackageMatch {
@@ -4466,7 +4266,7 @@ fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     })
 }
 
-fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
+pub(crate) fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
     rows.package_surfaces.iter().any(|surface| {
         surface.status == PackageAttributionStatus::Accepted
             && surface.export_specifier.as_str() == specifier
@@ -4488,307 +4288,6 @@ fn package_names_for_matching(
         names.retain(|package_name| package_filter.contains(package_name));
     }
     names
-}
-
-/// Returns npm package names referenced by source-backed `import`, `export from`,
-/// `require()`, or dynamic `import()` sites in the original source files.
-pub fn package_import_names_from_sources(
-    rows: &InputRows,
-) -> Result<BTreeSet<String>, SourcePackageImportParseError> {
-    Ok(package_import_sites_from_sources(rows)?
-        .into_iter()
-        .map(|site| site.package_name)
-        .collect())
-}
-
-/// Extracts source-backed bare package import/require sites from whole source
-/// files rather than from package-module rows. This is the path used for
-/// packages such as `ws`/`undici` that appear as runtime dependencies but whose
-/// implementation is not bundled as a module.
-pub fn package_import_sites_from_sources(
-    rows: &InputRows,
-) -> Result<BTreeSet<PackageImportSite>, SourcePackageImportParseError> {
-    let mut sites = BTreeSet::new();
-    for source_file in &rows.source_files {
-        let Some(source) = source_file.source.as_deref() else {
-            continue;
-        };
-        sites.extend(package_import_sites_from_source_file(
-            source_file.id,
-            source_file.path.as_str(),
-            source,
-        )?);
-    }
-    Ok(sites)
-}
-
-fn resolve_source_package_surfaces(
-    rows: &InputRows,
-    current_attributions: &[PackageAttributionInput],
-    package_sources: &[PackageSource],
-    package_filter: Option<&BTreeSet<String>>,
-    audit: &mut AuditReport,
-) -> Vec<PackageSurfaceInput> {
-    let mut sites_by_specifier = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    let import_sites = match package_import_sites_from_sources(rows) {
-        Ok(sites) => sites,
-        Err(error) => {
-            audit.push(
-                AuditFinding::error(
-                    FindingCode::AstFactExtractionFailed,
-                    format!(
-                        "failed to parse source-backed package import sites: {}",
-                        error.source
-                    ),
-                )
-                .with_module(error.source_file_path),
-            );
-            return Vec::new();
-        }
-    };
-    for site in import_sites {
-        if let Some(package_filter) = package_filter
-            && !package_filter.contains(site.package_name.as_str())
-        {
-            continue;
-        }
-        if has_accepted_surface(rows, site.specifier.as_str()) {
-            continue;
-        }
-        sites_by_specifier
-            .entry((site.package_name, site.specifier))
-            .or_default()
-            .insert(site.source_file_path);
-    }
-
-    let mut surfaces = Vec::new();
-    for ((package_name, specifier), source_paths) in sites_by_specifier {
-        let Some((package_version, evidence_kind)) = external_package_version(
-            rows,
-            current_attributions,
-            package_sources,
-            package_name.as_str(),
-        ) else {
-            audit.push(
-                AuditFinding::error(
-                    FindingCode::AmbiguousPackageSurfaceVersion,
-                    "source-backed package import has no unique package version; external import surface was not accepted",
-                )
-                .with_binding(specifier.clone()),
-            );
-            continue;
-        };
-        let evidence = source_surface_evidence(
-            package_name.as_str(),
-            package_version.as_str(),
-            specifier.as_str(),
-            evidence_kind,
-            &source_paths,
-        );
-        surfaces.push(
-            PackageSurfaceInput::accepted_external(package_name, package_version, specifier)
-                .with_evidence(evidence),
-        );
-    }
-    surfaces
-}
-
-fn package_import_sites_from_source_file(
-    source_file_id: u32,
-    source_file_path: &str,
-    source: &str,
-) -> Result<BTreeSet<PackageImportSite>, SourcePackageImportParseError> {
-    let allocator = Allocator::default();
-    let mut errors = Vec::new();
-    for source_type in
-        source_type_candidates(Some(Path::new(source_file_path)), ParseGoal::TypeScript)
-    {
-        let parsed = Parser::new(&allocator, source, source_type)
-            .with_options(parse_options_for(source_type))
-            .parse();
-        if parsed.errors.is_empty() && !parsed.panicked {
-            let mut visitor = SourcePackageImportVisitor::default();
-            visitor.visit_program(&parsed.program);
-            return Ok(visitor
-                .specifiers
-                .into_iter()
-                .map(|(package_name, specifier)| PackageImportSite {
-                    source_file_id,
-                    source_file_path: source_file_path.to_string(),
-                    package_name,
-                    specifier,
-                })
-                .collect());
-        }
-        errors.push(ParseError {
-            source_type: format!("{source_type:?}"),
-            diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
-        });
-    }
-    Err(SourcePackageImportParseError {
-        source_file_id,
-        source_file_path: source_file_path.to_string(),
-        source: JsError::ParseFailed(errors),
-    })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SurfaceVersionEvidenceKind {
-    PackageModule,
-    AcceptedAttribution,
-    CachedPackageSource,
-}
-
-impl SurfaceVersionEvidenceKind {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::PackageModule => "package_module_version",
-            Self::AcceptedAttribution => "accepted_attribution_version",
-            Self::CachedPackageSource => "cached_package_source_version",
-        }
-    }
-}
-
-fn external_package_version(
-    rows: &InputRows,
-    current_attributions: &[PackageAttributionInput],
-    package_sources: &[PackageSource],
-    package_name: &str,
-) -> Option<(String, SurfaceVersionEvidenceKind)> {
-    let module_versions = rows
-        .modules
-        .iter()
-        .filter(|module| {
-            module.kind == ModuleKind::Package
-                && module.package_name.as_deref() == Some(package_name)
-        })
-        .filter_map(|module| module.package_version.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(version) = unique_version(module_versions) {
-        return Some((version, SurfaceVersionEvidenceKind::PackageModule));
-    }
-
-    let attribution_versions = rows
-        .package_attributions
-        .iter()
-        .chain(current_attributions.iter())
-        .filter(|attribution| {
-            attribution.package_name == package_name
-                && attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
-        .filter_map(|attribution| attribution.package_version.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(version) = unique_version(attribution_versions) {
-        return Some((version, SurfaceVersionEvidenceKind::AcceptedAttribution));
-    }
-
-    let cached_versions = package_sources
-        .iter()
-        .filter(|source| source.package_name == package_name)
-        .map(|source| source.package_version.clone())
-        .collect::<BTreeSet<_>>();
-    if let Some(version) = unique_version(cached_versions) {
-        return Some((version, SurfaceVersionEvidenceKind::CachedPackageSource));
-    }
-
-    None
-}
-
-fn unique_version(versions: BTreeSet<String>) -> Option<String> {
-    if versions.len() == 1 {
-        versions.into_iter().next()
-    } else {
-        None
-    }
-}
-
-fn source_surface_evidence(
-    package_name: &str,
-    package_version: &str,
-    export_specifier: &str,
-    evidence_kind: SurfaceVersionEvidenceKind,
-    source_paths: &BTreeSet<String>,
-) -> String {
-    serde_json::json!({
-        "matcher": "source_package_import_surface",
-        "package_name": package_name,
-        "package_version": package_version,
-        "export_specifier": export_specifier,
-        "version_evidence": evidence_kind.as_str(),
-        "source_paths": source_paths.iter().collect::<Vec<_>>(),
-    })
-    .to_string()
-}
-
-#[derive(Debug, Default)]
-struct SourcePackageImportVisitor {
-    specifiers: BTreeSet<(String, String)>,
-}
-
-impl<'a> Visit<'a> for SourcePackageImportVisitor {
-    fn visit_import_declaration(&mut self, it: &ImportDeclaration<'a>) {
-        self.record_specifier(it.source.value.as_str());
-    }
-
-    fn visit_export_named_declaration(&mut self, it: &ExportNamedDeclaration<'a>) {
-        if let Some(source) = &it.source {
-            self.record_specifier(source.value.as_str());
-        }
-        walk_export_named_declaration(self, it);
-    }
-
-    fn visit_export_all_declaration(&mut self, it: &ExportAllDeclaration<'a>) {
-        self.record_specifier(it.source.value.as_str());
-        walk_export_all_declaration(self, it);
-    }
-
-    fn visit_call_expression(&mut self, it: &CallExpression<'a>) {
-        if let Expression::Identifier(identifier) = &it.callee
-            && identifier.name.as_str() == "require"
-            && let Some(specifier) = it.arguments.first().and_then(argument_string_literal)
-        {
-            self.record_specifier(specifier);
-        }
-        walk_call_expression(self, it);
-    }
-
-    fn visit_import_expression(&mut self, it: &ImportExpression<'a>) {
-        if let Some(specifier) = expression_string_literal(&it.source) {
-            self.record_specifier(specifier);
-        }
-        walk_import_expression(self, it);
-    }
-}
-
-impl SourcePackageImportVisitor {
-    fn record_specifier(&mut self, specifier: &str) {
-        if is_node_builtin(specifier) {
-            return;
-        }
-        let Some((package_name, _subpath)) = split_bare_specifier(specifier) else {
-            return;
-        };
-        if !is_valid_package_name(package_name.as_str()) {
-            return;
-        }
-        self.specifiers
-            .insert((package_name, specifier.to_string()));
-    }
-}
-
-fn argument_string_literal<'a>(argument: &'a Argument<'a>) -> Option<&'a str> {
-    match argument {
-        Argument::StringLiteral(literal) => Some(literal.value.as_str()),
-        _ => None,
-    }
-}
-
-fn expression_string_literal<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
-    match expression {
-        Expression::StringLiteral(literal) => Some(literal.value.as_str()),
-        _ => None,
-    }
 }
 
 pub(crate) fn normalize_source(path: &str, source: &str) -> Result<String, String> {
