@@ -4,6 +4,7 @@ pub mod cascade_match;
 mod cascade_ownership;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
+mod force_externalize;
 pub mod hungarian;
 mod importable_ownership;
 mod package_file_graph_ownership;
@@ -878,7 +879,7 @@ pub fn match_packages_with_pipeline(
     let matched_package_names = package_filter
         .cloned()
         .unwrap_or_else(|| unmatched_package_scope(rows));
-    force_externalize_remaining_package_modules(
+    force_externalize::force_externalize_remaining_package_modules(
         rows,
         package_sources,
         &matched_package_names,
@@ -1024,13 +1025,13 @@ pub(crate) fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchS
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ExternalImportTarget {
-    export_specifier: String,
-    source_path: String,
+pub(crate) struct ExternalImportTarget {
+    pub(crate) export_specifier: String,
+    pub(crate) source_path: String,
 }
 
 #[derive(Debug, Default)]
-struct ForceExternalizeCache<'a> {
+pub(crate) struct ForceExternalizeCache<'a> {
     module_fingerprints: RefCell<BTreeMap<ModuleId, Option<ModuleMatchFingerprint>>>,
     source_fingerprints_by_version:
         RefCell<BTreeMap<(String, String), Vec<PackageSourceFingerprint<'a>>>>,
@@ -4260,213 +4261,14 @@ fn unmatched_package_scope(rows: &InputRows) -> BTreeSet<String> {
         .collect()
 }
 
-fn force_externalize_remaining_package_modules(
-    rows: &InputRows,
-    package_sources: &[PackageSource],
-    matched_package_names: &BTreeSet<String>,
-    report: &mut VersionedPackageMatchReport,
-) -> usize {
-    let mut accepted_modules = accepted_external_modules(rows, report);
-    let source_only_matches = report
-        .matches
-        .iter()
-        .filter(|package_match| !package_match.external_importable)
-        .map(|package_match| (package_match.module_id, package_match.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let source_only_match_indices = report
-        .matches
-        .iter()
-        .enumerate()
-        .filter(|(_index, package_match)| !package_match.external_importable)
-        .map(|(index, package_match)| (package_match.module_id, index))
-        .collect::<BTreeMap<_, _>>();
-    let external_source_index = ExternalImportSourceIndex::build(package_sources);
-    let cache = ForceExternalizeCache::default();
-    let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
-    let mut forced = 0usize;
-
-    loop {
-        let mut round_forced = 0usize;
-        for module in &rows.modules {
-            if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
-                continue;
-            }
-            let Some(package_name) =
-                module
-                    .package_name
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|package_name| {
-                        !package_name.is_empty() && is_valid_package_name(package_name)
-                    })
-            else {
-                continue;
-            };
-            if !matched_package_names.contains(package_name) {
-                continue;
-            }
-            let source_only_match = source_only_matches.get(&module.id);
-            let package_version =
-                forced_external_package_version(module, source_only_match, package_sources)
-                    .unwrap_or_else(|| "*".to_string());
-            let module_source = rows
-                .module_source_slice(module.id)
-                .map(|slice| slice.source)
-                .unwrap_or_default();
-            let standard_target = forced_external_import_target(
-                rows,
-                module,
-                package_name,
-                package_version.as_str(),
-                source_only_match,
-                &external_source_index,
-            );
-            let mut accepted_package_name = package_name.to_string();
-            let mut accepted_package_version = package_version.clone();
-            let mut accepted_function_matches = source_only_match
-                .map(|package_match| package_match.function_signature_matches)
-                .unwrap_or_default();
-            let mut accepted_string_matches = source_only_match
-                .map(|package_match| package_match.string_anchor_matches)
-                .unwrap_or_default();
-            let mut target = standard_target;
-            if target.is_none() {
-                target = source_only_match.and_then(|package_match| {
-                    dependency_graph_source_fingerprint_external_import_target(
-                        rows,
-                        module,
-                        package_match,
-                        &external_source_index,
-                        module_source,
-                        &concrete_sources_by_module,
-                        &cache,
-                    )
-                    .or_else(|| {
-                        dependency_edge_path_external_import_target(
-                            rows,
-                            module,
-                            package_match,
-                            &external_source_index,
-                            &concrete_sources_by_module,
-                            &cache,
-                        )
-                    })
-                });
-            }
-            if target.is_none()
-                && let Some(correction) = source_only_match.and_then(|package_match| {
-                    same_package_cross_version_source_external_import_target(
-                        module,
-                        package_match,
-                        &external_source_index,
-                        module_source,
-                        &cache,
-                    )
-                })
-            {
-                accepted_package_name = correction.package_name;
-                accepted_package_version = correction.package_version;
-                accepted_function_matches = correction.function_signature_matches;
-                accepted_string_matches = correction.string_anchor_matches;
-                target = Some(correction.target);
-            }
-            if target.is_none()
-                && let Some(correction) = source_only_match.and_then(|package_match| {
-                    cross_package_exact_source_external_import_target(
-                        rows,
-                        module,
-                        package_match,
-                        &external_source_index,
-                        module_source,
-                        &concrete_sources_by_module,
-                        &cache,
-                    )
-                })
-            {
-                accepted_package_name = correction.package_name;
-                accepted_package_version = correction.package_version;
-                accepted_function_matches = correction.function_signature_matches;
-                accepted_string_matches = correction.string_anchor_matches;
-                target = Some(correction.target);
-            }
-            let Some(target) = target else {
-                continue;
-            };
-            if let Some(proven_version) = package_version_from_proof_path(
-                accepted_package_name.as_str(),
-                target.source_path.as_str(),
-            ) {
-                accepted_package_version = proven_version;
-            }
-            let target_source_path = target.source_path.clone();
-            let mut attribution = PackageAttributionInput::accepted_external(
-                module.id,
-                accepted_package_name.as_str(),
-                accepted_package_version.as_str(),
-                target.export_specifier.as_str(),
-            )
-            .with_resolved_file(target.source_path.as_str());
-            if let Some((_package_name, Some(subpath))) =
-                split_bare_specifier(target.export_specifier.as_str())
-            {
-                attribution = attribution.with_subpath(subpath);
-            }
-            report.attributions.push(attribution);
-            if let Some(index) = source_only_match_indices.get(&module.id).copied() {
-                let package_match = &mut report.matches[index];
-                package_match.package_name = accepted_package_name.clone();
-                package_match.package_version = accepted_package_version.clone();
-                package_match.export_specifier = target.export_specifier;
-                package_match.source_path = target.source_path;
-                package_match.function_signature_matches = accepted_function_matches;
-                package_match.string_anchor_matches = accepted_string_matches;
-                package_match.external_importable = true;
-            } else {
-                report.matches.push(PackageMatch {
-                    module_id: module.id,
-                    package_name: accepted_package_name.clone(),
-                    package_version: accepted_package_version.clone(),
-                    export_specifier: target.export_specifier,
-                    source_path: target.source_path,
-                    normalized_source_hash: String::new(),
-                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
-                    function_signature_matches: accepted_function_matches,
-                    string_anchor_matches: accepted_string_matches,
-                    external_importable: true,
-                });
-            }
-            accepted_modules.insert(module.id);
-            if let Some(concrete) = concrete_package_source_from_parts(
-                module.id,
-                accepted_package_name.as_str(),
-                report
-                    .matches
-                    .iter()
-                    .find(|package_match| package_match.module_id == module.id)
-                    .map(|package_match| package_match.package_version.as_str())
-                    .unwrap_or(accepted_package_version.as_str()),
-                target_source_path.as_str(),
-            ) {
-                concrete_sources_by_module.insert(module.id, concrete);
-            }
-            forced += 1;
-            round_forced += 1;
-        }
-        if round_forced == 0 {
-            break;
-        }
-    }
-    forced
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ConcretePackageSourcePath {
-    package_name: String,
-    package_version: String,
-    source_path: String,
+pub(crate) struct ConcretePackageSourcePath {
+    pub(crate) package_name: String,
+    pub(crate) package_version: String,
+    pub(crate) source_path: String,
 }
 
-fn concrete_package_sources_by_module(
+pub(crate) fn concrete_package_sources_by_module(
     rows: &InputRows,
     report: &VersionedPackageMatchReport,
 ) -> BTreeMap<ModuleId, ConcretePackageSourcePath> {
@@ -4509,7 +4311,7 @@ fn concrete_package_sources_by_module(
     sources
 }
 
-fn concrete_package_source_from_parts(
+pub(crate) fn concrete_package_source_from_parts(
     _module_id: ModuleId,
     package_name: &str,
     package_version: &str,
@@ -4542,7 +4344,10 @@ fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
     Some(proof_path.to_string())
 }
 
-fn package_version_from_proof_path(package_name: &str, proof_path: &str) -> Option<String> {
+pub(crate) fn package_version_from_proof_path(
+    package_name: &str,
+    proof_path: &str,
+) -> Option<String> {
     let concrete = concrete_package_source_path_from_proof(proof_path)?;
     let prefix = format!("{package_name}@");
     let rest = concrete.strip_prefix(prefix.as_str())?;
@@ -4597,7 +4402,7 @@ struct DependencyGraphSourceCandidate<'a> {
     string_matches: usize,
 }
 
-fn dependency_graph_source_fingerprint_external_import_target<'a>(
+pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
     rows: &InputRows,
     module: &ModuleInput,
     package_match: &PackageMatch,
@@ -4847,7 +4652,7 @@ fn dependency_graph_source_evidence(
     }
 }
 
-fn dependency_edge_path_external_import_target(
+pub(crate) fn dependency_edge_path_external_import_target(
     rows: &InputRows,
     module: &ModuleInput,
     package_match: &PackageMatch,
@@ -5030,12 +4835,12 @@ fn sources_matching_entry<'a>(
 }
 
 #[derive(Debug, Clone)]
-struct CorrectedPackageExternalImportTarget {
-    package_name: String,
-    package_version: String,
-    target: ExternalImportTarget,
-    function_signature_matches: usize,
-    string_anchor_matches: usize,
+pub(crate) struct CorrectedPackageExternalImportTarget {
+    pub(crate) package_name: String,
+    pub(crate) package_version: String,
+    pub(crate) target: ExternalImportTarget,
+    pub(crate) function_signature_matches: usize,
+    pub(crate) string_anchor_matches: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -5044,7 +4849,7 @@ struct CrossVersionSourceCandidate {
     target: ExternalImportTarget,
 }
 
-fn same_package_cross_version_source_external_import_target<'a>(
+pub(crate) fn same_package_cross_version_source_external_import_target<'a>(
     module: &ModuleInput,
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'a>,
@@ -5226,7 +5031,7 @@ fn cross_version_source_candidate_score(package_match: &ModulePackageMatch) -> u
         + package_match.string_anchor_matches
 }
 
-fn cross_package_exact_source_external_import_target<'a>(
+pub(crate) fn cross_package_exact_source_external_import_target<'a>(
     rows: &InputRows,
     module: &ModuleInput,
     package_match: &PackageMatch,
@@ -5383,7 +5188,7 @@ fn cross_package_exact_source_score(candidate: &CrossPackageExactSourceCandidate
         + candidate.string_matches
 }
 
-fn forced_external_package_version(
+pub(crate) fn forced_external_package_version(
     module: &ModuleInput,
     source_only_match: Option<&PackageMatch>,
     package_sources: &[PackageSource],
@@ -5416,7 +5221,7 @@ fn latest_package_source_version(
         .map(|(_version, text)| text.to_string())
 }
 
-fn forced_external_import_target(
+pub(crate) fn forced_external_import_target(
     rows: &InputRows,
     module: &ModuleInput,
     package_name: &str,
