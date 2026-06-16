@@ -21255,6 +21255,7 @@ function ownedB() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21322,6 +21323,7 @@ function runtimeReader() { return ownedA(); }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21391,6 +21393,7 @@ function runtimeReader() { return ownedA(); }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21470,6 +21473,7 @@ function runtimeReader() { return ownedA(); }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21549,6 +21553,7 @@ function runtimeDep() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21623,6 +21628,7 @@ function noop() {}\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21682,6 +21688,7 @@ function leaf() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21768,6 +21775,7 @@ function localDep() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21873,6 +21881,7 @@ function ownedB() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -21943,6 +21952,7 @@ function ownedB() { return ownedA(); }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -22005,6 +22015,7 @@ function ownedSmall() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -22082,6 +22093,7 @@ function ownedSmall() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "var ns = {};".to_string(),
                         byte_start: 0,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -22089,6 +22101,7 @@ function ownedSmall() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "function exportedOnly() { return 1; }".to_string(),
                         byte_start: 13,
+                        sub_snippets: Vec::new(),
                     },
                 ),
             ]),
@@ -22145,6 +22158,7 @@ function after() { return missing(); }\n"
                     RuntimePreludeSnippet {
                         source: "function before() { return 1; }".to_string(),
                         byte_start: 0,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -22152,6 +22166,7 @@ function after() { return missing(); }\n"
                     RuntimePreludeSnippet {
                         source: "function missing() { return before(); }".to_string(),
                         byte_start: 32,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -22159,6 +22174,7 @@ function after() { return missing(); }\n"
                     RuntimePreludeSnippet {
                         source: "function after() { return missing(); }".to_string(),
                         byte_start: 75,
+                        sub_snippets: Vec::new(),
                     },
                 ),
             ]),
@@ -22207,6 +22223,7 @@ function ownedA() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -22274,6 +22291,7 @@ class Owned {}\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -22344,6 +22362,7 @@ class Owned {}\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -22414,6 +22433,7 @@ class Owned {}\n";
                 RuntimePreludeSnippet {
                     source: "function ownedA() { return 1; }".to_string(),
                     byte_start: 0,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -22465,6 +22485,7 @@ class Owned {}\n";
                 RuntimePreludeSnippet {
                     source: "function ownedA() { return 1; }".to_string(),
                     byte_start: 0,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -22519,6 +22540,7 @@ class Owned {}\n";
                 RuntimePreludeSnippet {
                     source: "function ownedA() { return 1; }".to_string(),
                     byte_start: 0,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -22570,6 +22592,7 @@ class Owned {}\n";
                 RuntimePreludeSnippet {
                     source: "function ownedA() { return 1; }".to_string(),
                     byte_start: 0,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -22626,6 +22649,7 @@ class Owned {}\n";
                 RuntimePreludeSnippet {
                     source: "function ownedA() { return 1; }".to_string(),
                     byte_start: 0,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -22686,6 +22710,7 @@ function target() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "var ns = {};".to_string(),
                         byte_start: 0,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -22693,6 +22718,7 @@ function target() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "function target() { return 1; }".to_string(),
                         byte_start: "var ns = {};\n".len() as u32,
+                        sub_snippets: Vec::new(),
                     },
                 ),
             ]),
@@ -22839,6 +22865,7 @@ function target() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -26093,6 +26120,7 @@ function target() { return 1; }\n";
                 RuntimePreludeSnippet {
                     source: drop.to_string(),
                     byte_start: (keep.len() + 1) as u32,
+                    sub_snippets: Vec::new(),
                 },
             )]),
             namespace_exports: Vec::new(),
@@ -27566,6 +27594,7 @@ function migratedDep() { return 1; }\n";
             RuntimePreludeSnippet {
                 source: text.to_string(),
                 byte_start,
+                sub_snippets: Vec::new(),
             }
         };
         let prelude = RuntimePrelude {
@@ -31974,6 +32003,7 @@ function migratedDep() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "function readA() { return a + b; }".to_string(),
                         byte_start: 10,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -31981,6 +32011,7 @@ function migratedDep() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "function readC() { return b + c; }".to_string(),
                         byte_start: 20,
+                        sub_snippets: Vec::new(),
                     },
                 ),
                 (
@@ -31988,6 +32019,7 @@ function migratedDep() { return 1; }\n";
                     RuntimePreludeSnippet {
                         source: "function readD() { return b + d; }".to_string(),
                         byte_start: 30,
+                        sub_snippets: Vec::new(),
                     },
                 ),
             ]),

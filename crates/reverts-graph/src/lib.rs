@@ -139,6 +139,41 @@ impl RuntimePrelude {
 pub struct RuntimePreludeSnippet {
     pub source: String,
     pub byte_start: u32,
+    /// Top-level statement-level slices of this snippet, used by the
+    /// planner to evaluate migration of individual statements (e.g. each
+    /// statement inside a `lazyValue(() => { ... })` body) instead of
+    /// the whole snippet. When empty, callers fall back to the whole
+    /// `source` as a single unit — preserving the pre-split semantics.
+    pub sub_snippets: Vec<RuntimePreludeSubSnippet>,
+}
+
+/// A single top-level statement-level slice of a `RuntimePreludeSnippet`.
+/// Each sub-snippet covers a contiguous byte range inside the parent
+/// snippet and lists the bindings the statement defines / reads / writes
+/// so the planner can reason about its individual movability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePreludeSubSnippet {
+    pub source: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub defines: BTreeSet<BindingName>,
+    pub reads: BTreeSet<BindingName>,
+    pub writes: BTreeSet<BindingName>,
+}
+
+impl RuntimePreludeSnippet {
+    /// Construct a snippet without any pre-computed sub-snippets. The
+    /// planner's lazy-block splitter will populate `sub_snippets` when it
+    /// recognises a splittable shape; until then callers treat the
+    /// whole `source` as a single unit.
+    #[must_use]
+    pub fn new(source: impl Into<String>, byte_start: u32) -> Self {
+        Self {
+            source: source.into(),
+            byte_start,
+            sub_snippets: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -780,6 +815,7 @@ fn collect_runtime_prelude_declarations(
                 RuntimePreludeSnippet {
                     source: declaration.source.clone(),
                     byte_start: declaration.byte_start,
+                    sub_snippets: Vec::new(),
                 },
             );
             snippets.push(declaration.source);
