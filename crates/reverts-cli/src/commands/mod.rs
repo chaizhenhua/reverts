@@ -4,5 +4,8 @@
 //! `parse_project_id`, `format_audit_findings`) live in the crate root
 //! and are exposed as `pub(crate)`.
 
+pub(crate) mod extract_assets;
 pub(crate) mod generate_project;
+pub(crate) mod match_packages;
+pub(crate) mod package_cache;
 pub(crate) mod runtime_inventory;

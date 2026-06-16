@@ -180,189 +180,24 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
             Ok(())
         }
         CliCommand::GenerateProjectV2(args) => commands::generate_project::run(args),
-        CliCommand::MatchPackages(args) => run_match_packages(args),
-        CliCommand::MatchPackagesReport(args) => run_match_packages_report(args),
-        CliCommand::PackageCacheAudit(args) => run_package_cache_audit(args),
-        CliCommand::PackageCachePruneStale(args) => run_package_cache_prune_stale(args),
-        CliCommand::PackageExternalizationHints(args) => run_package_externalization_hints(args),
-        CliCommand::ExtractAssets(args) => run_extract_assets(args),
+        CliCommand::MatchPackages(args) => commands::match_packages::run(args),
+        CliCommand::MatchPackagesReport(args) => commands::match_packages::run_report(args),
+        CliCommand::PackageCacheAudit(args) => commands::package_cache::run_audit(args),
+        CliCommand::PackageCachePruneStale(args) => commands::package_cache::run_prune_stale(args),
+        CliCommand::PackageExternalizationHints(args) => {
+            commands::package_cache::run_externalization_hints(args)
+        }
+        CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
     }
 }
 
-fn run_match_packages(args: MatchPackagesArgs) -> Result<(), CliRunError> {
-    let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
-    println!(
-        "matched packages for project {} from {} package source(s): {} module attribution(s), {} direct external import module attribution(s), {} private source-suppressed package module(s), {} package source eliminated ({:.2}%), {} package source remaining, {} external import candidate(s), {} unsafe external import candidate(s) removed, {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
-        outcome.project_id,
-        outcome.loaded_package_sources,
-        outcome.matched_modules,
-        outcome.external_import_modules,
-        outcome.private_source_suppressed_package_modules,
-        outcome.source_eliminated_package_modules,
-        pct(
-            outcome.source_eliminated_package_modules,
-            outcome.loaded_package_modules
-        ),
-        outcome.remaining_package_source_modules,
-        outcome.external_import_candidates,
-        outcome.unsafe_external_import_modules,
-        outcome.matched_package_surfaces,
-        outcome.written_attributions,
-        outcome.written_surfaces,
-        outcome.function_attributions,
-        outcome.written_function_attributions,
-        outcome.function_ownership_matches,
-        outcome.package_source_quality_trusted,
-        outcome.package_source_quality_weak,
-        outcome.package_source_quality_invalid,
-        outcome.package_source_quality_missing,
-        outcome.audit.findings().len()
-    );
-    if !outcome.audit.is_clean() {
-        println!("{}", format_audit_findings(&outcome.audit));
-    }
-    print_external_import_blockers(&outcome.external_import_blockers);
-    Ok(())
-}
-
-fn print_external_import_blockers(blockers: &[ExternalImportBlockerSummary]) {
-    if blockers.is_empty() {
-        return;
-    }
-    println!("external import blockers:");
-    for blocker in blockers.iter().take(12) {
-        println!(
-            "  {}: {} ({})",
-            blocker.reason, blocker.consumer, blocker.count
-        );
-    }
-}
-
-fn run_match_packages_report(args: MatchPackagesReportArgs) -> Result<(), CliRunError> {
-    let outcome = match_packages_report_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
-    println!(
-        "package match report: projects={}, package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
-        outcome.projects.len(),
-        outcome.totals.package_modules,
-        outcome.totals.matched_modules,
-        pct(
-            outcome.totals.matched_modules,
-            outcome.totals.package_modules
-        ),
-        outcome.totals.external_import_modules,
-        pct(
-            outcome.totals.external_import_modules,
-            outcome.totals.package_modules
-        ),
-        outcome.totals.private_source_suppressed_package_modules,
-        outcome.totals.source_eliminated_package_modules,
-        pct(
-            outcome.totals.source_eliminated_package_modules,
-            outcome.totals.package_modules
-        ),
-        outcome.totals.remaining_package_source_modules,
-        outcome.totals.external_import_candidates,
-        outcome.totals.unsafe_external_import_modules,
-        outcome.totals.package_surfaces,
-        outcome.totals.audit_findings,
-    );
-    for project in &outcome.projects {
-        println!(
-            "  project {}: package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
-            project.project_id,
-            project.loaded_package_modules,
-            project.matched_modules,
-            pct(project.matched_modules, project.loaded_package_modules),
-            project.external_import_modules,
-            pct(
-                project.external_import_modules,
-                project.loaded_package_modules
-            ),
-            project.private_source_suppressed_package_modules,
-            project.source_eliminated_package_modules,
-            pct(
-                project.source_eliminated_package_modules,
-                project.loaded_package_modules
-            ),
-            project.remaining_package_source_modules,
-            project.external_import_candidates,
-            project.unsafe_external_import_modules,
-            project.matched_package_surfaces,
-            project.audit.findings().len(),
-        );
-    }
-    print_external_import_blockers(&outcome.blockers);
-    Ok(())
-}
-
-fn run_package_cache_audit(args: PackageCacheArgs) -> Result<(), CliRunError> {
-    let outcome =
-        package_cache_audit_from_sqlite(&args, false).map_err(CliRunError::MatchPackages)?;
-    print_package_cache_audit(&outcome, false);
-    Ok(())
-}
-
-fn run_package_cache_prune_stale(args: PackageCacheArgs) -> Result<(), CliRunError> {
-    let outcome =
-        package_cache_audit_from_sqlite(&args, true).map_err(CliRunError::MatchPackages)?;
-    print_package_cache_audit(&outcome, args.apply);
-    Ok(())
-}
-
-fn run_package_externalization_hints(
-    args: PackageExternalizationHintsArgs,
-) -> Result<(), CliRunError> {
-    let outcome =
-        package_externalization_hints_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
-    println!(
-        "package externalization hints: scanned={}, verified={}, skipped_invalid_specifier={}, skipped_invalid_versions={}, skipped_hash_mismatch={}, skipped_normalize_errors={}, {}={}",
-        outcome.scanned_rows,
-        outcome.verified_rows,
-        outcome.invalid_export_specifier_rows,
-        outcome.invalid_version_rows,
-        outcome.content_hash_mismatch_rows,
-        outcome.normalize_error_rows,
-        if args.apply { "written" } else { "would_write" },
-        outcome.written_rows,
-    );
-    Ok(())
-}
-
-fn print_package_cache_audit(outcome: &PackageCacheAuditOutcome, applied: bool) {
-    println!(
-        "package source cache audit: rows={}, missing_identity={}, invalid_versions={}, stale_policy={}, missing_policy={}, missing_export_specifier={}, parse_errors={}, {}={}",
-        outcome.rows,
-        outcome.missing_identity_rows,
-        outcome.invalid_version_rows,
-        outcome.stale_policy_rows,
-        outcome.missing_import_policy_rows,
-        outcome.missing_export_specifier_rows,
-        outcome.parse_error_rows,
-        if applied { "deleted" } else { "would_delete" },
-        outcome.deleted_rows,
-    );
-}
-
-fn pct(numerator: usize, denominator: usize) -> f64 {
+pub(crate) fn pct(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
     } else {
         (numerator as f64 * 100.0) / denominator as f64
     }
-}
-
-fn run_extract_assets(args: ExtractAssetsArgs) -> Result<(), CliRunError> {
-    let outcome = extract_assets_from_sqlite(&args).map_err(CliRunError::ExtractAssets)?;
-    println!(
-        "extracted assets for project {}: {} reference(s), {} matched, {} missing, {} written",
-        outcome.project_id,
-        outcome.referenced_assets,
-        outcome.matched_assets,
-        outcome.missing_assets,
-        outcome.written_assets
-    );
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
