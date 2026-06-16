@@ -8136,9 +8136,6 @@ pub enum ReaderNonSnippetUseKind {
     /// A queued reader is itself in `folded_runtime_definitions` — moving
     /// it would re-fold something already lowered.
     ReaderAlreadyFolded,
-    /// A queued reader has a non-snippet use that the fold heuristic
-    /// can't rewrite. The canonical "real usage outside our region".
-    UnfoldableNonSnippetUse,
     /// After expansion, accumulated moved source lines exceed the cap.
     ExpandedClusterSizeCap,
     /// `folded_runtime_deps` non-empty and the cluster source-line tally
@@ -8152,6 +8149,28 @@ pub enum ReaderNonSnippetUseKind {
     /// runtime helper, so migration would create `runtime → writer →
     /// runtime`.
     LazyInitCycleImport,
+    /// Reader is the bundle entrypoint's callee — migrating it would
+    /// orphan the entrypoint's call site.
+    UnfoldableEntrypointCallee,
+    /// Reader's non-snippet runtime read is also referenced by the
+    /// entrypoint — moving the reader detaches the entrypoint from the
+    /// folded chunk that satisfies that read.
+    UnfoldableEntrypointNonSnippetRead,
+    /// Reader is the target of a namespace object binding (its identity
+    /// is observed by namespace exports). Moving it would break the
+    /// namespace surface.
+    UnfoldableNamespaceObject,
+    /// Reader is a namespace export helper (wires up `__copyProps`/
+    /// `__esm`-style namespace re-exports). Moving breaks the wire-up.
+    UnfoldableNamespaceExportHelper,
+    /// Reader is already in `folded_runtime_definitions` — its
+    /// definition lives in a folded chunk, can't migrate again.
+    UnfoldableAlreadyFolded,
+    /// Reader has a non-snippet runtime read that hasn't been folded
+    /// into any runtime chunk. The canonical "real usage outside our
+    /// region" — runtime code reads this binding from a site we don't
+    /// control.
+    UnfoldableUnfoldedNonSnippetRead,
 }
 
 impl ReaderNonSnippetUseKind {
@@ -8160,13 +8179,57 @@ impl ReaderNonSnippetUseKind {
         match self {
             Self::SeedClusterSizeCap => "seed_cluster_size_cap",
             Self::ReaderAlreadyFolded => "reader_already_folded",
-            Self::UnfoldableNonSnippetUse => "unfoldable_non_snippet_use",
             Self::ExpandedClusterSizeCap => "expanded_cluster_size_cap",
             Self::FoldedDepClusterSizeCap => "folded_dep_cluster_size_cap",
             Self::PrimaryBindingNonSnippetUse => "primary_binding_non_snippet_use",
             Self::LazyInitCycleImport => "lazy_init_cycle_import",
+            Self::UnfoldableEntrypointCallee => "unfoldable_entrypoint_callee",
+            Self::UnfoldableEntrypointNonSnippetRead => "unfoldable_entrypoint_non_snippet_read",
+            Self::UnfoldableNamespaceObject => "unfoldable_namespace_object",
+            Self::UnfoldableNamespaceExportHelper => "unfoldable_namespace_export_helper",
+            Self::UnfoldableAlreadyFolded => "unfoldable_already_folded",
+            Self::UnfoldableUnfoldedNonSnippetRead => "unfoldable_unfolded_non_snippet_read",
         }
     }
+}
+
+/// Determine which condition of `runtime_reader_folded_non_snippet_use_can_move`
+/// caused it to return `false` for this reader. Caller must have already
+/// verified `runtime_binding_has_blocking_non_snippet_use` is true and
+/// `can_move` is false; this picks the most specific reason in priority
+/// order (entrypoint > namespace > folded > unfolded read).
+fn classify_unfoldable_non_snippet_use(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    reader: &BindingName,
+) -> ReaderNonSnippetUseKind {
+    if ctx.read_index.entrypoint_callee.as_ref() == Some(reader) {
+        return ReaderNonSnippetUseKind::UnfoldableEntrypointCallee;
+    }
+    if ctx
+        .read_index
+        .entrypoint_non_snippet_runtime_reads
+        .contains(reader)
+    {
+        return ReaderNonSnippetUseKind::UnfoldableEntrypointNonSnippetRead;
+    }
+    if ctx
+        .read_index
+        .namespace_exports_by_namespace
+        .contains_key(reader)
+    {
+        return ReaderNonSnippetUseKind::UnfoldableNamespaceObject;
+    }
+    if ctx.read_index.namespace_export_helpers.contains(reader) {
+        return ReaderNonSnippetUseKind::UnfoldableNamespaceExportHelper;
+    }
+    if ctx.folded_runtime_definitions.contains(reader) {
+        return ReaderNonSnippetUseKind::UnfoldableAlreadyFolded;
+    }
+    // Caller has has_blocking==true → reader is in non_snippet_runtime_reads,
+    // and can_move==false → reader is NOT in folded_non_snippet_runtime_reads
+    // after the higher-priority filters. So this is the canonical "real
+    // usage outside our region" case.
+    ReaderNonSnippetUseKind::UnfoldableUnfoldedNonSnippetRead
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8980,7 +9043,7 @@ fn migratable_runtime_reader_cluster_result(
         if runtime_binding_has_blocking_non_snippet_use(ctx.read_index, &reader) {
             if !runtime_reader_folded_non_snippet_use_can_move(ctx, &reader) {
                 return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
-                    ReaderNonSnippetUseKind::UnfoldableNonSnippetUse,
+                    classify_unfoldable_non_snippet_use(ctx, &reader),
                 ));
             }
             folded_non_snippet_snippets.insert(reader.clone());
