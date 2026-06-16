@@ -348,6 +348,62 @@ The folded-module branch of the per-module loop is now mostly a flat
 sequence of helper calls. The non-folded source-module branch is still
 ~700 lines and remains the next focus.
 
+### Session of 2026-05-23 (continuation 7 — Phase 3-C per-module loop split)
+
+18 commits in this session, `plan_enriched_program` method size
+**2,155 → 811 lines = -62.4%** (the per-module loop interior is the
+dominant subject):
+
+All extractions are freestanding `fn` helpers in `lib.rs` taking the
+state they need by `&` / `&mut`. The per-module loop now reads as a
+linear sequence of named helper calls; the previously 1,720-line
+body is split into ~25 explicit phases.
+
+Helpers added (in extraction order):
+
+- `filter_remaining_helpers_namespace_and_require` — dropped-
+  namespace + node-builtin-require helper filters.
+- `build_runtime_import_partitions` — per-source partition build (45
+  lines of filter chain + partition split).
+- `try_localize_lazy_value` — gate + lazyValue source rewrite (pre-
+  inline).
+- `compute_runtime_sources_for_module` — runtime-helper-file usage
+  set per module.
+- `route_prelude_imports_for_runtime_sources` — partition mutation.
+- `emit_migrated_extra_owner_imports` — migrated source + runtime-
+  owner + alias import emission.
+- `emit_migrated_runtime_extra_alias_imports` /
+  `emit_migrated_extra_runtime_reexport_imports` — runtime-extra
+  alias + reexport imports.
+- `record_lowered_runtime_helper_usage` — usage accumulator update
+  (12 helper maps).
+- `emit_lowered_runtime_helper_import` — single combined helper
+  import + planned-binding registration.
+- `emit_runtime_import_partitions` — per-source emit chain (direct
+  owner imports → prelude → singleton inline → package runtime →
+  named import).
+- `try_post_inline_localize_lazy_value` — second-chance lazyValue
+  localisation after singleton + package partitioning.
+- `emit_lowered_package_runtime_imports` — peel package-runtime
+  helpers off remaining/written sets.
+- `emit_module_definition_bindings` + `emit_source_import_bindings`
+  — readability-rename + binding registration loops.
+- `emit_migrated_extra_chunks` — migrated snippet + namespace export
+  body emission (deduped two call sites).
+- `add_migrated_local_binding_declarations` — migrated-local
+  PlannedBinding registration (deduped two call sites).
+- `emit_migrated_locally_var_declarations` — `var X;` / `var X =
+  init;` emission for migrated locals (deduped two call sites).
+- `build_lowered_module_source` — five-step source rewrite pipeline
+  (lazyValue → noop helper drop → node-builtin require → write
+  rewrites).
+
+Three of these extractions dedupe code that was repeated in both the
+`lowered_source.is_none()` source-free and the `Some(lowered_source)`
+source-backed branches. All commits pass `cargo clippy --locked
+--tests -- -D warnings` and the 290-test planner suite stays green
+at every step.
+
 ### Session of 2026-05-23 (continuation 6 — Phase 3-C step-by-step)
 
 3 commits, `lib.rs` 27,750 → 27,705 = -45 lines:
