@@ -246,6 +246,29 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
+### Session of 2026-05-23 (continuation 10 — source-refs computation chain)
+
+5 commits, method body 1,499 → 1,424 lines (-75 lines):
+
+- `0acea3b` `adjust_remaining_runtime_helpers` +
+  `adjust_written_runtime_helpers` — two single-purpose set arithmetic
+  helpers that previously inlined union/difference chains.
+- `ea3fa80` `compute_namespace_member_rewrite` +
+  `compute_node_builtin_require_helpers` +
+  `compute_node_builtin_require_rewrite` — three pure functions over
+  the lowered source / planned-binding state that compute the
+  namespace-member and node-builtin-require rewrites.
+- `b0cba0a` `compute_source_runtime_refs` — gathers runtime identifier
+  refs + exports + named-export bindings into a single set.
+- `95d7b32` follow-up: drop redundant `into_iter()` on `exports_for`
+  return (clippy `useless_conversion`).
+- `b709a68` `filter_remaining_helpers_by_write_rewrite` — the
+  conditional-rewrite-with-refs walk that filters
+  `remaining_runtime_helpers` against the post-rewrite identifier set.
+
+Cumulative on `plan_enriched_program`: 2,155 → 1,424 lines
+(-731 lines / -34%).
+
 ### Session of 2026-05-23 (continuation 9 — OwnerMigrationState builder)
 
 1 commit, method body 1,522 → 1,499 lines (-23 lines):
