@@ -10,6 +10,7 @@ mod external_package_adapter_emit;
 mod identifiers;
 mod import_coalesce;
 mod package_runtime;
+mod plan;
 mod plan_error;
 mod pure_reexport_bypass;
 mod relative_paths;
@@ -236,6 +237,9 @@ use import_coalesce::{
     parse_runtime_prelude_direct_import, split_import_clause_and_specifier,
 };
 
+pub use plan::{
+    EmitPlan, PlannedBinding, PlannedExport, PlannedFile, PlannedImport, PlannedRename,
+};
 pub use plan_error::PlanError;
 use relative_paths::relative_import_specifier;
 
@@ -272,18 +276,7 @@ use reverts_js::{
     skip_line_comment,
 };
 use reverts_model::EnrichedProgram;
-use reverts_package::{PackageResolution, accepted_external_module_ids};
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct EmitPlan {
-    pub files: Vec<PlannedFile>,
-}
-
-impl EmitPlan {
-    pub fn push_file(&mut self, file: PlannedFile) {
-        self.files.push(file);
-    }
-}
+use reverts_package::accepted_external_module_ids;
 
 /// Applies the planner's explicit source-text finalization pass to a generated
 /// file before it is appended to an [`EmitPlan`].
@@ -292,128 +285,6 @@ impl EmitPlan {
 /// between plan data structures and readability/boilerplate rewrite policy.
 pub fn finalize_planned_file(file: &mut PlannedFile) {
     import_coalesce::finalize_planned_file(file);
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedFile {
-    pub path: String,
-    pub imports: Vec<PlannedImport>,
-    pub bindings: Vec<PlannedBinding>,
-    pub exports: Vec<PlannedExport>,
-    /// Late, readability-only binding renames. These are applied by the
-    /// emitter after all source recovery/lowering is complete but before
-    /// final codegen and parse audit, so graph/planner facts stay keyed by
-    /// original recovered names.
-    pub readability_renames: Vec<PlannedRename>,
-    pub body: Vec<String>,
-    pub compiler_recovery: CompilerRecoveryDecision,
-}
-
-impl PlannedFile {
-    #[must_use]
-    pub fn new(path: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            imports: Vec::new(),
-            bindings: Vec::new(),
-            exports: Vec::new(),
-            readability_renames: Vec::new(),
-            body: Vec::new(),
-            compiler_recovery: CompilerRecoveryDecision::default(),
-        }
-    }
-
-    pub fn add_import(&mut self, import: PlannedImport) {
-        self.imports.push(import);
-    }
-
-    pub fn add_binding(&mut self, binding: PlannedBinding) {
-        self.bindings.push(binding);
-    }
-
-    pub fn add_export(&mut self, binding: BindingName) {
-        self.add_export_with_source_backed(binding, false);
-    }
-
-    pub fn add_export_with_source_backed(&mut self, binding: BindingName, source_backed: bool) {
-        self.exports.push(PlannedExport {
-            binding,
-            source_backed,
-        });
-    }
-
-    pub fn push_source(&mut self, source: impl Into<String>) {
-        self.body.push(source.into());
-    }
-
-    pub fn add_readability_rename(&mut self, rename: PlannedRename) {
-        self.readability_renames.push(rename);
-    }
-
-    pub fn set_compiler_recovery(&mut self, compiler_recovery: CompilerRecoveryDecision) {
-        self.compiler_recovery = compiler_recovery;
-    }
-
-    #[must_use]
-    pub const fn source_strategy(&self) -> SourceCompilerStrategy {
-        self.compiler_recovery.strategy
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedImport {
-    pub namespace: BindingName,
-    pub resolution: PackageResolution,
-    pub source_backed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedRename {
-    pub original: BindingName,
-    pub renamed: BindingName,
-}
-
-impl PlannedRename {
-    #[must_use]
-    pub fn new(original: BindingName, renamed: BindingName) -> Self {
-        Self { original, renamed }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedBinding {
-    pub original: BindingName,
-    pub emitted: BindingName,
-    pub shape: BindingShape,
-    pub source_backed: bool,
-    /// Paper #7 downstream: property names observed on this binding when
-    /// shape is `NamespaceObject`. Empty for every other shape and for
-    /// namespaces whose members the solver could not see.
-    pub known_members: BTreeSet<BindingName>,
-}
-
-impl PlannedBinding {
-    #[must_use]
-    pub fn new(
-        original: BindingName,
-        emitted: BindingName,
-        shape: BindingShape,
-        source_backed: bool,
-    ) -> Self {
-        Self {
-            original,
-            emitted,
-            shape,
-            source_backed,
-            known_members: BTreeSet::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_known_members(mut self, known_members: BTreeSet<BindingName>) -> Self {
-        self.known_members = known_members;
-        self
-    }
 }
 
 /// Build a `PlannedBinding` whose `shape` and `known_members` are derived
@@ -442,12 +313,6 @@ pub(crate) fn plan_binding_from_program(
         BTreeSet::new()
     };
     PlannedBinding::new(original, emitted, shape, source_backed).with_known_members(known_members)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedExport {
-    pub binding: BindingName,
-    pub source_backed: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
