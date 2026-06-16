@@ -246,6 +246,43 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
+### Session of 2026-05-23 (continuation 7 — folded-module phase split)
+
+7 commits, `plan_enriched_program` body shrank from 1,818 → 1,620 lines
+(-198 lines, **-11% on top of prior continuations**). Each commit
+extracts a bounded slice of the lazy-fold sub-block into a freestanding
+helper while preserving all behaviour:
+
+- `081c8b8` `partition_folded_stub_exports` +
+  `folded_runtime_required_bindings` — split `folded.stub_exports` into
+  runtime-owned vs. direct-owner stubs, and restrict
+  `folded.required_bindings` to the runtime/own subset.
+- `b91602c` `emit_folded_runtime_stub_reexports` +
+  `emit_folded_direct_stub_reexports` — emit `export { … } from runtime`
+  and `export { … } from './other-owner.ts'`.
+- `602b58c` `emit_runtime_extra_alias_imports` — per-source-file alias
+  import statements + helper-file/exported/required registration.
+- `36d32ed` `emit_runtime_extra_deps_imports` — analogous
+  `import { … } from runtime` for non-aliased extra deps.
+- `84d03da` allow `clippy::too_many_arguments` on the new helper fns.
+- `80d0c4e` `push_migrated_runtime_snippets_and_namespaces` — migrate
+  recovered snippet + namespace-export sources into the folded module's
+  output, with alias rewriting.
+- `b8477aa` `push_folded_noop_and_migrated_exports` — noop shims +
+  migrated `export { … }` + folded stub `PlannedBinding`s + migrated
+  local binding `PlannedBinding`s with shape decisions.
+- `cd54f49` `push_package_imports` — extract the package-graph import
+  emission (used by every module, not just folded ones).
+
+Cumulative on the planner's main method:
+- Original 2,155 lines (33,930-line lib.rs)
+- Now ~1,615 lines (after 8 helper extractions + tail extractions)
+- That's -540 lines (-25%) from the method body.
+
+The folded-module branch of the per-module loop is now mostly a flat
+sequence of helper calls. The non-folded source-module branch is still
+~700 lines and remains the next focus.
+
 ### Session of 2026-05-23 (continuation 6 — Phase 3-C step-by-step)
 
 3 commits, `lib.rs` 27,750 → 27,705 = -45 lines:
