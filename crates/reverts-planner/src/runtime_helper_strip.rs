@@ -26,6 +26,15 @@ use std::collections::BTreeSet;
 use reverts_graph::RuntimePrelude;
 use reverts_ir::BindingName;
 
+pub(crate) fn migratable_runtime_var_initializer(
+    prelude: &RuntimePrelude,
+    binding: &BindingName,
+) -> Option<Option<String>> {
+    let snippet = prelude.snippets.get(binding)?;
+    classify_migratable_var_declaration(snippet.source.as_str(), binding.as_str())
+        .map(|initializer| initializer.map(str::to_string))
+}
+
 use crate::is_pure_initializer_expression;
 use crate::statements::runtime_namespace_export_statement;
 

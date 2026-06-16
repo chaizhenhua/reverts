@@ -11,7 +11,14 @@ mod runtime_helper_strip;
 mod runtime_helper_writes;
 mod runtime_namespace_rewrite;
 mod runtime_setter_migration_blocker;
+mod runtime_source_read;
 mod source_module_facts;
+
+use runtime_source_read::{
+    RuntimeBindingReadProfile, RuntimeSourceReadIndex, runtime_binding_read_profile,
+    runtime_binding_read_profile_diagnostic, runtime_readers_for_binding,
+    runtime_source_read_index,
+};
 mod statement_parsers;
 mod statements;
 
@@ -26,7 +33,7 @@ use destructure_writes::{
 };
 
 use runtime_helper_strip::{
-    classify_migratable_var_declaration, strip_runtime_namespace_export_sources,
+    migratable_runtime_var_initializer, strip_runtime_namespace_export_sources,
     strip_runtime_snippet_sources, strip_runtime_var_declarations,
 };
 use runtime_helper_writes::{
@@ -51,6 +58,7 @@ use byte_lexer::{
     skip_template_literal, skip_ws, skip_ws_and_comments,
 };
 use identifiers::{
+    declaration_keyword_at, declaration_keyword_at_start, find_declaration_keyword,
     is_identifier_like, is_planner_synthetic_binding, keyword_at, parse_identifier,
     parse_identifier_after_function_keyword, parse_identifier_after_keyword,
 };
@@ -6786,208 +6794,6 @@ fn runtime_setter_migration_blocker_report(
     report
 }
 
-fn migratable_runtime_var_initializer(
-    prelude: &RuntimePrelude,
-    binding: &BindingName,
-) -> Option<Option<String>> {
-    let snippet = prelude.snippets.get(binding)?;
-    classify_migratable_var_declaration(snippet.source.as_str(), binding.as_str())
-        .map(|initializer| initializer.map(str::to_string))
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum RuntimeBindingReadProfile {
-    NoReads,
-    SnippetReaders(BTreeSet<BindingName>),
-    Rejected,
-}
-
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct RuntimeSourceReadIndex {
-    snippet_readers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
-    snippet_writers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
-    namespace_readers_by_binding: BTreeMap<BindingName, BTreeSet<BindingName>>,
-    namespace_exports_by_namespace: BTreeMap<BindingName, RuntimeNamespaceExport>,
-    namespace_export_helpers: BTreeSet<BindingName>,
-    free_bindings_by_snippet: BTreeMap<BindingName, BTreeSet<BindingName>>,
-    non_snippet_runtime_reads: BTreeSet<BindingName>,
-    folded_non_snippet_runtime_reads: BTreeSet<BindingName>,
-    folded_lazy_safe_runtime_reads: BTreeSet<BindingName>,
-    folded_non_call_runtime_reads: BTreeSet<BindingName>,
-    folded_unsafe_runtime_reads: BTreeSet<BindingName>,
-    entrypoint_non_snippet_runtime_reads: BTreeSet<BindingName>,
-    entrypoint_callee: Option<BindingName>,
-}
-
-fn runtime_source_read_index(
-    prelude: &RuntimePrelude,
-    folded_chunks: &[RuntimeFoldedSourceChunk],
-) -> RuntimeSourceReadIndex {
-    let mut index = RuntimeSourceReadIndex {
-        entrypoint_callee: prelude
-            .entrypoint
-            .as_ref()
-            .map(|entrypoint| entrypoint.callee.clone()),
-        ..RuntimeSourceReadIndex::default()
-    };
-    for (key, snippet) in &prelude.snippets {
-        let local_bindings = local_bindings_in_source(snippet.source.as_str());
-        let free_bindings = runtime_import_identifiers_in_source(snippet.source.as_str())
-            .into_iter()
-            .map(BindingName::new)
-            .collect::<BTreeSet<_>>();
-        for binding in &free_bindings {
-            index
-                .snippet_readers_by_binding
-                .entry(binding.clone())
-                .or_default()
-                .insert(key.clone());
-        }
-        index
-            .free_bindings_by_snippet
-            .insert(key.clone(), free_bindings);
-        for write in implicit_global_writes_in_source(snippet.source.as_str())
-            .into_iter()
-            .filter(|write| !local_bindings.contains(write.as_str()))
-            .filter(|write| prelude.defines(write))
-        {
-            index
-                .snippet_writers_by_binding
-                .entry(write)
-                .or_default()
-                .insert(key.clone());
-        }
-    }
-
-    for chunk in folded_chunks {
-        let folded_reads = runtime_import_identifiers_in_source(chunk.source.as_str())
-            .into_iter()
-            .map(BindingName::new)
-            .collect::<BTreeSet<_>>();
-        index
-            .non_snippet_runtime_reads
-            .extend(folded_reads.iter().cloned());
-        index.folded_non_snippet_runtime_reads.extend(folded_reads);
-        for statement in top_level_statement_slices(chunk.source.as_str()) {
-            let facts = identifier_read_facts_in_source(statement)
-                .into_iter()
-                .map(|fact| (BindingName::new(fact.name.as_str()), fact.is_call_callee))
-                .collect::<Vec<_>>();
-            if facts.is_empty() {
-                continue;
-            }
-            if lowered_lazy_initializer_statement_binding(statement).is_some() {
-                index
-                    .folded_lazy_safe_runtime_reads
-                    .extend(facts.into_iter().map(|(binding, _is_call)| binding));
-                continue;
-            }
-            for (binding, is_call) in facts {
-                if is_call {
-                    index.folded_unsafe_runtime_reads.insert(binding);
-                } else {
-                    index.folded_non_call_runtime_reads.insert(binding);
-                }
-            }
-        }
-    }
-
-    if let Some(entrypoint) = &prelude.entrypoint {
-        for side_effect in &entrypoint.side_effects {
-            let entrypoint_reads =
-                runtime_import_identifiers_in_source(side_effect.source.as_str())
-                    .into_iter()
-                    .map(BindingName::new)
-                    .collect::<BTreeSet<_>>();
-            index
-                .non_snippet_runtime_reads
-                .extend(entrypoint_reads.iter().cloned());
-            index
-                .entrypoint_non_snippet_runtime_reads
-                .extend(entrypoint_reads);
-        }
-    }
-
-    for namespace_export in &prelude.namespace_exports {
-        index
-            .namespace_export_helpers
-            .insert(namespace_export.helper.clone());
-        index
-            .namespace_exports_by_namespace
-            .insert(namespace_export.namespace.clone(), namespace_export.clone());
-        for target in namespace_export.exports.values() {
-            index
-                .namespace_readers_by_binding
-                .entry(target.clone())
-                .or_default()
-                .insert(namespace_export.namespace.clone());
-        }
-    }
-
-    index
-}
-
-fn runtime_binding_read_profile(
-    read_index: &RuntimeSourceReadIndex,
-    binding: &BindingName,
-) -> RuntimeBindingReadProfile {
-    if runtime_binding_read_profile_diagnostic(read_index, binding).is_err() {
-        return RuntimeBindingReadProfile::Rejected;
-    }
-
-    let readers = runtime_readers_for_binding(read_index, binding);
-    if readers.is_empty() {
-        RuntimeBindingReadProfile::NoReads
-    } else {
-        RuntimeBindingReadProfile::SnippetReaders(readers)
-    }
-}
-
-fn runtime_binding_read_profile_diagnostic(
-    read_index: &RuntimeSourceReadIndex,
-    binding: &BindingName,
-) -> Result<RuntimeBindingReadProfile, RuntimeSetterMigrationBlockerReason> {
-    if read_index.non_snippet_runtime_reads.contains(binding) {
-        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNonSnippetRead);
-    }
-    if read_index.namespace_export_helpers.contains(binding) {
-        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNamespaceExportHelper);
-    }
-    if read_index
-        .namespace_exports_by_namespace
-        .contains_key(binding)
-    {
-        return Err(RuntimeSetterMigrationBlockerReason::RuntimeNamespaceObjectBinding);
-    }
-
-    let readers = runtime_readers_for_binding(read_index, binding);
-    if readers.is_empty() {
-        Ok(RuntimeBindingReadProfile::NoReads)
-    } else {
-        Ok(RuntimeBindingReadProfile::SnippetReaders(readers))
-    }
-}
-
-fn runtime_readers_for_binding(
-    read_index: &RuntimeSourceReadIndex,
-    binding: &BindingName,
-) -> BTreeSet<BindingName> {
-    let mut readers = read_index
-        .snippet_readers_by_binding
-        .get(binding)
-        .cloned()
-        .unwrap_or_default();
-    readers.extend(
-        read_index
-            .namespace_readers_by_binding
-            .get(binding)
-            .into_iter()
-            .flatten()
-            .cloned(),
-    );
-    readers
-}
-
 struct RuntimeReaderClusterContext<'a> {
     source_file_id: u32,
     owner_available_bindings: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
@@ -11046,15 +10852,6 @@ fn try_parse_runtime_lazy_initializer_declaration(
     ))
 }
 
-fn declaration_keyword_at(source: &str, start: usize) -> Option<(&'static str, usize)> {
-    for keyword in ["var", "let", "const"] {
-        if keyword_at(source, start, keyword) {
-            return Some((keyword, keyword.len()));
-        }
-    }
-    None
-}
-
 fn find_statement_end(source: &str, start: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut cursor = start;
@@ -11544,7 +11341,7 @@ fn find_top_level_byte(source: &str, target: u8) -> Option<usize> {
     None
 }
 
-fn top_level_statement_slices(source: &str) -> Vec<&str> {
+pub(crate) fn top_level_statement_slices(source: &str) -> Vec<&str> {
     top_level_statement_spans(source)
         .into_iter()
         .map(|(start, end)| &source[start..end])
@@ -11575,7 +11372,7 @@ fn variable_declaration_without_initializer(statement: &str) -> bool {
     !contains_top_level_initializer_operator(statement, cursor)
 }
 
-fn lowered_lazy_initializer_statement_binding(statement: &str) -> Option<BindingName> {
+pub(crate) fn lowered_lazy_initializer_statement_binding(statement: &str) -> Option<BindingName> {
     let statement = statement.trim().trim_end_matches(';').trim();
     let (_keyword, after_keyword) = declaration_keyword_at_start(statement)?;
     let cursor = skip_ws(statement.as_bytes(), after_keyword);
@@ -11586,13 +11383,6 @@ fn lowered_lazy_initializer_statement_binding(statement: &str) -> Option<Binding
     }
     let initializer = statement[skip_ws(statement.as_bytes(), equals + 1)..].trim();
     looks_like_lowered_lazy_initializer(initializer).then(|| BindingName::new(binding))
-}
-
-fn declaration_keyword_at_start(source: &str) -> Option<(&'static str, usize)> {
-    ["var", "let", "const"]
-        .into_iter()
-        .find(|keyword| keyword_at(source, 0, keyword))
-        .map(|keyword| (keyword, keyword.len()))
 }
 
 fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
@@ -12996,7 +12786,7 @@ fn unresolved_runtime_helper_references(
         .collect()
 }
 
-fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
+pub(crate) fn runtime_import_identifiers_in_source(source: &str) -> BTreeSet<String> {
     let scan_source = runtime_dependency_scan_source(source);
     let source = scan_source.as_deref().unwrap_or(source);
     let local_bindings = local_bindings_in_source(source);
@@ -13283,14 +13073,14 @@ fn value_identifiers_in_source(source: &str) -> BTreeSet<String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct IdentifierReadUsage {
-    name: String,
-    byte_start: usize,
-    byte_end: usize,
-    is_call_callee: bool,
+pub(crate) struct IdentifierReadUsage {
+    pub(crate) name: String,
+    pub(crate) byte_start: usize,
+    pub(crate) byte_end: usize,
+    pub(crate) is_call_callee: bool,
 }
 
-fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
+pub(crate) fn identifier_read_facts_in_source(source: &str) -> Vec<IdentifierReadUsage> {
     try_identifier_read_facts_in_source(source).unwrap_or_default()
 }
 
@@ -13636,7 +13426,7 @@ fn collect_class_field_bindings(
     }
 }
 
-fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
+pub(crate) fn local_bindings_in_source(source: &str) -> BTreeSet<String> {
     let mut bindings = BTreeSet::new();
     let bytes = source.as_bytes();
     let mut cursor = 0usize;
@@ -17838,32 +17628,6 @@ fn parse_helper_call_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
     Some(cursor)
 }
 
-fn find_declaration_keyword(source: &str, from: usize) -> Option<(usize, &'static str)> {
-    ["var", "let", "const"]
-        .into_iter()
-        .filter_map(|keyword| find_keyword(source, keyword, from).map(|index| (index, keyword)))
-        .min_by_key(|(index, _)| *index)
-}
-
-fn find_keyword(source: &str, keyword: &str, from: usize) -> Option<usize> {
-    let mut offset = from;
-    while let Some(relative) = source[offset..].find(keyword) {
-        let absolute = offset + relative;
-        let before = absolute
-            .checked_sub(1)
-            .and_then(|index| source.as_bytes().get(index))
-            .copied();
-        let after = source.as_bytes().get(absolute + keyword.len()).copied();
-        if before.is_none_or(|byte| !is_identifier_continue(byte))
-            && after.is_none_or(|byte| !is_identifier_continue(byte))
-        {
-            return Some(absolute);
-        }
-        offset = absolute + keyword.len();
-    }
-    None
-}
-
 fn identifiers_in_source(source: &str) -> BTreeSet<String> {
     value_identifiers_in_source(source)
 }
@@ -17957,7 +17721,7 @@ fn implicit_global_declarations_for_module(
         .collect()
 }
 
-fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
+pub(crate) fn implicit_global_writes_in_source(source: &str) -> BTreeSet<BindingName> {
     let mut writes = BTreeSet::new();
     let declaration_bindings = variable_declaration_binding_starts(source);
     let class_field_bindings = class_field_bindings_in_source(source);

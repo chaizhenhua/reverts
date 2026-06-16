@@ -67,6 +67,58 @@ pub(crate) fn is_planner_synthetic_binding(name: &str) -> bool {
     name.starts_with("__reverts_") || name.starts_with("_$")
 }
 
+/// Match any of `var` / `let` / `const` whose leading byte is at
+/// `start`. Returns `(keyword, keyword.len())` on a hit so the caller
+/// can advance past it.
+pub(crate) fn declaration_keyword_at(source: &str, start: usize) -> Option<(&'static str, usize)> {
+    for keyword in ["var", "let", "const"] {
+        if keyword_at(source, start, keyword) {
+            return Some((keyword, keyword.len()));
+        }
+    }
+    None
+}
+
+/// Like `declaration_keyword_at` but unconditionally probing position 0
+/// of the slice — handy for "is this whole snippet a declaration?".
+pub(crate) fn declaration_keyword_at_start(source: &str) -> Option<(&'static str, usize)> {
+    ["var", "let", "const"]
+        .into_iter()
+        .find(|keyword| keyword_at(source, 0, keyword))
+        .map(|keyword| (keyword, keyword.len()))
+}
+
+/// Find the *next* occurrence of any of `var` / `let` / `const` after
+/// `from`, where the candidate is bounded by identifier boundaries on
+/// both sides. Returns the earliest hit if multiple keywords match.
+pub(crate) fn find_declaration_keyword(source: &str, from: usize) -> Option<(usize, &'static str)> {
+    ["var", "let", "const"]
+        .into_iter()
+        .filter_map(|keyword| find_keyword(source, keyword, from).map(|index| (index, keyword)))
+        .min_by_key(|(index, _)| *index)
+}
+
+/// Find the next byte offset at which `keyword` appears as a whole
+/// identifier (not as a fragment of a larger one) starting from `from`.
+pub(crate) fn find_keyword(source: &str, keyword: &str, from: usize) -> Option<usize> {
+    let mut offset = from;
+    while let Some(relative) = source[offset..].find(keyword) {
+        let absolute = offset + relative;
+        let before = absolute
+            .checked_sub(1)
+            .and_then(|index| source.as_bytes().get(index))
+            .copied();
+        let after = source.as_bytes().get(absolute + keyword.len()).copied();
+        if before.is_none_or(|byte| !is_identifier_continue(byte))
+            && after.is_none_or(|byte| !is_identifier_continue(byte))
+        {
+            return Some(absolute);
+        }
+        offset = absolute + keyword.len();
+    }
+    None
+}
+
 pub(crate) fn keyword_at(source: &str, cursor: usize, keyword: &str) -> bool {
     source
         .get(cursor..)
