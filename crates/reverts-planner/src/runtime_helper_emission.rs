@@ -45,11 +45,11 @@ use crate::{
     coalesce_runtime_lazy_initializer_call_runs, compact_pure_static_runtime_literals,
     drop_bare_void_zero_top_level_statements, identifiers_in_source,
     inline_single_use_runtime_proxy_functions, noop_runtime_helpers_in_source,
-    planned_runtime_helper_consumed_bindings, private_noop_runtime_helpers_in_source,
-    prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
-    rewrite_noop_runtime_helper_calls, runtime_entrypoint_root_bindings,
-    runtime_module_owner_imports_for_source, scan_runtime_externalized_bindings,
-    strip_runtime_noop_declarations, unresolved_runtime_helper_references,
+    private_noop_runtime_helpers_in_source, prune_orphan_runtime_bindings,
+    purify_private_runtime_lazy_initializers, rewrite_noop_runtime_helper_calls,
+    runtime_entrypoint_root_bindings, runtime_module_owner_imports_for_source,
+    scan_runtime_externalized_bindings, strip_runtime_noop_declarations,
+    unresolved_runtime_helper_references,
 };
 
 pub(crate) struct RuntimeHelperEmissionContext<'a> {
@@ -429,4 +429,36 @@ pub(crate) fn emit_runtime_helper_files(
         plan.push_file(file);
     }
     Ok(())
+}
+
+pub(crate) fn planned_runtime_helper_consumed_bindings(
+    plan: &EmitPlan,
+    source_file_id: u32,
+) -> std::collections::BTreeSet<reverts_ir::BindingName> {
+    use crate::relative_paths::relative_import_specifier;
+    use crate::statement_parsers::{
+        parse_generated_named_import_statement, parse_generated_named_reexport_statement,
+    };
+    use crate::statements::runtime_helpers_path;
+    let helper_path = runtime_helpers_path(source_file_id);
+    let mut consumed = std::collections::BTreeSet::new();
+    for file in &plan.files {
+        let specifier = relative_import_specifier(file.path.as_str(), helper_path.as_str());
+        for source in &file.body {
+            if let Some((bindings, import_specifier)) =
+                parse_generated_named_import_statement(source)
+                && import_specifier == specifier
+            {
+                consumed.extend(bindings);
+                continue;
+            }
+            if let Some((bindings, reexport_specifier)) =
+                parse_generated_named_reexport_statement(source)
+                && reexport_specifier == specifier
+            {
+                consumed.extend(bindings);
+            }
+        }
+    }
+    consumed
 }

@@ -4,6 +4,7 @@ mod cli_entrypoint;
 mod compiler_recovery;
 mod destructure_writes;
 mod eager_safe_analysis;
+mod external_package_adapter_emit;
 mod identifiers;
 mod import_coalesce;
 mod package_runtime;
@@ -70,7 +71,6 @@ use runtime_namespace_rewrite::rewrite_runtime_namespace_member_accesses;
 use statement_parsers::{
     coalesce_consecutive_uninitialized_var_declarations, parse_generated_default_import_statement,
     parse_generated_named_export_statement, parse_generated_named_import_statement,
-    parse_generated_named_reexport_statement,
 };
 
 use byte_lexer::{
@@ -540,6 +540,28 @@ impl PlannerAnalysis {
     }
 }
 
+/// When a lazy binding is folded into its helper module, the consumer no
+/// longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
+/// helper file does. Detect that case here so the helper file declares
+/// and exports `lazyValue`/`lazyModule` even though no consumer needs to
+/// import them.
+fn detect_folded_lazy_helper_use(
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    used_lazy_module: &mut BTreeSet<u32>,
+    used_lazy_value: &mut BTreeSet<u32>,
+) {
+    for (source_file_id, chunks) in &runtime_lazy_folds.chunks_by_source_file {
+        for chunk in chunks {
+            if chunk.source.contains("lazyModule(") {
+                used_lazy_module.insert(*source_file_id);
+            }
+            if chunk.source.contains("lazyValue(") {
+                used_lazy_value.insert(*source_file_id);
+            }
+        }
+    }
+}
+
 impl ImportExportPlanner {
     #[must_use]
     pub fn runtime_setter_migration_blocker_report(
@@ -615,21 +637,11 @@ impl ImportExportPlanner {
             &package_runtime_islands,
         );
 
-        // When a lazy binding is folded into its helper module, the consumer no
-        // longer carries the `lazyValue(...)`/`lazyModule(...)` call — but the
-        // helper file does. Detect that case here so the helper file declares
-        // and exports `lazyValue`/`lazyModule` even though no consumer needs to
-        // import them.
-        for (source_file_id, chunks) in &runtime_lazy_folds.chunks_by_source_file {
-            for chunk in chunks {
-                if chunk.source.contains("lazyModule(") {
-                    used_lazy_module.insert(*source_file_id);
-                }
-                if chunk.source.contains("lazyValue(") {
-                    used_lazy_value.insert(*source_file_id);
-                }
-            }
-        }
+        detect_folded_lazy_helper_use(
+            runtime_lazy_folds,
+            &mut used_lazy_module,
+            &mut used_lazy_value,
+        );
 
         for module in program.model().modules() {
             if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
@@ -642,32 +654,23 @@ impl ImportExportPlanner {
                 .unwrap_or(module.semantic_path.as_str());
             let package_runtime_owner =
                 package_runtime_owner_for_module(module, source_suppressed_packages);
-            let mut file = PlannedFile::new(path);
             let compiler_profile = program.compiler_profile().module(module.id);
             let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
+            let mut adapter_file = PlannedFile::new(path);
+            adapter_file.set_compiler_recovery(compiler_recovery.clone());
+            if external_package_adapter_emit::try_emit_external_package_adapter(
+                program,
+                module,
+                external_package_adapters,
+                adapter_file,
+                &mut plan,
+            ) {
+                continue;
+            }
+            let mut file = PlannedFile::new(path);
             file.set_compiler_recovery(compiler_recovery);
             let mut planned_bindings = BTreeSet::<BindingName>::new();
             let mut emitted_inline_runtime_helpers = BTreeSet::<(u32, BindingName)>::new();
-
-            if module.kind == ModuleKind::Package
-                && let Some(adapter_plan) = external_package_adapters.get(&module.id)
-                && let Some(attribution) = accepted_external_attribution_for_module(
-                    &program.model().input().package_attributions,
-                    module.id,
-                )
-            {
-                populate_external_package_adapter_file(
-                    &mut file,
-                    program,
-                    module.id,
-                    attribution,
-                    &adapter_plan.bindings,
-                    adapter_plan.kind,
-                    adapter_plan.member_proof.as_ref(),
-                );
-                plan.push_file(file);
-                continue;
-            }
 
             if pure_reexport_bypasses.omitted_modules.contains(&module.id) {
                 continue;
@@ -2496,33 +2499,6 @@ fn partition_runtime_owner_bindings(
         }
     }
     partition
-}
-
-pub(crate) fn planned_runtime_helper_consumed_bindings(
-    plan: &EmitPlan,
-    source_file_id: u32,
-) -> BTreeSet<BindingName> {
-    let helper_path = runtime_helpers_path(source_file_id);
-    let mut consumed = BTreeSet::<BindingName>::new();
-    for file in &plan.files {
-        let specifier = relative_import_specifier(file.path.as_str(), helper_path.as_str());
-        for source in &file.body {
-            if let Some((bindings, import_specifier)) =
-                parse_generated_named_import_statement(source)
-                && import_specifier == specifier
-            {
-                consumed.extend(bindings);
-                continue;
-            }
-            if let Some((bindings, reexport_specifier)) =
-                parse_generated_named_reexport_statement(source)
-                && reexport_specifier == specifier
-            {
-                consumed.extend(bindings);
-            }
-        }
-    }
-    consumed
 }
 
 pub(crate) fn emit_direct_owner_imports(
@@ -11402,16 +11378,16 @@ pub(crate) fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExternalPackageAdapterKind {
+pub(crate) enum ExternalPackageAdapterKind {
     CommonJsWrapper,
     NamespaceReturn,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalPackageAdapterPlan {
-    bindings: BTreeSet<BindingName>,
-    kind: ExternalPackageAdapterKind,
-    member_proof: Option<ExportMemberAdapterProof>,
+    pub(crate) bindings: BTreeSet<BindingName>,
+    pub(crate) kind: ExternalPackageAdapterKind,
+    pub(crate) member_proof: Option<ExportMemberAdapterProof>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11451,7 +11427,7 @@ impl ExportMemberAdapterProofKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ExportMemberAdapterProof {
+pub(crate) struct ExportMemberAdapterProof {
     kind: ExportMemberAdapterProofKind,
     exported_members: BTreeSet<String>,
     aliases: BTreeMap<BindingName, String>,
@@ -12009,7 +11985,7 @@ fn external_package_adapter_kind(
     ExternalPackageAdapterKind::NamespaceReturn
 }
 
-fn populate_external_package_adapter_file(
+pub(crate) fn populate_external_package_adapter_file(
     file: &mut PlannedFile,
     program: &EnrichedProgram,
     module_id: ModuleId,
