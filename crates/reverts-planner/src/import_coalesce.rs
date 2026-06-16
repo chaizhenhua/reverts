@@ -27,11 +27,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_ir::BindingName;
 
 use crate::identifiers::is_identifier_like;
+use crate::statement_parsers::{
+    coalesce_consecutive_uninitialized_var_declarations as coalesce_uninitialized_var_declarations_in_source,
+    parse_generated_default_import_statement, parse_generated_named_export_statement,
+    parse_generated_named_import_statement,
+};
 use crate::statements::{
-    default_import_statement, default_named_import_alias_statement, named_import_alias_statement,
+    default_import_statement, default_named_import_alias_statement, named_export_statement,
+    named_import_alias_statement, named_import_statement,
 };
 use crate::{
-    RuntimePreludeDirectImport, RuntimePreludeDirectImportKind, apply_text_edits,
+    PlannedFile, RuntimePreludeDirectImport, RuntimePreludeDirectImportKind, apply_text_edits,
     top_level_statement_spans,
 };
 
@@ -197,6 +203,165 @@ pub(crate) fn parse_named_import_clause(clause: &str) -> Option<Vec<(String, Str
         specifiers.push((imported.to_string(), local.to_string()));
     }
     Some(specifiers)
+}
+
+/// Applies planner readability-only coalescing to one generated file.
+///
+/// This is intentionally an explicit pass instead of hidden behavior inside
+/// [`EmitPlan::push_file`](crate::EmitPlan::push_file): the plan data
+/// structure stores facts, while this module owns the source-text rewrite
+/// policy for collapsing generated import/export boilerplate.
+pub(crate) fn finalize_planned_file(file: &mut PlannedFile) {
+    coalesce_consecutive_uninitialized_var_declarations_in_planned_file(file);
+    coalesce_generated_named_imports(file);
+    coalesce_generated_default_named_imports(file);
+    coalesce_generated_named_exports(file);
+}
+
+pub(crate) fn coalesce_generated_named_imports(file: &mut PlannedFile) {
+    let mut imports_by_specifier = BTreeMap::<String, BTreeSet<BindingName>>::new();
+    let mut first_index_by_specifier = BTreeMap::<String, usize>::new();
+    let mut duplicate_indices = BTreeSet::<usize>::new();
+    for (index, source) in file.body.iter().enumerate() {
+        let Some((bindings, specifier)) = parse_generated_named_import_statement(source) else {
+            continue;
+        };
+        imports_by_specifier
+            .entry(specifier.clone())
+            .or_default()
+            .extend(bindings);
+        use std::collections::btree_map::Entry;
+        match first_index_by_specifier.entry(specifier) {
+            Entry::Vacant(entry) => {
+                entry.insert(index);
+            }
+            Entry::Occupied(_) => {
+                duplicate_indices.insert(index);
+            }
+        }
+    }
+    if duplicate_indices.is_empty() {
+        return;
+    }
+    let mut replacements = BTreeMap::<usize, String>::new();
+    for (specifier, index) in first_index_by_specifier {
+        let Some(bindings) = imports_by_specifier.get(&specifier) else {
+            continue;
+        };
+        replacements.insert(
+            index,
+            named_import_statement(bindings.iter(), specifier.as_str()),
+        );
+    }
+    let mut merged = Vec::with_capacity(file.body.len().saturating_sub(duplicate_indices.len()));
+    for (index, source) in file.body.iter().enumerate() {
+        if duplicate_indices.contains(&index) {
+            continue;
+        }
+        if let Some(replacement) = replacements.get(&index) {
+            merged.push(replacement.clone());
+        } else {
+            merged.push(source.clone());
+        }
+    }
+    file.body = merged;
+}
+
+fn coalesce_generated_default_named_imports(file: &mut PlannedFile) {
+    let mut named_by_specifier = BTreeMap::<String, (usize, BTreeSet<BindingName>)>::new();
+    let mut defaults_by_specifier = BTreeMap::<String, Vec<(usize, BindingName)>>::new();
+    for (index, source) in file.body.iter().enumerate() {
+        if let Some((bindings, specifier)) = parse_generated_named_import_statement(source) {
+            named_by_specifier.insert(specifier, (index, bindings));
+            continue;
+        }
+        if let Some((binding, specifier)) = parse_generated_default_import_statement(source) {
+            defaults_by_specifier
+                .entry(specifier)
+                .or_default()
+                .push((index, binding));
+        }
+    }
+
+    let mut removals = BTreeSet::<usize>::new();
+    let mut replacements = BTreeMap::<usize, String>::new();
+    for (specifier, (named_index, bindings)) in named_by_specifier {
+        let Some(defaults) = defaults_by_specifier.get(&specifier) else {
+            continue;
+        };
+        let [(default_index, default_binding)] = defaults.as_slice() else {
+            continue;
+        };
+        let replacement_index = (*default_index).min(named_index);
+        let removed_index = (*default_index).max(named_index);
+        replacements.insert(
+            replacement_index,
+            default_named_import_alias_statement(
+                default_binding,
+                bindings.iter().map(|binding| (binding.as_str(), binding)),
+                specifier.as_str(),
+            ),
+        );
+        removals.insert(removed_index);
+    }
+    if removals.is_empty() {
+        return;
+    }
+
+    let mut merged = Vec::with_capacity(file.body.len().saturating_sub(removals.len()));
+    for (index, source) in file.body.iter().enumerate() {
+        if removals.contains(&index) {
+            continue;
+        }
+        if let Some(replacement) = replacements.get(&index) {
+            merged.push(replacement.clone());
+        } else {
+            merged.push(source.clone());
+        }
+    }
+    file.body = merged;
+}
+
+fn coalesce_generated_named_exports(file: &mut PlannedFile) {
+    let mut exported_bindings = BTreeSet::<BindingName>::new();
+    let mut first_index = None::<usize>;
+    let mut duplicate_indices = BTreeSet::<usize>::new();
+    for (index, source) in file.body.iter().enumerate() {
+        let Some(bindings) = parse_generated_named_export_statement(source) else {
+            continue;
+        };
+        exported_bindings.extend(bindings);
+        if first_index.is_none() {
+            first_index = Some(index);
+        } else {
+            duplicate_indices.insert(index);
+        }
+    }
+    if duplicate_indices.is_empty() {
+        return;
+    }
+    let Some(first_index) = first_index else {
+        return;
+    };
+    let replacement = named_export_statement(exported_bindings.iter());
+    let mut merged = Vec::with_capacity(file.body.len().saturating_sub(duplicate_indices.len()));
+    for (index, source) in file.body.iter().enumerate() {
+        if duplicate_indices.contains(&index) {
+            continue;
+        }
+        if index == first_index {
+            merged.push(replacement.clone());
+        } else {
+            merged.push(source.clone());
+        }
+    }
+    file.body = merged;
+}
+
+fn coalesce_consecutive_uninitialized_var_declarations_in_planned_file(file: &mut PlannedFile) {
+    for source in &mut file.body {
+        *source = coalesce_uninitialized_var_declarations_in_source(source);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

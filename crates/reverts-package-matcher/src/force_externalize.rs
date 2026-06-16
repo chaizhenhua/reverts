@@ -15,7 +15,7 @@ use reverts_input::{InputRows, PackageAttributionInput};
 use reverts_ir::{ModuleKind, is_valid_package_name, split_bare_specifier};
 
 use crate::{
-    ExternalImportSourceIndex, ForceExternalizeCache, ModuleMatchStrategy, PackageMatch,
+    ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy, PackageMatch,
     PackageSource, VersionedPackageMatchReport, accepted_external_modules,
     concrete_package_source_from_parts, concrete_package_sources_by_module,
     cross_package_exact_source_external_import_target, dependency_edge_path_external_import_target,
@@ -45,7 +45,7 @@ pub(crate) fn force_externalize_remaining_package_modules(
         .map(|(index, package_match)| (package_match.module_id, index))
         .collect::<BTreeMap<_, _>>();
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
-    let cache = ForceExternalizeCache::default();
+    let cache = ExternalImportProofScratch::default();
     let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
     let mut forced = 0usize;
 

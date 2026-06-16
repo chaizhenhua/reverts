@@ -224,11 +224,6 @@ use pure_reexport_bypass::{
 };
 use runtime_namespace_rewrite::rewrite_runtime_namespace_member_accesses;
 
-use statement_parsers::{
-    coalesce_consecutive_uninitialized_var_declarations, parse_generated_default_import_statement,
-    parse_generated_named_export_statement, parse_generated_named_import_statement,
-};
-
 use byte_lexer::{
     find_matching_brace, looks_like_regex_literal, skip_non_code_at, skip_quoted,
     skip_regex_literal, skip_ws,
@@ -285,13 +280,18 @@ pub struct EmitPlan {
 }
 
 impl EmitPlan {
-    pub fn push_file(&mut self, mut file: PlannedFile) {
-        file.coalesce_consecutive_uninitialized_var_declarations();
-        file.coalesce_generated_named_imports();
-        file.coalesce_generated_default_named_imports();
-        file.coalesce_generated_named_exports();
+    pub fn push_file(&mut self, file: PlannedFile) {
         self.files.push(file);
     }
+}
+
+/// Applies the planner's explicit source-text finalization pass to a generated
+/// file before it is appended to an [`EmitPlan`].
+///
+/// Keeping this separate from [`EmitPlan::push_file`] preserves the boundary
+/// between plan data structures and readability/boilerplate rewrite policy.
+pub fn finalize_planned_file(file: &mut PlannedFile) {
+    import_coalesce::finalize_planned_file(file);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,154 +352,6 @@ impl PlannedFile {
 
     pub fn set_compiler_recovery(&mut self, compiler_recovery: CompilerRecoveryDecision) {
         self.compiler_recovery = compiler_recovery;
-    }
-
-    fn coalesce_generated_named_imports(&mut self) {
-        let mut imports_by_specifier = BTreeMap::<String, BTreeSet<BindingName>>::new();
-        let mut first_index_by_specifier = BTreeMap::<String, usize>::new();
-        let mut duplicate_indices = BTreeSet::<usize>::new();
-        for (index, source) in self.body.iter().enumerate() {
-            let Some((bindings, specifier)) = parse_generated_named_import_statement(source) else {
-                continue;
-            };
-            imports_by_specifier
-                .entry(specifier.clone())
-                .or_default()
-                .extend(bindings);
-            use std::collections::btree_map::Entry;
-            match first_index_by_specifier.entry(specifier) {
-                Entry::Vacant(entry) => {
-                    entry.insert(index);
-                }
-                Entry::Occupied(_) => {
-                    duplicate_indices.insert(index);
-                }
-            }
-        }
-        if duplicate_indices.is_empty() {
-            return;
-        }
-        let mut replacements = BTreeMap::<usize, String>::new();
-        for (specifier, index) in first_index_by_specifier {
-            let Some(bindings) = imports_by_specifier.get(&specifier) else {
-                continue;
-            };
-            replacements.insert(
-                index,
-                named_import_statement(bindings.iter(), specifier.as_str()),
-            );
-        }
-        let mut merged =
-            Vec::with_capacity(self.body.len().saturating_sub(duplicate_indices.len()));
-        for (index, source) in self.body.iter().enumerate() {
-            if duplicate_indices.contains(&index) {
-                continue;
-            }
-            if let Some(replacement) = replacements.get(&index) {
-                merged.push(replacement.clone());
-            } else {
-                merged.push(source.clone());
-            }
-        }
-        self.body = merged;
-    }
-
-    fn coalesce_generated_default_named_imports(&mut self) {
-        let mut named_by_specifier = BTreeMap::<String, (usize, BTreeSet<BindingName>)>::new();
-        let mut defaults_by_specifier = BTreeMap::<String, Vec<(usize, BindingName)>>::new();
-        for (index, source) in self.body.iter().enumerate() {
-            if let Some((bindings, specifier)) = parse_generated_named_import_statement(source) {
-                named_by_specifier.insert(specifier, (index, bindings));
-                continue;
-            }
-            if let Some((binding, specifier)) = parse_generated_default_import_statement(source) {
-                defaults_by_specifier
-                    .entry(specifier)
-                    .or_default()
-                    .push((index, binding));
-            }
-        }
-
-        let mut removals = BTreeSet::<usize>::new();
-        let mut replacements = BTreeMap::<usize, String>::new();
-        for (specifier, (named_index, bindings)) in named_by_specifier {
-            let Some(defaults) = defaults_by_specifier.get(&specifier) else {
-                continue;
-            };
-            let [(default_index, default_binding)] = defaults.as_slice() else {
-                continue;
-            };
-            let replacement_index = (*default_index).min(named_index);
-            let removed_index = (*default_index).max(named_index);
-            replacements.insert(
-                replacement_index,
-                default_named_import_alias_statement(
-                    default_binding,
-                    bindings.iter().map(|binding| (binding.as_str(), binding)),
-                    specifier.as_str(),
-                ),
-            );
-            removals.insert(removed_index);
-        }
-        if removals.is_empty() {
-            return;
-        }
-
-        let mut merged = Vec::with_capacity(self.body.len().saturating_sub(removals.len()));
-        for (index, source) in self.body.iter().enumerate() {
-            if removals.contains(&index) {
-                continue;
-            }
-            if let Some(replacement) = replacements.get(&index) {
-                merged.push(replacement.clone());
-            } else {
-                merged.push(source.clone());
-            }
-        }
-        self.body = merged;
-    }
-
-    fn coalesce_generated_named_exports(&mut self) {
-        let mut exported_bindings = BTreeSet::<BindingName>::new();
-        let mut first_index = None::<usize>;
-        let mut duplicate_indices = BTreeSet::<usize>::new();
-        for (index, source) in self.body.iter().enumerate() {
-            let Some(bindings) = parse_generated_named_export_statement(source) else {
-                continue;
-            };
-            exported_bindings.extend(bindings);
-            if first_index.is_none() {
-                first_index = Some(index);
-            } else {
-                duplicate_indices.insert(index);
-            }
-        }
-        if duplicate_indices.is_empty() {
-            return;
-        }
-        let Some(first_index) = first_index else {
-            return;
-        };
-        let replacement = named_export_statement(exported_bindings.iter());
-        let mut merged =
-            Vec::with_capacity(self.body.len().saturating_sub(duplicate_indices.len()));
-        for (index, source) in self.body.iter().enumerate() {
-            if duplicate_indices.contains(&index) {
-                continue;
-            }
-            if index == first_index {
-                merged.push(replacement.clone());
-            } else {
-                merged.push(source.clone());
-            }
-        }
-        self.body = merged;
-    }
-
-    fn coalesce_consecutive_uninitialized_var_declarations(&mut self) {
-        for source in &mut self.body {
-            *source = coalesce_consecutive_uninitialized_var_declarations(source);
-        }
     }
 
     #[must_use]

@@ -227,6 +227,7 @@ pub(crate) fn plan_one_module(
             &mut file,
             &mut planned_bindings,
         );
+        crate::finalize_planned_file(&mut file);
         plan.push_file(file);
         return Ok(());
     }
@@ -775,6 +776,7 @@ pub(crate) fn plan_one_module(
         }
     }
 
+    crate::finalize_planned_file(&mut file);
     plan.push_file(file);
 
     Ok(())

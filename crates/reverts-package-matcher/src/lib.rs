@@ -9,6 +9,7 @@ mod dependency_closure;
 mod dependency_neighborhood;
 mod exact_hint_ownership;
 mod exported_members;
+mod externalization_policy;
 mod fingerprint;
 mod force_externalize;
 pub mod hungarian;
@@ -36,6 +37,13 @@ pub(crate) use dependency_closure::{
 use exported_members::{
     export_member_set_is_strong, exported_members_from_source, is_identifier_name,
     is_usable_export_member,
+};
+use externalization_policy::{
+    SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
+    cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
+    dependency_graph_source_fingerprint_policy_allows, public_export_member_policy_allows,
+    same_package_cross_version_source_policy_allows, semantic_external_target_policies,
+    semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
 use fingerprint::{SourceFingerprint, fingerprint_source};
 pub use hungarian::assign_max_weight;
@@ -1026,26 +1034,20 @@ fn match_with_cascade_scoped_by_module_hints(
     merged
 }
 
-pub(crate) fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchStrategy) -> bool {
-    matches!(
-        strategy,
-        ModuleMatchStrategy::NormalizedSourceHash
-            | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-            | ModuleMatchStrategy::PropertyShapeAndStringAnchors
-            | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-            | ModuleMatchStrategy::ClassShapeAndStringAnchors
-            | ModuleMatchStrategy::SwitchShapeAndStringAnchors
-    )
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalImportTarget {
     pub(crate) export_specifier: String,
     pub(crate) source_path: String,
 }
 
+/// Pass-local memoization for external-import proof strategies.
+///
+/// This is scratch state for proof execution, not a package-source index and
+/// not a policy object. Keeping it named and scoped as scratch makes the
+/// mechanism/strategy boundary explicit: callers may reuse expensive facts
+/// while each proof strategy still owns its own allow/score decisions.
 #[derive(Debug, Default)]
-pub(crate) struct ForceExternalizeCache<'a> {
+pub(crate) struct ExternalImportProofScratch<'a> {
     module_fingerprints: RefCell<BTreeMap<ModuleId, Option<ModuleMatchFingerprint>>>,
     source_fingerprints_by_version:
         RefCell<BTreeMap<(String, String), Vec<PackageSourceFingerprint<'a>>>>,
@@ -1057,7 +1059,7 @@ pub(crate) struct ForceExternalizeCache<'a> {
     package_modules_by_id: RefCell<Option<BTreeMap<ModuleId, (String, String)>>>,
 }
 
-impl<'a> ForceExternalizeCache<'a> {
+impl<'a> ExternalImportProofScratch<'a> {
     fn module_fingerprint(
         &self,
         module: &ModuleInput,
@@ -1501,7 +1503,7 @@ fn resolve_external_import_target_with_index(
     external_source_index: &ExternalImportSourceIndex<'_>,
     module_source: &str,
 ) -> Option<ExternalImportTarget> {
-    let cache = ForceExternalizeCache::default();
+    let cache = ExternalImportProofScratch::default();
     if let Some(target) = normalized_source_external_package_source(
         module,
         package_name,
@@ -1642,7 +1644,7 @@ fn dependency_exact_hint_source_match_external_package_source<'a>(
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
-    cache: &ForceExternalizeCache<'a>,
+    cache: &ExternalImportProofScratch<'a>,
 ) -> Option<ExternalImportTarget> {
     if package_match.strategy != ModuleMatchStrategy::DependencyClosureOwnership
         || !package_match.source_path.starts_with("exact-hint:")
@@ -1698,102 +1700,6 @@ fn dependency_exact_hint_source_match_external_package_source<'a>(
         external_source_index,
         module_source,
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SemanticExternalTargetPolicy {
-    hint_mode: SemanticPathHintMode,
-    min_score: usize,
-}
-
-fn semantic_external_target_policies(
-    package_match: &PackageMatch,
-) -> Vec<SemanticExternalTargetPolicy> {
-    match package_match.strategy {
-        ModuleMatchStrategy::NormalizedSourceHash => vec![SemanticExternalTargetPolicy {
-            hint_mode: SemanticPathHintMode::ImportProof,
-            min_score: 1,
-        }],
-        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-            if package_match.function_signature_matches > 0
-                && package_match.string_anchor_matches > 0 =>
-        {
-            vec![SemanticExternalTargetPolicy {
-                hint_mode: SemanticPathHintMode::ImportProof,
-                min_score: 1,
-            }]
-        }
-        ModuleMatchStrategy::PropertyShapeAndStringAnchors
-            if package_match.function_signature_matches > 0
-                && package_match.string_anchor_matches > 0 =>
-        {
-            vec![SemanticExternalTargetPolicy {
-                hint_mode: SemanticPathHintMode::ImportProof,
-                min_score: 1,
-            }]
-        }
-        ModuleMatchStrategy::ObjectShapeAndStringAnchors
-            if package_match.function_signature_matches > 0
-                && package_match.string_anchor_matches > 0 =>
-        {
-            vec![SemanticExternalTargetPolicy {
-                hint_mode: SemanticPathHintMode::ImportProof,
-                min_score: 1,
-            }]
-        }
-        ModuleMatchStrategy::ClassShapeAndStringAnchors
-            if package_match.function_signature_matches > 0
-                && package_match.string_anchor_matches > 0 =>
-        {
-            vec![SemanticExternalTargetPolicy {
-                hint_mode: SemanticPathHintMode::ImportProof,
-                min_score: 1,
-            }]
-        }
-        ModuleMatchStrategy::SwitchShapeAndStringAnchors
-            if package_match.function_signature_matches > 0
-                && package_match.string_anchor_matches > 0 =>
-        {
-            vec![SemanticExternalTargetPolicy {
-                hint_mode: SemanticPathHintMode::ImportProof,
-                min_score: 1,
-            }]
-        }
-        ModuleMatchStrategy::DependencyClosureOwnership => {
-            if !package_match.source_path.starts_with("exact-hint:") {
-                return Vec::new();
-            }
-            if package_match.source_path.contains(":quality=trusted:") {
-                return vec![
-                    SemanticExternalTargetPolicy {
-                        hint_mode: SemanticPathHintMode::ImportProof,
-                        min_score: 1,
-                    },
-                    SemanticExternalTargetPolicy {
-                        hint_mode: SemanticPathHintMode::RelaxedImportProof,
-                        min_score: 4,
-                    },
-                ];
-            }
-            if package_match.source_path.contains(":quality=weak:") {
-                return vec![SemanticExternalTargetPolicy {
-                    hint_mode: SemanticPathHintMode::RelaxedImportProof,
-                    min_score: 4,
-                }];
-            }
-            Vec::new()
-        }
-        ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
-        | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-        | ModuleMatchStrategy::ClassShapeAndStringAnchors
-        | ModuleMatchStrategy::SwitchShapeAndStringAnchors => Vec::new(),
-        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::CascadeFunctionCoverage
-        | ModuleMatchStrategy::CascadeFunctionOwnership
-        | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => Vec::new(),
-    }
 }
 
 fn semantic_external_package_source(
@@ -1947,34 +1853,6 @@ fn canonical_subpath_external_package_source(
         export_specifier: export_specifier.to_string(),
         source_path: format!("forced-external:canonical-subpath:{}", source.source_path),
     })
-}
-
-fn canonical_subpath_policy_allows(package_match: &PackageMatch) -> bool {
-    if source_only_match_can_be_promoted_to_import(package_match.strategy) {
-        return true;
-    }
-    match package_match.strategy {
-        ModuleMatchStrategy::DependencyClosureOwnership => {
-            package_match.source_path.starts_with("exact-hint:")
-        }
-        ModuleMatchStrategy::AggregateStructuralBagSimilarity => {
-            package_match.function_signature_matches >= 3
-                && package_match.string_anchor_matches >= 8
-        }
-        ModuleMatchStrategy::CascadeFunctionOwnership
-        | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors => {
-            package_match.function_signature_matches >= 2
-                && package_match.string_anchor_matches >= 1
-        }
-        ModuleMatchStrategy::NormalizedSourceHash
-        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
-        | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-        | ModuleMatchStrategy::ClassShapeAndStringAnchors
-        | ModuleMatchStrategy::SwitchShapeAndStringAnchors
-        | ModuleMatchStrategy::CascadeFunctionCoverage => false,
-    }
 }
 
 fn exact_hint_semantic_path(source_path: &str) -> Option<String> {
@@ -2165,27 +2043,6 @@ fn semantic_source_only_export_member_package_source(
         export_specifier,
         source_path,
     })
-}
-
-fn semantic_source_only_export_member_policy_allows(package_match: &PackageMatch) -> bool {
-    match package_match.strategy {
-        ModuleMatchStrategy::DependencyClosureOwnership => {
-            package_match.source_path.starts_with("exact-hint:")
-                && (package_match.source_path.contains(":quality=trusted:")
-                    || package_match.source_path.contains(":quality=weak:"))
-        }
-        ModuleMatchStrategy::NormalizedSourceHash
-        | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::PropertyShapeAndStringAnchors
-        | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-        | ModuleMatchStrategy::ClassShapeAndStringAnchors
-        | ModuleMatchStrategy::SwitchShapeAndStringAnchors
-        | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
-        | ModuleMatchStrategy::CascadeFunctionCoverage
-        | ModuleMatchStrategy::CascadeFunctionOwnership
-        | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => false,
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2533,22 +2390,6 @@ fn public_export_member_external_package_source(
             source.0.source_path
         ),
     })
-}
-
-fn public_export_member_policy_allows(package_match: &PackageMatch) -> bool {
-    source_only_match_can_be_promoted_to_import(package_match.strategy)
-        || (package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-            && package_match.source_path.starts_with("exact-hint:"))
-        || (package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
-            && package_match.function_signature_matches >= 3
-            && package_match.string_anchor_matches >= 8)
-        || (matches!(
-            package_match.strategy,
-            ModuleMatchStrategy::CascadeFunctionOwnership
-                | ModuleMatchStrategy::CascadePartialFunctionCoverage
-                | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
-        ) && package_match.function_signature_matches >= 2
-            && package_match.string_anchor_matches >= 1)
 }
 
 fn public_export_member_signature_score(
@@ -3382,7 +3223,7 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
     external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
-    cache: &ForceExternalizeCache<'a>,
+    cache: &ExternalImportProofScratch<'a>,
 ) -> Option<ExternalImportTarget> {
     if !dependency_graph_source_fingerprint_policy_allows(package_match.strategy)
         || module_source.trim().is_empty()
@@ -3503,22 +3344,6 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
     )
 }
 
-fn dependency_graph_source_fingerprint_policy_allows(strategy: ModuleMatchStrategy) -> bool {
-    matches!(
-        strategy,
-        ModuleMatchStrategy::DependencyClosureOwnership
-            | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
-            | ModuleMatchStrategy::CascadeFunctionCoverage
-            | ModuleMatchStrategy::CascadeFunctionOwnership
-            | ModuleMatchStrategy::CascadePartialFunctionCoverage
-            | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-            | ModuleMatchStrategy::PropertyShapeAndStringAnchors
-            | ModuleMatchStrategy::ObjectShapeAndStringAnchors
-            | ModuleMatchStrategy::ClassShapeAndStringAnchors
-            | ModuleMatchStrategy::SwitchShapeAndStringAnchors
-    )
-}
-
 fn dependency_graph_source_candidate_score(
     candidate: &DependencyGraphSourceCandidate<'_>,
 ) -> usize {
@@ -3631,7 +3456,7 @@ pub(crate) fn dependency_edge_path_external_import_target(
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'_>,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
-    cache: &ForceExternalizeCache<'_>,
+    cache: &ExternalImportProofScratch<'_>,
 ) -> Option<ExternalImportTarget> {
     if !dependency_edge_path_policy_allows(package_match) {
         return None;
@@ -3724,13 +3549,6 @@ struct DependencyEdgePathCandidate<'a> {
     entry: String,
 }
 
-fn dependency_edge_path_policy_allows(package_match: &PackageMatch) -> bool {
-    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
-        && (package_match.source_path.contains(":quality=trusted:")
-            || package_match.source_path.contains(":quality=weak:"))
-}
-
 fn dependency_edge_path_remaining_entries(
     rows: &InputRows,
     dependent_id: ModuleId,
@@ -3738,7 +3556,7 @@ fn dependency_edge_path_remaining_entries(
     dependent_source: &PackageSource,
     external_source_index: &ExternalImportSourceIndex<'_>,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
-    cache: &ForceExternalizeCache<'_>,
+    cache: &ExternalImportProofScratch<'_>,
 ) -> BTreeSet<String> {
     let dependency_ids = cache.direct_dependencies(rows, dependent_id);
     if !dependency_ids.contains(&unresolved_module_id) {
@@ -3827,7 +3645,7 @@ pub(crate) fn same_package_cross_version_source_external_import_target<'a>(
     package_match: &PackageMatch,
     external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
-    cache: &ForceExternalizeCache<'a>,
+    cache: &ExternalImportProofScratch<'a>,
 ) -> Option<CorrectedPackageExternalImportTarget> {
     if !same_package_cross_version_source_policy_allows(package_match)
         || module_source.trim().is_empty()
@@ -3950,12 +3768,6 @@ pub(crate) fn same_package_cross_version_source_external_import_target<'a>(
     })
 }
 
-fn same_package_cross_version_source_policy_allows(package_match: &PackageMatch) -> bool {
-    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
-        && package_match.source_path.contains(":quality=trusted:")
-}
-
 fn cross_version_source_target_allowed_by_runtime_surface(
     package_match: &PackageMatch,
     source_match: &ModulePackageMatch,
@@ -4011,7 +3823,7 @@ pub(crate) fn cross_package_exact_source_external_import_target<'a>(
     external_source_index: &ExternalImportSourceIndex<'a>,
     module_source: &str,
     concrete_sources_by_module: &BTreeMap<ModuleId, ConcretePackageSourcePath>,
-    cache: &ForceExternalizeCache<'a>,
+    cache: &ExternalImportProofScratch<'a>,
 ) -> Option<CorrectedPackageExternalImportTarget> {
     if !cross_package_exact_source_policy_allows(package_match) || module_source.trim().is_empty() {
         return None;
@@ -4132,11 +3944,6 @@ struct CrossPackageExactSourceCandidate<'a> {
     graph: DependencyGraphEvidence,
     function_matches: usize,
     string_matches: usize,
-}
-
-fn cross_package_exact_source_policy_allows(package_match: &PackageMatch) -> bool {
-    package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
 }
 
 fn cross_package_exact_source_candidate_allowed(

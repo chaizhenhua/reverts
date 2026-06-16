@@ -29,5 +29,6 @@ pub(crate) fn emit_cli_entrypoint(program: &EnrichedProgram, plan: &mut EmitPlan
         specifier.as_str(),
     ));
     file.push_source(format!("await {}();", entrypoint.callee.as_str()));
+    crate::finalize_planned_file(&mut file);
     plan.push_file(file);
 }

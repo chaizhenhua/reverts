@@ -426,6 +426,7 @@ pub(crate) fn emit_runtime_helper_files(
         if file.body.is_empty() {
             continue;
         }
+        crate::finalize_planned_file(&mut file);
         plan.push_file(file);
     }
     Ok(())

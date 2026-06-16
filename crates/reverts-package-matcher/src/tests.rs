@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ConcretePackageSourcePath,
-    ExternalImportSourceIndex, ForceExternalizeCache, ModuleMatchStrategy,
+    ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy,
     PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, VersionedPackageMatcher, cascade_ownership, exact_hint_ownership,
     match_packages_with_pipeline, match_structural_bags,
@@ -159,7 +159,7 @@ fn exact_match_uses_normalized_source_before_accepting_attribution() {
 }
 
 #[test]
-fn force_externalize_cache_reuses_source_and_graph_evidence() {
+fn external_import_proof_scratch_reuses_source_and_graph_evidence() {
     let source = "export function add(a, b) { return a + b; }";
     let rows = rows_with_package_source_at_version(source, "1.0.0");
     let package_sources = [PackageSource::external(
@@ -170,7 +170,7 @@ fn force_externalize_cache_reuses_source_and_graph_evidence() {
         source,
     )];
     let index = ExternalImportSourceIndex::build(&package_sources);
-    let cache = ForceExternalizeCache::default();
+    let cache = ExternalImportProofScratch::default();
 
     let first_module_fingerprint = cache
         .module_fingerprint(
@@ -2894,7 +2894,7 @@ fn cross_version_source_proof_selects_unique_importable_version() {
         ),
     ];
     let index = ExternalImportSourceIndex::build(&package_sources);
-    let cache = ForceExternalizeCache::default();
+    let cache = ExternalImportProofScratch::default();
 
     let correction = same_package_cross_version_source_external_import_target(
         &module,
@@ -2963,7 +2963,7 @@ fn cross_version_source_proof_rejects_older_private_import_absent_from_hint_surf
         ),
     ];
     let index = ExternalImportSourceIndex::build(&package_sources);
-    let cache = ForceExternalizeCache::default();
+    let cache = ExternalImportProofScratch::default();
 
     let correction = same_package_cross_version_source_external_import_target(
         &module,

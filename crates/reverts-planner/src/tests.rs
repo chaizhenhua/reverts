@@ -19,15 +19,16 @@ use super::external_adapters::{
     ExportMemberAdapterProofKind, compact_source_defines_callable_binding,
     export_member_adapter_proof,
 };
+use super::statement_parsers::parse_generated_named_export_statement;
 use super::{
     CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, PlannerAnalysis,
     RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
     RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
     RuntimeSourceReadIndex, SourceCompilerStrategy, coalesce_runtime_lazy_initializer_call_runs,
-    compact_pure_static_runtime_literals, inline_internal_setter_calls,
+    compact_pure_static_runtime_literals, finalize_planned_file, inline_internal_setter_calls,
     inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
-    merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
-    prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
+    merge_same_owner_overlapping_reader_migrations, prune_orphan_runtime_bindings,
+    purify_private_runtime_lazy_initializers,
 };
 
 fn enriched_from_rows(rows: InputRows) -> EnrichedProgram {
@@ -302,6 +303,21 @@ var init = lazyValue(() => {\n\
 }
 
 #[test]
+fn emit_plan_push_file_is_data_only_without_finalization_pass() {
+    let mut file = PlannedFile::new("modules/consumer.ts");
+    file.push_source("import { beta } from './dep.js';");
+    file.push_source("import { alpha } from './dep.js';");
+
+    let mut plan = EmitPlan::default();
+    plan.push_file(file);
+    let source = planned_source(&plan, "modules/consumer.ts");
+
+    assert_eq!(source.matches("from './dep.js'").count(), 2);
+    assert!(source.contains("import { beta } from './dep.js';"));
+    assert!(source.contains("import { alpha } from './dep.js';"));
+}
+
+#[test]
 fn emit_plan_coalesces_duplicate_generated_named_imports() {
     let mut file = PlannedFile::new("modules/consumer.ts");
     file.push_source("import { beta } from './runtime/source-1-helpers.js';");
@@ -310,6 +326,7 @@ fn emit_plan_coalesces_duplicate_generated_named_imports() {
     file.push_source("console.log(alpha, beta, local);");
 
     let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
     plan.push_file(file);
     let source = planned_source(&plan, "modules/consumer.ts");
 
@@ -332,6 +349,7 @@ fn emit_plan_coalesces_generated_default_and_named_imports() {
     file.push_source("console.log(defaultValue, alpha, beta);");
 
     let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
     plan.push_file(file);
     let source = planned_source(&plan, "modules/consumer.ts");
 
@@ -2276,6 +2294,7 @@ fn emit_plan_coalesces_generated_named_exports() {
     file.push_source("export { beta };");
 
     let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
     plan.push_file(file);
     let source = planned_source(&plan, "modules/consumer.ts");
 
@@ -2294,6 +2313,7 @@ fn emit_plan_keeps_reexports_and_alias_exports_separate() {
     file.push_source("export { alpha };");
 
     let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
     plan.push_file(file);
     let source = planned_source(&plan, "modules/consumer.ts");
 
@@ -2324,6 +2344,7 @@ fn emit_plan_coalesces_only_consecutive_plain_var_declarations() {
     ));
 
     let mut plan = EmitPlan::default();
+    finalize_planned_file(&mut file);
     plan.push_file(file);
     let source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 

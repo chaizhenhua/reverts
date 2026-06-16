@@ -584,7 +584,7 @@ pub(crate) fn inline_package_runtime_helper_into_single_consumer(
         }
     }
     file.body = body;
-    file.coalesce_generated_named_imports();
+    crate::import_coalesce::coalesce_generated_named_imports(file);
 
     Ok(true)
 }
@@ -724,6 +724,7 @@ pub(crate) fn emit_package_runtime_helper_files(
         if file.body.is_empty() {
             continue;
         }
+        crate::finalize_planned_file(&mut file);
         plan.push_file(file);
     }
     Ok(())

@@ -51,6 +51,7 @@ pub(crate) fn try_emit_external_package_adapter(
         adapter_plan.kind,
         adapter_plan.member_proof.as_ref(),
     );
+    crate::finalize_planned_file(&mut file);
     plan.push_file(file);
     true
 }
