@@ -184,6 +184,78 @@ runtime_singleton_inline, runtime_var_migration, package_runtime). Most
 have heavy dependency chains; the remaining work belongs in future
 sessions where each extraction can stand alone as a focused commit.
 
+### Session of 2026-05-23 (continuation 4 — big-subsystem extractions)
+
+4 commits, `lib.rs` 31,131 → 28,078 = **-3,053 lines (-9.8%)**:
+
+- `b707503` `eager_safe_analysis.rs` — full cross-module eager-safety
+  pipeline (815 lines) — `EagerSafeAnalysis` + `compute_eager_safe_analysis`
+  + `compute_consumer_usage_scopes` + `compute_consumer_call_forms` +
+  `singleton_scc_modules` + `compute_thunk_wrapped_exports` +
+  `predict_delazifiable_exports` (with fixpoint + classifier) +
+  `consumer_eagerified_imports` + `rewrite_eagerified_call_sites`.
+- `2ae1a1c` `runtime_var_migration.rs` — entire Phase-10 migration
+  subsystem (1,135 lines): `RuntimeVarMigrationPlan` + 22-method impl +
+  `RuntimeVarMigration` + `RuntimeOwnedSnippetMigration` +
+  `compute_runtime_var_migration_plan` (the 412-line core algorithm).
+- `8e296ab` `runtime_singleton_inline.rs` — singleton consumer inline
+  subsystem (560 lines): `RuntimeSingletonInlineSnippet` /
+  `…SnippetSource` / `…Plan` / `…Context` / `…EmitContext` +
+  `runtime_singleton_inline_plan` +
+  `resolve_runtime_singleton_inline_snippet` +
+  `emit_runtime_singleton_inline_helpers` +
+  `partition_runtime_singleton_inline_bindings` +
+  `runtime_singleton_inline_consumer_has_name_conflict` etc.
+- `b90d17d` `package_runtime.rs` — package-runtime island planning +
+  emission (780 lines): `PackageRuntimeOwner` /
+  `PackageRuntimeHelperKey` / `PackageRuntimeHelperUsage` /
+  `PackageRuntimeIslandPlan` / `PackageRuntimeClosureGate` /
+  `PackageRuntimeImportEmitter` + `package_runtime_island_plan` +
+  `package_runtime_closure_is_safe` +
+  `partition_package_runtime_bindings` +
+  `emit_package_runtime_helper_import` +
+  `inline_package_runtime_helper_into_single_consumer` +
+  `emit_package_runtime_helper_files` +
+  `push_packed_runtime_helper_imports`.
+
+**Phase 3-A is now essentially complete.** All 10 target subsystems
+have their own modules:
+
+| Module | Lines | Subsystem |
+|---|---|---|
+| `byte_lexer.rs` | 357 | JS byte-walking lexer helpers |
+| `identifiers.rs` | 134 | Identifier shape / keyword helpers |
+| `statements.rs` | 227 | Pure JS statement formatters |
+| `statement_parsers.rs` | 152 | Reverse parsers + var coalescer |
+| `relative_paths.rs` | 64 | POSIX import specifiers |
+| `plan_error.rs` | 62 | PlanError type |
+| `compiler_recovery.rs` | 129 | Compiler recovery decision types |
+| `runtime_setter_migration_blocker.rs` | 195 | Blocker report types |
+| `runtime_namespace_rewrite.rs` | 168 | Namespace member-access rewriter |
+| `pure_reexport_bypass.rs` | 146 | Barrel re-export bypass |
+| `destructure_writes.rs` | 275 | Destructuring assignment rewriters |
+| `runtime_helper_writes.rs` | 415 | Write-to-setter + inline-setter rewriters |
+| `runtime_helper_strip.rs` | 188 | Helper-body strip helpers |
+| `source_module_facts.rs` | 70 | SourceModuleFacts bus |
+| `binding_owner.rs` | 189 | BindingOwnerPlan canonical owner table |
+| `import_coalesce.rs` | 422 | Top-level import coalescing |
+| `runtime_source_read.rs` | 225 | RuntimeSourceReadIndex builder + queries |
+| `eager_safe_analysis.rs` | 816 | Cross-module eager-safety pipeline |
+| `runtime_singleton_inline.rs` | 563 | Singleton inline subsystem |
+| `runtime_var_migration.rs` | 1,135 | Runtime-var migration subsystem |
+| `package_runtime.rs` | 781 | Package-runtime island plan + emission |
+| `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
+
+The remaining `lib.rs` is dominated by the 2,155-line
+`plan_enriched_program` method and the medium-sized free functions
+that the per-module loop calls. Phase 3-B (`analysis.rs` consolidation)
+is mostly done de-facto: PlannerAnalysis still lives in lib.rs but
+every type it carries (`SourceModuleWiring`, `LoweredRuntimeModuleSource`,
+`RuntimeLazyFoldPlan`, `BindingOwnerPlan`, etc.) is now in its own
+module. Phase 3-C (per-module loop split) and Phase 3-D (final
+cleanup) are the remaining bigger work; both are largely orthogonal
+to the 3-A foundation now in place.
+
 ### Session of 2026-05-23 (continuation 3 — runtime-source-read consolidation)
 
 5 more commits (and one cleanup fix), `lib.rs` 31,358 → 31,131 = -227
