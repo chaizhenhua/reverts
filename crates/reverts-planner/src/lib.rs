@@ -31,14 +31,14 @@ mod statements;
 use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition};
 use package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, PackageRuntimeImportEmitter,
-    emit_package_runtime_helper_files, emit_package_runtime_helper_import,
+    PackageRuntimeOwner, emit_package_runtime_helper_files, emit_package_runtime_helper_import,
     package_runtime_island_plan, package_runtime_owner_for_module,
     partition_package_runtime_bindings,
 };
 use runtime_singleton_inline::{
-    RuntimeSingletonInlineEmitContext, emit_runtime_singleton_inline_helpers,
-    module_exported_bindings, partition_runtime_singleton_inline_bindings,
-    runtime_singleton_inline_plan,
+    RuntimeSingletonInlineEmitContext, RuntimeSingletonInlinePlan,
+    emit_runtime_singleton_inline_helpers, module_exported_bindings,
+    partition_runtime_singleton_inline_bindings, runtime_singleton_inline_plan,
 };
 use runtime_var_migration::{
     RuntimeOwnedSnippetMigration, RuntimeVarMigrationPlan, compute_runtime_var_migration_plan,
@@ -840,6 +840,992 @@ fn filter_remaining_helpers_namespace_and_require(
         .filter(|binding| !consumed_node_builtin_require_helpers.contains(binding))
         .collect();
     (filtered, consumed_node_builtin_require_helpers)
+}
+
+/// Build the per-source-file runtime-import partitions for a module
+/// from the raw runtime-import groups: each group's binding stream
+/// has dropped/already-emitted helpers filtered out, namespace-member
+/// imports folded in, and the result split into runtime-helper vs.
+/// direct-import buckets via `partition_runtime_owner_bindings`.
+/// Empty partitions are dropped.
+#[allow(clippy::too_many_arguments)]
+fn build_runtime_import_partitions(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    runtime_import_groups: BTreeMap<u32, BTreeSet<BindingName>>,
+    binding_owners: &BindingOwnerPlan,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    source_runtime_refs: &BTreeSet<BindingName>,
+    lowered_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    consumed_node_builtin_require_helpers: &BTreeSet<BindingName>,
+    localized_noop_runtime_helpers: &BTreeSet<BindingName>,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    planned_bindings: &BTreeSet<BindingName>,
+    local_source_definitions: &BTreeSet<BindingName>,
+    local_source_writes: &BTreeSet<BindingName>,
+) -> Vec<(u32, RuntimeOwnerImportPartition)> {
+    let mut runtime_import_partitions = Vec::<(u32, RuntimeOwnerImportPartition)>::new();
+    for (source_file_id, bindings) in runtime_import_groups {
+        let dropped_runtime_namespaces = namespace_member_rewrite
+            .and_then(|rewrite| rewrite.dropped_namespaces_by_source.get(&source_file_id))
+            .cloned()
+            .unwrap_or_default();
+        let namespace_member_imports = namespace_member_rewrite
+            .and_then(|rewrite| rewrite.imports_by_source.get(&source_file_id))
+            .cloned()
+            .unwrap_or_default();
+        let namespace_export_helpers = program
+            .model()
+            .graph()
+            .runtime_prelude(source_file_id)
+            .map(|prelude| {
+                prelude
+                    .namespace_exports
+                    .iter()
+                    .map(|export| export.helper.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let bindings = bindings
+            .into_iter()
+            .filter(|binding| !dropped_runtime_namespaces.contains(binding))
+            .chain(namespace_member_imports.into_iter())
+            // Namespace helper calls such as `__export(ns, {...})`
+            // are planner-lowered to `Object.defineProperties(...)`
+            // when the namespace setup is emitted. If graph recovery
+            // attributed that prelude-only call to a source module,
+            // do not keep a synthetic runtime import/export edge for
+            // the helper unless the module body itself still names it.
+            .filter(|binding| {
+                !namespace_export_helpers.contains(binding) || source_runtime_refs.contains(binding)
+            })
+            .filter(|binding| !lowered_helpers.contains(binding))
+            // Runtime imports recorded by the graph can include the
+            // LHS of cross-module writes. After we rewrite those
+            // writes through `__reverts_set_X(...)`, a write-only `X`
+            // must not stay in the value-import/public-export
+            // surface. Bindings that are both written and read in the
+            // lowered source are handled by `remaining_runtime_helpers`
+            // above, so this only removes setter-only leftovers.
+            .filter(|binding| !written_runtime_helpers.contains(binding))
+            .filter(|binding| !consumed_node_builtin_require_helpers.contains(binding))
+            .filter(|binding| !localized_noop_runtime_helpers.contains(binding))
+            .filter(|binding| !remaining_runtime_helpers.contains(binding))
+            .filter(|binding| !planned_bindings.contains(binding))
+            .filter(|binding| !local_source_definitions.contains(binding))
+            .filter(|binding| !local_source_writes.contains(binding))
+            .collect::<BTreeSet<_>>();
+        if bindings.is_empty() {
+            continue;
+        }
+        let import_partition =
+            partition_runtime_owner_bindings(binding_owners, source_file_id, module_id, bindings);
+        if !import_partition.runtime_bindings.is_empty()
+            || !import_partition.direct_imports.is_empty()
+        {
+            runtime_import_partitions.push((source_file_id, import_partition));
+        }
+    }
+    runtime_import_partitions
+}
+
+/// When a lowered source only uses `lazyValue` (not `lazyModule`) and
+/// has no remaining runtime-helper imports, no written runtime
+/// helpers, and no other runtime group imports, try to inline a tiny
+/// local `lazyValue` shim instead of importing it. Returns the
+/// localized rewritten source on success; `None` if any precondition
+/// fails or the rewrite isn't applicable.
+#[allow(clippy::too_many_arguments)]
+fn try_localize_lazy_value(
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    has_runtime_edge_before_lazy_helpers: bool,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    has_runtime_group_imports: bool,
+    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
+    module_id: ModuleId,
+    lowered_runtime_bindings: &BTreeSet<BindingName>,
+) -> Option<String> {
+    let lowered_source = lowered_source?;
+    if !lowered_source.uses_lazy_value
+        || lowered_source.uses_lazy_module
+        || has_runtime_edge_before_lazy_helpers
+        || !written_runtime_helpers.is_empty()
+        || has_runtime_group_imports
+    {
+        return None;
+    }
+    let source_for_lazy = namespace_member_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or(lowered_source.source.as_str());
+    let (inlineable_lazy_runtime_deps, _runtime_deps_after_inline) =
+        partition_runtime_singleton_inline_bindings(
+            runtime_singleton_inlines,
+            module_id,
+            lowered_source.source_file_id,
+            lowered_runtime_bindings,
+        );
+    if !inlineable_lazy_runtime_deps.is_empty()
+        || !owner_runtime_imports_are_lazy_safe(source_for_lazy, lowered_runtime_bindings)
+    {
+        return None;
+    }
+    localize_lazy_value_source(source_for_lazy)
+}
+
+/// Collect the source files whose runtime-helper companion file this
+/// module will still need to import — either because not every helper
+/// could be inlined as a singleton snippet, or because written/lazy
+/// helpers always go through the runtime file. Used downstream to
+/// route prelude imports through the runtime companion.
+fn compute_runtime_sources_for_module(
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    lowered_import_partition: &RuntimeOwnerImportPartition,
+    runtime_import_partitions: &[(u32, RuntimeOwnerImportPartition)],
+    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
+    module_id: ModuleId,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    lazy_helper_names: &[&'static str],
+) -> BTreeSet<u32> {
+    let mut runtime_sources_for_module = BTreeSet::<u32>::new();
+    if let Some(lowered_source) = lowered_source
+        && (!partition_runtime_singleton_inline_bindings(
+            runtime_singleton_inlines,
+            module_id,
+            lowered_source.source_file_id,
+            &lowered_import_partition.runtime_bindings,
+        )
+        .1
+        .is_empty()
+            || !written_runtime_helpers.is_empty()
+            || !lazy_helper_names.is_empty())
+    {
+        runtime_sources_for_module.insert(lowered_source.source_file_id);
+    }
+    for (source_file_id, partition) in runtime_import_partitions {
+        if !partition_runtime_singleton_inline_bindings(
+            runtime_singleton_inlines,
+            module_id,
+            *source_file_id,
+            &partition.runtime_bindings,
+        )
+        .1
+        .is_empty()
+        {
+            runtime_sources_for_module.insert(*source_file_id);
+        }
+    }
+    runtime_sources_for_module
+}
+
+/// Apply the planner-owned source rewrites to the lowered source for
+/// this module — namespace-member access folding, lazyValue
+/// localisation, noop runtime-helper call removal (plus dropping the
+/// bare `void 0;` statements they often leave behind), node-builtin
+/// `require(...)` reshape, and runtime-helper writes routed through
+/// `__reverts_set_X(...)`. The result is the source body the emitter
+/// will normalise and write to disk.
+fn build_lowered_module_source(
+    lowered_source: &LoweredRuntimeModuleSource,
+    localized_lazy_value_source: Option<&str>,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    localized_noop_runtime_helpers: &BTreeSet<BindingName>,
+    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
+    node_builtin_require_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+) -> String {
+    let mut source = localized_lazy_value_source
+        .map(str::to_owned)
+        .unwrap_or_else(|| {
+            namespace_member_rewrite
+                .map(|rewrite| rewrite.source.clone())
+                .unwrap_or_else(|| lowered_source.source.clone())
+        });
+    if !localized_noop_runtime_helpers.is_empty() {
+        source = rewrite_noop_runtime_helper_calls(source.as_str(), localized_noop_runtime_helpers);
+        source = drop_bare_void_zero_top_level_statements(source.as_str());
+    }
+    if let Some(rewrite) = node_builtin_require_rewrite
+        && !rewrite.imports.is_empty()
+    {
+        source = rewrite_node_builtin_require_calls_with_imports(
+            source.as_str(),
+            node_builtin_require_helpers,
+            &rewrite.imports,
+        );
+    }
+    if !written_runtime_helpers.is_empty() {
+        source = rewrite_runtime_helper_writes(source.as_str(), written_runtime_helpers);
+    }
+    source
+}
+
+/// Emit `var` declarations for bindings migrated locally into this
+/// module: one bundled `var X, Y, Z;` for the uninitialized
+/// migrations and a separate `var X = init;` for each that carries an
+/// initializer. Initialized bindings are emitted as individual
+/// statements (not bundled) so the initializers stay readable.
+fn emit_migrated_locally_var_declarations(
+    file: &mut PlannedFile,
+    migrated_locally: &BTreeSet<BindingName>,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+) {
+    if migrated_locally.is_empty() {
+        return;
+    }
+    let bare: BTreeSet<&BindingName> = migrated_locally
+        .iter()
+        .filter(|binding| {
+            runtime_var_migrations
+                .migrations_by_binding
+                .get(*binding)
+                .and_then(|m| m.initializer.as_deref())
+                .is_none()
+        })
+        .collect();
+    if !bare.is_empty() {
+        file.push_source(variable_declaration_statement(bare.into_iter()));
+    }
+    for binding in migrated_locally {
+        let Some(migration) = runtime_var_migrations.migrations_by_binding.get(binding) else {
+            continue;
+        };
+        let Some(initializer) = migration.initializer.as_deref() else {
+            continue;
+        };
+        file.push_source(format!(
+            "var {name} = {initializer};",
+            name = binding.as_str()
+        ));
+    }
+}
+
+/// Register each migrated-local binding as planned and declare it on
+/// the file with the appropriate shape: bindings that were migrated
+/// to this module (either as locals or as namespace members) get
+/// `BindingShape::Unknown` because the lowered form may reshape them;
+/// other migrated bindings stay `Callable`. Called from both the
+/// source-free and source-backed paths.
+fn add_migrated_local_binding_declarations(
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    migrated_local_bindings: &BTreeSet<BindingName>,
+    migrated_locally: &BTreeSet<BindingName>,
+    migrated_extra_namespace_bindings: &BTreeSet<BindingName>,
+) {
+    for binding in migrated_local_bindings {
+        planned_bindings.insert(binding.clone());
+        let binding_shape = if migrated_locally.contains(binding)
+            || migrated_extra_namespace_bindings.contains(binding)
+        {
+            BindingShape::Unknown
+        } else {
+            BindingShape::Callable
+        };
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            binding_shape,
+            true,
+        ));
+    }
+}
+
+/// Emit the migrated-extra runtime chunks (snippet bodies and
+/// namespace exports) into this module's source, ordered by their
+/// original byte position in the runtime prelude. Identifier reads
+/// inside each chunk are renamed through `migrated_runtime_dep_aliases`
+/// and setter-writes are routed through `__reverts_set_X` helpers.
+/// Called from both the source-free and source-backed module-emit
+/// paths since the chunk-emit shape is identical.
+fn emit_migrated_extra_chunks(
+    program: &EnrichedProgram,
+    file: &mut PlannedFile,
+    migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
+    migrated_extra_namespace_exports: &BTreeSet<(u32, BindingName)>,
+    migrated_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    migrated_extra_runtime_setter_deps_by_source: &BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    if migrated_extra_snippets.is_empty() && migrated_extra_namespace_exports.is_empty() {
+        return;
+    }
+    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
+        .values()
+        .flat_map(|aliases| aliases.iter())
+        .map(|(original, alias)| (original.clone(), alias.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (source_file_id, binding) in migrated_extra_snippets {
+        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
+            continue;
+        };
+        let Some(snippet) = prelude.snippets.get(binding) else {
+            continue;
+        };
+        let mut source = snippet.source.clone();
+        if let Some(setter_deps) = migrated_extra_runtime_setter_deps_by_source.get(source_file_id)
+            && !setter_deps.is_empty()
+        {
+            source = rewrite_runtime_helper_writes(source.as_str(), setter_deps);
+        }
+        migrated_chunks.push((
+            snippet.byte_start,
+            0,
+            rename_identifier_reads_in_source(source.as_str(), &migrated_runtime_dep_aliases),
+        ));
+    }
+    for (source_file_id, namespace) in migrated_extra_namespace_exports {
+        let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
+            continue;
+        };
+        let Some(namespace_export) = prelude
+            .namespace_exports
+            .iter()
+            .find(|export| export.namespace == *namespace)
+        else {
+            continue;
+        };
+        migrated_chunks.push((
+            namespace_export.byte_start,
+            1,
+            rename_identifier_reads_in_source(
+                runtime_namespace_export_statement(namespace_export).as_str(),
+                &migrated_runtime_dep_aliases,
+            ),
+        ));
+    }
+    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
+    for (_, _, source) in migrated_chunks {
+        file.push_source(source);
+    }
+}
+
+/// Emit `PlannedBinding`s for every graph-known definition in this
+/// module, recording a readability rename when the emitted semantic
+/// name differs from the original AST identifier and an `Unknown`
+/// shape override for bindings that were reshaped during runtime
+/// lowering.
+fn emit_module_definition_bindings(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+) {
+    let source_definitions = program.model().graph().ast_definitions_for(module_id);
+    let reshaped_bindings = lowered_source
+        .map(|src| src.reshaped_bindings.clone())
+        .unwrap_or_default();
+    for original in program.model().graph().definitions_for(module_id) {
+        let source_backed = source_definitions.contains(&original);
+        let emitted = program
+            .semantic_names()
+            .binding_name(module_id, original.as_str())
+            .cloned()
+            .unwrap_or_else(|| original.clone());
+        if source_backed && emitted != original {
+            file.add_readability_rename(PlannedRename::new(original.clone(), emitted.clone()));
+        }
+        let shape_override = if reshaped_bindings.contains(&original) {
+            Some(BindingShape::Unknown)
+        } else {
+            None
+        };
+        planned_bindings.insert(original.clone());
+        file.add_binding(plan_binding_from_program(
+            program,
+            module_id,
+            original,
+            emitted,
+            source_backed,
+            shape_override,
+        ));
+    }
+}
+
+/// Emit `PlannedBinding`s for the module's source-imported names that
+/// aren't already planned (graph imports the planner kept as-is),
+/// each with a readability rename when the emitted semantic name
+/// differs from the original.
+fn emit_source_import_bindings(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    source_imports: &BTreeSet<BindingName>,
+) {
+    for original in source_imports {
+        if planned_bindings.contains(original) {
+            continue;
+        }
+        let emitted = program
+            .semantic_names()
+            .binding_name(module_id, original.as_str())
+            .cloned()
+            .unwrap_or_else(|| original.clone());
+        if emitted != *original {
+            file.add_readability_rename(PlannedRename::new(original.clone(), emitted.clone()));
+        }
+        planned_bindings.insert(original.clone());
+        file.add_binding(plan_binding_from_program(
+            program,
+            module_id,
+            original.clone(),
+            emitted,
+            true,
+            None,
+        ));
+    }
+}
+
+/// Peel package-runtime-owned helpers off the remaining-read and
+/// written runtime-helper sets for this module's lowered source and
+/// emit the corresponding package-runtime helper-file import (if any
+/// remain after the split). Returns `(package_remaining, remaining,
+/// package_written, written)` — the post-split sets needed by the
+/// follow-up lazyValue localization and helper-usage recording.
+#[allow(clippy::too_many_arguments)]
+fn emit_lowered_package_runtime_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_package_runtime_helper_files: &mut BTreeMap<
+        PackageRuntimeHelperKey,
+        PackageRuntimeHelperUsage,
+    >,
+    source_file_id: u32,
+    binding_owners: &BindingOwnerPlan,
+    package_runtime_owner: Option<&PackageRuntimeOwner>,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+) -> (
+    BTreeSet<BindingName>,
+    BTreeSet<BindingName>,
+    BTreeSet<BindingName>,
+    BTreeSet<BindingName>,
+) {
+    let (package_remaining_helpers, remaining_runtime_helpers) = partition_package_runtime_bindings(
+        binding_owners,
+        package_runtime_owner,
+        source_file_id,
+        remaining_runtime_helpers,
+    );
+    let (package_written_helpers, written_runtime_helpers) = partition_package_runtime_bindings(
+        binding_owners,
+        package_runtime_owner,
+        source_file_id,
+        written_runtime_helpers,
+    );
+    if !package_remaining_helpers.is_empty() || !package_written_helpers.is_empty() {
+        let mut package_import = PackageRuntimeImportEmitter {
+            program,
+            used_package_runtime_helper_files,
+            file,
+            planned_bindings,
+            module_id,
+            module_path,
+            owner: package_runtime_owner.expect("package runtime bindings must have an owner"),
+            source_file_id,
+        };
+        emit_package_runtime_helper_import(
+            &mut package_import,
+            &package_remaining_helpers,
+            &package_written_helpers,
+        );
+    }
+    (
+        package_remaining_helpers,
+        remaining_runtime_helpers,
+        package_written_helpers,
+        written_runtime_helpers,
+    )
+}
+
+/// Second-chance lazyValue localization, run after singleton-inline
+/// and package-runtime partitioning. A module can fail the earlier
+/// gate because it still referenced a singleton runtime helper; once
+/// that helper has been inlined and any package-runtime bindings
+/// peeled off, if the shared `lazyValue` import is the only remaining
+/// runtime edge, we localize it too and avoid materializing the
+/// runtime-helper file just for the memoizer.
+#[allow(clippy::too_many_arguments)]
+fn try_post_inline_localize_lazy_value(
+    lowered_source: &LoweredRuntimeModuleSource,
+    namespace_member_rewrite: Option<
+        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
+    >,
+    already_localized: Option<&String>,
+    has_runtime_edge_before_lazy_helpers: bool,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    package_remaining_helpers: &BTreeSet<BindingName>,
+    package_written_helpers: &BTreeSet<BindingName>,
+    lazy_helper_names: &[&'static str],
+    runtime_import_partitions: &[(u32, RuntimeOwnerImportPartition)],
+    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
+    binding_owners: &BindingOwnerPlan,
+    package_runtime_owner: Option<&PackageRuntimeOwner>,
+    module_id: ModuleId,
+) -> Option<String> {
+    if already_localized.is_some()
+        || !lowered_source.uses_lazy_value
+        || lowered_source.uses_lazy_module
+        || has_runtime_edge_before_lazy_helpers
+        || !remaining_runtime_helpers.is_empty()
+        || !written_runtime_helpers.is_empty()
+        || !package_remaining_helpers.is_empty()
+        || !package_written_helpers.is_empty()
+        || !lazy_helper_names.contains(&"lazyValue")
+    {
+        return None;
+    }
+    let has_runtime_group_edges_after_inline =
+        runtime_import_partitions
+            .iter()
+            .any(|(source_file_id, partition)| {
+                let (_inline_bindings, runtime_bindings) =
+                    partition_runtime_singleton_inline_bindings(
+                        runtime_singleton_inlines,
+                        module_id,
+                        *source_file_id,
+                        &partition.runtime_bindings,
+                    );
+                let (_package_bindings, runtime_bindings) = partition_package_runtime_bindings(
+                    binding_owners,
+                    package_runtime_owner,
+                    *source_file_id,
+                    &runtime_bindings,
+                );
+                !runtime_bindings.is_empty()
+            });
+    if has_runtime_group_edges_after_inline {
+        return None;
+    }
+    let source_for_lazy = namespace_member_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or(lowered_source.source.as_str());
+    localize_lazy_value_source(source_for_lazy)
+}
+
+/// Emit the per-source-file runtime-import partitions for this
+/// module: direct owner imports, direct prelude imports, singleton-
+/// inline snippets, package-runtime helper imports for any package-
+/// owned bindings, and finally the standard runtime-helper import for
+/// the remaining bindings — updating usage/export accumulators along
+/// the way.
+#[allow(clippy::too_many_arguments)]
+fn emit_runtime_import_partitions(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    used_package_runtime_helper_files: &mut BTreeMap<
+        PackageRuntimeHelperKey,
+        PackageRuntimeHelperUsage,
+    >,
+    emitted_inline_runtime_helpers: &mut BTreeSet<(u32, BindingName)>,
+    runtime_import_partitions: Vec<(u32, RuntimeOwnerImportPartition)>,
+    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
+    binding_owners: &BindingOwnerPlan,
+    package_runtime_owner: Option<&PackageRuntimeOwner>,
+) {
+    for (source_file_id, import_partition) in runtime_import_partitions {
+        emit_direct_owner_imports(
+            program,
+            module_id,
+            module_path,
+            file,
+            planned_bindings,
+            &import_partition.direct_imports,
+        );
+        emit_direct_prelude_imports(
+            file,
+            planned_bindings,
+            &import_partition.direct_prelude_imports,
+        );
+        let (inline_bindings, runtime_bindings) = partition_runtime_singleton_inline_bindings(
+            runtime_singleton_inlines,
+            module_id,
+            source_file_id,
+            &import_partition.runtime_bindings,
+        );
+        emit_runtime_singleton_inline_helpers(
+            RuntimeSingletonInlineEmitContext {
+                program,
+                module_id,
+                module_path,
+            },
+            runtime_singleton_inlines,
+            file,
+            planned_bindings,
+            emitted_inline_runtime_helpers,
+            source_file_id,
+            &inline_bindings,
+        );
+        let (package_bindings, bindings) = partition_package_runtime_bindings(
+            binding_owners,
+            package_runtime_owner,
+            source_file_id,
+            &runtime_bindings,
+        );
+        if !package_bindings.is_empty() {
+            let mut package_import = PackageRuntimeImportEmitter {
+                program,
+                used_package_runtime_helper_files,
+                file,
+                planned_bindings,
+                module_id,
+                module_path,
+                owner: package_runtime_owner.expect("package runtime bindings must have an owner"),
+                source_file_id,
+            };
+            emit_package_runtime_helper_import(
+                &mut package_import,
+                &package_bindings,
+                &BTreeSet::new(),
+            );
+        }
+        if bindings.is_empty() {
+            continue;
+        }
+        used_runtime_helper_files
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        required_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        let specifier =
+            relative_import_specifier(module_path, runtime_helpers_path(source_file_id).as_str());
+        file.push_source(runtime_helper_import_statement(
+            &bindings,
+            &BTreeSet::new(),
+            &[],
+            specifier.as_str(),
+        ));
+        for binding in bindings {
+            if planned_bindings.contains(&binding) {
+                continue;
+            }
+            planned_bindings.insert(binding.clone());
+            file.add_binding(plan_binding_from_program(
+                program,
+                module_id,
+                binding.clone(),
+                binding,
+                true,
+                None,
+            ));
+        }
+    }
+}
+
+/// Emit the runtime-helper companion import for this module's
+/// lowered source — a single `import { helpers, __reverts_set_*,
+/// lazyValue, lazyModule } from "runtime-helpers/..."` covering
+/// remaining-read helpers, written setters, and the lazy helper
+/// imports — and add `PlannedBinding` entries for the read bindings.
+/// Skipped entirely when every category is empty.
+#[allow(clippy::too_many_arguments)]
+fn emit_lowered_runtime_helper_import(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    source_file_id: u32,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    lazy_helper_names: &[&'static str],
+) {
+    if remaining_runtime_helpers.is_empty()
+        && written_runtime_helpers.is_empty()
+        && lazy_helper_names.is_empty()
+    {
+        return;
+    }
+    let specifier =
+        relative_import_specifier(module_path, runtime_helpers_path(source_file_id).as_str());
+    file.push_source(runtime_helper_import_statement(
+        remaining_runtime_helpers,
+        written_runtime_helpers,
+        lazy_helper_names,
+        specifier.as_str(),
+    ));
+    for binding in remaining_runtime_helpers {
+        if planned_bindings.contains(binding) {
+            continue;
+        }
+        planned_bindings.insert(binding.clone());
+        file.add_binding(plan_binding_from_program(
+            program,
+            module_id,
+            binding.clone(),
+            binding.clone(),
+            true,
+            None,
+        ));
+    }
+}
+
+/// Record this module's runtime-helper usage against the per-source
+/// accumulators used by downstream emission and audits: which helper
+/// files are read, which bindings are re-exported, which writers/
+/// setters target this source, and which lazy helpers are imported or
+/// re-exported by lazy form.
+#[allow(clippy::too_many_arguments)]
+fn record_lowered_runtime_helper_usage(
+    lowered_source: &LoweredRuntimeModuleSource,
+    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    written_runtime_helpers: &BTreeSet<BindingName>,
+    lazy_helper_names: &[&'static str],
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    used_runtime_helper_setters: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    used_lazy_module: &mut BTreeSet<u32>,
+    used_lazy_value: &mut BTreeSet<u32>,
+    exported_lazy_module: &mut BTreeSet<u32>,
+    exported_lazy_value: &mut BTreeSet<u32>,
+) {
+    let source_file_id = lowered_source.source_file_id;
+    if !remaining_runtime_helpers.is_empty()
+        || !written_runtime_helpers.is_empty()
+        || !lazy_helper_names.is_empty()
+    {
+        used_runtime_helper_files.entry(source_file_id).or_default();
+    }
+    if !remaining_runtime_helpers.is_empty() {
+        used_runtime_helper_files
+            .entry(source_file_id)
+            .or_default()
+            .extend(remaining_runtime_helpers.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(remaining_runtime_helpers.iter().cloned());
+        required_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(remaining_runtime_helpers.iter().cloned());
+    }
+    if !written_runtime_helpers.is_empty() {
+        used_runtime_helper_setters
+            .entry(source_file_id)
+            .or_default()
+            .extend(written_runtime_helpers.iter().cloned());
+    }
+    if lowered_source.uses_lazy_module {
+        used_lazy_module.insert(source_file_id);
+    }
+    if lazy_helper_names.contains(&"lazyValue") {
+        used_lazy_value.insert(source_file_id);
+    }
+    if lazy_helper_names.contains(&"lazyModule") {
+        exported_lazy_module.insert(source_file_id);
+    }
+    if lazy_helper_names.contains(&"lazyValue") {
+        exported_lazy_value.insert(source_file_id);
+    }
+}
+
+/// Emit alias-renamed re-imports of runtime helpers that were moved
+/// out to this module from another owner. Each `(source_file_id ->
+/// {original -> alias})` produces one `import { original as alias, ...
+/// } from "runtime-helpers/..."` statement and updates the helper-
+/// tracking maps so audits know this module reads from that source.
+#[allow(clippy::too_many_arguments)]
+fn emit_migrated_runtime_extra_alias_imports(
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    migrated_runtime_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+) {
+    for (source_file_id, aliases) in migrated_runtime_extra_runtime_dep_aliases {
+        if aliases.is_empty() {
+            continue;
+        }
+        let original_bindings = aliases.keys().cloned().collect::<BTreeSet<_>>();
+        used_runtime_helper_files
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        required_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(original_bindings.iter().cloned());
+        let specifier =
+            relative_import_specifier(module_path, runtime_helpers_path(*source_file_id).as_str());
+        file.push_source(named_import_alias_statement(
+            aliases
+                .iter()
+                .map(|(original, alias)| (original.as_str(), alias)),
+            specifier.as_str(),
+        ));
+        for alias in aliases.values() {
+            if planned_bindings.contains(alias) {
+                continue;
+            }
+            planned_bindings.insert(alias.clone());
+            file.add_binding(PlannedBinding::new(
+                alias.clone(),
+                alias.clone(),
+                BindingShape::Unknown,
+                true,
+            ));
+        }
+    }
+}
+
+/// Emit plain re-export imports of runtime helpers that were
+/// migrated from another owner's runtime file into this module so it
+/// can re-export them. Each `(source_file_id -> {bindings})` emits
+/// one helper-import statement and records the surface for audit.
+#[allow(clippy::too_many_arguments)]
+fn emit_migrated_extra_runtime_reexport_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    migrated_extra_runtime_reexport_deps: &BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    for (source_file_id, bindings) in migrated_extra_runtime_reexport_deps {
+        used_runtime_helper_files
+            .entry(*source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        exported_runtime_helper_bindings
+            .entry(*source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        let specifier =
+            relative_import_specifier(module_path, runtime_helpers_path(*source_file_id).as_str());
+        file.push_source(runtime_helper_import_statement(
+            bindings,
+            &BTreeSet::new(),
+            &[],
+            specifier.as_str(),
+        ));
+        for binding in bindings {
+            if planned_bindings.contains(binding) {
+                continue;
+            }
+            planned_bindings.insert(binding.clone());
+            file.add_binding(plan_binding_from_program(
+                program,
+                module_id,
+                binding.clone(),
+                binding.clone(),
+                true,
+                None,
+            ));
+        }
+    }
+}
+
+/// Emit the migrated-extra owner/runtime-owner import statements that
+/// have already been moved out of their original module: a plain
+/// direct owner re-import for source/runtime-owner deps and an
+/// aliased import for the alias-renamed bindings.
+#[allow(clippy::too_many_arguments)]
+fn emit_migrated_extra_owner_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    module_path: &str,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    migrated_extra_source_deps: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    migrated_extra_runtime_owner_deps: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    migrated_extra_runtime_owner_dep_aliases: &BTreeMap<
+        ModuleId,
+        BTreeMap<BindingName, BindingName>,
+    >,
+) {
+    if !migrated_extra_source_deps.is_empty() {
+        emit_direct_owner_imports(
+            program,
+            module_id,
+            module_path,
+            file,
+            planned_bindings,
+            migrated_extra_source_deps,
+        );
+    }
+    if !migrated_extra_runtime_owner_deps.is_empty() {
+        emit_direct_owner_imports(
+            program,
+            module_id,
+            module_path,
+            file,
+            planned_bindings,
+            migrated_extra_runtime_owner_deps,
+        );
+    }
+    if !migrated_extra_runtime_owner_dep_aliases.is_empty() {
+        emit_direct_owner_import_aliases(
+            program,
+            module_path,
+            file,
+            planned_bindings,
+            migrated_extra_runtime_owner_dep_aliases,
+        );
+    }
+}
+
+/// For every source whose helper file this module still imports, mark
+/// its prelude-direct imports as runtime-routed (so the planner emits
+/// them via the runtime companion instead of a direct prelude path),
+/// except for bindings whose direct route was explicitly allowed by
+/// `runtime_edge_direct_prelude_imports`.
+fn route_prelude_imports_for_runtime_sources(
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    lowered_import_partition: &mut RuntimeOwnerImportPartition,
+    runtime_import_partitions: &mut [(u32, RuntimeOwnerImportPartition)],
+    runtime_sources_for_module: &BTreeSet<u32>,
+    runtime_edge_direct_prelude_imports: &BTreeMap<u32, BTreeSet<BindingName>>,
+) {
+    if let Some(lowered_source) = lowered_source
+        && runtime_sources_for_module.contains(&lowered_source.source_file_id)
+    {
+        lowered_import_partition.route_prelude_imports_through_runtime_except(
+            runtime_edge_direct_prelude_imports.get(&lowered_source.source_file_id),
+        );
+    }
+    for (source_file_id, partition) in runtime_import_partitions {
+        if runtime_sources_for_module.contains(source_file_id) {
+            partition.route_prelude_imports_through_runtime_except(
+                runtime_edge_direct_prelude_imports.get(source_file_id),
+            );
+        }
+    }
 }
 
 /// Collect the helper bindings that drive each
@@ -1817,75 +2803,22 @@ impl ImportExportPlanner {
                 .difference(&localized_noop_runtime_helpers)
                 .cloned()
                 .collect();
-            let mut runtime_import_partitions = Vec::<(u32, RuntimeOwnerImportPartition)>::new();
-            for (source_file_id, bindings) in runtime_import_groups {
-                let dropped_runtime_namespaces = namespace_member_rewrite
-                    .as_ref()
-                    .and_then(|rewrite| rewrite.dropped_namespaces_by_source.get(&source_file_id))
-                    .cloned()
-                    .unwrap_or_default();
-                let namespace_member_imports = namespace_member_rewrite
-                    .as_ref()
-                    .and_then(|rewrite| rewrite.imports_by_source.get(&source_file_id))
-                    .cloned()
-                    .unwrap_or_default();
-                let namespace_export_helpers = program
-                    .model()
-                    .graph()
-                    .runtime_prelude(source_file_id)
-                    .map(|prelude| {
-                        prelude
-                            .namespace_exports
-                            .iter()
-                            .map(|export| export.helper.clone())
-                            .collect::<BTreeSet<_>>()
-                    })
-                    .unwrap_or_default();
-                let bindings = bindings
-                    .into_iter()
-                    .filter(|binding| !dropped_runtime_namespaces.contains(binding))
-                    .chain(namespace_member_imports.into_iter())
-                    // Namespace helper calls such as `__export(ns, {...})`
-                    // are planner-lowered to `Object.defineProperties(...)`
-                    // when the namespace setup is emitted. If graph recovery
-                    // attributed that prelude-only call to a source module,
-                    // do not keep a synthetic runtime import/export edge for
-                    // the helper unless the module body itself still names it.
-                    .filter(|binding| {
-                        !namespace_export_helpers.contains(binding)
-                            || source_runtime_refs.contains(binding)
-                    })
-                    .filter(|binding| !lowered_helpers.contains(binding))
-                    // Runtime imports recorded by the graph can include the
-                    // LHS of cross-module writes. After we rewrite those
-                    // writes through `__reverts_set_X(...)`, a write-only `X`
-                    // must not stay in the value-import/public-export
-                    // surface. Bindings that are both written and read in the
-                    // lowered source are handled by `remaining_runtime_helpers`
-                    // above, so this only removes setter-only leftovers.
-                    .filter(|binding| !written_runtime_helpers.contains(binding))
-                    .filter(|binding| !consumed_node_builtin_require_helpers.contains(binding))
-                    .filter(|binding| !localized_noop_runtime_helpers.contains(binding))
-                    .filter(|binding| !remaining_runtime_helpers.contains(binding))
-                    .filter(|binding| !planned_bindings.contains(binding))
-                    .filter(|binding| !local_source_definitions.contains(binding))
-                    .filter(|binding| !local_source_writes.contains(binding))
-                    .collect::<BTreeSet<_>>();
-                if bindings.is_empty() {
-                    continue;
-                }
-                let import_partition = partition_runtime_owner_bindings(
-                    &binding_owners,
-                    source_file_id,
-                    module.id,
-                    bindings,
-                );
-                if !import_partition.runtime_bindings.is_empty()
-                    || !import_partition.direct_imports.is_empty()
-                {
-                    runtime_import_partitions.push((source_file_id, import_partition));
-                }
-            }
+            let mut runtime_import_partitions = build_runtime_import_partitions(
+                program,
+                module.id,
+                runtime_import_groups,
+                &binding_owners,
+                namespace_member_rewrite.as_ref(),
+                &source_runtime_refs,
+                &lowered_helpers,
+                &written_runtime_helpers,
+                &consumed_node_builtin_require_helpers,
+                &localized_noop_runtime_helpers,
+                &remaining_runtime_helpers,
+                &planned_bindings,
+                &local_source_definitions,
+                &local_source_writes,
+            );
             let has_runtime_group_imports = runtime_import_partitions
                 .iter()
                 .any(|(_, partition)| !partition.runtime_bindings.is_empty());
@@ -1902,177 +2835,64 @@ impl ImportExportPlanner {
             let mut lazy_helper_names = lowered_source
                 .map(lazy_helper_import_names_for_source)
                 .unwrap_or_default();
-            let mut localized_lazy_value_source: Option<String> = None;
-            if let Some(lowered_source) = lowered_source
-                && lowered_source.uses_lazy_value
-                && !lowered_source.uses_lazy_module
-                && !has_runtime_edge_before_lazy_helpers
-                && written_runtime_helpers.is_empty()
-                && !has_runtime_group_imports
-            {
-                let source_for_lazy = namespace_member_rewrite
-                    .as_ref()
-                    .map(|rewrite| rewrite.source.as_str())
-                    .unwrap_or(lowered_source.source.as_str());
-                let (inlineable_lazy_runtime_deps, _runtime_deps_after_inline) =
-                    partition_runtime_singleton_inline_bindings(
-                        &runtime_singleton_inlines,
-                        module.id,
-                        lowered_source.source_file_id,
-                        &lowered_import_partition.runtime_bindings,
-                    );
-                if inlineable_lazy_runtime_deps.is_empty()
-                    && owner_runtime_imports_are_lazy_safe(
-                        source_for_lazy,
-                        &lowered_import_partition.runtime_bindings,
-                    )
-                    && let Some(localized) = localize_lazy_value_source(source_for_lazy)
-                {
-                    localized_lazy_value_source = Some(localized);
-                    lazy_helper_names.retain(|name| *name != "lazyValue");
-                }
+            let mut localized_lazy_value_source = try_localize_lazy_value(
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                has_runtime_edge_before_lazy_helpers,
+                &written_runtime_helpers,
+                has_runtime_group_imports,
+                &runtime_singleton_inlines,
+                module.id,
+                &lowered_import_partition.runtime_bindings,
+            );
+            if localized_lazy_value_source.is_some() {
+                lazy_helper_names.retain(|name| *name != "lazyValue");
             }
-            let mut runtime_sources_for_module = BTreeSet::<u32>::new();
-            if let Some(lowered_source) = lowered_source
-                && (!partition_runtime_singleton_inline_bindings(
-                    &runtime_singleton_inlines,
-                    module.id,
-                    lowered_source.source_file_id,
-                    &lowered_import_partition.runtime_bindings,
-                )
-                .1
-                .is_empty()
-                    || !written_runtime_helpers.is_empty()
-                    || !lazy_helper_names.is_empty())
-            {
-                runtime_sources_for_module.insert(lowered_source.source_file_id);
-            }
-            for (source_file_id, partition) in &runtime_import_partitions {
-                if !partition_runtime_singleton_inline_bindings(
-                    &runtime_singleton_inlines,
-                    module.id,
-                    *source_file_id,
-                    &partition.runtime_bindings,
-                )
-                .1
-                .is_empty()
-                {
-                    runtime_sources_for_module.insert(*source_file_id);
-                }
-            }
-            if let Some(lowered_source) = lowered_source
-                && runtime_sources_for_module.contains(&lowered_source.source_file_id)
-            {
-                lowered_import_partition.route_prelude_imports_through_runtime_except(
-                    runtime_edge_direct_prelude_imports.get(&lowered_source.source_file_id),
-                );
-            }
-            for (source_file_id, partition) in &mut runtime_import_partitions {
-                if runtime_sources_for_module.contains(source_file_id) {
-                    partition.route_prelude_imports_through_runtime_except(
-                        runtime_edge_direct_prelude_imports.get(source_file_id),
-                    );
-                }
-            }
-            if !migrated_extra_source_deps.is_empty() {
-                emit_direct_owner_imports(
-                    program,
-                    module.id,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    &migrated_extra_source_deps,
-                );
-            }
-            if !migrated_extra_runtime_owner_deps.is_empty() {
-                emit_direct_owner_imports(
-                    program,
-                    module.id,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    &migrated_extra_runtime_owner_deps,
-                );
-            }
-            if !migrated_extra_runtime_owner_dep_aliases.is_empty() {
-                emit_direct_owner_import_aliases(
-                    program,
-                    path,
-                    &mut file,
-                    &mut planned_bindings,
-                    &migrated_extra_runtime_owner_dep_aliases,
-                );
-            }
-            for (source_file_id, aliases) in &migrated_runtime_extra_runtime_dep_aliases {
-                if aliases.is_empty() {
-                    continue;
-                }
-                let original_bindings = aliases.keys().cloned().collect::<BTreeSet<_>>();
-                used_runtime_helper_files
-                    .entry(*source_file_id)
-                    .or_default()
-                    .extend(original_bindings.iter().cloned());
-                exported_runtime_helper_bindings
-                    .entry(*source_file_id)
-                    .or_default()
-                    .extend(original_bindings.iter().cloned());
-                required_runtime_helper_bindings
-                    .entry(*source_file_id)
-                    .or_default()
-                    .extend(original_bindings.iter().cloned());
-                let specifier =
-                    relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
-                file.push_source(named_import_alias_statement(
-                    aliases
-                        .iter()
-                        .map(|(original, alias)| (original.as_str(), alias)),
-                    specifier.as_str(),
-                ));
-                for alias in aliases.values() {
-                    if planned_bindings.contains(alias) {
-                        continue;
-                    }
-                    planned_bindings.insert(alias.clone());
-                    file.add_binding(PlannedBinding::new(
-                        alias.clone(),
-                        alias.clone(),
-                        BindingShape::Unknown,
-                        true,
-                    ));
-                }
-            }
-            for (source_file_id, bindings) in &migrated_extra_runtime_reexport_deps {
-                used_runtime_helper_files
-                    .entry(*source_file_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-                exported_runtime_helper_bindings
-                    .entry(*source_file_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-                let specifier =
-                    relative_import_specifier(path, runtime_helpers_path(*source_file_id).as_str());
-                file.push_source(runtime_helper_import_statement(
-                    bindings,
-                    &BTreeSet::new(),
-                    &[],
-                    specifier.as_str(),
-                ));
-                for binding in bindings {
-                    if planned_bindings.contains(binding) {
-                        continue;
-                    }
-                    planned_bindings.insert(binding.clone());
-                    file.add_binding(plan_binding_from_program(
-                        program,
-                        module.id,
-                        binding.clone(),
-                        binding.clone(),
-                        true,
-                        None,
-                    ));
-                }
-            }
+            let runtime_sources_for_module = compute_runtime_sources_for_module(
+                lowered_source,
+                &lowered_import_partition,
+                &runtime_import_partitions,
+                &runtime_singleton_inlines,
+                module.id,
+                &written_runtime_helpers,
+                &lazy_helper_names,
+            );
+            route_prelude_imports_for_runtime_sources(
+                lowered_source,
+                &mut lowered_import_partition,
+                &mut runtime_import_partitions,
+                &runtime_sources_for_module,
+                &runtime_edge_direct_prelude_imports,
+            );
+            emit_migrated_extra_owner_imports(
+                program,
+                module.id,
+                path,
+                &mut file,
+                &mut planned_bindings,
+                &migrated_extra_source_deps,
+                &migrated_extra_runtime_owner_deps,
+                &migrated_extra_runtime_owner_dep_aliases,
+            );
+            emit_migrated_runtime_extra_alias_imports(
+                path,
+                &mut file,
+                &mut planned_bindings,
+                &mut used_runtime_helper_files,
+                &mut exported_runtime_helper_bindings,
+                &mut required_runtime_helper_bindings,
+                &migrated_runtime_extra_runtime_dep_aliases,
+            );
+            emit_migrated_extra_runtime_reexport_imports(
+                program,
+                module.id,
+                path,
+                &mut file,
+                &mut planned_bindings,
+                &mut used_runtime_helper_files,
+                &mut exported_runtime_helper_bindings,
+                &migrated_extra_runtime_reexport_deps,
+            );
             if let Some(lowered_source) = lowered_source
                 && (!remaining_runtime_helpers.is_empty()
                     || !written_runtime_helpers.is_empty()
@@ -2111,253 +2931,86 @@ impl ImportExportPlanner {
                     lowered_source.source_file_id,
                     &inline_remaining_helpers,
                 );
-                let (package_remaining_helpers, remaining_runtime_helpers) =
-                    partition_package_runtime_bindings(
-                        &binding_owners,
-                        package_runtime_owner.as_ref(),
-                        lowered_source.source_file_id,
-                        &remaining_runtime_helpers,
-                    );
-                let (package_written_helpers, written_runtime_helpers) =
-                    partition_package_runtime_bindings(
-                        &binding_owners,
-                        package_runtime_owner.as_ref(),
-                        lowered_source.source_file_id,
-                        &written_runtime_helpers,
-                    );
-                if !package_remaining_helpers.is_empty() || !package_written_helpers.is_empty() {
-                    let mut package_import = PackageRuntimeImportEmitter {
-                        program,
-                        used_package_runtime_helper_files: &mut used_package_runtime_helper_files,
-                        file: &mut file,
-                        planned_bindings: &mut planned_bindings,
-                        module_id: module.id,
-                        module_path: path,
-                        owner: package_runtime_owner
-                            .as_ref()
-                            .expect("package runtime bindings must have an owner"),
-                        source_file_id: lowered_source.source_file_id,
-                    };
-                    emit_package_runtime_helper_import(
-                        &mut package_import,
-                        &package_remaining_helpers,
-                        &package_written_helpers,
-                    );
-                }
-                // A module can fail the earlier lazyValue-localization gate
-                // because it still referenced a singleton runtime helper.
-                // After singleton/package partitioning above, if the shared
-                // lazyValue import is the only remaining runtime edge,
-                // localize it too and avoid materializing the runtime helper
-                // file just for the memoizer.
-                let has_runtime_group_edges_after_inline =
-                    runtime_import_partitions
-                        .iter()
-                        .any(|(source_file_id, partition)| {
-                            let (_inline_bindings, runtime_bindings) =
-                                partition_runtime_singleton_inline_bindings(
-                                    &runtime_singleton_inlines,
-                                    module.id,
-                                    *source_file_id,
-                                    &partition.runtime_bindings,
-                                );
-                            let (_package_bindings, runtime_bindings) =
-                                partition_package_runtime_bindings(
-                                    &binding_owners,
-                                    package_runtime_owner.as_ref(),
-                                    *source_file_id,
-                                    &runtime_bindings,
-                                );
-                            !runtime_bindings.is_empty()
-                        });
-                if localized_lazy_value_source.is_none()
-                    && lowered_source.uses_lazy_value
-                    && !lowered_source.uses_lazy_module
-                    && !has_runtime_edge_before_lazy_helpers
-                    && !has_runtime_group_edges_after_inline
-                    && remaining_runtime_helpers.is_empty()
-                    && written_runtime_helpers.is_empty()
-                    && package_remaining_helpers.is_empty()
-                    && package_written_helpers.is_empty()
-                    && lazy_helper_names.contains(&"lazyValue")
-                {
-                    let source_for_lazy = namespace_member_rewrite
-                        .as_ref()
-                        .map(|rewrite| rewrite.source.as_str())
-                        .unwrap_or(lowered_source.source.as_str());
-                    if let Some(localized) = localize_lazy_value_source(source_for_lazy) {
-                        localized_lazy_value_source = Some(localized);
-                        lazy_helper_names.retain(|name| *name != "lazyValue");
-                    }
-                }
-                if !remaining_runtime_helpers.is_empty()
-                    || !written_runtime_helpers.is_empty()
-                    || !lazy_helper_names.is_empty()
-                {
-                    used_runtime_helper_files
-                        .entry(lowered_source.source_file_id)
-                        .or_default();
-                }
-                if !remaining_runtime_helpers.is_empty() {
-                    used_runtime_helper_files
-                        .entry(lowered_source.source_file_id)
-                        .or_default()
-                        .extend(remaining_runtime_helpers.iter().cloned());
-                    exported_runtime_helper_bindings
-                        .entry(lowered_source.source_file_id)
-                        .or_default()
-                        .extend(remaining_runtime_helpers.iter().cloned());
-                    required_runtime_helper_bindings
-                        .entry(lowered_source.source_file_id)
-                        .or_default()
-                        .extend(remaining_runtime_helpers.iter().cloned());
-                }
-                if !written_runtime_helpers.is_empty() {
-                    used_runtime_helper_setters
-                        .entry(lowered_source.source_file_id)
-                        .or_default()
-                        .extend(written_runtime_helpers.iter().cloned());
-                }
-                if lowered_source.uses_lazy_module {
-                    used_lazy_module.insert(lowered_source.source_file_id);
-                }
-                if lazy_helper_names.contains(&"lazyValue") {
-                    used_lazy_value.insert(lowered_source.source_file_id);
-                }
-                if lazy_helper_names.contains(&"lazyModule") {
-                    exported_lazy_module.insert(lowered_source.source_file_id);
-                }
-                if lazy_helper_names.contains(&"lazyValue") {
-                    exported_lazy_value.insert(lowered_source.source_file_id);
-                }
-                let specifier = relative_import_specifier(
-                    path,
-                    runtime_helpers_path(lowered_source.source_file_id).as_str(),
-                );
-                if !remaining_runtime_helpers.is_empty()
-                    || !written_runtime_helpers.is_empty()
-                    || !lazy_helper_names.is_empty()
-                {
-                    file.push_source(runtime_helper_import_statement(
-                        &remaining_runtime_helpers,
-                        &written_runtime_helpers,
-                        &lazy_helper_names,
-                        specifier.as_str(),
-                    ));
-                    for binding in &remaining_runtime_helpers {
-                        if planned_bindings.contains(binding) {
-                            continue;
-                        }
-                        planned_bindings.insert(binding.clone());
-                        file.add_binding(plan_binding_from_program(
-                            program,
-                            module.id,
-                            binding.clone(),
-                            binding.clone(),
-                            true,
-                            None,
-                        ));
-                    }
-                }
-            }
-
-            for (source_file_id, import_partition) in runtime_import_partitions {
-                emit_direct_owner_imports(
+                let (
+                    package_remaining_helpers,
+                    remaining_runtime_helpers,
+                    package_written_helpers,
+                    written_runtime_helpers,
+                ) = emit_lowered_package_runtime_imports(
                     program,
                     module.id,
                     path,
                     &mut file,
                     &mut planned_bindings,
-                    &import_partition.direct_imports,
-                );
-                emit_direct_prelude_imports(
-                    &mut file,
-                    &mut planned_bindings,
-                    &import_partition.direct_prelude_imports,
-                );
-                let (inline_bindings, runtime_bindings) =
-                    partition_runtime_singleton_inline_bindings(
-                        &runtime_singleton_inlines,
-                        module.id,
-                        source_file_id,
-                        &import_partition.runtime_bindings,
-                    );
-                emit_runtime_singleton_inline_helpers(
-                    RuntimeSingletonInlineEmitContext {
-                        program,
-                        module_id: module.id,
-                        module_path: path,
-                    },
-                    &runtime_singleton_inlines,
-                    &mut file,
-                    &mut planned_bindings,
-                    &mut emitted_inline_runtime_helpers,
-                    source_file_id,
-                    &inline_bindings,
-                );
-                let (package_bindings, bindings) = partition_package_runtime_bindings(
+                    &mut used_package_runtime_helper_files,
+                    lowered_source.source_file_id,
                     &binding_owners,
                     package_runtime_owner.as_ref(),
-                    source_file_id,
-                    &runtime_bindings,
+                    &remaining_runtime_helpers,
+                    &written_runtime_helpers,
                 );
-                if !package_bindings.is_empty() {
-                    let mut package_import = PackageRuntimeImportEmitter {
-                        program,
-                        used_package_runtime_helper_files: &mut used_package_runtime_helper_files,
-                        file: &mut file,
-                        planned_bindings: &mut planned_bindings,
-                        module_id: module.id,
-                        module_path: path,
-                        owner: package_runtime_owner
-                            .as_ref()
-                            .expect("package runtime bindings must have an owner"),
-                        source_file_id,
-                    };
-                    emit_package_runtime_helper_import(
-                        &mut package_import,
-                        &package_bindings,
-                        &BTreeSet::new(),
-                    );
+                if let Some(localized) = try_post_inline_localize_lazy_value(
+                    lowered_source,
+                    namespace_member_rewrite.as_ref(),
+                    localized_lazy_value_source.as_ref(),
+                    has_runtime_edge_before_lazy_helpers,
+                    &remaining_runtime_helpers,
+                    &written_runtime_helpers,
+                    &package_remaining_helpers,
+                    &package_written_helpers,
+                    &lazy_helper_names,
+                    &runtime_import_partitions,
+                    &runtime_singleton_inlines,
+                    &binding_owners,
+                    package_runtime_owner.as_ref(),
+                    module.id,
+                ) {
+                    localized_lazy_value_source = Some(localized);
+                    lazy_helper_names.retain(|name| *name != "lazyValue");
                 }
-                if bindings.is_empty() {
-                    continue;
-                }
-                used_runtime_helper_files
-                    .entry(source_file_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-                exported_runtime_helper_bindings
-                    .entry(source_file_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-                required_runtime_helper_bindings
-                    .entry(source_file_id)
-                    .or_default()
-                    .extend(bindings.iter().cloned());
-                let specifier =
-                    relative_import_specifier(path, runtime_helpers_path(source_file_id).as_str());
-                file.push_source(runtime_helper_import_statement(
-                    &bindings,
-                    &BTreeSet::new(),
-                    &[],
-                    specifier.as_str(),
-                ));
-                for binding in bindings {
-                    if planned_bindings.contains(&binding) {
-                        continue;
-                    }
-                    planned_bindings.insert(binding.clone());
-                    file.add_binding(plan_binding_from_program(
-                        program,
-                        module.id,
-                        binding.clone(),
-                        binding,
-                        true,
-                        None,
-                    ));
-                }
+                record_lowered_runtime_helper_usage(
+                    lowered_source,
+                    &remaining_runtime_helpers,
+                    &written_runtime_helpers,
+                    &lazy_helper_names,
+                    &mut used_runtime_helper_files,
+                    &mut exported_runtime_helper_bindings,
+                    &mut required_runtime_helper_bindings,
+                    &mut used_runtime_helper_setters,
+                    &mut used_lazy_module,
+                    &mut used_lazy_value,
+                    &mut exported_lazy_module,
+                    &mut exported_lazy_value,
+                );
+                emit_lowered_runtime_helper_import(
+                    program,
+                    module.id,
+                    path,
+                    &mut file,
+                    &mut planned_bindings,
+                    lowered_source.source_file_id,
+                    &remaining_runtime_helpers,
+                    &written_runtime_helpers,
+                    &lazy_helper_names,
+                );
             }
+
+            emit_runtime_import_partitions(
+                program,
+                module.id,
+                path,
+                &mut file,
+                &mut planned_bindings,
+                &mut used_runtime_helper_files,
+                &mut exported_runtime_helper_bindings,
+                &mut required_runtime_helper_bindings,
+                &mut used_package_runtime_helper_files,
+                &mut emitted_inline_runtime_helpers,
+                runtime_import_partitions,
+                &runtime_singleton_inlines,
+                &binding_owners,
+                package_runtime_owner.as_ref(),
+            );
 
             if let Some(rewrite) = &node_builtin_require_rewrite
                 && !rewrite.imports.is_empty()
@@ -2370,171 +3023,43 @@ impl ImportExportPlanner {
             }
 
             let source_definitions = program.model().graph().ast_definitions_for(module.id);
-            let reshaped_bindings = lowered_source
-                .map(|src| src.reshaped_bindings.clone())
-                .unwrap_or_default();
-            for original in program.model().graph().definitions_for(module.id) {
-                let source_backed = source_definitions.contains(&original);
-                let emitted = program
-                    .semantic_names()
-                    .binding_name(module.id, original.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| original.clone());
-                if source_backed && emitted != original {
-                    file.add_readability_rename(PlannedRename::new(
-                        original.clone(),
-                        emitted.clone(),
-                    ));
-                }
-                let shape_override = if reshaped_bindings.contains(&original) {
-                    Some(BindingShape::Unknown)
-                } else {
-                    None
-                };
-                planned_bindings.insert(original.clone());
-                file.add_binding(plan_binding_from_program(
-                    program,
-                    module.id,
-                    original,
-                    emitted,
-                    source_backed,
-                    shape_override,
-                ));
-            }
+            emit_module_definition_bindings(
+                program,
+                module.id,
+                &mut file,
+                &mut planned_bindings,
+                lowered_source,
+            );
 
-            for original in &source_imports {
-                if planned_bindings.contains(original) {
-                    continue;
-                }
-                let emitted = program
-                    .semantic_names()
-                    .binding_name(module.id, original.as_str())
-                    .cloned()
-                    .unwrap_or_else(|| original.clone());
-                if emitted != *original {
-                    file.add_readability_rename(PlannedRename::new(
-                        original.clone(),
-                        emitted.clone(),
-                    ));
-                }
-                planned_bindings.insert(original.clone());
-                file.add_binding(plan_binding_from_program(
-                    program,
-                    module.id,
-                    original.clone(),
-                    emitted,
-                    true,
-                    None,
-                ));
-            }
+            emit_source_import_bindings(
+                program,
+                module.id,
+                &mut file,
+                &mut planned_bindings,
+                &source_imports,
+            );
 
             if lowered_source.is_none() && !migrated_local_bindings.is_empty() {
-                for binding in &migrated_local_bindings {
-                    planned_bindings.insert(binding.clone());
-                    let binding_shape = if migrated_locally.contains(binding)
-                        || migrated_extra_namespace_bindings.contains(binding)
-                    {
-                        BindingShape::Unknown
-                    } else {
-                        BindingShape::Callable
-                    };
-                    file.add_binding(PlannedBinding::new(
-                        binding.clone(),
-                        binding.clone(),
-                        binding_shape,
-                        true,
-                    ));
-                }
-                if !migrated_locally.is_empty() {
-                    let bare: BTreeSet<&BindingName> = migrated_locally
-                        .iter()
-                        .filter(|binding| {
-                            runtime_var_migrations
-                                .migrations_by_binding
-                                .get(*binding)
-                                .and_then(|m| m.initializer.as_deref())
-                                .is_none()
-                        })
-                        .collect();
-                    if !bare.is_empty() {
-                        file.push_source(variable_declaration_statement(bare.into_iter()));
-                    }
-                    for binding in &migrated_locally {
-                        let Some(migration) =
-                            runtime_var_migrations.migrations_by_binding.get(binding)
-                        else {
-                            continue;
-                        };
-                        let Some(initializer) = migration.initializer.as_deref() else {
-                            continue;
-                        };
-                        file.push_source(format!(
-                            "var {name} = {initializer};",
-                            name = binding.as_str()
-                        ));
-                    }
-                }
-                if !migrated_extra_snippets.is_empty()
-                    || !migrated_extra_namespace_exports.is_empty()
-                {
-                    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
-                    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
-                        .values()
-                        .flat_map(|aliases| aliases.iter())
-                        .map(|(original, alias)| (original.clone(), alias.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    for (source_file_id, binding) in &migrated_extra_snippets {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(snippet) = prelude.snippets.get(binding) else {
-                            continue;
-                        };
-                        let mut source = snippet.source.clone();
-                        if let Some(setter_deps) =
-                            migrated_extra_runtime_setter_deps_by_source.get(source_file_id)
-                            && !setter_deps.is_empty()
-                        {
-                            source = rewrite_runtime_helper_writes(source.as_str(), setter_deps);
-                        }
-                        migrated_chunks.push((
-                            snippet.byte_start,
-                            0,
-                            rename_identifier_reads_in_source(
-                                source.as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    for (source_file_id, namespace) in &migrated_extra_namespace_exports {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(namespace_export) = prelude
-                            .namespace_exports
-                            .iter()
-                            .find(|export| export.namespace == *namespace)
-                        else {
-                            continue;
-                        };
-                        migrated_chunks.push((
-                            namespace_export.byte_start,
-                            1,
-                            rename_identifier_reads_in_source(
-                                runtime_namespace_export_statement(namespace_export).as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
-                    for (_, _, source) in migrated_chunks {
-                        file.push_source(source);
-                    }
-                }
+                add_migrated_local_binding_declarations(
+                    &mut file,
+                    &mut planned_bindings,
+                    &migrated_local_bindings,
+                    &migrated_locally,
+                    &migrated_extra_namespace_bindings,
+                );
+                emit_migrated_locally_var_declarations(
+                    &mut file,
+                    &migrated_locally,
+                    &runtime_var_migrations,
+                );
+                emit_migrated_extra_chunks(
+                    program,
+                    &mut file,
+                    &migrated_extra_snippets,
+                    &migrated_extra_namespace_exports,
+                    &migrated_extra_runtime_dep_aliases,
+                    &migrated_extra_runtime_setter_deps_by_source,
+                );
                 for binding in &migrated_extra_noop_deps {
                     file.push_source(noop_function_statement(binding));
                 }
@@ -2542,32 +3067,15 @@ impl ImportExportPlanner {
 
             if let Some(lowered_source) = lowered_source {
                 let source_file_path = lowered_source.source_file_path.as_str();
-                let mut source = localized_lazy_value_source.clone().unwrap_or_else(|| {
-                    namespace_member_rewrite
-                        .as_ref()
-                        .map(|rewrite| rewrite.source.clone())
-                        .unwrap_or_else(|| lowered_source.source.clone())
-                });
-                if !localized_noop_runtime_helpers.is_empty() {
-                    source = rewrite_noop_runtime_helper_calls(
-                        source.as_str(),
-                        &localized_noop_runtime_helpers,
-                    );
-                    source = drop_bare_void_zero_top_level_statements(source.as_str());
-                }
-                if let Some(rewrite) = &node_builtin_require_rewrite
-                    && !rewrite.imports.is_empty()
-                {
-                    source = rewrite_node_builtin_require_calls_with_imports(
-                        source.as_str(),
-                        &node_builtin_require_helpers,
-                        &rewrite.imports,
-                    );
-                }
-                if !written_runtime_helpers.is_empty() {
-                    source =
-                        rewrite_runtime_helper_writes(source.as_str(), &written_runtime_helpers);
-                }
+                let source = build_lowered_module_source(
+                    lowered_source,
+                    localized_lazy_value_source.as_deref(),
+                    namespace_member_rewrite.as_ref(),
+                    &localized_noop_runtime_helpers,
+                    node_builtin_require_rewrite.as_ref(),
+                    &node_builtin_require_helpers,
+                    &written_runtime_helpers,
+                );
                 if contains_call_to_identifier(source.as_str(), "require")
                     && !local_source_definitions.contains(&BindingName::new("require"))
                 {
@@ -2579,22 +3087,13 @@ impl ImportExportPlanner {
                 // globals scan picks the same bindings up as undeclared
                 // writes and emits a redundant `var X;` line alongside
                 // the migration's own declaration.
-                for binding in &migrated_local_bindings {
-                    planned_bindings.insert(binding.clone());
-                    let binding_shape = if migrated_locally.contains(binding)
-                        || migrated_extra_namespace_bindings.contains(binding)
-                    {
-                        BindingShape::Unknown
-                    } else {
-                        BindingShape::Callable
-                    };
-                    file.add_binding(PlannedBinding::new(
-                        binding.clone(),
-                        binding.clone(),
-                        binding_shape,
-                        true,
-                    ));
-                }
+                add_migrated_local_binding_declarations(
+                    &mut file,
+                    &mut planned_bindings,
+                    &migrated_local_bindings,
+                    &migrated_locally,
+                    &migrated_extra_namespace_bindings,
+                );
                 let implicit_globals = implicit_global_declarations_for_module(
                     source.as_str(),
                     &source_definitions,
@@ -2613,96 +3112,19 @@ impl ImportExportPlanner {
                 // barrel. Bindings that came with a literal initializer emit
                 // `var X = INIT;` so the writer keeps the original
                 // initial value the runtime used to set at load.
-                if !migrated_locally.is_empty() {
-                    let bare: BTreeSet<&BindingName> = migrated_locally
-                        .iter()
-                        .filter(|binding| {
-                            runtime_var_migrations
-                                .migrations_by_binding
-                                .get(*binding)
-                                .and_then(|m| m.initializer.as_deref())
-                                .is_none()
-                        })
-                        .collect();
-                    if !bare.is_empty() {
-                        file.push_source(variable_declaration_statement(bare.into_iter()));
-                    }
-                    for binding in &migrated_locally {
-                        let Some(migration) =
-                            runtime_var_migrations.migrations_by_binding.get(binding)
-                        else {
-                            continue;
-                        };
-                        let Some(initializer) = migration.initializer.as_deref() else {
-                            continue;
-                        };
-                        file.push_source(format!(
-                            "var {name} = {initializer};",
-                            name = binding.as_str()
-                        ));
-                    }
-                }
-                if !migrated_extra_snippets.is_empty()
-                    || !migrated_extra_namespace_exports.is_empty()
-                {
-                    let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
-                    let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
-                        .values()
-                        .flat_map(|aliases| aliases.iter())
-                        .map(|(original, alias)| (original.clone(), alias.clone()))
-                        .collect::<BTreeMap<_, _>>();
-                    for (source_file_id, binding) in &migrated_extra_snippets {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(snippet) = prelude.snippets.get(binding) else {
-                            continue;
-                        };
-                        let mut source = snippet.source.clone();
-                        if let Some(setter_deps) =
-                            migrated_extra_runtime_setter_deps_by_source.get(source_file_id)
-                            && !setter_deps.is_empty()
-                        {
-                            source = rewrite_runtime_helper_writes(source.as_str(), setter_deps);
-                        }
-                        migrated_chunks.push((
-                            snippet.byte_start,
-                            0,
-                            rename_identifier_reads_in_source(
-                                source.as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    for (source_file_id, namespace) in &migrated_extra_namespace_exports {
-                        let Some(prelude) =
-                            program.model().graph().runtime_prelude(*source_file_id)
-                        else {
-                            continue;
-                        };
-                        let Some(namespace_export) = prelude
-                            .namespace_exports
-                            .iter()
-                            .find(|export| export.namespace == *namespace)
-                        else {
-                            continue;
-                        };
-                        migrated_chunks.push((
-                            namespace_export.byte_start,
-                            1,
-                            rename_identifier_reads_in_source(
-                                runtime_namespace_export_statement(namespace_export).as_str(),
-                                &migrated_runtime_dep_aliases,
-                            ),
-                        ));
-                    }
-                    migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
-                    for (_, _, source) in migrated_chunks {
-                        file.push_source(source);
-                    }
-                }
+                emit_migrated_locally_var_declarations(
+                    &mut file,
+                    &migrated_locally,
+                    &runtime_var_migrations,
+                );
+                emit_migrated_extra_chunks(
+                    program,
+                    &mut file,
+                    &migrated_extra_snippets,
+                    &migrated_extra_namespace_exports,
+                    &migrated_extra_runtime_dep_aliases,
+                    &migrated_extra_runtime_setter_deps_by_source,
+                );
                 for binding in &migrated_extra_noop_deps {
                     file.push_source(noop_function_statement(binding));
                 }
