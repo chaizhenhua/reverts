@@ -2,33 +2,21 @@ pub mod acceptance;
 mod binding_signatures;
 pub mod cascade;
 pub mod cascade_match;
-mod cascade_ownership;
-mod dependency_closure;
-mod dependency_neighborhood;
-mod exact_hint_ownership;
 mod externalization_policy;
-mod force_externalize;
 pub mod hungarian;
-mod importable_ownership;
 mod index;
 mod model;
-mod package_file_graph_ownership;
+mod ownership;
 pub mod package_helpers;
 mod source;
 pub mod structural_bag;
 pub mod tier;
 mod version_scoring;
-mod weak_source_equivalent;
 
 pub use acceptance::{AcceptanceDecision, classify};
 use binding_signatures::binding_string_signatures_from_source;
 pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
 pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
-pub(crate) use dependency_closure::{
-    DependencyNeighborhoodEvidence, dependency_neighborhood_ownership_evidence,
-    dependency_neighborhood_source_path, has_direct_neighborhood_package_contradiction,
-    package_dependency_components,
-};
 use externalization_policy::{
     SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
     cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
@@ -59,6 +47,11 @@ pub use model::{
 pub(crate) use model::{
     ConcretePackageSourcePath, CorrectedPackageExternalImportTarget, ExternalImportTarget,
     package_module_source_quality_label,
+};
+pub(crate) use ownership::dependency_closure::{
+    DependencyNeighborhoodEvidence, dependency_neighborhood_ownership_evidence,
+    dependency_neighborhood_source_path, has_direct_neighborhood_package_contradiction,
+    package_dependency_components,
 };
 pub use package_helpers::{
     SemanticPathHintMode, accepted_external_modules, canonical_public_path_segments,
@@ -450,7 +443,7 @@ pub fn match_packages_with_pipeline(
         match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources)
     };
     mark_timing!("cascade_match");
-    cascade_ownership::promote_cascade_function_coverage_to_module_attributions(
+    ownership::cascade::promote_cascade_function_coverage_to_module_attributions(
         rows,
         &fingerprints_by_module,
         &cascade_report,
@@ -487,34 +480,34 @@ pub fn match_packages_with_pipeline(
     );
     mark_timing!("structural_promote");
     package_report.audit.extend(structural_bag_report.audit);
-    weak_source_equivalent::promote_weak_source_equivalent_matches(
+    ownership::weak_source_equivalent::promote_weak_source_equivalent_matches(
         rows,
         package_sources,
         &mut package_report,
     );
     mark_timing!("weak_source_equivalent");
-    exact_hint_ownership::promote_exact_hint_ownership_matches(
+    ownership::exact_hint::promote_exact_hint_ownership_matches(
         rows,
         package_sources,
         &mut package_report,
     );
     mark_timing!("exact_hint_promote");
-    dependency_neighborhood::promote_dependency_closure_ownership_matches(
+    ownership::dependency_neighborhood::promote_dependency_closure_ownership_matches(
         rows,
         &mut package_report,
     );
     mark_timing!("dependency_closure");
-    dependency_neighborhood::promote_dependency_cluster_ownership_matches(
+    ownership::dependency_neighborhood::promote_dependency_cluster_ownership_matches(
         rows,
         &mut package_report,
     );
     mark_timing!("dependency_cluster");
-    package_file_graph_ownership::promote_package_file_graph_ownership_matches(
+    ownership::package_file_graph::promote_package_file_graph_ownership_matches(
         rows,
         &mut package_report,
     );
     mark_timing!("package_file_graph");
-    importable_ownership::promote_importable_ownership_matches(
+    ownership::importable::promote_importable_ownership_matches(
         rows,
         package_sources,
         &mut package_report,
@@ -523,7 +516,7 @@ pub fn match_packages_with_pipeline(
     let matched_package_names = package_filter
         .cloned()
         .unwrap_or_else(|| unmatched_package_scope(rows));
-    force_externalize::force_externalize_remaining_package_modules(
+    ownership::force_externalize::force_externalize_remaining_package_modules(
         rows,
         package_sources,
         &matched_package_names,

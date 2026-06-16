@@ -4,11 +4,12 @@ use crate::{
     BestVersionMatch, CascadeMatchReport, CascadeOwnershipMatch, ConcretePackageSourcePath,
     ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy,
     PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES, PackageMatch, PackageModuleSourceQuality, PackageSource,
-    VersionedPackageMatchReport, VersionedPackageMatcher, cascade_ownership, exact_hint_ownership,
-    match_packages_with_pipeline, match_structural_bags,
-    match_structural_bags_with_excluded_modules, package_import_names_from_sources,
-    package_module_source_quality, package_source_public_export_proofs,
-    resolve_external_import_target, same_package_cross_version_source_external_import_target,
+    VersionedPackageMatchReport, VersionedPackageMatcher, match_packages_with_pipeline,
+    match_structural_bags, match_structural_bags_with_excluded_modules,
+    ownership::{cascade, exact_hint},
+    package_import_names_from_sources, package_module_source_quality,
+    package_source_public_export_proofs, resolve_external_import_target,
+    same_package_cross_version_source_external_import_target,
 };
 use reverts_graph::FunctionExtractor;
 use reverts_input::{
@@ -694,7 +695,7 @@ fn pipeline_keeps_weak_full_cascade_coverage_source_only() {
         audit: Default::default(),
     };
 
-    cascade_ownership::promote_cascade_function_coverage_to_module_attributions(
+    cascade::promote_cascade_function_coverage_to_module_attributions(
         &rows,
         &BTreeMap::from([(ModuleId(10), fingerprints)]),
         &cascade_report,
@@ -744,11 +745,7 @@ fn exact_hint_import_proof_upgrades_existing_source_only_match_to_external() {
         audit: Default::default(),
     };
 
-    exact_hint_ownership::promote_exact_hint_ownership_matches(
-        &rows,
-        &package_sources,
-        &mut report,
-    );
+    exact_hint::promote_exact_hint_ownership_matches(&rows, &package_sources, &mut report);
 
     assert_eq!(report.matches.len(), 1);
     assert!(report.matches[0].external_importable);
@@ -781,11 +778,7 @@ fn exact_hint_import_proof_accepts_root_export_entry_path_match() {
         audit: Default::default(),
     };
 
-    exact_hint_ownership::promote_exact_hint_ownership_matches(
-        &rows,
-        &package_sources,
-        &mut report,
-    );
+    exact_hint::promote_exact_hint_ownership_matches(&rows, &package_sources, &mut report);
 
     assert_eq!(report.matches.len(), 1);
     assert!(report.matches[0].external_importable);
