@@ -42,6 +42,34 @@ matcher strategies extracted into `strategies/` modules. `reverts-pipeline`
 also got `runtime_dependencies.rs` factored out (`5271087`). All 1,401
 tests stayed green throughout.
 
+### Session of 2026-05-23 (continuation — matcher tail + pipeline + planner kickoff)
+
+`reverts-package-matcher` Phase 2 tail (1 commit, lib.rs ~13,907 → ~12,700):
+
+- `a119c53` `force_externalize.rs` — last-resort externalization pass +
+  several `pub(crate)` bumps so the index/cache helpers stay reachable
+
+`reverts-pipeline` Phase 4 (4 commits, `lib.rs` 3,753 → 2,699 = -28%):
+
+- `82094d9` `audit.rs` — 3 audit passes + 7 helpers (parse + binding-
+  shape + namespace-member consistency)
+- `3e8768d` `assets.rs` — asset reference collection / audit / rewrite
+  (including ripgrep-vendor dynamic detector)
+- `178b735` `source_rewrites.rs` — `import.meta.url` canonicalization,
+  static template-literal folding, string-literal value rewriter
+- `12cef62` `output_paths.rs` — `module_output_paths` +
+  `relative_asset_specifier`
+
+`reverts-planner` Phase 3 kickoff (2 commits, `lib.rs` 33,930 → 33,658):
+
+- `3732f04` `runtime_setter_migration_blocker.rs` — public diagnostic
+  surface (`RuntimeSetterMigrationBlockerReport` + sub-types)
+- `4028f2f` `compiler_recovery.rs` — `SourceCompilerStrategy`,
+  `CompilerRecoveryAction`, `CompilerRecoveryDecision`
+
+All workspace tests stayed green (84 pipeline + 290 planner + 376 matcher
++ analyze/observe/etc).
+
 Remaining in `reverts-cli` Phase 1 (~1 session):
 
 - `persist_package_attributions` cluster (~1500 lines, ~10 helper deps) into
