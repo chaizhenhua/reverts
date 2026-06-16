@@ -348,6 +348,44 @@ The folded-module branch of the per-module loop is now mostly a flat
 sequence of helper calls. The non-folded source-module branch is still
 ~700 lines and remains the next focus.
 
+### Session of 2026-05-23 (continuation 8 — Phase 3-D completed)
+
+Two final commits bring the planner refactor through Phase 3-D:
+
+- `b16bdd8` extract `plan_one_module` from `plan_enriched_program`
+  loop body as a freestanding function in `lib.rs`. The method body
+  shrinks from 811 lines (post-3-C) to 143 lines (-82% in one
+  commit, -93.4% from the original 2,155). The per-module work
+  becomes a single named call that takes 25 explicit arguments
+  (`#[allow(clippy::too_many_arguments)]`). Five `continue;`
+  statements in the loop became `return Ok(());` in the extracted
+  function. All 290 planner tests + workspace tests green.
+
+- `3cbcca0` move `plan_one_module` to a new `compute_modules.rs`
+  module, completing Phase 3-D's target file layout. Required a
+  bulk visibility bump on lib.rs: every top-level `fn` became
+  `pub(crate) fn` (327 functions) and every top-level `struct`/
+  `enum` became `pub(crate)` (26 types). This exposes nothing
+  outside the crate, but makes the helpers visible to sibling
+  modules. `compute_modules.rs` imports ~50 helpers + ~8 types
+  from `lib.rs` and the focused submodules. All tests still green.
+
+**Phase 3 is complete.** Final status:
+
+- Phase 3-A (pure subsystems): ✅ all 10 target subsystems extracted
+- Phase 3-B (analysis.rs consolidation): ✅ de-facto complete (all
+  PlannerAnalysis carried types live in their own modules)
+- Phase 3-C (per-module loop split): ✅ 25+ named helper extractions;
+  the loop body became a linear sequence of named calls
+- Phase 3-D (final lib.rs skeleton): ✅ per-module loop body moved to
+  `compute_modules.rs`; `plan_enriched_program` is now a tight
+  143-line orchestrator
+
+The remaining lib.rs (~28k lines) still hosts most of the planner's
+free-helper code, but every helper is small, focused, and reachable
+from sibling modules. Future phase 4+ work (e.g., per-module
+analysis sub-files) can land incrementally on this foundation.
+
 ### Session of 2026-05-23 (continuation 7 — Phase 3-C per-module loop split)
 
 18 commits in this session, `plan_enriched_program` method size
