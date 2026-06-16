@@ -9,4 +9,5 @@ pub(crate) mod attributions;
 pub(crate) mod externalization_hints;
 pub(crate) mod function_attributions;
 pub(crate) mod package_surfaces;
+pub(crate) mod source_cache;
 pub(crate) mod synthetic_modules;
