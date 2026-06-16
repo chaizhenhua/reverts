@@ -15,13 +15,16 @@ use reverts_model::{
 };
 use reverts_package::accepted_external_module_ids;
 
+use super::external_adapters::{
+    ExportMemberAdapterProofKind, compact_source_defines_callable_binding,
+    export_member_adapter_proof,
+};
 use super::{
-    CompilerRecoveryAction, EmitPlan, ExportMemberAdapterProofKind, ImportExportPlanner,
-    PlannedFile, PlannerAnalysis, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
+    CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, PlannerAnalysis,
+    RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
     RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
     RuntimeSourceReadIndex, SourceCompilerStrategy, coalesce_runtime_lazy_initializer_call_runs,
-    compact_pure_static_runtime_literals, compact_source_defines_callable_binding,
-    export_member_adapter_proof, inline_internal_setter_calls,
+    compact_pure_static_runtime_literals, inline_internal_setter_calls,
     inline_remaining_lazy_value_wrappers_allowing_assignments, lower_runtime_helpers,
     merge_same_owner_overlapping_reader_migrations, parse_generated_named_export_statement,
     prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
@@ -7799,7 +7802,7 @@ fn accepted_external_package_read_from_runtime_helper_uses_external_adapter() {
     let accepted_externalized_packages =
         accepted_external_module_ids(&enriched.model().input().package_attributions);
     let source_facts = super::SourceModuleFacts::from_program(&enriched);
-    let adapter_analysis = super::external_package_adapter_analysis(
+    let adapter_analysis = super::external_adapters::external_package_adapter_analysis(
         &enriched,
         &accepted_externalized_packages,
         &source_facts,
