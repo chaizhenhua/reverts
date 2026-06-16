@@ -246,7 +246,30 @@ have their own modules:
 | `package_runtime.rs` | 781 | Package-runtime island plan + emission |
 | `lib.rs` | **28,078** | EmitPlan / PlannedFile / ImportExportPlanner + per-module loop |
 
-The remaining `lib.rs` is dominated by the 2,155-line
+### Session of 2026-05-23 (continuation 5 — Phase 3-C kickoff)
+
+3 commits, `lib.rs` 28,078 → 27,750 = -328 lines, and crucially the
+`plan_enriched_program` method shrank from 2,155 lines to **1,818
+lines**:
+
+- `9976078` `cli_entrypoint.rs` — `emit_cli_entrypoint` (33 lines).
+  Trivial tail of `plan_enriched_program` for synthesizing `cli.ts`.
+- `30f2dd5` `runtime_helper_emission.rs` — `emit_runtime_helper_files`
+  + `RuntimeHelperEmissionContext` (478 lines). The 344-line
+  source-file helper emission tail. Required `pub(crate)` bumps on 13
+  helper functions + `ExternalPackageAdapterPlan` struct +
+  `strip_runtime_noop_declarations`.
+- `b51486d` follow-up: allow lib.rs to keep test-only imports for
+  helpers whose runtime use sites all moved out.
+
+Phase 3-C is **kicked off**. Two end-pieces of `plan_enriched_program`
+now live in their own modules with explicit context structs (the
+pattern the broader per-module loop split will follow). The 1,720-line
+per-module `for module in modules { ... }` body remains. Splitting it
+into a `ModulePlanCx` with `apply_*` phase methods is the next big
+step (genuinely 3-4 sessions of careful work).
+
+The remaining `lib.rs` is dominated by the 1,818-line
 `plan_enriched_program` method and the medium-sized free functions
 that the per-module loop calls. Phase 3-B (`analysis.rs` consolidation)
 is mostly done de-facto: PlannerAnalysis still lives in lib.rs but
