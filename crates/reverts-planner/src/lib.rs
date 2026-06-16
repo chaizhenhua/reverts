@@ -64,7 +64,7 @@ use runtime_helper_writes::{
 };
 
 use pure_reexport_bypass::{
-    folded_stub_modules_with_internal_consumers, pure_reexport_bypass_plan,
+    PureReexportBypassPlan, folded_stub_modules_with_internal_consumers, pure_reexport_bypass_plan,
 };
 use runtime_namespace_rewrite::rewrite_runtime_namespace_member_accesses;
 
@@ -621,6 +621,142 @@ fn emit_folded_runtime_stub_reexports(
     ));
 }
 
+/// Emit the consumer-side `import { … } from './target.ts'` /
+/// `import { … } from runtime` lines for every binding this module
+/// reads from another source module (per
+/// `source_module_wiring.imports_by_module`). The path varies by
+/// target kind:
+///
+/// - if a pure re-export barrel routes the target, the `redirects`
+///   table sends each binding to its real owner;
+/// - if the target is a folded module whose stub got omitted, the
+///   binding's `BindingOwner::Module` re-points to the new owner
+///   directly, while runtime-routed bindings fall back to the
+///   runtime helper file;
+/// - everything else gets the obvious `import { … } from '<target>'`.
+///
+/// Returns `true` if at least one binding routed through a folded
+/// module's runtime helper file — the caller uses that to decide
+/// whether the lazy helper imports must precede the rest.
+#[allow(clippy::too_many_arguments)]
+fn emit_source_module_imports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    path: &str,
+    source_module_wiring: &SourceModuleWiring,
+    pure_reexport_bypasses: &PureReexportBypassPlan,
+    runtime_lazy_folds: &RuntimeLazyFoldPlan,
+    omitted_folded_stub_modules: &BTreeSet<ModuleId>,
+    binding_owners: &BindingOwnerPlan,
+    file: &mut PlannedFile,
+    planned_bindings: &mut BTreeSet<BindingName>,
+    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+) -> bool {
+    let mut has_runtime_edge_before_lazy_helpers = false;
+    let Some(module_imports) = source_module_wiring.imports_by_module.get(&module_id) else {
+        return has_runtime_edge_before_lazy_helpers;
+    };
+    for (target_module_id, bindings) in module_imports {
+        let mut bindings_by_target = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+        if let Some(redirects) = pure_reexport_bypasses.redirects.get(target_module_id) {
+            for binding in bindings {
+                let effective_target = redirects.get(binding).copied().unwrap_or(*target_module_id);
+                bindings_by_target
+                    .entry(effective_target)
+                    .or_default()
+                    .insert(binding.clone());
+            }
+        } else {
+            bindings_by_target.insert(*target_module_id, bindings.clone());
+        }
+        for (effective_target_module_id, effective_bindings) in bindings_by_target {
+            if effective_target_module_id == module_id {
+                continue;
+            }
+            if let Some(folded) = runtime_lazy_folds.modules.get(&effective_target_module_id)
+                && omitted_folded_stub_modules.contains(&effective_target_module_id)
+            {
+                let mut runtime_bindings = BTreeSet::<BindingName>::new();
+                let mut direct_bindings = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+                for binding in effective_bindings {
+                    if let Some(owner_module) =
+                        binding_owners.module_owner(folded.source_file_id, &binding)
+                        && owner_module != module_id
+                    {
+                        direct_bindings
+                            .entry(owner_module)
+                            .or_default()
+                            .insert(binding.clone());
+                    } else {
+                        runtime_bindings.insert(binding.clone());
+                    }
+                }
+                emit_direct_owner_imports(
+                    program,
+                    module_id,
+                    path,
+                    file,
+                    planned_bindings,
+                    &direct_bindings,
+                );
+                if runtime_bindings.is_empty() {
+                    continue;
+                }
+                has_runtime_edge_before_lazy_helpers = true;
+                used_runtime_helper_files
+                    .entry(folded.source_file_id)
+                    .or_default()
+                    .extend(runtime_bindings.iter().cloned());
+                exported_runtime_helper_bindings
+                    .entry(folded.source_file_id)
+                    .or_default()
+                    .extend(runtime_bindings.iter().cloned());
+                let specifier = relative_import_specifier(
+                    path,
+                    runtime_helpers_path(folded.source_file_id).as_str(),
+                );
+                file.push_source(named_import_statement(
+                    runtime_bindings.iter(),
+                    specifier.as_str(),
+                ));
+                for binding in runtime_bindings {
+                    planned_bindings.insert(binding.clone());
+                    file.add_binding(plan_binding_from_program(
+                        program,
+                        module_id,
+                        binding.clone(),
+                        binding,
+                        true,
+                        None,
+                    ));
+                }
+                continue;
+            }
+            let Some(target_path) = module_output_path(program, effective_target_module_id) else {
+                continue;
+            };
+            let specifier = relative_import_specifier(path, target_path.as_str());
+            file.push_source(named_import_statement(
+                effective_bindings.iter(),
+                specifier.as_str(),
+            ));
+            for binding in effective_bindings {
+                planned_bindings.insert(binding.clone());
+                file.add_binding(plan_binding_from_program(
+                    program,
+                    module_id,
+                    binding.clone(),
+                    binding,
+                    true,
+                    None,
+                ));
+            }
+        }
+    }
+    has_runtime_edge_before_lazy_helpers
+}
+
 /// Push every `PlannedImport` for module's package-graph imports
 /// (the decisions surfaced by `program.package_imports_for`).
 fn push_package_imports(program: &EnrichedProgram, module_id: ModuleId, file: &mut PlannedFile) {
@@ -1142,112 +1278,20 @@ impl ImportExportPlanner {
 
             push_package_imports(program, module.id, &mut file);
 
-            let mut has_runtime_edge_before_lazy_helpers = false;
-            if let Some(module_imports) = source_module_wiring.imports_by_module.get(&module.id) {
-                for (target_module_id, bindings) in module_imports {
-                    let mut bindings_by_target = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-                    if let Some(redirects) = pure_reexport_bypasses.redirects.get(target_module_id)
-                    {
-                        for binding in bindings {
-                            let effective_target =
-                                redirects.get(binding).copied().unwrap_or(*target_module_id);
-                            bindings_by_target
-                                .entry(effective_target)
-                                .or_default()
-                                .insert(binding.clone());
-                        }
-                    } else {
-                        bindings_by_target.insert(*target_module_id, bindings.clone());
-                    }
-                    for (effective_target_module_id, effective_bindings) in bindings_by_target {
-                        if effective_target_module_id == module.id {
-                            continue;
-                        }
-                        if let Some(folded) =
-                            runtime_lazy_folds.modules.get(&effective_target_module_id)
-                            && omitted_folded_stub_modules.contains(&effective_target_module_id)
-                        {
-                            let mut runtime_bindings = BTreeSet::<BindingName>::new();
-                            let mut direct_bindings =
-                                BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
-                            for binding in effective_bindings {
-                                if let Some(owner_module) =
-                                    binding_owners.module_owner(folded.source_file_id, &binding)
-                                    && owner_module != module.id
-                                {
-                                    direct_bindings
-                                        .entry(owner_module)
-                                        .or_default()
-                                        .insert(binding.clone());
-                                } else {
-                                    runtime_bindings.insert(binding.clone());
-                                }
-                            }
-                            emit_direct_owner_imports(
-                                program,
-                                module.id,
-                                path,
-                                &mut file,
-                                &mut planned_bindings,
-                                &direct_bindings,
-                            );
-                            if runtime_bindings.is_empty() {
-                                continue;
-                            }
-                            has_runtime_edge_before_lazy_helpers = true;
-                            used_runtime_helper_files
-                                .entry(folded.source_file_id)
-                                .or_default()
-                                .extend(runtime_bindings.iter().cloned());
-                            exported_runtime_helper_bindings
-                                .entry(folded.source_file_id)
-                                .or_default()
-                                .extend(runtime_bindings.iter().cloned());
-                            let specifier = relative_import_specifier(
-                                path,
-                                runtime_helpers_path(folded.source_file_id).as_str(),
-                            );
-                            file.push_source(named_import_statement(
-                                runtime_bindings.iter(),
-                                specifier.as_str(),
-                            ));
-                            for binding in runtime_bindings {
-                                planned_bindings.insert(binding.clone());
-                                file.add_binding(plan_binding_from_program(
-                                    program,
-                                    module.id,
-                                    binding.clone(),
-                                    binding,
-                                    true,
-                                    None,
-                                ));
-                            }
-                            continue;
-                        }
-                        let Some(target_path) =
-                            module_output_path(program, effective_target_module_id)
-                        else {
-                            continue;
-                        };
-                        let specifier = relative_import_specifier(path, target_path.as_str());
-                        file.push_source(named_import_statement(
-                            effective_bindings.iter(),
-                            specifier.as_str(),
-                        ));
-                        for binding in effective_bindings {
-                            planned_bindings.insert(binding.clone());
-                            file.add_binding(plan_binding_from_program(
-                                program,
-                                module.id,
-                                binding.clone(),
-                                binding,
-                                true,
-                                None,
-                            ));
-                        }
-                    }
-                }
-            }
+            let has_runtime_edge_before_lazy_helpers = emit_source_module_imports(
+                program,
+                module.id,
+                path,
+                source_module_wiring,
+                &pure_reexport_bypasses,
+                runtime_lazy_folds,
+                &omitted_folded_stub_modules,
+                &binding_owners,
+                &mut file,
+                &mut planned_bindings,
+                &mut used_runtime_helper_files,
+                &mut exported_runtime_helper_bindings,
+            );
 
             let runtime_imports = program.model().graph().runtime_imports_for(module.id);
             let runtime_import_groups = group_runtime_imports(runtime_imports);
