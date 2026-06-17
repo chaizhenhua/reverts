@@ -1,25 +1,14 @@
 mod binding_signatures;
-mod externalization_policy;
 mod index;
 mod model;
 mod ownership;
 pub mod package_helpers;
+mod proof;
 mod scoring;
 mod source;
 mod strategy;
 
 use binding_signatures::binding_string_signatures_from_source;
-use externalization_policy::{
-    SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
-    cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
-    dependency_graph_source_fingerprint_policy_allows, dependency_graph_source_proof_label,
-    dependency_graph_source_proof_rank, dependency_graph_source_proof_requires_unique_source_path,
-    export_member_source_proof_alias_source_is_matched, export_member_source_proof_label,
-    export_member_source_proof_rank, public_export_member_policy_allows,
-    same_package_cross_version_source_policy_allows, semantic_external_source_proof_label,
-    semantic_external_source_proof_rank, semantic_external_target_policies,
-    semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
-};
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 use index::{
@@ -53,6 +42,17 @@ pub use package_helpers::{
     package_source_export_path, package_source_external_import_rank, package_source_relative_path,
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
+};
+use proof::policy::{
+    SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
+    cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
+    dependency_graph_source_fingerprint_policy_allows, dependency_graph_source_proof_label,
+    dependency_graph_source_proof_rank, dependency_graph_source_proof_requires_unique_source_path,
+    export_member_source_proof_alias_source_is_matched, export_member_source_proof_label,
+    export_member_source_proof_rank, public_export_member_policy_allows,
+    same_package_cross_version_source_policy_allows, semantic_external_source_proof_label,
+    semantic_external_source_proof_rank, semantic_external_target_policies,
+    semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
 pub use scoring::{
     AcceptanceDecision, FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, assign_max_weight, classify,
