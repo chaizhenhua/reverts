@@ -370,6 +370,136 @@ impl Error for RuntimeInventoryError {
 }
 
 #[derive(Debug)]
+pub enum SymbolNamesError {
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    ConfigureDatabase(rusqlite::Error),
+    QuerySymbolNames(rusqlite::Error),
+    WriteSymbolName(rusqlite::Error),
+    ReadBatch(io::Error),
+    ProjectNotFound {
+        project_id: u32,
+    },
+    UnknownModule {
+        project_id: u32,
+        module_id: u32,
+    },
+    UnknownSymbol {
+        module_id: u32,
+        original_name: String,
+    },
+    InvalidSemanticName {
+        semantic_name: String,
+    },
+    ConflictingOperation {
+        module_id: u32,
+        original_name: String,
+    },
+    NameCollision {
+        module_id: u32,
+        semantic_name: String,
+        existing_original_name: String,
+    },
+    InvalidBatchLine {
+        line: usize,
+        message: String,
+    },
+    InvalidDatabaseId {
+        owner: &'static str,
+        value: i64,
+    },
+}
+
+impl fmt::Display for SymbolNamesError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenDatabase { path, source } => {
+                write!(formatter, "failed to open {}: {source}", path.display())
+            }
+            Self::ConfigureDatabase(source) => {
+                write!(formatter, "failed to configure SQLite: {source}")
+            }
+            Self::QuerySymbolNames(source) => {
+                write!(formatter, "failed to query symbol names: {source}")
+            }
+            Self::WriteSymbolName(source) => {
+                write!(formatter, "failed to write symbol name: {source}")
+            }
+            Self::ReadBatch(source) => {
+                write!(formatter, "failed to read symbol-name batch: {source}")
+            }
+            Self::ProjectNotFound { project_id } => {
+                write!(formatter, "project {project_id} was not found")
+            }
+            Self::UnknownModule {
+                project_id,
+                module_id,
+            } => write!(
+                formatter,
+                "module {module_id} does not belong to project {project_id}"
+            ),
+            Self::UnknownSymbol {
+                module_id,
+                original_name,
+            } => write!(
+                formatter,
+                "module {module_id} has no module-scope symbol named {original_name}"
+            ),
+            Self::InvalidSemanticName { semantic_name } => write!(
+                formatter,
+                "semantic name {semantic_name} is not a valid JavaScript identifier"
+            ),
+            Self::ConflictingOperation {
+                module_id,
+                original_name,
+            } => write!(
+                formatter,
+                "multiple operations target module {module_id} symbol {original_name}"
+            ),
+            Self::NameCollision {
+                module_id,
+                semantic_name,
+                existing_original_name,
+            } => write!(
+                formatter,
+                "module {module_id} semantic name {semantic_name} collides with symbol {existing_original_name}"
+            ),
+            Self::InvalidBatchLine { line, message } => {
+                write!(
+                    formatter,
+                    "invalid symbol-name batch line {line}: {message}"
+                )
+            }
+            Self::InvalidDatabaseId { owner, value } => {
+                write!(formatter, "invalid database id {value} for {owner}")
+            }
+        }
+    }
+}
+
+impl Error for SymbolNamesError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenDatabase { source, .. }
+            | Self::ConfigureDatabase(source)
+            | Self::QuerySymbolNames(source)
+            | Self::WriteSymbolName(source) => Some(source),
+            Self::ReadBatch(source) => Some(source),
+            Self::ProjectNotFound { .. }
+            | Self::UnknownModule { .. }
+            | Self::UnknownSymbol { .. }
+            | Self::InvalidSemanticName { .. }
+            | Self::ConflictingOperation { .. }
+            | Self::NameCollision { .. }
+            | Self::InvalidBatchLine { .. }
+            | Self::InvalidDatabaseId { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum CliRunError {
     Args(CliError),
     LoadInput(SqliteInputError),
@@ -377,6 +507,7 @@ pub enum CliRunError {
     MatchPackages(MatchPackagesError),
     ExtractAssets(ExtractAssetsError),
     RuntimeInventory(RuntimeInventoryError),
+    SymbolNames(SymbolNamesError),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -391,6 +522,7 @@ impl fmt::Display for CliRunError {
             Self::MatchPackages(source) => write!(formatter, "{source}"),
             Self::ExtractAssets(source) => write!(formatter, "{source}"),
             Self::RuntimeInventory(source) => write!(formatter, "{source}"),
+            Self::SymbolNames(source) => write!(formatter, "{source}"),
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -420,6 +552,7 @@ impl Error for CliRunError {
             Self::MatchPackages(source) => Some(source),
             Self::ExtractAssets(source) => Some(source),
             Self::RuntimeInventory(source) => Some(source),
+            Self::SymbolNames(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
             Self::AuditRejected(_) | Self::UnsafeOutputPath(_) => None,
         }

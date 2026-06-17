@@ -14,6 +14,7 @@ pub enum HelpTopic {
     PackageExternalizationHints,
     ExtractAssets,
     RuntimeInventory,
+    SymbolNames,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +33,7 @@ pub const PACKAGE_CACHE_PRUNE_STALE_COMMAND: &str = "package-cache-prune-stale";
 pub const PACKAGE_EXTERNALIZATION_HINTS_COMMAND: &str = "package-externalization-hints";
 pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
+pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -79,6 +81,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         topic: HelpTopic::RuntimeInventory,
         summary: "Measure emitted runtime helpers and generated internal names",
     },
+    CommandSpec {
+        name: SYMBOL_NAMES_COMMAND,
+        topic: HelpTopic::SymbolNames,
+        summary: "List or manually set symbol semantic names in SQLite",
+    },
 ];
 
 #[must_use]
@@ -98,7 +105,7 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List or manually set symbol semantic names in SQLite\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
         }
         HelpTopic::GenerateProjectV2 => {
             "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
@@ -126,6 +133,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::RuntimeInventory => {
             "reverts-cli runtime-inventory\n\nUSAGE:\n    reverts-cli runtime-inventory --input <DB> (--project-id <ID> | --all-projects) [--limit <N>] [--newest] [--max-source-bytes <N>] [--setter-blockers] [--runtime-attribution]\n\nOPTIONS:\n    --input <DB>                SQLite input database\n    --project-id <ID>           Positive project id to inspect\n    --all-projects              Inspect every project id in the database\n    --limit <N>                 Maximum number of project ids to inspect when --all-projects is used\n    --newest                    Visit highest project ids first when --all-projects is used\n    --max-source-bytes <N>      Skip projects whose source_files total exceeds this byte limit\n    --setter-blockers           Also print conservative runtime setter migration blocker distribution\n    --runtime-attribution       Attribute emitted runtime helper lines by top-level binding and kind"
+        }
+        HelpTopic::SymbolNames => {
+            "reverts-cli symbol-names\n\nUSAGE:\n    reverts-cli symbol-names --input <DB> --project-id <ID> --list\n    reverts-cli symbol-names --input <DB> --project-id <ID> [--set <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--clear <MODULE_ID:ORIGINAL> ...] [--batch <TSV|->] [--apply]\n\nOPTIONS:\n    --input <DB>       SQLite input database\n    --project-id <ID>  Positive project id\n    --list             Print module/global symbols as TSV\n    --set <SPEC>       Set a module-scope semantic name; repeatable\n    --clear <SPEC>     Clear a module-scope semantic name; repeatable\n    --batch <TSV|->    Read tab-separated set/clear operations from a file or stdin\n    --apply            Persist changes; without --apply, only validates and prints a dry-run summary\n\nBATCH TSV:\n    set<TAB>module_id<TAB>original_name<TAB>semantic_name\n    clear<TAB>module_id<TAB>original_name"
         }
     }
 }

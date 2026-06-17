@@ -24,8 +24,10 @@ pub use commands::runtime_inventory::{
     RuntimeLineAttributionBucket, RuntimeLineAttributionItem, RuntimeLineAttributionReport,
     runtime_inventory_from_sqlite,
 };
+pub use commands::symbol_names::SymbolNamesArgs;
 pub use errors::{
     CliError, CliRunError, ExtractAssetsError, MatchPackagesError, RuntimeInventoryError,
+    SymbolNamesError,
 };
 pub use help::{HelpTopic, help_text, version_text};
 
@@ -90,6 +92,7 @@ pub enum CliCommand {
     PackageExternalizationHints(PackageExternalizationHintsArgs),
     ExtractAssets(ExtractAssetsArgs),
     RuntimeInventory(RuntimeInventoryArgs),
+    SymbolNames(SymbolNamesArgs),
 }
 
 impl CliCommand {
@@ -136,6 +139,9 @@ impl CliCommand {
                         }
                         HelpTopic::RuntimeInventory => {
                             Ok(Self::RuntimeInventory(RuntimeInventoryArgs::parse(args)?))
+                        }
+                        HelpTopic::SymbolNames => {
+                            Ok(Self::SymbolNames(SymbolNamesArgs::parse(args)?))
                         }
                         HelpTopic::TopLevel => Ok(Self::Help(HelpTopic::TopLevel)),
                     }
@@ -215,6 +221,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         }
         CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
+        CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
     }
 }
 

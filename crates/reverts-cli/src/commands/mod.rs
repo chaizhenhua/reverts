@@ -10,3 +10,4 @@ pub(crate) mod match_packages;
 pub(crate) mod package_cache;
 pub(crate) mod package_version_diagnostics;
 pub(crate) mod runtime_inventory;
+pub(crate) mod symbol_names;
