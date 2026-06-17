@@ -85,6 +85,11 @@ pub struct MatchModulesRecallArgs {
     /// precision-friendly default.
     #[arg(long, value_enum, default_value_t = AxisCombiner::Mean)]
     pub combiner: AxisCombiner,
+    /// Disable IDF (inverse-doc-frequency) weighting of fingerprint hashes.
+    /// IDF down-weights hashes that show up in many subject modules — usually
+    /// good for precision because common shapes stop dominating.
+    #[arg(long, default_value_t = false)]
+    pub no_idf: bool,
     /// Restrict to modules of this category (e.g. "application", "package").
     /// Repeatable. Empty = all categories.
     #[arg(long = "category")]
@@ -198,12 +203,15 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
     let scoring_started = Instant::now();
     let threshold = f64::from(args.threshold_percent) / 100.0;
-    let best_per_ref = score_best_subjects(&ref_bags, &sub_bags, args.metric, args.combiner);
+    let use_idf = !args.no_idf;
+    let best_per_ref =
+        score_best_subjects(&ref_bags, &sub_bags, args.metric, args.combiner, use_idf);
     let recall = summarise_recall(&best_per_ref, threshold);
     println!(
-        "[multi_axis_{}_{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        "[multi_axis_{}_{}{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
         combiner_label(args.combiner),
         metric_label(args.metric),
+        if use_idf { "_idf" } else { "" },
         threshold,
         recall.matched,
         ref_modules.len(),
@@ -356,11 +364,17 @@ struct BestMatch {
 /// Returns the best (subject_idx, score, axis) for each ref module, indexed
 /// alongside `ref_bags`. Uses an (axis, hash) inverted index to skip
 /// candidates that share no fingerprint hash, so we do not pay O(R · S).
+///
+/// When `use_idf` is true, hashes are weighted by `ln(N / df(h))`. Hashes
+/// shared across most subject modules carry near-zero weight, so common
+/// shapes (binding_pattern, structural_anchor) no longer drown out the rare
+/// hashes that actually identify a module.
 fn score_best_subjects(
     ref_bags: &[ModuleBag],
     sub_bags: &[ModuleBag],
     metric: SimilarityMetric,
     combiner: AxisCombiner,
+    use_idf: bool,
 ) -> Vec<BestMatch> {
     // Inverted index: (axis, hash) -> Vec<subject_index>.
     let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
@@ -372,25 +386,46 @@ fn score_best_subjects(
         }
     }
 
+    // Pre-compute IDF weights per (axis, hash). A hash that appears in every
+    // subject contributes 0 to the score; a hash unique to one subject
+    // contributes ln(N).
+    let total_subjects = sub_bags.len().max(1) as f64;
+    let mut hash_weight: HashMap<(AxisKind, u64), f64> = HashMap::with_capacity(by_axis_hash.len());
+    for ((axis, hash), subjects) in &by_axis_hash {
+        let weight = if use_idf {
+            (total_subjects / subjects.len() as f64).ln().max(0.0)
+        } else {
+            1.0
+        };
+        hash_weight.insert((*axis, *hash), weight);
+    }
+
+    // Pre-compute per-bag per-axis weighted size = sum of weights over that
+    // bag's hashes on that axis. Used as the Jaccard/Overlap denominator.
+    let ref_axis_weight = weighted_axis_sums(ref_bags, &hash_weight);
+    let sub_axis_weight = weighted_axis_sums(sub_bags, &hash_weight);
+
     let mut out = vec![BestMatch::default(); ref_bags.len()];
 
     for (ref_idx, ref_bag) in ref_bags.iter().enumerate() {
         if ref_bag.function_count == 0 {
             continue;
         }
-        // Per-axis: (subject_index -> shared hash count). We tally on the
-        // axis where we observed the hash, so each pair's per-axis intersect
-        // count is correct without re-walking subject bags.
-        let mut axis_overlap: BTreeMap<AxisKind, HashMap<usize, usize>> = BTreeMap::new();
+        // Per-axis: subject_index -> weighted intersection.
+        let mut axis_overlap: BTreeMap<AxisKind, HashMap<usize, f64>> = BTreeMap::new();
         for &axis in SCORING_AXES {
             axis_overlap.insert(axis, HashMap::new());
         }
         for (axis, hashes) in &ref_bag.by_axis {
             let axis_table = axis_overlap.get_mut(axis).expect("axis pre-inserted above");
             for &hash in hashes {
+                let weight = hash_weight.get(&(*axis, hash)).copied().unwrap_or(0.0);
+                if weight <= 0.0 {
+                    continue;
+                }
                 if let Some(subject_indexes) = by_axis_hash.get(&(*axis, hash)) {
                     for &subject_idx in subject_indexes {
-                        *axis_table.entry(subject_idx).or_default() += 1;
+                        *axis_table.entry(subject_idx).or_default() += weight;
                     }
                 }
             }
@@ -401,38 +436,35 @@ fn score_best_subjects(
         let mut best_subject: Option<usize> = None;
         // Union of all subject indexes with any axis-level overlap, dedup'd.
         let mut candidate_indexes: BTreeSet<usize> = BTreeSet::new();
-        for (_, table) in &axis_overlap {
+        for table in axis_overlap.values() {
             candidate_indexes.extend(table.keys().copied());
         }
         for sub_idx in candidate_indexes {
             let mut per_axis_scores: [f64; SCORING_AXES.len()] = [0.0; SCORING_AXES.len()];
             let mut ref_active_axes: usize = 0;
             for (idx, &axis) in SCORING_AXES.iter().enumerate() {
-                let ref_size = ref_bag.by_axis.get(&axis).map_or(0, BTreeSet::len);
-                if ref_size == 0 {
+                let ref_weight = ref_axis_weight[ref_idx].get(&axis).copied().unwrap_or(0.0);
+                if ref_weight <= 0.0 {
                     continue;
                 }
                 ref_active_axes += 1;
-                let sub_size = sub_bags[sub_idx]
-                    .by_axis
-                    .get(&axis)
-                    .map_or(0, BTreeSet::len);
-                if sub_size == 0 {
+                let sub_weight = sub_axis_weight[sub_idx].get(&axis).copied().unwrap_or(0.0);
+                if sub_weight <= 0.0 {
                     continue;
                 }
                 let intersect = axis_overlap
                     .get(&axis)
                     .and_then(|table| table.get(&sub_idx).copied())
-                    .unwrap_or(0);
-                if intersect == 0 {
+                    .unwrap_or(0.0);
+                if intersect <= 0.0 {
                     continue;
                 }
                 per_axis_scores[idx] = match metric {
                     SimilarityMetric::Jaccard => {
-                        let union = ref_size + sub_size - intersect;
-                        intersect as f64 / union as f64
+                        let union = ref_weight + sub_weight - intersect;
+                        if union <= 0.0 { 0.0 } else { intersect / union }
                     }
-                    SimilarityMetric::Overlap => intersect as f64 / ref_size.min(sub_size) as f64,
+                    SimilarityMetric::Overlap => intersect / ref_weight.min(sub_weight),
                 };
             }
             let (score, winning_axis) =
@@ -450,6 +482,25 @@ fn score_best_subjects(
         };
     }
     out
+}
+
+fn weighted_axis_sums(
+    bags: &[ModuleBag],
+    hash_weight: &HashMap<(AxisKind, u64), f64>,
+) -> Vec<BTreeMap<AxisKind, f64>> {
+    bags.iter()
+        .map(|bag| {
+            let mut by_axis = BTreeMap::new();
+            for (axis, hashes) in &bag.by_axis {
+                let sum: f64 = hashes
+                    .iter()
+                    .map(|h| hash_weight.get(&(*axis, *h)).copied().unwrap_or(0.0))
+                    .sum();
+                by_axis.insert(*axis, sum);
+            }
+            by_axis
+        })
+        .collect()
 }
 
 fn combine_axis_scores(
