@@ -541,6 +541,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let rare_struct_best =
                 score_via_rare_axis_anchor(&ref_bags, &sub_bags, AxisKind::StructuralAnchor);
             let fn_first_best = score_via_function_first_pin(&ref_fps, &sub_fps);
+            let arity_best = score_via_arity_histogram(&ref_fps, &sub_fps);
             const BAG_ACCEPT: f64 = 0.20;
             // Tighter category check (no 'unknown' wildcard) allows a
             // lower bag-jaccard floor without absorbing cross-category
@@ -562,6 +563,9 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // recall without adding precision because the cascade has
             // already filtered ambiguous candidates.
             const FN_FIRST_RESCUE: f64 = 1.0;
+            // Arity histogram is coarse — only fire when prefiltered
+            // candidates plus near-perfect cosine agreement converge.
+            const ARITY_RESCUE: f64 = 0.95;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -576,6 +580,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_rare = 0usize;
             let mut rescued_band = 0usize;
             let mut rescued_fn_first = 0usize;
+            let mut rescued_arity = 0usize;
             let mut rescued_consensus = 0usize;
             let mut rescued_cross_cat = 0usize;
             let mut dropped_cross_category = 0usize;
@@ -674,6 +679,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_fn_first += 1;
                     }
                 }
+                if pick.is_none() {
+                    let arity_pick = arity_best[ref_idx];
+                    if arity_pick.score >= ARITY_RESCUE
+                        && let Some(sub_idx) = arity_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_arity += 1;
+                    }
+                }
                 // Cross-cat bypass: very strong rare-anchor evidence
                 // overrides the category-respect filter.
                 if pick.is_none() {
@@ -728,7 +743,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} arity={rescued_arity} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -1059,6 +1074,19 @@ struct ModuleFingerprints {
     /// stable across the cross-version pair and a strong identity
     /// signal orthogonal to AST/CFG fingerprints.
     property_names: BTreeSet<u64>,
+    /// Per-module function-arity histogram (params 0..=ARITY_BUCKETS-1,
+    /// last bucket caps anything ≥ that count). Bundler-stable because
+    /// the bundler cannot change a function's arity without breaking
+    /// its callers. Use for cosine-similarity rescue.
+    arity_histogram: ArityHistogram,
+}
+
+const ARITY_BUCKETS: usize = 10;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArityHistogram {
+    counts: [u32; ARITY_BUCKETS],
+    total: u32,
 }
 
 /// Counts of structural JS keywords / `=>`. Bundler-stable (a minified
@@ -1144,6 +1172,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 dependency_specifiers: Vec::new(),
                 dependency_targets: Vec::new(),
                 property_names: BTreeSet::new(),
+                arity_histogram: ArityHistogram::default(),
             });
             continue;
         };
@@ -1161,6 +1190,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 dependency_specifiers: Vec::new(),
                 dependency_targets: Vec::new(),
                 property_names: BTreeSet::new(),
+                arity_histogram: ArityHistogram::default(),
             });
             continue;
         };
@@ -1171,6 +1201,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
         let keyword_histogram = extract_keyword_histogram(slice);
         let dependency_specifiers = extract_import_specifiers(slice);
         let property_names = extract_property_names(slice);
+        let arity_histogram = arity_histogram_from(&raw);
         out.push(ModuleFingerprints {
             bag,
             raw,
@@ -1179,6 +1210,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
             dependency_specifiers,
             dependency_targets: Vec::new(),
             property_names,
+            arity_histogram,
         });
     }
     out
@@ -1325,6 +1357,36 @@ fn extract_keyword_histogram(source: &str) -> KeywordHistogram {
 /// Cosine similarity over keyword histograms, returned in `[0, 1]`. Two
 /// modules with identical histogram shapes (regardless of total counts)
 /// score 1.0.
+fn arity_histogram_from(raw: &[FunctionFingerprint]) -> ArityHistogram {
+    let mut h = ArityHistogram::default();
+    for fp in raw {
+        let bucket = (fp.param_count as usize).min(ARITY_BUCKETS - 1);
+        h.counts[bucket] = h.counts[bucket].saturating_add(1);
+        h.total = h.total.saturating_add(1);
+    }
+    h
+}
+
+fn arity_histogram_similarity(a: &ArityHistogram, b: &ArityHistogram) -> f64 {
+    if a.total == 0 || b.total == 0 {
+        return 0.0;
+    }
+    let mut dot = 0.0_f64;
+    let mut sq_a = 0.0_f64;
+    let mut sq_b = 0.0_f64;
+    for (ax, bx) in a.counts.iter().zip(b.counts.iter()) {
+        let af = f64::from(*ax);
+        let bf = f64::from(*bx);
+        dot += af * bf;
+        sq_a += af * af;
+        sq_b += bf * bf;
+    }
+    if sq_a == 0.0 || sq_b == 0.0 {
+        return 0.0;
+    }
+    dot / (sq_a.sqrt() * sq_b.sqrt())
+}
+
 fn keyword_histogram_similarity(a: &KeywordHistogram, b: &KeywordHistogram) -> f64 {
     if a.total == 0 || b.total == 0 {
         return 0.0;
@@ -2022,6 +2084,62 @@ fn score_via_keyword_histogram(
                 &m.keyword_histogram,
                 &sub_fps[sub_idx].keyword_histogram,
             );
+            if score > best_score {
+                best_score = score;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_score,
+            axis: None,
+        };
+    }
+    out
+}
+
+/// Per-module arity-histogram cosine similarity. Coarse signal — many
+/// modules share similar arity shapes — but cheap and bundler-stable
+/// (changing a function's arity breaks its callers). Used only as a
+/// late-stage rescue with an AST-hash candidate prefilter.
+fn score_via_arity_histogram(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    let mut sub_ast_index: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            sub_ast_index
+                .entry(fp.primary.ast)
+                .or_default()
+                .push(sub_idx);
+            for alt in &fp.alternates {
+                sub_ast_index.entry(alt.axes.ast).or_default().push(sub_idx);
+            }
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.arity_histogram.total == 0 {
+            continue;
+        }
+        let mut candidates: BTreeSet<usize> = BTreeSet::new();
+        for fp in &m.raw {
+            if let Some(subs) = sub_ast_index.get(&fp.primary.ast) {
+                candidates.extend(subs.iter().copied());
+            }
+            for alt in &fp.alternates {
+                if let Some(subs) = sub_ast_index.get(&alt.axes.ast) {
+                    candidates.extend(subs.iter().copied());
+                }
+            }
+        }
+        let mut best_score = 0.0_f64;
+        let mut best_sub = None;
+        for sub_idx in candidates {
+            let score =
+                arity_histogram_similarity(&m.arity_histogram, &sub_fps[sub_idx].arity_histogram);
             if score > best_score {
                 best_score = score;
                 best_sub = Some(sub_idx);
