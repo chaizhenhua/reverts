@@ -1586,9 +1586,7 @@ fn extract_string_corpus(source: &str) -> BTreeSet<u64> {
                         in_class = true;
                     } else if c == b']' {
                         in_class = false;
-                    } else if c == b'\n' {
-                        break;
-                    } else if c == b'/' && !in_class {
+                    } else if c == b'\n' || (c == b'/' && !in_class) {
                         break;
                     }
                     j += 1;

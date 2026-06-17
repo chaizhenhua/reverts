@@ -190,6 +190,7 @@ pub fn apply_rollup_projections(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::db::load_snapshot;

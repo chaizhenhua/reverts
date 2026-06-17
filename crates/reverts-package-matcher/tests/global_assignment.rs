@@ -11,7 +11,7 @@
 use reverts_ir::{
     AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId, NormalizationPassId,
 };
-use reverts_package_index::{Candidate, ExactKey, FingerprintIndex, PackageId};
+use reverts_package_index::{Candidate, ExactKey, FingerprintIndex, PackageId, PackageOwner};
 use reverts_package_matcher::assign_globally;
 
 fn zero_axes(ast: u64) -> AxisHashes {
@@ -91,12 +91,14 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     ast_hash: primary_hash,
                 },
                 Candidate {
-                    package: pkg_a.clone(),
-                    variant_path: "a/i.js".into(),
+                    owner: PackageOwner {
+                        package: pkg_a.clone(),
+                        variant_path: "a/i.js".into(),
+                        external_importable: true,
+                    },
                     external_function_id: pkg_a_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
             idx.insert_exact(
@@ -106,12 +108,14 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     ast_hash: alt_hash,
                 },
                 Candidate {
-                    package: pkg_b.clone(),
-                    variant_path: "b/i.js".into(),
+                    owner: PackageOwner {
+                        package: pkg_b.clone(),
+                        variant_path: "b/i.js".into(),
+                        external_importable: true,
+                    },
                     external_function_id: pkg_b_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
         } else {
@@ -123,12 +127,14 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     ast_hash: primary_hash,
                 },
                 Candidate {
-                    package: pkg_b.clone(),
-                    variant_path: "b/i.js".into(),
+                    owner: PackageOwner {
+                        package: pkg_b.clone(),
+                        variant_path: "b/i.js".into(),
+                        external_importable: true,
+                    },
                     external_function_id: pkg_b_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
             idx.insert_exact(
@@ -138,12 +144,14 @@ fn hungarian_assigns_chunk_optimally_when_two_packages_share_helpers() {
                     ast_hash: alt_hash,
                 },
                 Candidate {
-                    package: pkg_a.clone(),
-                    variant_path: "a/i.js".into(),
+                    owner: PackageOwner {
+                        package: pkg_a.clone(),
+                        variant_path: "a/i.js".into(),
+                        external_importable: true,
+                    },
                     external_function_id: pkg_a_fn_id,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
         }
@@ -217,12 +225,14 @@ fn hungarian_assigns_reused_exact_columns_once() {
                 ast_hash: primary_hash,
             },
             Candidate {
-                package: pkg_a.clone(),
-                variant_path: "x/i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_a.clone(),
+                    variant_path: "x/i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: a_fn_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
         // Slot's alternate hash → pkg_y candidate. It is available as a lower
@@ -235,12 +245,14 @@ fn hungarian_assigns_reused_exact_columns_once() {
                 ast_hash: alt_hash,
             },
             Candidate {
-                package: pkg_b.clone(),
-                variant_path: "y/i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_b.clone(),
+                    variant_path: "y/i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: b_fn_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
     }

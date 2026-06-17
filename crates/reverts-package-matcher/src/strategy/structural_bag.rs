@@ -982,6 +982,7 @@ fn structural_bag_source_path(score: &PackageScore<'_>) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 

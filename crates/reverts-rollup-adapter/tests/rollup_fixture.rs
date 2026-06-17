@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use reverts_analyze::rollup::model::Snapshot;
 use reverts_analyze::rollup::oracle::{OracleConfig, OracleVerdict, build_oracle};
 use reverts_analyze::rollup::projection::{Projection, ProjectionKind, project};
