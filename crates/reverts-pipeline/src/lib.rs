@@ -37,7 +37,7 @@ pub use reverts_planner::{
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputRun {
-    pub project: EmittedProject,
+    pub project: PreAcceptProject,
     pub accepted_project: Option<AcceptedProject>,
     pub pre_accept_report: Option<PreAcceptTransformReport>,
     pub audit: AuditReport,
@@ -195,7 +195,7 @@ pub fn generate_project_from_prepared(
     // the entire project at files=0.
     if audit.has_errors() {
         return Ok(OutputRun {
-            project: EmittedProject::default(),
+            project: PreAcceptProject::empty(),
             accepted_project: None,
             pre_accept_report: None,
             audit,
@@ -211,7 +211,7 @@ pub fn generate_project_from_prepared(
     audit.extend(audit_emit_plan_synthesis(&plan));
     if audit.has_errors() {
         return Ok(OutputRun {
-            project: EmittedProject::default(),
+            project: PreAcceptProject::empty(),
             accepted_project: None,
             pre_accept_report: None,
             audit,
@@ -234,19 +234,19 @@ pub fn generate_project_from_prepared(
             module_output_paths: &module_output_paths,
         },
     );
-    let project = pre_accept.project.clone();
+    let emitted_project = pre_accept.project.clone();
     let pre_accept_report = pre_accept.report.clone();
 
-    audit.extend(audit_emitted_project_parse(&project));
-    audit.extend(audit_binding_shape_consistency(&plan, &project));
-    audit.extend(audit_namespace_object_member_consistency(&plan, &project));
-    let accepted_project = pre_accept.accept_if_clean(&audit);
-    let project = accepted_project
-        .as_ref()
-        .map_or(project, |accepted| accepted.project.clone());
+    audit.extend(audit_emitted_project_parse(&emitted_project));
+    audit.extend(audit_binding_shape_consistency(&plan, &emitted_project));
+    audit.extend(audit_namespace_object_member_consistency(
+        &plan,
+        &emitted_project,
+    ));
+    let accepted_project = pre_accept.clone().accept_if_clean(&audit);
 
     Ok(OutputRun {
-        project,
+        project: pre_accept,
         accepted_project,
         pre_accept_report: Some(pre_accept_report),
         audit,

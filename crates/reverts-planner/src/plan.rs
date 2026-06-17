@@ -94,19 +94,18 @@ impl TryFrom<PlannedFile> for ValidatedPlannedFile {
                 message: "planned file path is empty".to_string(),
             });
         }
-        let mut imports = BTreeSet::<(String, Option<String>, bool)>::new();
+        let mut import_slots = BTreeSet::<(String, Option<String>)>::new();
         for import in &file.imports {
             if import.namespace.as_str().trim().is_empty() {
                 return Err(crate::PlanError::InvalidEmitPlan {
                     message: format!("file '{}' has an import with an empty namespace", file.path),
                 });
             }
-            let key = (
+            let slot = (
                 import.namespace.as_str().to_string(),
                 import.resolution.specifier().map(str::to_string),
-                import.source_backed,
             );
-            if !imports.insert(key) {
+            if !import_slots.insert(slot) {
                 return Err(crate::PlanError::InvalidEmitPlan {
                     message: format!(
                         "file '{}' has a duplicate planned import for '{}'",
@@ -115,12 +114,39 @@ impl TryFrom<PlannedFile> for ValidatedPlannedFile {
                 });
             }
         }
-        let mut generated_exports = BTreeSet::<String>::new();
-        for export in file.exports.iter().filter(|export| !export.source_backed) {
-            if !generated_exports.insert(export.binding.as_str().to_string()) {
+        let mut declarations = file
+            .imports
+            .iter()
+            .map(|import| import.namespace.clone())
+            .chain(file.bindings.iter().map(|binding| binding.emitted.clone()))
+            .collect::<BTreeSet<_>>();
+        declarations.extend(file.bindings.iter().map(|binding| binding.original.clone()));
+
+        for binding in &file.bindings {
+            if !binding.source_backed {
                 return Err(crate::PlanError::InvalidEmitPlan {
                     message: format!(
-                        "file '{}' has a duplicate generated export for '{}'",
+                        "file '{}' has a synthetic binding '{}' without a declaration owner",
+                        file.path, binding.emitted
+                    ),
+                });
+            }
+        }
+
+        let mut exports = BTreeSet::<String>::new();
+        for export in &file.exports {
+            if !exports.insert(export.binding.as_str().to_string()) {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!(
+                        "file '{}' has a duplicate planned export for '{}'",
+                        file.path, export.binding
+                    ),
+                });
+            }
+            if !export.source_backed && !declarations.contains(&export.binding) {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!(
+                        "file '{}' has a generated export '{}' without a declaration or import",
                         file.path, export.binding
                     ),
                 });

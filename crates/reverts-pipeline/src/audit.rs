@@ -24,6 +24,7 @@ use reverts_js::{
 };
 use reverts_model::EnrichedProgram;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
 
 pub(crate) fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
@@ -93,6 +94,22 @@ fn audit_file_synthesis(file: &PlannedFile) -> AuditReport {
                 )
                 .with_module(file.path.clone())
                 .with_binding(binding.emitted.as_str()),
+            );
+        }
+    }
+
+    for import in &file.imports {
+        if import.source_backed {
+            continue;
+        }
+        if let PackageResolution::Rejected { specifier, reason } = &import.resolution {
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::UnresolvableBareImport,
+                    format!("planned generated import could not be resolved: {reason}"),
+                )
+                .with_module(file.path.clone())
+                .with_binding(format!("{} from {}", import.namespace, specifier)),
             );
         }
     }

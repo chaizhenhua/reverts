@@ -26,9 +26,33 @@ pub(crate) fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -
     output
 }
 
+/// Expand statement-removal edits to consume a neighbouring newline.
+///
+/// Several passes remove entire top-level statements after a syntax-aware
+/// scanner has identified their byte ranges. Keeping the newline policy here
+/// prevents each pass from hand-rolling subtly different text surgery.
+pub(crate) fn expand_line_removal_edits(
+    source: &str,
+    edits: &[(usize, usize, String)],
+) -> Vec<(usize, usize, String)> {
+    edits
+        .iter()
+        .map(|(start, end, replacement)| {
+            let mut drop_start = *start;
+            let mut drop_end = *end;
+            if source.as_bytes().get(drop_end) == Some(&b'\n') {
+                drop_end += 1;
+            } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
+                drop_start -= 1;
+            }
+            (drop_start, drop_end, replacement.clone())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::apply_text_edits;
+    use super::{apply_text_edits, expand_line_removal_edits};
 
     #[test]
     fn applies_edits_in_source_order_even_when_supplied_unsorted() {
@@ -60,5 +84,28 @@ export { value };";
         );
         reverts_js::parse_source(edited.as_str(), None, reverts_js::ParseGoal::JavaScript)
             .expect("statement-safe source surgery should keep JS parseable");
+    }
+
+    #[test]
+    fn line_removal_edits_consume_trailing_newline() {
+        let source = "const a = 1;\nconst b = 2;\n";
+        let edits = expand_line_removal_edits(source, &[(0, 12, String::new())]);
+        assert_eq!(apply_text_edits(source, &edits), "const b = 2;\n");
+    }
+
+    #[test]
+    fn line_removal_edits_consume_leading_newline_at_eof() {
+        let source = "const a = 1;\nconst b = 2;";
+        let edits = expand_line_removal_edits(source, &[(13, 25, String::new())]);
+        assert_eq!(apply_text_edits(source, &edits), "const a = 1;");
+    }
+
+    #[test]
+    fn delimiter_scanner_skips_strings_comments_templates_and_regex_literals() {
+        let source = r#"call(")", /* ) */ `template ${")"}`, /[)]/.test(value), actual)"#;
+        let close = crate::byte_lexer::find_matching_paren(source, 4)
+            .expect("outer call paren should be found");
+        assert_eq!(&source[close..=close], ")");
+        assert_eq!(&source[close - "actual".len()..close], "actual");
     }
 }

@@ -4,6 +4,7 @@ mod errors;
 mod help;
 mod persistence;
 mod pkg_sources;
+mod project_writer;
 #[cfg(test)]
 mod tests;
 

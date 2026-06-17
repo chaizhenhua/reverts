@@ -145,7 +145,8 @@ crate tests / integration tests
   produce `PreAcceptProject`; only audit-clean output becomes `AcceptedProject`.
 - `reverts-cli` owns command orchestration, argument parsing, paths, and process
   exit behavior. Core behavior should remain testable without invoking the CLI;
-  project writing consumes `AcceptedProject` rather than unaudited bytes.
+  project writing is isolated behind the CLI `project_writer` adapter and
+  consumes `AcceptedProject` rather than unaudited bytes.
 - `reverts-fixtures` owns fixture builders used by tests. It must not become a
   source of production behavior.
 
@@ -185,8 +186,13 @@ PlanModulesPass
 ```
 
 Mutable helper bookkeeping is split into `RuntimeHelperUsageAccumulator` and
-`PackageRuntimeAccumulator`. New planner work should be introduced as a named
-pass or accumulator before adding cross-module `pub(crate)` plumbing.
+`PackageRuntimeAccumulator`. Immutable runtime/package preparation lives in
+`runtime_plan_preparation.rs`, and the module loop is mediated by
+`ModulePlanningContext`. The legacy `compute_modules::plan_one_module` no longer
+accepts a long positional parameter list; callers pass a typed
+`ModulePlanInput` plus `ModulePlanAccumulators` bundle. New planner work should
+be introduced as a named pass, context, or accumulator before adding cross-module
+`pub(crate)` plumbing.
 
 ## Pre-Accept Output Stage
 
@@ -198,8 +204,19 @@ The current order is:
 2. `rewrite_asset_references`
 3. `fold_static_template_literals`
 
-The transform names are recorded in `PreAcceptTransformReport`; project writers
-must write `AcceptedProject`, not raw `EmittedProject`.
+The transform names and changed-file counts are recorded in
+`PreAcceptTransformReport`. `OutputRun.project` is a `PreAcceptProject` so
+callers cannot mistake it for accepted output; project writers must write
+`AcceptedProject`, not raw `EmittedProject`.
+
+## Source Surgery
+
+Text/byte-level edits are centralized in `reverts-planner::source_surgery` for
+the remaining cases where AST-first output is not yet practical. The module owns
+the shared edit applier and line-removal newline policy, with parse and
+delimiter-boundary tests. Passes that still scan source bytes must document why
+they cannot use AST-first rewriting and should use `source_surgery`/`byte_lexer`
+helpers rather than ad hoc string repair.
 
 ## Compiler Lowering Pipeline
 

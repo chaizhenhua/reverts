@@ -17,6 +17,7 @@ reverts-ir = { path = "../reverts-ir" }
 reverts-js = { path = "../reverts-js" }
 reverts-model = { path = "../reverts-model" }
 reverts-observe = { path = "../reverts-observe" }
+reverts-package = { path = "../reverts-package" }
 reverts-planner = { path = "../reverts-planner" }
 semver = "1"
 

@@ -50,6 +50,49 @@ use crate::{
     try_localize_lazy_value, try_post_inline_localize_lazy_value, variable_declaration_statement,
 };
 
+/// Immutable planner facts needed while planning one module.
+///
+/// Keeping these as one typed argument makes the module planner's boundary
+/// explicit: callers can no longer smuggle new horizontal dependencies into
+/// `plan_one_module` by adding another positional parameter.
+pub(crate) struct ModulePlanInput<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module: &'a ModuleInput,
+    pub(crate) external_package_adapters: &'a BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
+    pub(crate) externalized_packages: &'a BTreeSet<ModuleId>,
+    pub(crate) source_suppressed_packages: &'a BTreeSet<ModuleId>,
+    pub(crate) source_module_wiring: &'a SourceModuleWiring,
+    pub(crate) lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
+    pub(crate) runtime_lazy_folds: &'a RuntimeLazyFoldPlan,
+    pub(crate) omitted_folded_stub_modules: &'a BTreeSet<ModuleId>,
+    pub(crate) pure_reexport_bypasses: &'a PureReexportBypassPlan,
+    pub(crate) runtime_var_migrations: &'a RuntimeVarMigrationPlan,
+    pub(crate) runtime_prelude_direct_imports:
+        &'a BTreeMap<u32, BTreeMap<BindingName, RuntimePreludeDirectImport>>,
+    pub(crate) runtime_singleton_inlines: &'a RuntimeSingletonInlinePlan,
+    pub(crate) runtime_edge_direct_prelude_imports: &'a BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+}
+
+/// Mutable planner accumulators updated by one module.
+///
+/// These are grouped separately from immutable inputs so future extraction can
+/// split the module planner into smaller passes without expanding its public
+/// signature again.
+pub(crate) struct ModulePlanAccumulators<'a> {
+    pub(crate) plan: &'a mut EmitPlan,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) required_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) used_runtime_helper_setters: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) used_lazy_module: &'a mut BTreeSet<u32>,
+    pub(crate) used_lazy_value: &'a mut BTreeSet<u32>,
+    pub(crate) exported_lazy_module: &'a mut BTreeSet<u32>,
+    pub(crate) exported_lazy_value: &'a mut BTreeSet<u32>,
+    pub(crate) used_package_runtime_helper_files:
+        &'a mut BTreeMap<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>,
+}
+
 /// Plan a single module's emit output. The body of the per-module
 /// loop, lifted out of `ImportExportPlanner::plan_enriched_program`
 /// so that loop can be skimmed as a linear sequence of named
@@ -57,40 +100,39 @@ use crate::{
 /// runtime-helper-file emission relies on. Returns early (with
 /// `Ok(())`) when the module is an externalized package, a pure-
 /// reexport bypass, or a folded stub with no internal consumers.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_one_module(
-    program: &EnrichedProgram,
-    module: &ModuleInput,
-    plan: &mut EmitPlan,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    used_runtime_helper_setters: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    used_lazy_module: &mut BTreeSet<u32>,
-    used_lazy_value: &mut BTreeSet<u32>,
-    exported_lazy_module: &mut BTreeSet<u32>,
-    exported_lazy_value: &mut BTreeSet<u32>,
-    used_package_runtime_helper_files: &mut BTreeMap<
-        PackageRuntimeHelperKey,
-        PackageRuntimeHelperUsage,
-    >,
-    external_package_adapters: &BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
-    externalized_packages: &BTreeSet<ModuleId>,
-    source_suppressed_packages: &BTreeSet<ModuleId>,
-    source_module_wiring: &SourceModuleWiring,
-    lowered_runtime_sources: &BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
-    runtime_lazy_folds: &RuntimeLazyFoldPlan,
-    omitted_folded_stub_modules: &BTreeSet<ModuleId>,
-    pure_reexport_bypasses: &PureReexportBypassPlan,
-    runtime_var_migrations: &RuntimeVarMigrationPlan,
-    runtime_prelude_direct_imports: &BTreeMap<
-        u32,
-        BTreeMap<BindingName, RuntimePreludeDirectImport>,
-    >,
-    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
-    runtime_edge_direct_prelude_imports: &BTreeMap<u32, BTreeSet<BindingName>>,
-    binding_owners: &BindingOwnerPlan,
+    input: ModulePlanInput<'_>,
+    accumulators: ModulePlanAccumulators<'_>,
 ) -> Result<(), PlanError> {
+    let ModulePlanInput {
+        program,
+        module,
+        external_package_adapters,
+        externalized_packages,
+        source_suppressed_packages,
+        source_module_wiring,
+        lowered_runtime_sources,
+        runtime_lazy_folds,
+        omitted_folded_stub_modules,
+        pure_reexport_bypasses,
+        runtime_var_migrations,
+        runtime_prelude_direct_imports,
+        runtime_singleton_inlines,
+        runtime_edge_direct_prelude_imports,
+        binding_owners,
+    } = input;
+    let ModulePlanAccumulators {
+        plan,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        required_runtime_helper_bindings,
+        used_runtime_helper_setters,
+        used_lazy_module,
+        used_lazy_value,
+        exported_lazy_module,
+        exported_lazy_value,
+        used_package_runtime_helper_files,
+    } = accumulators;
     if module.kind == ModuleKind::Package && externalized_packages.contains(&module.id) {
         return Ok(());
     }

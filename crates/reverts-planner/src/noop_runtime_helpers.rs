@@ -14,11 +14,11 @@ use reverts_ir::BindingName;
 use crate::byte_lexer::{find_matching_paren, skip_ws};
 use crate::{
     IdentifierReadUsage, apply_text_edits, contains_identifier_reference,
-    identifier_read_facts_in_source, identifier_read_rename_site_is_safe,
-    implicit_global_writes_in_source, localize_lazy_value_source,
-    lowered_lazy_initializer_statement_binding, previous_token_is_keyword,
-    runtime_prelude_snippet_is_noop, top_level_definitions_in_source, top_level_statement_slices,
-    top_level_statement_spans,
+    expand_line_removal_edits, identifier_read_facts_in_source,
+    identifier_read_rename_site_is_safe, implicit_global_writes_in_source,
+    localize_lazy_value_source, lowered_lazy_initializer_statement_binding,
+    previous_token_is_keyword, runtime_prelude_snippet_is_noop, top_level_definitions_in_source,
+    top_level_statement_slices, top_level_statement_spans,
 };
 
 pub(crate) fn localizable_noop_runtime_helpers(
@@ -109,25 +109,6 @@ pub(crate) fn strip_runtime_noop_declarations(
         return source.to_string();
     }
     apply_text_edits(source, &expand_line_removal_edits(source, &edits))
-}
-
-pub(crate) fn expand_line_removal_edits(
-    source: &str,
-    edits: &[(usize, usize, String)],
-) -> Vec<(usize, usize, String)> {
-    edits
-        .iter()
-        .map(|(start, end, replacement)| {
-            let mut drop_start = *start;
-            let mut drop_end = *end;
-            if source.as_bytes().get(drop_end) == Some(&b'\n') {
-                drop_end += 1;
-            } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
-                drop_start -= 1;
-            }
-            (drop_start, drop_end, replacement.clone())
-        })
-        .collect()
 }
 
 pub(crate) fn drop_bare_void_zero_top_level_statements(source: &str) -> String {

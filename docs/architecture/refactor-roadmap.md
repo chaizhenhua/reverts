@@ -742,7 +742,7 @@ Current architecture hardening pass:
 - Introduced planner facade/pipeline modules: `planner_context.rs` and
   `planner_pipeline.rs`. The planner now runs named passes over `PlanningState`
   and separates immutable `RuntimePlanPreparation`, `RuntimeHelperUsageAccumulator`,
-  and `PackageRuntimeAccumulator`.
+  `PackageRuntimeAccumulator`, and `ModulePlanningContext`.
 - Strengthened emit typestate with `ValidatedEmitPlan` and
   `ValidatedPlannedFile`; validation now rejects duplicate output paths, empty
   file paths, duplicate planned imports, duplicate generated exports, and empty
@@ -754,6 +754,36 @@ Current architecture hardening pass:
   `PreAcceptTransformReport`; audit-clean output becomes `AcceptedProject`, and
   the project writer consumes `AcceptedProject` in production.
 
-Remaining planner debt: `compute_modules::plan_one_module` still has a large
-argument list and should be split into smaller per-module passes once its source
-import/runtime/package branches have stable context structs.
+Remaining planner debt after this session: `compute_modules::plan_one_module`
+still has a large body, but its caller boundary is now stable enough to split
+source import, runtime, and package branches into smaller per-module passes.
+
+### 2026-05-24 — deepening without architecture-test enforcement
+
+Scope: resolve the remaining design debt called out after the adapter split,
+except machine-enforced crate-boundary tests.
+
+- Split planner pass support into named files:
+  `runtime_plan_preparation.rs`, `runtime_helper_usage.rs`,
+  `package_runtime_accumulator.rs`, and `module_planning_context.rs`.
+- Replaced the long `compute_modules::plan_one_module` positional signature
+  with `ModulePlanInput` and `ModulePlanAccumulators`, so future per-module
+  pass extraction has a stable boundary.
+- Strengthened `ValidatedPlannedFile` invariants: generated exports must have a
+  declaration/import, synthetic planned bindings are rejected as planner bugs,
+  planned imports/exports are deduplicated independent of source-backed status,
+  and rejected generated package imports now require an explicit
+  `UnresolvableBareImport` audit finding.
+- Moved newline-aware line-removal edit expansion into `source_surgery`, added
+  delimiter-boundary coverage for strings/comments/templates/regex literals,
+  and kept remaining source-surgery passes documented as non-AST-first seams.
+- Made `OutputRun.project` a `PreAcceptProject` rather than a raw
+  `EmittedProject`; transform reports now include changed-file counts, and only
+  `AcceptedProject` reaches the filesystem writer.
+- Moved generated-project filesystem materialisation into the CLI
+  `project_writer` adapter, leaving `generate_project` as command orchestration.
+
+Remaining non-enforced architecture debt: source-surgery scanner modules still
+need gradual migration into `source_surgery`/`reverts-js`, and the CLI still
+contains package-source/cache command use-cases that can become smaller app or
+storage adapter modules later.

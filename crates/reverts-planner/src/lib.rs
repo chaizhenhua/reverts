@@ -9,7 +9,9 @@ mod eager_safe_analysis;
 mod external_package_adapter_emit;
 mod identifiers;
 mod import_coalesce;
+mod module_planning_context;
 mod package_runtime;
+mod package_runtime_accumulator;
 mod plan;
 mod plan_error;
 mod planner_context;
@@ -21,9 +23,11 @@ mod runtime_globals;
 mod runtime_helper_emission;
 mod runtime_helper_source_closure;
 mod runtime_helper_strip;
+mod runtime_helper_usage;
 mod runtime_helper_writes;
 mod runtime_literal_compaction;
 mod runtime_namespace_rewrite;
+mod runtime_plan_preparation;
 mod runtime_setter_migration_blocker;
 mod runtime_singleton_inline;
 mod runtime_source_read;
@@ -177,10 +181,9 @@ use node_builtin_require::{
     rewrite_node_builtin_require_calls_with_imports, runtime_create_require_helpers,
 };
 use noop_runtime_helpers::{
-    drop_bare_void_zero_top_level_statements, expand_line_removal_edits,
-    localizable_noop_runtime_helpers, noop_runtime_helpers_in_source,
-    private_noop_runtime_helpers_in_source, rewrite_noop_runtime_helper_calls,
-    strip_runtime_noop_declarations,
+    drop_bare_void_zero_top_level_statements, localizable_noop_runtime_helpers,
+    noop_runtime_helpers_in_source, private_noop_runtime_helpers_in_source,
+    rewrite_noop_runtime_helper_calls, strip_runtime_noop_declarations,
 };
 use pure_expression::{
     is_pure_initializer_expression, looks_like_arrow_function_expression, pure_class_expression,
@@ -203,7 +206,7 @@ use runtime_var_migration::{
 };
 
 use source_module_facts::SourceModuleFacts;
-pub(crate) use source_surgery::apply_text_edits;
+pub(crate) use source_surgery::{apply_text_edits, expand_line_removal_edits};
 
 #[allow(unused_imports)]
 use destructure_writes::{

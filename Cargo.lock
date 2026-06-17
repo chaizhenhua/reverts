@@ -1080,6 +1080,7 @@ dependencies = [
  "reverts-js",
  "reverts-model",
  "reverts-observe",
+ "reverts-package",
  "reverts-planner",
  "semver",
 ]

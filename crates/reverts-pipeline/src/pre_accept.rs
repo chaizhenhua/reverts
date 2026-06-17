@@ -25,9 +25,23 @@ pub struct PreAcceptProject {
     pub report: PreAcceptTransformReport,
 }
 
+impl Deref for PreAcceptProject {
+    type Target = EmittedProject;
+
+    fn deref(&self) -> &Self::Target {
+        &self.project
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreAcceptTransformReport {
-    pub transforms: Vec<&'static str>,
+    pub transforms: Vec<PreAcceptTransformEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreAcceptTransformEntry {
+    pub name: &'static str,
+    pub changed_files: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +58,16 @@ impl Deref for AcceptedProject {
 }
 
 impl PreAcceptProject {
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            project: EmittedProject::default(),
+            report: PreAcceptTransformReport {
+                transforms: Vec::new(),
+            },
+        }
+    }
+
     #[must_use]
     pub fn accept_if_clean(self, audit: &AuditReport) -> Option<AcceptedProject> {
         (!audit.has_errors()).then_some(AcceptedProject {
@@ -74,13 +98,36 @@ pub(crate) fn apply_pre_accept_transforms(
     ];
     let mut transforms = Vec::with_capacity(passes.len());
     for pass in passes {
+        let before = project_fingerprints(&project);
         pass.apply(&mut project, context);
-        transforms.push(pass.name());
+        let after = project_fingerprints(&project);
+        let changed_files = before
+            .iter()
+            .zip(after.iter())
+            .filter(
+                |((before_path, before_source), (after_path, after_source))| {
+                    before_path != after_path || before_source != after_source
+                },
+            )
+            .count()
+            + before.len().abs_diff(after.len());
+        transforms.push(PreAcceptTransformEntry {
+            name: pass.name(),
+            changed_files,
+        });
     }
     PreAcceptProject {
         project,
         report: PreAcceptTransformReport { transforms },
     }
+}
+
+fn project_fingerprints(project: &EmittedProject) -> Vec<(String, String)> {
+    project
+        .files
+        .iter()
+        .map(|file| (file.path.clone(), file.source.clone()))
+        .collect()
 }
 
 struct CanonicalizeSourceLocations;
@@ -147,5 +194,17 @@ mod tests {
                 "fold_static_template_literals",
             ]
         );
+    }
+
+    #[test]
+    fn pre_accept_report_records_named_transform_entries() {
+        let report = super::PreAcceptTransformReport {
+            transforms: vec![super::PreAcceptTransformEntry {
+                name: "example",
+                changed_files: 2,
+            }],
+        };
+        assert_eq!(report.transforms[0].name, "example");
+        assert_eq!(report.transforms[0].changed_files, 2);
     }
 }
