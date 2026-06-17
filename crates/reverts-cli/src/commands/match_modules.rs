@@ -180,7 +180,8 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
     let scoring_started = Instant::now();
     let threshold = f64::from(args.threshold_percent) / 100.0;
-    let recall = multi_axis_recall(&ref_bags, &sub_bags, args.metric, threshold);
+    let best_per_ref = score_best_subjects(&ref_bags, &sub_bags, args.metric);
+    let recall = summarise_recall(&best_per_ref, threshold);
     println!(
         "[multi_axis_{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
         metric_label(args.metric),
@@ -192,6 +193,9 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     );
     print_histogram(&recall.score_histogram, ref_modules.len());
     print_axis_winners(&recall.winning_axis_counts);
+
+    let precision = precision_against_baseline(&ref_modules, &sub_modules, &best_per_ref);
+    print_precision(&precision);
 
     Ok(())
 }
@@ -313,15 +317,23 @@ struct RecallReport {
     winning_axis_counts: BTreeMap<AxisKind, usize>,
 }
 
-/// Recall under a per-axis overlap metric, taking the max axis score per
-/// (ref, subject) pair. An inverted index keyed by (axis, hash) prunes
-/// candidates so we do not pay O(R · S) per scoring round.
-fn multi_axis_recall(
+#[derive(Debug, Default, Clone, Copy)]
+struct BestMatch {
+    /// Index into the subject bag/module slice (None if ref had no fingerprints
+    /// or no axis-level overlap with any subject module).
+    subject_idx: Option<usize>,
+    score: f64,
+    axis: Option<AxisKind>,
+}
+
+/// Returns the best (subject_idx, score, axis) for each ref module, indexed
+/// alongside `ref_bags`. Uses an (axis, hash) inverted index to skip
+/// candidates that share no fingerprint hash, so we do not pay O(R · S).
+fn score_best_subjects(
     ref_bags: &[ModuleBag],
     sub_bags: &[ModuleBag],
     metric: SimilarityMetric,
-    threshold: f64,
-) -> RecallReport {
+) -> Vec<BestMatch> {
     // Inverted index: (axis, hash) -> Vec<subject_index>.
     let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
     for (sub_idx, bag) in sub_bags.iter().enumerate() {
@@ -332,12 +344,9 @@ fn multi_axis_recall(
         }
     }
 
-    let mut report = RecallReport::default();
-    for label in HISTOGRAM_LABELS {
-        report.score_histogram.insert(label, 0);
-    }
+    let mut out = vec![BestMatch::default(); ref_bags.len()];
 
-    for ref_bag in ref_bags {
+    for (ref_idx, ref_bag) in ref_bags.iter().enumerate() {
         if ref_bag.function_count == 0 {
             continue;
         }
@@ -361,6 +370,7 @@ fn multi_axis_recall(
 
         let mut best_score: f64 = 0.0;
         let mut best_axis: Option<AxisKind> = None;
+        let mut best_subject: Option<usize> = None;
         // Union of all subject indexes with any axis-level overlap, dedup'd.
         let mut candidate_indexes: BTreeSet<usize> = BTreeSet::new();
         for (_, table) in &axis_overlap {
@@ -393,23 +403,105 @@ fn multi_axis_recall(
                 if score > best_score {
                     best_score = score;
                     best_axis = Some(axis);
+                    best_subject = Some(sub_idx);
                 }
             }
         }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_subject,
+            score: best_score,
+            axis: best_axis,
+        };
+    }
+    out
+}
+
+fn summarise_recall(best_per_ref: &[BestMatch], threshold: f64) -> RecallReport {
+    let mut report = RecallReport::default();
+    for label in HISTOGRAM_LABELS {
+        report.score_histogram.insert(label, 0);
+    }
+    for best in best_per_ref {
+        if best.score == 0.0 && best.subject_idx.is_none() {
+            continue;
+        }
         for &label in HISTOGRAM_LABELS {
-            let bound = histogram_bound(label);
-            if best_score >= bound {
+            if best.score >= histogram_bound(label) {
                 *report.score_histogram.entry(label).or_default() += 1;
             }
         }
-        if best_score >= threshold {
+        if best.score >= threshold {
             report.matched += 1;
-            if let Some(axis) = best_axis {
+            if let Some(axis) = best.axis {
                 *report.winning_axis_counts.entry(axis).or_default() += 1;
             }
         }
     }
     report
+}
+
+#[derive(Debug, Default)]
+struct PrecisionReport {
+    /// Ref modules whose semantic_name is also held by some subject module.
+    baseline_universe: usize,
+    /// Of those, ref modules whose best subject pick has the same semantic_name.
+    correctly_paired: usize,
+    /// Of those, ref modules whose best subject pick has a different name
+    /// (counted as confusions).
+    mispaired: usize,
+    /// Of those, ref modules whose scorer returned no candidate at all.
+    unranked: usize,
+}
+
+fn precision_against_baseline(
+    ref_modules: &[ModuleRecord],
+    sub_modules: &[ModuleRecord],
+    best_per_ref: &[BestMatch],
+) -> PrecisionReport {
+    let mut subject_names_by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (idx, module) in sub_modules.iter().enumerate() {
+        if let Some(name) = module.semantic_name.as_deref() {
+            subject_names_by_name.entry(name).or_default().push(idx);
+        }
+    }
+
+    let mut report = PrecisionReport::default();
+    for (ref_idx, ref_module) in ref_modules.iter().enumerate() {
+        let Some(name) = ref_module.semantic_name.as_deref() else {
+            continue;
+        };
+        if !subject_names_by_name.contains_key(name) {
+            continue;
+        }
+        report.baseline_universe += 1;
+        let best = best_per_ref[ref_idx];
+        let Some(subject_idx) = best.subject_idx else {
+            report.unranked += 1;
+            continue;
+        };
+        let picked_name = sub_modules[subject_idx].semantic_name.as_deref();
+        if picked_name == Some(name) {
+            report.correctly_paired += 1;
+        } else {
+            report.mispaired += 1;
+        }
+    }
+    report
+}
+
+fn print_precision(report: &PrecisionReport) {
+    if report.baseline_universe == 0 {
+        println!("[precision @ baseline pairs]: 0 baseline-true pairs to verify");
+        return;
+    }
+    println!(
+        "[precision @ baseline pairs]: {} / {} correctly paired ({:.2}%) — mispaired={} unranked={}",
+        report.correctly_paired,
+        report.baseline_universe,
+        pct(report.correctly_paired, report.baseline_universe),
+        report.mispaired,
+        report.unranked,
+    );
 }
 
 const HISTOGRAM_LABELS: &[&str] = &["≥0.1", "≥0.3", "≥0.5", "≥0.7", "≥0.9"];
