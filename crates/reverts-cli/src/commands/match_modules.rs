@@ -1489,6 +1489,107 @@ fn extract_string_corpus(source: &str) -> BTreeSet<u64> {
                 break;
             }
         }
+        // Numeric literals (≥4 chars): error codes (0x40404040), version
+        // strings ("1.0.10"), magic constants, IDs. Survive minification
+        // verbatim. Restrict to ≥4 chars to avoid 0/1/2/255 noise.
+        if b.is_ascii_digit() {
+            let start = i;
+            let mut j = i + 1;
+            let mut seen_dot = false;
+            let mut seen_exp = false;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if c.is_ascii_hexdigit() || c == b'_' {
+                    j += 1;
+                } else if c == b'.' && !seen_dot {
+                    seen_dot = true;
+                    j += 1;
+                } else if (c == b'e' || c == b'E') && !seen_exp {
+                    seen_exp = true;
+                    j += 1;
+                    if j < bytes.len() && (bytes[j] == b'+' || bytes[j] == b'-') {
+                        j += 1;
+                    }
+                } else if c == b'x' || c == b'X' || c == b'o' || c == b'O' || c == b'b' || c == b'B'
+                {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            let literal = &source[start..j];
+            if literal.len() >= 4 {
+                out.insert(reverts_ir::hash::fnv1a(literal.as_bytes()));
+            }
+            i = j;
+            continue;
+        }
+        // Regex literals: heuristic — `/` only treated as a regex when
+        // the immediately preceding non-space byte is an operator /
+        // punctuation that admits a regex (e.g. `=`, `(`, `,`, `:`,
+        // `;`, `[`, `!`, `&`, `|`, `?`, `{`, `}`, `\n`). Avoids picking
+        // up division. Skip if previous byte is alphanumeric/closing.
+        if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] != b'/' && bytes[i + 1] != b'*' {
+            let prev = (1..=i).rev().find_map(|k| {
+                let c = bytes[i - k];
+                (c != b' ' && c != b'\t' && c != b'\n').then_some(c)
+            });
+            let regex_ok = matches!(
+                prev,
+                None | Some(
+                    b'=' | b'('
+                        | b','
+                        | b':'
+                        | b';'
+                        | b'['
+                        | b'!'
+                        | b'&'
+                        | b'|'
+                        | b'?'
+                        | b'{'
+                        | b'}'
+                        | b'\n'
+                        | b'+'
+                        | b'~'
+                        | b'^'
+                        | b'*'
+                )
+            );
+            if regex_ok {
+                let start = i + 1;
+                let mut j = start;
+                let mut in_class = false;
+                while j < bytes.len() {
+                    let c = bytes[j];
+                    if c == b'\\' {
+                        j += 2;
+                        continue;
+                    }
+                    if c == b'[' {
+                        in_class = true;
+                    } else if c == b']' {
+                        in_class = false;
+                    } else if c == b'\n' {
+                        break;
+                    } else if c == b'/' && !in_class {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'/' {
+                    let mut end = j + 1;
+                    while end < bytes.len() && bytes[end].is_ascii_alphabetic() {
+                        end += 1;
+                    }
+                    let literal = &source[i..end];
+                    if literal.len() >= 4 {
+                        out.insert(reverts_ir::hash::fnv1a(literal.as_bytes()));
+                    }
+                    i = end;
+                    continue;
+                }
+            }
+        }
         i += 1;
     }
     out
