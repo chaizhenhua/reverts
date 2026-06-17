@@ -85,14 +85,34 @@ pub enum MatchStrategy {
     /// AST/CFG-based scoring misses.
     StringLiteral,
     /// Cascade of orthogonal signals. Runs bag-jaccard, string-literal,
-    /// and module-pinned function-tier independently; the final pick is
-    /// the subject with the most agreement (weighted vote). Each signal
-    /// that hits the same subject for a given ref module adds a vote,
-    /// scaled by that signal's confidence. Subjects with two or more
-    /// agreeing signals are considered high-confidence pairs even when
-    /// no single signal would have triggered alone.
+    /// keyword-histogram, and module-pinned function-tier independently;
+    /// the final pick is the subject with the most agreement (weighted
+    /// vote). Each signal that hits the same subject for a given ref
+    /// module adds a vote, scaled by that signal's confidence. Subjects
+    /// with two or more agreeing signals are considered high-confidence
+    /// pairs even when no single signal would have triggered alone.
     SignalCascade,
+    /// Cosine similarity over per-module structural-keyword histograms
+    /// (Lever 5 lite). Identifier-invariant and bundler-stable, but
+    /// coarse — strongest as one signal among many.
+    KeywordHistogram,
 }
+
+// ---------------------------------------------------------------------------
+// Note on the original "Lever 5: α-renamed body_hash for fingerprints"
+// ---------------------------------------------------------------------------
+// A code read of `reverts-graph/src/fingerprint/ast.rs` shows the existing
+// function-body AST hash already collapses every `Identifier` expression
+// to a single `"id"` token (line 86) and ships a regression test
+// (`ast_hash_collides_for_alpha_renamed_functions`) locking that in. So
+// the headline AST hash is already α-rename invariant at the function-
+// body level. The 46 % AST exact-hit ceiling we measured on
+// CC 2.1.89 src-ref ↔ bundle is therefore *structural variance*
+// (different control-flow shapes between ref and the bundled form), not
+// identifier renaming. An extended α-rename pass in `reverts-graph`
+// would not move tier_unique. The remaining levers worth pursuing
+// (dependency-graph anchor propagation and bag-jaccard prefilter
+// expansion) are wired below.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AxisCombiner {
@@ -366,19 +386,21 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             );
             let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
             let str_best = score_via_string_literal(&ref_fps, &sub_fps);
+            let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
             let pinned: Vec<Option<usize>> = bag_best
                 .iter()
                 .map(|m| m.subject_idx.filter(|_| m.score >= 0.20))
                 .collect();
             let func_report = score_via_module_pinned_function_tier(&ref_fps, &sub_fps, &pinned);
 
-            let signals: [&[BestMatch]; 3] = [&bag_best, &str_best, &func_report.best];
-            let signal_names: [&str; 3] = [
+            let signals: [&[BestMatch]; 4] = [&bag_best, &str_best, &kw_best, &func_report.best];
+            let signal_names: [&str; 4] = [
                 "bag_jaccard",
                 "string_literal",
+                "keyword_histogram",
                 "module_pinned_function_tier",
             ];
-            let signal_thresholds: [f64; 3] = [0.20, 0.30, 0.30];
+            let signal_thresholds: [f64; 4] = [0.20, 0.30, 0.85, 0.30];
 
             let mut best_per_ref: Vec<BestMatch> = vec![BestMatch::default(); ref_modules.len()];
             let mut agreement_counts: BTreeMap<usize, usize> = BTreeMap::new();
@@ -444,6 +466,19 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
             (best_per_ref, None)
+        }
+        MatchStrategy::KeywordHistogram => {
+            let best = score_via_keyword_histogram(&ref_fps, &sub_fps);
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[keyword_histogram (cosine over JS keyword counts)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            (best, None)
         }
         MatchStrategy::StringLiteral => {
             let best = score_via_string_literal(&ref_fps, &sub_fps);
@@ -602,14 +637,85 @@ fn load_modules(
 
 /// Per-module fingerprint payload: per-axis bag (bag-Jaccard strategy),
 /// raw `FunctionFingerprint` list (function-tier strategies via
-/// [`FingerprintIndex`]), and the per-module string-literal corpus
-/// (orthogonal axis: bundlers very rarely rewrite string contents).
+/// [`FingerprintIndex`]), the per-module string-literal corpus
+/// (orthogonal axis: bundlers rarely rewrite string contents), and a
+/// per-module **keyword histogram** (Lever 5 lite: identifier-invariant
+/// structural fingerprint that proxies the effect of a full α-rename
+/// without touching the upstream extractor).
 /// One pass over the source so every strategy sees the same inputs.
 struct ModuleFingerprints {
     bag: ModuleBag,
     raw: Vec<FunctionFingerprint>,
     string_corpus: BTreeSet<u64>,
+    keyword_histogram: KeywordHistogram,
 }
+
+/// Counts of structural JS keywords / `=>`. Bundler-stable (a minified
+/// function still uses `function`, `return`, `if`); identifier-invariant
+/// (no local variable names appear). Two modules with the same
+/// control-flow shape have similar histograms, even when their AST
+/// hashes diverge because renamed identifiers fall outside the
+/// existing `collect_universal_renamable_bindings` coverage in
+/// `reverts-graph::FunctionExtractor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeywordHistogram {
+    counts: [u32; KEYWORD_TOKENS.len()],
+    total: u32,
+}
+
+impl Default for KeywordHistogram {
+    fn default() -> Self {
+        Self {
+            counts: [0u32; KEYWORD_TOKENS.len()],
+            total: 0,
+        }
+    }
+}
+
+const KEYWORD_TOKENS: &[&str] = &[
+    "function",
+    "return",
+    "if",
+    "else",
+    "for",
+    "while",
+    "do",
+    "switch",
+    "case",
+    "break",
+    "continue",
+    "throw",
+    "try",
+    "catch",
+    "finally",
+    "var",
+    "let",
+    "const",
+    "new",
+    "class",
+    "extends",
+    "this",
+    "super",
+    "import",
+    "export",
+    "default",
+    "from",
+    "as",
+    "async",
+    "await",
+    "yield",
+    "typeof",
+    "instanceof",
+    "in",
+    "of",
+    "delete",
+    "void",
+    "null",
+    "true",
+    "false",
+    "undefined",
+    "=>",
+];
 
 fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
     let mut source_cache: HashMap<String, Option<String>> = HashMap::new();
@@ -623,6 +729,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 bag: ModuleBag::default(),
                 raw: Vec::new(),
                 string_corpus: BTreeSet::new(),
+                keyword_histogram: KeywordHistogram::default(),
             });
             continue;
         };
@@ -636,6 +743,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 bag: ModuleBag::default(),
                 raw: Vec::new(),
                 string_corpus: BTreeSet::new(),
+                keyword_histogram: KeywordHistogram::default(),
             });
             continue;
         };
@@ -643,13 +751,137 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
         let raw = FunctionExtractor::fingerprint(module_id, slice);
         let bag = bag_from_fingerprints(&raw);
         let string_corpus = extract_string_corpus(slice);
+        let keyword_histogram = extract_keyword_histogram(slice);
         out.push(ModuleFingerprints {
             bag,
             raw,
             string_corpus,
+            keyword_histogram,
         });
     }
     out
+}
+
+/// Count occurrences of structural JS keywords in a source slice. Reads
+/// the slice as bytes, tracks whether we are inside a string / comment /
+/// regex, and on every `identifier-or-keyword`-shaped run checks the
+/// run against `KEYWORD_TOKENS`. The `=>` token is handled separately
+/// because it is not an identifier shape. Templates and JSX are
+/// best-effort: keywords inside `` ` ${...} ` `` interpolations are
+/// counted (they are real expressions); keywords inside string literals
+/// and comments are skipped.
+fn extract_keyword_histogram(source: &str) -> KeywordHistogram {
+    let mut hist = KeywordHistogram::default();
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    let in_ident_char = |c: u8| -> bool { c.is_ascii_alphanumeric() || c == b'_' || c == b'$' };
+    while i < bytes.len() {
+        let c = bytes[i];
+        // Comments
+        if c == b'/' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'/' => {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // String / template literals
+        if c == b'"' || c == b'\'' || c == b'`' {
+            let quote = c;
+            let mut j = i + 1;
+            while j < bytes.len() {
+                let cc = bytes[j];
+                if cc == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if quote == b'`' && cc == b'$' && j + 1 < bytes.len() && bytes[j + 1] == b'{' {
+                    let mut depth = 1usize;
+                    j += 2;
+                    while j < bytes.len() && depth > 0 {
+                        match bytes[j] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    continue;
+                }
+                if cc == quote {
+                    break;
+                }
+                j += 1;
+            }
+            i = j.saturating_add(1).min(bytes.len());
+            continue;
+        }
+        // Arrow `=>`
+        if c == b'=' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+            // Tokens slot for `=>` is the last entry in KEYWORD_TOKENS.
+            let slot = KEYWORD_TOKENS.len() - 1;
+            hist.counts[slot] = hist.counts[slot].saturating_add(1);
+            hist.total = hist.total.saturating_add(1);
+            i += 2;
+            continue;
+        }
+        // Identifier-shaped run; only counted when starting on a non-ident
+        // char boundary (or at the start of the slice).
+        if c.is_ascii_alphabetic() || c == b'_' || c == b'$' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && in_ident_char(bytes[i]) {
+                i += 1;
+            }
+            let run = &source[start..i];
+            if let Some(slot) = KEYWORD_TOKENS
+                .iter()
+                .position(|kw| *kw != "=>" && *kw == run)
+            {
+                hist.counts[slot] = hist.counts[slot].saturating_add(1);
+                hist.total = hist.total.saturating_add(1);
+            }
+            continue;
+        }
+        i += 1;
+    }
+    hist
+}
+
+/// Cosine similarity over keyword histograms, returned in `[0, 1]`. Two
+/// modules with identical histogram shapes (regardless of total counts)
+/// score 1.0.
+fn keyword_histogram_similarity(a: &KeywordHistogram, b: &KeywordHistogram) -> f64 {
+    if a.total == 0 || b.total == 0 {
+        return 0.0;
+    }
+    let mut dot = 0.0_f64;
+    let mut sq_a = 0.0_f64;
+    let mut sq_b = 0.0_f64;
+    for (ax, bx) in a.counts.iter().zip(b.counts.iter()) {
+        let af = f64::from(*ax);
+        let bf = f64::from(*bx);
+        dot += af * bf;
+        sq_a += af * af;
+        sq_b += bf * bf;
+    }
+    if sq_a == 0.0 || sq_b == 0.0 {
+        return 0.0;
+    }
+    dot / (sq_a.sqrt() * sq_b.sqrt())
 }
 
 /// Pull non-trivial string literals out of a JS/TS source slice. Bundler
@@ -1135,6 +1367,66 @@ fn score_via_structural_bag(
             axis: None,
         })
         .collect()
+}
+
+/// Pair ref modules with subject modules by cosine similarity over the
+/// keyword histograms. Pre-filters via shared string-corpus or matching
+/// total keyword count to avoid O(R × S) cosine on every pair.
+fn score_via_keyword_histogram(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    // Inverted index: AST hash -> subject indexes. Reuse function-level
+    // AST hashes as the prefilter — a ref module with any function-level
+    // overlap with a subject is worth scoring; everything else is noise.
+    let mut sub_ast_index: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            sub_ast_index
+                .entry(fp.primary.ast)
+                .or_default()
+                .push(sub_idx);
+            for alt in &fp.alternates {
+                sub_ast_index.entry(alt.axes.ast).or_default().push(sub_idx);
+            }
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.keyword_histogram.total == 0 {
+            continue;
+        }
+        let mut candidates: BTreeSet<usize> = BTreeSet::new();
+        for fp in &m.raw {
+            if let Some(subs) = sub_ast_index.get(&fp.primary.ast) {
+                candidates.extend(subs.iter().copied());
+            }
+            for alt in &fp.alternates {
+                if let Some(subs) = sub_ast_index.get(&alt.axes.ast) {
+                    candidates.extend(subs.iter().copied());
+                }
+            }
+        }
+        let mut best_score = 0.0_f64;
+        let mut best_sub = None;
+        for sub_idx in candidates {
+            let score = keyword_histogram_similarity(
+                &m.keyword_histogram,
+                &sub_fps[sub_idx].keyword_histogram,
+            );
+            if score > best_score {
+                best_score = score;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_score,
+            axis: None,
+        };
+    }
+    out
 }
 
 /// Pair ref modules with subject modules by string-literal Jaccard. For
