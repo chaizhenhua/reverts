@@ -26,9 +26,30 @@ use reverts_js::{
 
 use crate::identifiers::{is_identifier_like, parse_identifier};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NamedImportSpecifier {
+    pub(crate) imported: BindingName,
+    pub(crate) local: BindingName,
+}
+
 pub(crate) fn parse_generated_named_import_statement(
     source: &str,
 ) -> Option<(BTreeSet<BindingName>, String)> {
+    let (specifiers, specifier) = parse_generated_named_import_specifiers(source)?;
+    let bindings = specifiers
+        .into_iter()
+        .map(|specifier| (specifier.imported == specifier.local).then_some(specifier.imported))
+        .collect::<Option<BTreeSet<_>>>()?;
+    if bindings.is_empty() {
+        None
+    } else {
+        Some((bindings, specifier))
+    }
+}
+
+pub(crate) fn parse_generated_named_import_specifiers(
+    source: &str,
+) -> Option<(Vec<NamedImportSpecifier>, String)> {
     let source = source.trim();
     let rest = source.strip_prefix("import { ")?;
     let (names, rest) = rest.split_once(" } from '")?;
@@ -36,17 +57,34 @@ pub(crate) fn parse_generated_named_import_statement(
     if names.trim().is_empty() {
         return None;
     }
-    let bindings = names
+    let specifiers = names
         .split(',')
         .map(str::trim)
         .filter(|name| !name.is_empty())
-        .map(BindingName::new)
-        .collect::<BTreeSet<_>>();
-    if bindings.is_empty() {
+        .map(parse_named_import_specifier)
+        .collect::<Option<Vec<_>>>()?;
+    if specifiers.is_empty() {
         None
     } else {
-        Some((bindings, specifier.to_string()))
+        Some((specifiers, specifier.to_string()))
     }
+}
+
+fn parse_named_import_specifier(source: &str) -> Option<NamedImportSpecifier> {
+    let (imported, local) = source
+        .split_once(" as ")
+        .map_or((source, source), |(imported, local)| {
+            (imported.trim(), local.trim())
+        });
+    Some(NamedImportSpecifier {
+        imported: parse_binding_name(imported)?,
+        local: parse_binding_name(local)?,
+    })
+}
+
+fn parse_binding_name(source: &str) -> Option<BindingName> {
+    let (identifier, end) = parse_identifier(source, 0)?;
+    (end == source.len() && !is_js_keyword(identifier)).then(|| BindingName::new(identifier))
 }
 
 pub(crate) fn parse_generated_default_import_statement(

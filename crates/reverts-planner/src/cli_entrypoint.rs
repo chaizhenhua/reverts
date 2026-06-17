@@ -32,7 +32,7 @@ use crate::{
     runtime_entrypoint_side_effects, scan_runtime_externalized_bindings,
 };
 
-const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
+pub(crate) const ENTRYPOINT_ISLAND_PATH: &str = "modules/entrypoint.ts";
 
 pub(crate) fn emit_cli_entrypoint(
     program: &EnrichedProgram,
@@ -50,13 +50,15 @@ pub(crate) fn emit_cli_entrypoint(
     let import_path =
         if let Some(path) = entrypoint_direct_owner_path(program, runtime_var_migrations) {
             path
-        } else if emit_entrypoint_island(
-            program,
-            binding_owners,
-            occupied_runtime_bindings,
-            externalized_packages,
-            plan,
-        ) {
+        } else if entrypoint_island_is_planned(plan)
+            || emit_entrypoint_island(
+                program,
+                binding_owners,
+                occupied_runtime_bindings,
+                externalized_packages,
+                plan,
+            )
+        {
             ENTRYPOINT_ISLAND_PATH.to_string()
         } else {
             runtime_helpers_path(entrypoint.source_file_id)
@@ -234,7 +236,7 @@ pub(crate) fn entrypoint_island_plan(
     })
 }
 
-fn emit_entrypoint_island(
+pub(crate) fn emit_entrypoint_island(
     program: &EnrichedProgram,
     binding_owners: &BindingOwnerPlan,
     occupied_runtime_bindings: &BTreeSet<BindingName>,
@@ -250,6 +252,17 @@ fn emit_entrypoint_island(
     ) else {
         return false;
     };
+    emit_planned_entrypoint_island(program, plan, island)
+}
+
+pub(crate) fn emit_planned_entrypoint_island(
+    program: &EnrichedProgram,
+    plan: &mut EmitPlan,
+    island: EntrypointIslandPlan,
+) -> bool {
+    if entrypoint_island_is_planned(plan) {
+        return true;
+    }
     let Some((_prelude, entrypoint)) = runtime_entrypoint(program) else {
         return false;
     };
@@ -306,6 +319,12 @@ fn emit_entrypoint_island(
     crate::finalize_planned_file(&mut file);
     plan.push_file(file);
     true
+}
+
+pub(crate) fn entrypoint_island_is_planned(plan: &EmitPlan) -> bool {
+    plan.files
+        .iter()
+        .any(|file| file.path == ENTRYPOINT_ISLAND_PATH)
 }
 
 fn minimal_entrypoint_island_plan(

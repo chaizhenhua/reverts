@@ -576,7 +576,7 @@ pub(crate) fn planned_runtime_helper_consumed_bindings(
 ) -> std::collections::BTreeSet<reverts_ir::BindingName> {
     use crate::relative_paths::relative_import_specifier;
     use crate::statement_parsers::{
-        parse_generated_named_import_statement, parse_generated_named_reexport_statement,
+        parse_generated_named_import_specifiers, parse_generated_named_reexport_statement,
     };
     use crate::statements::runtime_helpers_path;
     let helper_path = runtime_helpers_path(source_file_id);
@@ -584,11 +584,11 @@ pub(crate) fn planned_runtime_helper_consumed_bindings(
     for file in &plan.files {
         let specifier = relative_import_specifier(file.path.as_str(), helper_path.as_str());
         for source in &file.body {
-            if let Some((bindings, import_specifier)) =
-                parse_generated_named_import_statement(source)
+            if let Some((specifiers, import_specifier)) =
+                parse_generated_named_import_specifiers(source)
                 && import_specifier == specifier
             {
-                consumed.extend(bindings);
+                consumed.extend(specifiers.into_iter().map(|specifier| specifier.imported));
                 continue;
             }
             if let Some((bindings, reexport_specifier)) =

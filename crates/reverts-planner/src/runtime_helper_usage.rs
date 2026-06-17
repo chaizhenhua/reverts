@@ -71,6 +71,31 @@ impl RuntimeHelperUsageAccumulator {
         bindings
     }
 
+    pub(crate) fn remove_runtime_bindings(
+        &mut self,
+        source_file_id: u32,
+        bindings: &BTreeSet<BindingName>,
+    ) {
+        if bindings.is_empty() {
+            return;
+        }
+        remove_from_binding_map(
+            &mut self.used_runtime_helper_files,
+            source_file_id,
+            bindings,
+        );
+        remove_from_binding_map(
+            &mut self.exported_runtime_helper_bindings,
+            source_file_id,
+            bindings,
+        );
+        remove_from_binding_map(
+            &mut self.required_runtime_helper_bindings,
+            source_file_id,
+            bindings,
+        );
+    }
+
     pub(crate) fn mark_entrypoint(&mut self, source_file_id: u32, callee: &BindingName) {
         self.used_runtime_helper_files
             .entry(source_file_id)
@@ -84,5 +109,17 @@ impl RuntimeHelperUsageAccumulator {
             .entry(source_file_id)
             .or_default()
             .insert(callee.clone());
+    }
+}
+
+fn remove_from_binding_map(
+    map: &mut BTreeMap<u32, BTreeSet<BindingName>>,
+    source_file_id: u32,
+    bindings: &BTreeSet<BindingName>,
+) {
+    if let Some(existing) = map.get_mut(&source_file_id) {
+        for binding in bindings {
+            existing.remove(binding);
+        }
     }
 }

@@ -5212,40 +5212,22 @@ fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
         .iter()
         .find(|file| file.path == "cli.ts")
         .expect("cli entrypoint should be planned");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
     let entry_source = entry_file.body.join("\n");
     let cli_source = cli_file.body.join("\n");
-    let helper_source = helper_file.body.join("\n");
 
-    assert!(
-        entry_source.contains("import { __reverts_set_yA } from './runtime/source-1-helpers.js';")
-    );
-    assert!(!entry_source.contains("import { yA, __reverts_set_yA }"));
-    assert!(entry_source.contains("__reverts_set_yA(() => 'linux');"));
+    assert!(entry_source.contains("var yA;"));
+    assert!(entry_source.contains("yA = () => 'linux';"));
+    assert!(!entry_source.contains("__reverts_set_yA"));
     let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
     assert!(cli_source.contains("import { main } from './modules/entrypoint.js';"));
     assert!(cli_source.contains("await main();"));
     assert!(!cli_source.contains("var yA"));
-    assert!(entrypoint_source.contains("import { initModule } from './entry.js';"));
-    assert!(entrypoint_source.contains("import { yA } from './runtime/source-1-helpers.js';"));
+    assert!(entrypoint_source.contains("initModule"));
+    assert!(entrypoint_source.contains("yA"));
+    assert!(entrypoint_source.contains("from './entry.js';"));
     assert!(entrypoint_source.contains("function main()"));
     assert!(entrypoint_source.contains("return yA();"));
-    assert!(helper_source.contains("var yA;"));
-    assert!(!helper_source.contains("function main()"));
-    assert!(helper_source.contains("function __reverts_set_yA(value) { return yA = value; }"));
-    let export_line = helper_source
-        .lines()
-        .find(|line| line.starts_with("export {"))
-        .expect("helper should export runtime bindings");
-    let exports = parse_generated_named_export_statement(export_line)
-        .expect("helper should emit a generated export list");
-    assert!(exports.contains(&BindingName::new("__reverts_set_yA")));
-    assert!(!exports.contains(&BindingName::new("main")));
-    assert!(exports.contains(&BindingName::new("yA")));
+    assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
 }
 
 #[test]
@@ -9301,11 +9283,11 @@ fn reader_cluster_runtime_var_migration_rejects_folded_reader_with_initialized_s
     let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
     assert!(
-        writer_source.contains(
-            "import { shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
-        )
+        !writer_source.contains("source-1-helpers"),
+        "{writer_source}"
     );
-    assert!(writer_source.contains("__reverts_set_shared('ok');"));
+    assert!(writer_source.contains("var shared;"), "{writer_source}");
+    assert!(writer_source.contains("shared = 'ok';"));
     assert!(
         !writer_source.contains("function readShared()"),
         "{writer_source}"
@@ -9316,6 +9298,14 @@ fn reader_cluster_runtime_var_migration_rejects_folded_reader_with_initialized_s
     );
     assert!(
         helper_source.contains("function readShared() { side = shared; return shared; }"),
+        "{helper_source}"
+    );
+    assert!(
+        helper_source.contains("import { shared } from '../writer.js';"),
+        "{helper_source}"
+    );
+    assert!(
+        !helper_source.contains("function __reverts_set_shared"),
         "{helper_source}"
     );
 }
@@ -10758,8 +10748,11 @@ fn reader_cluster_runtime_var_migration_imports_ambiguous_folded_runtime_dep() {
     let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
     assert!(
-        writer_source
-            .contains("import { decorate, initDecorate } from './runtime/source-1-helpers.js';"),
+        writer_source.contains("import { initDecorate } from './runtime/source-1-helpers.js';"),
+        "{writer_source}"
+    );
+    assert!(
+        writer_source.contains("import { decorate } from './duplicate.js';"),
         "{writer_source}"
     );
     assert!(writer_source.contains("function decoratedShared()"));
@@ -11958,14 +11951,17 @@ fn single_reader_runtime_var_migration_reexports_cyclic_source_dependency_throug
     let consumer_source = planned_source(&plan, "modules/consumer.ts");
     let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
-    assert!(writer_source.contains("import { decorate } from './runtime/source-1-helpers.js';"));
+    assert!(
+        writer_source.contains("import { decorate } from './helper.js';"),
+        "{writer_source}"
+    );
     assert!(writer_source.contains("var shared;"));
     assert!(writer_source.contains("function formatShared() { return decorate(shared); }"));
     assert!(writer_source.contains("shared = 'ok';"));
     assert!(!writer_source.contains("__reverts_set_shared"));
     assert!(consumer_source.contains("import { formatShared } from './writer.js';"));
     assert!(helper_source.contains("import { decorate } from '../helper.js';"));
-    assert!(helper_source.contains("export { decorate };"));
+    assert!(!helper_source.contains("export { decorate };"));
     assert!(!helper_source.contains("var shared;"));
     assert!(!helper_source.contains("function formatShared()"));
     assert!(!helper_source.contains("__reverts_set_shared"));

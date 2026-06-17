@@ -5722,6 +5722,62 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
     })
 }
 
+pub(crate) fn migratable_runtime_primary_with_retained_readers_result(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    owner_module: ModuleId,
+    binding: &BindingName,
+) -> Option<RuntimeReaderClusterMigration> {
+    if !retained_runtime_primary_readers_are_lazy_safe(ctx, binding) {
+        return None;
+    }
+    let owner_available_bindings = owner_declared_or_imported_bindings(ctx, owner_module).ok()?;
+    if owner_available_bindings.contains(binding) {
+        return None;
+    }
+    let primary_bindings = BTreeSet::from([binding.clone()]);
+    if !runtime_reader_cycle_imports_can_move(RuntimeReaderCycleImportGate {
+        ctx,
+        owner_module,
+        primary_bindings: &primary_bindings,
+        moved_snippets: &BTreeSet::new(),
+        moved_namespace_exports: &BTreeSet::new(),
+        locally_owned_runtime: &primary_bindings,
+        extra_runtime_deps: &BTreeSet::new(),
+        folded_runtime_deps: &BTreeSet::new(),
+        extra_runtime_setter_deps: &BTreeSet::new(),
+        extra_runtime_reexport_source_deps: &BTreeMap::new(),
+    })
+    .ok()?
+    {
+        return None;
+    }
+    Some(RuntimeReaderClusterMigration {
+        primary_bindings,
+        extra_snippets: BTreeSet::new(),
+        extra_namespace_exports: BTreeSet::new(),
+        extra_runtime_deps: BTreeSet::new(),
+        extra_runtime_setter_deps: BTreeSet::new(),
+        extra_runtime_dep_aliases: BTreeMap::new(),
+        pinned_runtime_deps: BTreeSet::new(),
+        extra_source_deps: BTreeMap::new(),
+        extra_runtime_reexport_source_deps: BTreeMap::new(),
+        extra_noop_deps: BTreeSet::new(),
+    })
+}
+
+fn retained_runtime_primary_readers_are_lazy_safe(
+    ctx: &RuntimeReaderClusterContext<'_>,
+    binding: &BindingName,
+) -> bool {
+    runtime_readers_for_binding(ctx.read_index, binding)
+        .into_iter()
+        .all(|reader| {
+            ctx.prelude.snippets.get(&reader).is_some_and(|snippet| {
+                is_migratable_private_runtime_function_dependency(&reader, snippet.source.as_str())
+            })
+        })
+}
+
 pub(crate) fn owner_declared_or_imported_bindings(
     ctx: &RuntimeReaderClusterContext<'_>,
     owner_module: ModuleId,

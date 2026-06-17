@@ -45,8 +45,10 @@ use crate::{
     RuntimeReaderClusterMigration, RuntimeReaderClusterMigrationProposal, SourceModuleWiring,
     add_global_owned_runtime_snippet_migrations, folded_runtime_chunk_definitions,
     localize_reader_runtime_setter_deps, merge_same_owner_overlapping_reader_migrations,
-    migratable_folded_non_snippet_runtime_read_result, migratable_runtime_reader_cluster_result,
-    module_dependency_modules_by_owner, module_dependency_path_exists, owner_module_source_lines,
+    migratable_folded_non_snippet_runtime_read_result,
+    migratable_runtime_primary_with_retained_readers_result,
+    migratable_runtime_reader_cluster_result, module_dependency_modules_by_owner,
+    module_dependency_path_exists, owner_module_source_lines,
     runtime_owner_definition_modules_by_source, runtime_prelude_direct_import_consumers,
     runtime_reader_folded_non_snippet_use_can_move, runtime_reader_migration_source_lines,
     runtime_reader_owner_available_bindings, runtime_reader_owner_runtime_state,
@@ -878,15 +880,26 @@ pub(crate) fn compute_runtime_var_migration_plan(
                     extra_noop_deps: BTreeSet::new(),
                 },
                 RuntimeBindingReadProfile::SnippetReaders(readers) => {
-                    let Ok(migration) = migratable_runtime_reader_cluster_result(
+                    match migratable_runtime_reader_cluster_result(
                         &reader_cluster_context,
                         *owner_module,
                         binding,
                         readers,
-                    ) else {
-                        continue;
-                    };
-                    migration
+                    ) {
+                        Ok(migration) => migration,
+                        Err(_) => {
+                            let Some(migration) =
+                                migratable_runtime_primary_with_retained_readers_result(
+                                    &reader_cluster_context,
+                                    *owner_module,
+                                    binding,
+                                )
+                            else {
+                                continue;
+                            };
+                            migration
+                        }
+                    }
                 }
                 RuntimeBindingReadProfile::Rejected => {
                     if let Some(migration) = migratable_folded_non_snippet_runtime_read_result(
@@ -895,26 +908,55 @@ pub(crate) fn compute_runtime_var_migration_plan(
                         binding,
                     ) {
                         migration
-                    } else {
-                        if !runtime_reader_folded_non_snippet_use_can_move(
-                            &reader_cluster_context,
-                            binding,
-                        ) {
-                            continue;
-                        }
-                        let readers = runtime_readers_for_binding(&read_index, binding);
-                        if readers.is_empty() {
-                            continue;
-                        }
-                        let Ok(migration) = migratable_runtime_reader_cluster_result(
-                            &reader_cluster_context,
-                            *owner_module,
-                            binding,
-                            readers,
-                        ) else {
+                    } else if !runtime_reader_folded_non_snippet_use_can_move(
+                        &reader_cluster_context,
+                        binding,
+                    ) {
+                        let Some(migration) =
+                            migratable_runtime_primary_with_retained_readers_result(
+                                &reader_cluster_context,
+                                *owner_module,
+                                binding,
+                            )
+                        else {
                             continue;
                         };
                         migration
+                    } else {
+                        let readers = runtime_readers_for_binding(&read_index, binding);
+                        if readers.is_empty() {
+                            let Some(migration) =
+                                migratable_runtime_primary_with_retained_readers_result(
+                                    &reader_cluster_context,
+                                    *owner_module,
+                                    binding,
+                                )
+                            else {
+                                continue;
+                            };
+                            migration
+                        } else {
+                            match migratable_runtime_reader_cluster_result(
+                                &reader_cluster_context,
+                                *owner_module,
+                                binding,
+                                readers,
+                            ) {
+                                Ok(migration) => migration,
+                                Err(_) => {
+                                    let Some(migration) =
+                                        migratable_runtime_primary_with_retained_readers_result(
+                                            &reader_cluster_context,
+                                            *owner_module,
+                                            binding,
+                                        )
+                                    else {
+                                        continue;
+                                    };
+                                    migration
+                                }
+                            }
+                        }
                     }
                 }
             };

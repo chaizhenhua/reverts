@@ -9,20 +9,29 @@ use crate::module_planning_context::ModulePlanningContext;
 use crate::package_runtime::emit_package_runtime_helper_files;
 use crate::package_runtime_accumulator::PackageRuntimeAccumulator;
 use crate::planner_context::PlannerContext;
+use crate::relative_paths::relative_import_specifier;
 use crate::runtime_helper_usage::RuntimeHelperUsageAccumulator;
 use crate::runtime_plan_preparation::RuntimePlanPreparation;
+use crate::statement_parsers::{
+    NamedImportSpecifier, parse_generated_named_import_specifiers,
+    parse_generated_named_reexport_statement,
+};
+use crate::statements::{
+    named_import_alias_statement, named_reexport_statement, runtime_helpers_path,
+};
 use crate::{
     EmitPlan, PlanError, cli_entrypoint, runtime_entrypoint, runtime_helper_emission,
     top_level_definitions_in_source,
 };
 use reverts_ir::BindingName;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitPlan, PlanError> {
     let mut state = PlanningState::new(context);
     PlanModulesPass.run(context, &mut state)?;
     EmitPackageRuntimePass.run(context, &mut state)?;
     MarkEntrypointRuntimePass.run(context, &mut state)?;
+    RerouteRuntimeBarrelImportsPass.run(context, &mut state)?;
     EmitRuntimeHelpersPass.run(context, &mut state)?;
     EmitCliEntrypointPass.run(context, &mut state)?;
     Ok(state.plan)
@@ -84,6 +93,19 @@ impl PlanningPass for EmitPackageRuntimePass {
     }
 }
 
+struct RerouteRuntimeBarrelImportsPass;
+
+impl PlanningPass for RerouteRuntimeBarrelImportsPass {
+    fn run(
+        &self,
+        _context: &PlannerContext<'_>,
+        state: &mut PlanningState,
+    ) -> Result<(), PlanError> {
+        reroute_runtime_barrel_imports(&mut state.plan, &mut state.runtime_helpers);
+        Ok(())
+    }
+}
+
 struct MarkEntrypointRuntimePass;
 
 impl PlanningPass for MarkEntrypointRuntimePass {
@@ -109,9 +131,15 @@ impl PlanningPass for MarkEntrypointRuntimePass {
                 &context.analysis().externalized_packages,
                 Some(&state.plan),
             ) {
+                let runtime_bindings = island.runtime_bindings.clone();
+                cli_entrypoint::emit_planned_entrypoint_island(
+                    context.program(),
+                    &mut state.plan,
+                    island,
+                );
                 state
                     .runtime_helpers
-                    .mark_runtime_bindings(island.source_file_id, &island.runtime_bindings);
+                    .mark_runtime_bindings(entrypoint.source_file_id, &runtime_bindings);
             } else {
                 state
                     .runtime_helpers
@@ -209,4 +237,269 @@ fn occupied_runtime_bindings_for_entrypoint(
         }
     }
     occupied
+}
+
+fn reroute_runtime_barrel_imports(
+    plan: &mut EmitPlan,
+    runtime_helpers: &mut RuntimeHelperUsageAccumulator,
+) {
+    let source_file_ids = runtime_helper_usage_source_file_ids(runtime_helpers);
+    if source_file_ids.is_empty() {
+        return;
+    }
+    let owner_paths = planned_unique_non_runtime_export_owner_paths(plan);
+    if owner_paths.is_empty() {
+        return;
+    }
+
+    let mut rerouted_by_source = BTreeMap::<u32, BTreeSet<BindingName>>::new();
+    for file in &mut plan.files {
+        if file.path.starts_with("modules/runtime/") {
+            continue;
+        }
+        let mut rewritten = Vec::with_capacity(file.body.len());
+        for source in std::mem::take(&mut file.body) {
+            if let Some((specifiers, import_specifier)) =
+                parse_generated_named_import_specifiers(&source)
+                && let Some(source_file_id) = runtime_helper_source_file_for_specifier(
+                    file.path.as_str(),
+                    import_specifier.as_str(),
+                    &source_file_ids,
+                )
+            {
+                let partition = partition_runtime_barrel_import_specifiers(
+                    file.path.as_str(),
+                    specifiers,
+                    &owner_paths,
+                );
+                if partition.rerouted.is_empty() {
+                    rewritten.push(source);
+                    continue;
+                }
+                push_partitioned_runtime_barrel_imports(
+                    file.path.as_str(),
+                    import_specifier.as_str(),
+                    &mut rewritten,
+                    &partition,
+                );
+                rerouted_by_source
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(partition.rerouted_bindings);
+                continue;
+            }
+
+            if let Some((bindings, reexport_specifier)) =
+                parse_generated_named_reexport_statement(&source)
+                && let Some(source_file_id) = runtime_helper_source_file_for_specifier(
+                    file.path.as_str(),
+                    reexport_specifier.as_str(),
+                    &source_file_ids,
+                )
+            {
+                let partition =
+                    partition_runtime_barrel_reexports(file.path.as_str(), bindings, &owner_paths);
+                if partition.rerouted.is_empty() {
+                    rewritten.push(source);
+                    continue;
+                }
+                push_partitioned_runtime_barrel_reexports(
+                    file.path.as_str(),
+                    reexport_specifier.as_str(),
+                    &mut rewritten,
+                    &partition,
+                );
+                rerouted_by_source
+                    .entry(source_file_id)
+                    .or_default()
+                    .extend(partition.rerouted_bindings);
+                continue;
+            }
+
+            rewritten.push(source);
+        }
+        file.body = rewritten;
+    }
+
+    for (source_file_id, rerouted) in rerouted_by_source {
+        let consumed =
+            runtime_helper_emission::planned_runtime_helper_consumed_bindings(plan, source_file_id);
+        let removable = rerouted
+            .difference(&consumed)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        runtime_helpers.remove_runtime_bindings(source_file_id, &removable);
+    }
+}
+
+fn runtime_helper_usage_source_file_ids(
+    runtime_helpers: &RuntimeHelperUsageAccumulator,
+) -> BTreeSet<u32> {
+    let mut source_file_ids = BTreeSet::new();
+    source_file_ids.extend(runtime_helpers.used_runtime_helper_files.keys().copied());
+    source_file_ids.extend(
+        runtime_helpers
+            .exported_runtime_helper_bindings
+            .keys()
+            .copied(),
+    );
+    source_file_ids.extend(
+        runtime_helpers
+            .required_runtime_helper_bindings
+            .keys()
+            .copied(),
+    );
+    source_file_ids.extend(runtime_helpers.used_runtime_helper_setters.keys().copied());
+    source_file_ids
+}
+
+fn planned_unique_non_runtime_export_owner_paths(
+    plan: &EmitPlan,
+) -> BTreeMap<BindingName, Option<String>> {
+    let mut owners = BTreeMap::<BindingName, Option<String>>::new();
+    for file in &plan.files {
+        if file.path == "cli.ts"
+            || file.path.starts_with("modules/runtime/")
+            || file
+                .body
+                .iter()
+                .any(|source| source.contains("runtime/source-"))
+        {
+            continue;
+        }
+        for export in &file.exports {
+            owners
+                .entry(export.binding.clone())
+                .and_modify(|owner| {
+                    if owner.as_ref().is_none_or(|path| path != &file.path) {
+                        *owner = None;
+                    }
+                })
+                .or_insert_with(|| Some(file.path.clone()));
+        }
+    }
+    owners
+}
+
+fn runtime_helper_source_file_for_specifier(
+    file_path: &str,
+    specifier: &str,
+    source_file_ids: &BTreeSet<u32>,
+) -> Option<u32> {
+    source_file_ids.iter().copied().find(|source_file_id| {
+        relative_import_specifier(file_path, runtime_helpers_path(*source_file_id).as_str())
+            == specifier
+    })
+}
+
+#[derive(Default)]
+struct RuntimeBarrelImportPartition {
+    remaining: Vec<NamedImportSpecifier>,
+    rerouted: BTreeMap<String, Vec<NamedImportSpecifier>>,
+    rerouted_bindings: BTreeSet<BindingName>,
+}
+
+fn partition_runtime_barrel_import_specifiers(
+    file_path: &str,
+    specifiers: Vec<NamedImportSpecifier>,
+    owner_paths: &BTreeMap<BindingName, Option<String>>,
+) -> RuntimeBarrelImportPartition {
+    let mut partition = RuntimeBarrelImportPartition::default();
+    for specifier in specifiers {
+        if specifier.imported.as_str().starts_with("__reverts_set_") {
+            partition.remaining.push(specifier);
+            continue;
+        }
+        match owner_paths.get(&specifier.imported).and_then(Clone::clone) {
+            Some(owner_path) if owner_path != file_path => {
+                partition
+                    .rerouted
+                    .entry(owner_path)
+                    .or_default()
+                    .push(specifier.clone());
+                partition.rerouted_bindings.insert(specifier.imported);
+            }
+            _ => partition.remaining.push(specifier),
+        }
+    }
+    partition
+}
+
+fn push_partitioned_runtime_barrel_imports(
+    file_path: &str,
+    runtime_specifier: &str,
+    body: &mut Vec<String>,
+    partition: &RuntimeBarrelImportPartition,
+) {
+    if !partition.remaining.is_empty() {
+        body.push(import_specifier_statement(
+            &partition.remaining,
+            runtime_specifier,
+        ));
+    }
+    for (owner_path, specifiers) in &partition.rerouted {
+        let specifier = relative_import_specifier(file_path, owner_path);
+        body.push(import_specifier_statement(specifiers, specifier.as_str()));
+    }
+}
+
+fn import_specifier_statement(specifiers: &[NamedImportSpecifier], source: &str) -> String {
+    named_import_alias_statement(
+        specifiers
+            .iter()
+            .map(|specifier| (specifier.imported.as_str(), &specifier.local)),
+        source,
+    )
+}
+
+#[derive(Default)]
+struct RuntimeBarrelReexportPartition {
+    remaining: BTreeSet<BindingName>,
+    rerouted: BTreeMap<String, BTreeSet<BindingName>>,
+    rerouted_bindings: BTreeSet<BindingName>,
+}
+
+fn partition_runtime_barrel_reexports(
+    file_path: &str,
+    bindings: BTreeSet<BindingName>,
+    owner_paths: &BTreeMap<BindingName, Option<String>>,
+) -> RuntimeBarrelReexportPartition {
+    let mut partition = RuntimeBarrelReexportPartition::default();
+    for binding in bindings {
+        match owner_paths.get(&binding).and_then(Clone::clone) {
+            Some(owner_path) if owner_path != file_path => {
+                partition
+                    .rerouted
+                    .entry(owner_path)
+                    .or_default()
+                    .insert(binding.clone());
+                partition.rerouted_bindings.insert(binding);
+            }
+            _ => {
+                partition.remaining.insert(binding);
+            }
+        }
+    }
+    partition
+}
+
+fn push_partitioned_runtime_barrel_reexports(
+    file_path: &str,
+    runtime_specifier: &str,
+    body: &mut Vec<String>,
+    partition: &RuntimeBarrelReexportPartition,
+) {
+    if !partition.remaining.is_empty() {
+        body.push(named_reexport_statement(
+            partition.remaining.iter(),
+            runtime_specifier,
+        ));
+    }
+    for (owner_path, bindings) in &partition.rerouted {
+        let specifier = relative_import_specifier(file_path, owner_path);
+        body.push(named_reexport_statement(
+            bindings.iter(),
+            specifier.as_str(),
+        ));
+    }
 }
