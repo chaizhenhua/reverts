@@ -21,7 +21,7 @@ pub struct FunctionMatch {
     /// - StructuralOnly: `[StructuralAnchor]`.
     ///
     /// Carrying the real set (rather than a single axis) lets
-    /// [`crate::acceptance::AttributionConfidence`] surface the
+    /// [`reverts_input::AttributionConfidence`] surface the
     /// multi-axis evidence that drove the decision.
     pub matched_axes: Vec<AxisKind>,
 }

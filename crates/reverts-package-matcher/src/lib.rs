@@ -1,22 +1,14 @@
-pub mod acceptance;
 mod binding_signatures;
-pub mod cascade;
-pub mod cascade_match;
 mod externalization_policy;
-pub mod hungarian;
 mod index;
 mod model;
 mod ownership;
 pub mod package_helpers;
+mod scoring;
 mod source;
-pub mod structural_bag;
-pub mod tier;
-mod version_scoring;
+mod strategy;
 
-pub use acceptance::{AcceptanceDecision, classify};
 use binding_signatures::binding_string_signatures_from_source;
-pub use cascade::{GlobalAssignment, assign_globally, cascade_candidates, match_function};
-pub use cascade_match::{CascadeMatchReport, CascadeOwnershipMatch, match_with_cascade};
 use externalization_policy::{
     SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
     cross_package_exact_source_policy_allows, dependency_edge_path_policy_allows,
@@ -28,7 +20,6 @@ use externalization_policy::{
     semantic_external_source_proof_rank, semantic_external_target_policies,
     semantic_source_only_export_member_policy_allows, source_only_match_can_be_promoted_to_import,
 };
-pub use hungarian::assign_max_weight;
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 use index::{
@@ -63,6 +54,15 @@ pub use package_helpers::{
     package_source_semantic_hint_score, package_source_semantic_surface_hint_score,
     path_hint_tokens, strip_package_prefix_from_semantic_path, strip_source_extension,
 };
+pub use scoring::{
+    AcceptanceDecision, FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, assign_max_weight, classify,
+    try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
+    try_structural_only,
+};
+pub(crate) use scoring::{
+    accepted_attribution_from_match, best_source_match, disambiguate_exact_source_candidate,
+    module_package_match,
+};
 use source::exported_members::{
     export_member_set_is_strong, exported_members_from_source, is_identifier_name,
     is_usable_export_member,
@@ -76,16 +76,10 @@ pub use source::source_imports::{
     package_import_names_from_sources, package_import_sites_from_sources,
 };
 pub(crate) use source::source_text::normalize_source;
-pub use structural_bag::{
-    StructuralBagMatchReport, match_structural_bags, match_structural_bags_with_excluded_modules,
-};
-pub use tier::{
-    FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, try_exact, try_exact_alternate,
-    try_feature_similarity, try_structural_anchored, try_structural_only,
-};
-use version_scoring::best_source_match;
-pub(crate) use version_scoring::{
-    accepted_attribution_from_match, disambiguate_exact_source_candidate, module_package_match,
+pub use strategy::{
+    CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, StructuralBagMatchReport,
+    assign_globally, cascade_candidates, match_function, match_structural_bags,
+    match_structural_bags_with_excluded_modules, match_with_cascade,
 };
 
 use std::cell::RefCell;
@@ -473,7 +467,7 @@ pub fn match_packages_with_pipeline(
         )
     };
     mark_timing!("structural_bag");
-    structural_bag::promote_structural_bag_ownership_matches(
+    strategy::structural_bag::promote_structural_bag_ownership_matches(
         rows,
         structural_bag_report.matches.as_slice(),
         &mut package_report,

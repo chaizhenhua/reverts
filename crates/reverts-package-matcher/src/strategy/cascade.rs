@@ -1,9 +1,8 @@
 use reverts_ir::{FunctionFingerprint, FunctionId};
 use reverts_package_index::FingerprintIndex;
 
-use crate::hungarian::assign_max_weight;
-use crate::tier::{
-    FunctionMatch, try_exact, try_exact_alternate, try_feature_similarity,
+use crate::scoring::{
+    FunctionMatch, assign_max_weight, try_exact, try_exact_alternate, try_feature_similarity,
     try_feature_similarity_alternate, try_structural_anchored, try_structural_anchored_alternate,
     try_structural_only, try_structural_only_alternate,
 };
@@ -61,7 +60,7 @@ pub fn cascade_candidates(
 }
 
 /// Per-function output of [`assign_globally`]: both the full pre-Hungarian
-/// candidate list (so callers can call [`crate::acceptance::classify`] with
+/// candidate list (so callers can call [`crate::classify`] with
 /// real runner-up information) and the chosen match after the global
 /// bipartite assignment, when one exists.
 #[derive(Debug, Clone, PartialEq)]
@@ -261,7 +260,7 @@ mod tests {
         Candidate, ExactKey, FeatureKey, FingerprintIndex, PackageId, StructuralKey,
     };
 
-    use crate::tier::{
+    use crate::scoring::{
         try_exact_alternate, try_feature_similarity, try_structural_anchored, try_structural_only,
     };
 

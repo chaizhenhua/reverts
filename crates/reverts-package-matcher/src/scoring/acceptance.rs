@@ -1,7 +1,7 @@
 use reverts_input::AttributionConfidence;
 use reverts_ir::MatchTier;
 
-use crate::tier::FunctionMatch;
+use super::tier::FunctionMatch;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptanceDecision {

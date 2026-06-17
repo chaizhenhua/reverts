@@ -19,7 +19,7 @@ use crate::package_helpers::{
     normalize_hint_text, package_semantic_path_prefixes, path_hint_tokens,
     strip_package_prefix_from_semantic_path, strip_source_extension,
 };
-use crate::version_scoring::{compare_versions, score_version};
+use crate::scoring::{compare_versions, score_version};
 use crate::{
     BestVersionMatch, ModuleMatchFingerprint, ModulePackageMatch, PackageModuleSourceQuality,
     PackageSource, PackageSourceFingerprint, PackageVersionCandidate, VersionMatchScore,

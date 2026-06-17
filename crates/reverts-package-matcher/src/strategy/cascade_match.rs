@@ -5,7 +5,7 @@
 //! [`crate::match_packages_with_pipeline`]. It builds an in-memory fingerprint
 //! index from the supplied package sources, runs the cascade tiers per bundle
 //! function, lets the Hungarian assignment resolve cross-package collisions,
-//! classifies each accepted match through [`acceptance::classify`], and emits
+//! classifies each accepted match through [`crate::classify`], and emits
 //! [`PackageAttributionInput`] rows with `function_span` + `confidence`
 //! populated.
 
@@ -24,8 +24,9 @@ use reverts_package_index::{
 };
 
 use crate::PackageSource;
-use crate::acceptance::{AcceptanceDecision, classify};
-use crate::cascade::assign_globally;
+use crate::scoring::{AcceptanceDecision, classify};
+
+use super::cascade::assign_globally;
 
 /// Aggregate result of [`match_with_cascade`].
 #[derive(Debug, Clone, PartialEq)]
@@ -358,7 +359,7 @@ fn encode_function_id(fn_id: &FunctionId) -> u64 {
 ///
 /// Includes both the always-present axes (return/effect/structural/binding)
 /// and the `Option`al axes when populated, mirroring
-/// [`crate::tier::collect_remaining_axes`] without the exclusion filter.
+/// `collect_remaining_axes` without the exclusion filter.
 fn axes_to_feature_keys(axes: &AxisHashes) -> Vec<(AxisKind, u64)> {
     let mut out = vec![
         (AxisKind::ReturnPattern, axes.return_pattern),

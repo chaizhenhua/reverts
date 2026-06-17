@@ -12,7 +12,7 @@ use reverts_ir::{
     AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionId, ModuleId, NormalizationPassId,
 };
 use reverts_package_index::{Candidate, ExactKey, FingerprintIndex, PackageId};
-use reverts_package_matcher::cascade::assign_globally;
+use reverts_package_matcher::assign_globally;
 
 fn zero_axes(ast: u64) -> AxisHashes {
     AxisHashes {
