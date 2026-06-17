@@ -49,7 +49,8 @@ use crate::{
     partition_runtime_owner_bindings, push_folded_noop_and_migrated_exports,
     push_migrated_runtime_snippets_and_namespaces, push_package_imports,
     record_lowered_runtime_helper_usage, route_prelude_imports_for_runtime_sources,
-    try_localize_lazy_value, try_post_inline_localize_lazy_value, variable_declaration_statement,
+    scan_runtime_externalized_bindings, try_localize_lazy_value,
+    try_post_inline_localize_lazy_value, variable_declaration_statement,
 };
 
 /// Immutable planner facts needed while planning one module.
@@ -212,6 +213,7 @@ pub(crate) fn plan_one_module(
         runtime_singleton_inlines,
         runtime_edge_direct_prelude_imports,
         binding_owners,
+        externalized_packages,
         package_runtime_owner: package_runtime_owner.as_ref(),
         has_runtime_edge_before_lazy_helpers,
         migration: &migration,
@@ -421,6 +423,7 @@ struct NormalRuntimePass<'a> {
     runtime_singleton_inlines: &'a RuntimeSingletonInlinePlan,
     runtime_edge_direct_prelude_imports: &'a BTreeMap<u32, BTreeSet<BindingName>>,
     binding_owners: &'a BindingOwnerPlan,
+    externalized_packages: &'a BTreeSet<ModuleId>,
     package_runtime_owner: Option<&'a crate::package_runtime::PackageRuntimeOwner>,
     has_runtime_edge_before_lazy_helpers: bool,
     migration: &'a OwnerMigrationState,
@@ -552,6 +555,15 @@ impl<'a> NormalRuntimePass<'a> {
             namespace_member_rewrite.as_ref(),
             node_builtin_require_rewrite.as_ref(),
             &remaining_runtime_helpers,
+        );
+        let mut localized_noop_runtime_helpers = localized_noop_runtime_helpers;
+        localized_noop_runtime_helpers.extend(
+            rewritable_externalized_package_init_shims_for_source(
+                self.program,
+                lowered_source,
+                namespace_member_rewrite.as_ref(),
+                self.externalized_packages,
+            ),
         );
         let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
             .difference(&localized_noop_runtime_helpers)
@@ -784,6 +796,36 @@ impl<'a> NormalRuntimePass<'a> {
             written_runtime_helpers,
         }
     }
+}
+
+fn rewritable_externalized_package_init_shims_for_source(
+    program: &EnrichedProgram,
+    lowered_source: Option<&LoweredRuntimeModuleSource>,
+    namespace_member_rewrite: Option<&RuntimeNamespaceMemberAccessRewrite>,
+    externalized_packages: &BTreeSet<ModuleId>,
+) -> BTreeSet<BindingName> {
+    let Some(lowered_source) = lowered_source else {
+        return BTreeSet::new();
+    };
+    if externalized_packages.is_empty() {
+        return BTreeSet::new();
+    }
+    let source = namespace_member_rewrite
+        .map(|rewrite| rewrite.source.as_str())
+        .unwrap_or(lowered_source.source.as_str());
+    let mut shims = scan_runtime_externalized_bindings(
+        program,
+        source,
+        &BTreeSet::new(),
+        externalized_packages,
+    )
+    .package_init_shims;
+    if shims.is_empty() {
+        return BTreeSet::new();
+    }
+    let original = shims.clone();
+    let _rewritten = crate::erase_rewritable_package_init_shim_calls(source, &mut shims);
+    original.difference(&shims).cloned().collect()
 }
 
 struct NormalModuleBodyPass<'a> {
