@@ -104,6 +104,13 @@ pub enum MatchStrategy {
     /// provided string-corpus or keyword-histogram backs it up. Iterates
     /// until no new pairs land.
     DepGraphPropagation,
+    /// Bag-jaccard with orthogonal-signal rescue. Runs bag-jaccard at the
+    /// usual 0.20 threshold, then for every ref module that *failed* the
+    /// threshold checks string-corpus (≥ 0.50) and keyword-histogram
+    /// (≥ 0.90). If either orthogonal signal nominates a subject, accept
+    /// it. Recovers near-miss bag-jaccard modules that the orthogonal
+    /// axes (which scoring noise affects independently) still see clearly.
+    BagJaccardRescued,
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +490,73 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                 );
             }
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
+            (best_per_ref, None)
+        }
+        MatchStrategy::BagJaccardRescued => {
+            let bag_context = build_scoring_context(
+                &ref_bags,
+                &sub_bags,
+                SimilarityMetric::Jaccard,
+                AxisCombiner::Mean,
+                true,
+                false,
+            );
+            let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
+            let str_best = score_via_string_literal(&ref_fps, &sub_fps);
+            let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
+
+            const BAG_ACCEPT: f64 = 0.20;
+            const STR_RESCUE: f64 = 0.50;
+            const KW_RESCUE: f64 = 0.90;
+
+            let mut best_per_ref: Vec<BestMatch> = Vec::with_capacity(ref_modules.len());
+            let mut rescued_str = 0usize;
+            let mut rescued_kw = 0usize;
+            for ref_idx in 0..ref_modules.len() {
+                if bag_best[ref_idx].score >= BAG_ACCEPT && bag_best[ref_idx].subject_idx.is_some()
+                {
+                    best_per_ref.push(bag_best[ref_idx]);
+                    continue;
+                }
+                // Below the bag threshold — try orthogonal-signal rescue.
+                let str_pick = str_best[ref_idx];
+                let kw_pick = kw_best[ref_idx];
+                if str_pick.score >= STR_RESCUE && str_pick.subject_idx.is_some() {
+                    rescued_str += 1;
+                    best_per_ref.push(BestMatch {
+                        subject_idx: str_pick.subject_idx,
+                        // Carry the rescuing signal's own score forward so
+                        // histogram bucketing reflects the true confidence
+                        // the rescue is based on (not the failed bag-jaccard
+                        // score). Downstream callers that need rescue
+                        // provenance can branch on score >= STR_RESCUE.
+                        score: str_pick.score,
+                        axis: None,
+                    });
+                    continue;
+                }
+                if kw_pick.score >= KW_RESCUE && kw_pick.subject_idx.is_some() {
+                    rescued_kw += 1;
+                    best_per_ref.push(BestMatch {
+                        subject_idx: kw_pick.subject_idx,
+                        score: kw_pick.score,
+                        axis: None,
+                    });
+                    continue;
+                }
+                best_per_ref.push(bag_best[ref_idx]);
+            }
+
+            let recall = summarise_recall(&best_per_ref, threshold);
+            println!(
+                "[bag_jaccard_rescued (bag>=0.20 OR str>=0.50 OR kw>=0.90)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            println!("  rescues: string-corpus={rescued_str}, keyword-histogram={rescued_kw}");
+            print_histogram(&recall.score_histogram, ref_modules.len());
             (best_per_ref, None)
         }
         MatchStrategy::DepGraphPropagation => {
