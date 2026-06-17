@@ -567,10 +567,11 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // Arity histogram is coarse — only fire when prefiltered
             // candidates plus near-perfect cosine agreement converge.
             const ARITY_RESCUE: f64 = 0.95;
-            // Function-majority pin requires the top subject to claim
-            // ≥30% of ref functions (vs covered functions). Bundler
-            // chunking otherwise scatters votes too thinly.
-            const FN_MAJORITY_RESCUE: f64 = 0.30;
+            // Function-majority pin: even modest top-subject share
+            // (≥15%) is a real signal when filtered by category. The
+            // coverage gate (≥10% of ref fns mapped to ANY subject) is
+            // the real noise filter, not the share threshold.
+            const FN_MAJORITY_RESCUE: f64 = 0.15;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -2616,11 +2617,11 @@ fn score_via_function_majority_pin(
         // the winner; high values mean the bundler clustered the source.
         let denom = m.raw.len().max(1);
         let score = best_count as f64 / denom as f64;
-        // Also require ≥20% module coverage so tiny-module noise is
+        // Also require ≥10% module coverage so tiny-module noise is
         // filtered. covered/denom approximates how much of the module's
         // surface mapped to subject.
         let coverage = covered as f64 / denom as f64;
-        if coverage < 0.2 {
+        if coverage < 0.10 {
             continue;
         }
         out[ref_idx] = BestMatch {
