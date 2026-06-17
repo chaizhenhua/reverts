@@ -26,6 +26,7 @@ use reverts_ir::{BindingName, BindingShape, ModuleId};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
+use crate::erase_rewritable_package_init_shim_calls;
 use crate::import_coalesce::coalesce_top_level_import_declarations;
 use crate::package_runtime::push_packed_runtime_helper_imports;
 use crate::runtime_helper_strip::{
@@ -336,7 +337,11 @@ pub(crate) fn emit_runtime_helper_files(
                 .or_default()
                 .extend(bindings);
         }
-        let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        let mut package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        helper_closure.source = erase_rewritable_package_init_shim_calls(
+            helper_closure.source.as_str(),
+            &mut package_init_shims,
+        );
         let helper_path = runtime_helpers_path(*source_file_id);
         let helper_imported_bindings = helper_imports
             .values()

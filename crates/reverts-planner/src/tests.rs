@@ -73,6 +73,19 @@ fn runtime_source_module_import_scan_skips_helper_local_bindings() {
 }
 
 #[test]
+fn rewritable_externalized_package_init_shim_calls_are_erased() {
+    let mut shims = BTreeSet::from([BindingName::new("packageInit")]);
+    let rewritten = super::erase_rewritable_package_init_shim_calls(
+        "packageInit();\nfunction helper() { return packageInit(); }\n",
+        &mut shims,
+    );
+
+    assert!(shims.is_empty(), "{rewritten}");
+    assert!(!rewritten.contains("packageInit"), "{rewritten}");
+    assert!(rewritten.contains("function helper() { return void 0; }"));
+}
+
+#[test]
 fn top_level_statement_spans_use_parser_statement_boundaries() {
     let source = "function first() { return 1; }function second() { return 2; }\nvar third = 3;\n";
 

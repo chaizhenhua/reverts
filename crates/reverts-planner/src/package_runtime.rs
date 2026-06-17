@@ -39,6 +39,7 @@ use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
+use crate::erase_rewritable_package_init_shim_calls;
 use crate::identifiers::is_planner_synthetic_binding;
 use crate::import_coalesce::coalesce_top_level_import_declarations;
 use crate::relative_paths::relative_import_specifier;
@@ -635,7 +636,11 @@ pub(crate) fn emit_package_runtime_helper_files(
             externalized_packages,
         );
         let helper_imports = runtime_externalized_binding_scan.source_module_imports;
-        let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        let mut package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        helper_closure.source = erase_rewritable_package_init_shim_calls(
+            helper_closure.source.as_str(),
+            &mut package_init_shims,
+        );
         let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
         emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
         let unresolved = unresolved_runtime_helper_references(

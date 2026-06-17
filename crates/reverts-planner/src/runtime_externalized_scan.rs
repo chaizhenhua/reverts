@@ -18,7 +18,10 @@ use crate::local_bindings::local_bindings_in_source;
 use crate::runtime_source_scan::{
     call_identifiers_in_source, runtime_import_identifiers_in_source,
 };
-use crate::unique_source_definition_modules;
+use crate::{
+    drop_bare_void_zero_top_level_statements, identifiers_in_source,
+    rewrite_noop_runtime_helper_calls, unique_source_definition_modules,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct RuntimeExternalizedBindingScan {
@@ -77,6 +80,20 @@ pub(crate) fn scan_runtime_externalized_bindings(
         source_module_imports,
         package_init_shims,
     }
+}
+
+pub(crate) fn erase_rewritable_package_init_shim_calls(
+    source: &str,
+    package_init_shims: &mut BTreeSet<BindingName>,
+) -> String {
+    if package_init_shims.is_empty() {
+        return source.to_string();
+    }
+    let rewritten = rewrite_noop_runtime_helper_calls(source, package_init_shims);
+    let rewritten = drop_bare_void_zero_top_level_statements(rewritten.as_str());
+    let remaining_identifiers = identifiers_in_source(rewritten.as_str());
+    package_init_shims.retain(|binding| remaining_identifiers.contains(binding.as_str()));
+    rewritten
 }
 
 pub(crate) fn runtime_module_owner_imports_for_source(
