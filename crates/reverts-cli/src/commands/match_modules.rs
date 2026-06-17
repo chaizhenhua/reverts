@@ -542,6 +542,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                 score_via_rare_axis_anchor(&ref_bags, &sub_bags, AxisKind::StructuralAnchor);
             let fn_first_best = score_via_function_first_pin(&ref_fps, &sub_fps);
             let arity_best = score_via_arity_histogram(&ref_fps, &sub_fps);
+            let fn_majority_best = score_via_function_majority_pin(&ref_fps, &sub_fps);
             const BAG_ACCEPT: f64 = 0.20;
             // Tighter category check (no 'unknown' wildcard) allows a
             // lower bag-jaccard floor without absorbing cross-category
@@ -566,6 +567,10 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // Arity histogram is coarse — only fire when prefiltered
             // candidates plus near-perfect cosine agreement converge.
             const ARITY_RESCUE: f64 = 0.95;
+            // Function-majority pin requires the top subject to claim
+            // ≥30% of ref functions (vs covered functions). Bundler
+            // chunking otherwise scatters votes too thinly.
+            const FN_MAJORITY_RESCUE: f64 = 0.30;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -581,6 +586,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_band = 0usize;
             let mut rescued_fn_first = 0usize;
             let mut rescued_arity = 0usize;
+            let mut rescued_fn_majority = 0usize;
             let mut rescued_consensus = 0usize;
             let mut rescued_cross_cat = 0usize;
             let mut dropped_cross_category = 0usize;
@@ -689,6 +695,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_arity += 1;
                     }
                 }
+                if pick.is_none() {
+                    let maj_pick = fn_majority_best[ref_idx];
+                    if maj_pick.score >= FN_MAJORITY_RESCUE
+                        && let Some(sub_idx) = maj_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_fn_majority += 1;
+                    }
+                }
                 // Cross-cat bypass: very strong rare-anchor evidence
                 // overrides the category-respect filter.
                 if pick.is_none() {
@@ -743,7 +759,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} arity={rescued_arity} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} arity={rescued_arity} fn-maj={rescued_fn_majority} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -2533,6 +2549,83 @@ fn score_via_function_first_pin(
         out[ref_idx] = BestMatch {
             subject_idx: best_sub,
             score: best_count as f64,
+            axis: None,
+        };
+    }
+    out
+}
+
+/// Function-majority pin: for every ref module, count which subject
+/// module appears most often as a candidate across all AST-hash hits.
+/// Tolerates non-unique cascade outcomes (bundler chunks the source
+/// across multiple subject modules) — the largest contributor wins.
+///
+/// Unlike `score_via_function_first_pin`, this doesn't require
+/// `pick_unique` to succeed; any AST-hash match votes.
+fn score_via_function_majority_pin(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    let mut by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            by_hash.entry(fp.primary.ast).or_default().push(sub_idx);
+            for alt in &fp.alternates {
+                by_hash.entry(alt.axes.ast).or_default().push(sub_idx);
+            }
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.raw.is_empty() {
+            continue;
+        }
+        let mut votes: HashMap<usize, usize> = HashMap::new();
+        let mut covered = 0usize;
+        for fp in &m.raw {
+            let mut seen_subs: BTreeSet<usize> = BTreeSet::new();
+            if let Some(subs) = by_hash.get(&fp.primary.ast) {
+                for &s in subs {
+                    seen_subs.insert(s);
+                }
+            }
+            for alt in &fp.alternates {
+                if let Some(subs) = by_hash.get(&alt.axes.ast) {
+                    for &s in subs {
+                        seen_subs.insert(s);
+                    }
+                }
+            }
+            if !seen_subs.is_empty() {
+                covered += 1;
+                for s in seen_subs {
+                    *votes.entry(s).or_default() += 1;
+                }
+            }
+        }
+        let mut best_sub = None;
+        let mut best_count = 0usize;
+        for (&sub_idx, &c) in &votes {
+            if c > best_count {
+                best_count = c;
+                best_sub = Some(sub_idx);
+            }
+        }
+        // Score = fraction of ref functions whose top-voted subject is
+        // the winner; high values mean the bundler clustered the source.
+        let denom = m.raw.len().max(1);
+        let score = best_count as f64 / denom as f64;
+        // Also require ≥20% module coverage so tiny-module noise is
+        // filtered. covered/denom approximates how much of the module's
+        // surface mapped to subject.
+        let coverage = covered as f64 / denom as f64;
+        if coverage < 0.2 {
+            continue;
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score,
             axis: None,
         };
     }
