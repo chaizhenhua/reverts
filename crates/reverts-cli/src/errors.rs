@@ -511,6 +511,7 @@ pub enum CliRunError {
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
+    MatchModulesRecall(String),
 }
 
 impl fmt::Display for CliRunError {
@@ -539,6 +540,9 @@ impl fmt::Display for CliRunError {
             Self::WriteOutput { path, source } => {
                 write!(formatter, "failed to write {}: {source}", path.display())
             }
+            Self::MatchModulesRecall(message) => {
+                write!(formatter, "match-modules-recall: {message}")
+            }
         }
     }
 }
@@ -554,7 +558,9 @@ impl Error for CliRunError {
             Self::RuntimeInventory(source) => Some(source),
             Self::SymbolNames(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
-            Self::AuditRejected(_) | Self::UnsafeOutputPath(_) => None,
+            Self::AuditRejected(_) | Self::UnsafeOutputPath(_) | Self::MatchModulesRecall(_) => {
+                None
+            }
         }
     }
 }
