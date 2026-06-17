@@ -80,10 +80,19 @@ pub(crate) fn is_migratable_namespace_reader_snippet(binding: &BindingName, sour
 }
 
 pub(crate) fn function_declaration_names_binding(source: &str, binding: &BindingName) -> bool {
-    if !keyword_at(source, 0, "function") {
+    let function_offset = if keyword_at(source, 0, "function") {
+        0
+    } else if keyword_at(source, 0, "async") {
+        let offset = skip_ws(source.as_bytes(), "async".len());
+        if keyword_at(source, offset, "function") {
+            offset
+        } else {
+            return false;
+        }
+    } else {
         return false;
-    }
-    parse_identifier_after_function_keyword(source, 0)
+    };
+    parse_identifier_after_function_keyword(source, function_offset)
         .is_some_and(|(name, _)| name == binding.as_str())
 }
 

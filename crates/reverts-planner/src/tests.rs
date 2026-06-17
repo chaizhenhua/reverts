@@ -5143,45 +5143,33 @@ fn entrypoint_runtime_uses_shared_helper_module_with_tail_side_effects() {
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let module_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/entry.ts")
-        .expect("module file should be planned");
-    let cli_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "cli.ts")
-        .expect("cli entrypoint should be planned");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
+    let module_source = planned_source(&plan, "modules/entry.ts");
+    let cli_source = planned_source(&plan, "cli.ts");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
     assert!(
         plan.files
             .iter()
             .all(|file| file.path != "modules/runtime/source-1-prelude.ts")
     );
-    let module_source = module_file.body.join("\n");
-    let cli_source = cli_file.body.join("\n");
-    let helper_source = helper_file.body.join("\n");
-
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only direct module dependencies should not keep a runtime helper barrel"
+    );
     assert!(module_source.contains("export { cliEntry, cliInit };"));
     assert!(cli_source.contains("#!/usr/bin/env node"));
-    assert!(cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';"));
+    assert!(cli_source.contains("import { main } from './modules/entrypoint.js';"));
     assert!(cli_source.contains("await main();"));
     assert!(!cli_source.contains("function main()"));
     assert!(!cli_source.contains("cliInit();"));
     assert!(!cli_source.contains("process.env.FLAG = 'ok';"));
     assert!(!cli_source.contains("source-1-prelude"));
-    assert!(helper_source.contains("import { cliEntry, cliInit } from '../entry.js';"));
-    assert!(helper_source.contains("function main()"));
-    assert!(helper_source.contains("return cliEntry();"));
-    assert!(helper_source.contains("cliInit();"));
-    assert!(helper_source.contains("process.env.FLAG = 'ok';"));
-    assert!(helper_source.contains("export { main };"));
+    assert!(entrypoint_source.contains("import { cliEntry, cliInit } from './entry.js';"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(entrypoint_source.contains("return cliEntry();"));
+    assert!(entrypoint_source.contains("cliInit();"));
+    assert!(entrypoint_source.contains("process.env.FLAG = 'ok';"));
+    assert!(entrypoint_source.contains("export { main };"));
 }
 
 #[test]
@@ -5238,13 +5226,16 @@ fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
     );
     assert!(!entry_source.contains("import { yA, __reverts_set_yA }"));
     assert!(entry_source.contains("__reverts_set_yA(() => 'linux');"));
-    assert!(cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';"));
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+    assert!(cli_source.contains("import { main } from './modules/entrypoint.js';"));
     assert!(cli_source.contains("await main();"));
     assert!(!cli_source.contains("var yA"));
-    assert!(helper_source.contains("import { initModule } from '../entry.js';"));
+    assert!(entrypoint_source.contains("import { initModule } from './entry.js';"));
+    assert!(entrypoint_source.contains("import { yA } from './runtime/source-1-helpers.js';"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(entrypoint_source.contains("return yA();"));
     assert!(helper_source.contains("var yA;"));
-    assert!(helper_source.contains("function main()"));
-    assert!(helper_source.contains("return yA();"));
+    assert!(!helper_source.contains("function main()"));
     assert!(helper_source.contains("function __reverts_set_yA(value) { return yA = value; }"));
     let export_line = helper_source
         .lines()
@@ -5253,8 +5244,8 @@ fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
     let exports = parse_generated_named_export_statement(export_line)
         .expect("helper should emit a generated export list");
     assert!(exports.contains(&BindingName::new("__reverts_set_yA")));
-    assert!(exports.contains(&BindingName::new("main")));
-    assert!(!exports.contains(&BindingName::new("yA")));
+    assert!(!exports.contains(&BindingName::new("main")));
+    assert!(exports.contains(&BindingName::new("yA")));
 }
 
 #[test]
@@ -5295,22 +5286,23 @@ fn entrypoint_runtime_preserves_side_effect_order_before_later_runtime_declarati
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
-    let helper_source = helper_file.body.join("\n");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
-    let initialize_index = helper_source
+    let initialize_index = entrypoint_source
         .find("initializeConstructor();")
         .expect("entrypoint side effect should be emitted");
-    let command_index = helper_source
+    let command_index = entrypoint_source
         .find("var command = new Constructor();")
         .expect("later runtime declaration should be emitted");
     assert!(initialize_index < command_index);
-    assert!(helper_source.contains("function main()"));
-    assert!(helper_source.contains("export { main };"));
+    assert!(entrypoint_source.contains("var Constructor;"));
+    assert!(entrypoint_source.contains("function initializeConstructor()"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(entrypoint_source.contains("export { main };"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only ordered runtime declarations should stay in the island"
+    );
 }
 
 #[test]
@@ -5352,25 +5344,24 @@ fn entrypoint_runtime_preserves_namespace_export_order_before_tail_side_effects(
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
-    let helper_source = helper_file.body.join("\n");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
-    let namespace_index = helper_source
+    let namespace_index = entrypoint_source
         .find("Object.defineProperties(m")
         .expect("namespace export should be emitted");
-    let side_effect_index = helper_source
+    let side_effect_index = entrypoint_source
         .find("initializeSchemas();")
         .expect("entrypoint side effect should be emitted");
     assert!(
         namespace_index < side_effect_index,
-        "namespace export must precede tail side effects that read it, got:\n{helper_source}"
+        "namespace export must precede tail side effects that read it, got:\n{entrypoint_source}"
     );
-    assert!(helper_source.contains("function main()"));
-    assert!(helper_source.contains("export { main };"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(entrypoint_source.contains("export { main };"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only namespace runtime should stay in the island"
+    );
 }
 
 #[test]
@@ -5404,17 +5395,16 @@ fn contextual_identifier_as_is_kept_as_runtime_dependency() {
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
-    let helper_source = helper_file.body.join("\n");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
-    assert!(helper_source.contains("var as = { command() { return this; } };"));
-    assert!(helper_source.contains("function main()"));
-    assert!(helper_source.contains("as.command('run')"));
-    assert!(helper_source.contains("export { main };"));
+    assert!(entrypoint_source.contains("var as = { command() { return this; } };"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(entrypoint_source.contains("as.command('run')"));
+    assert!(entrypoint_source.contains("export { main };"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only runtime dependency named `as` should stay in the island"
+    );
 }
 
 #[test]
@@ -5551,27 +5541,21 @@ fn entrypoint_runtime_imports_adapter_required_package_bindings() {
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let cli_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "cli.ts")
-        .expect("cli entrypoint should be planned");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
     let package_file = plan
         .files
         .iter()
         .find(|file| file.path == "modules/package.ts")
         .expect("adapter-required package file should be emitted");
-    let cli_source = cli_file.body.join("\n");
-    let helper_source = helper_file.body.join("\n");
+    let cli_source = planned_source(&plan, "cli.ts");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
-    assert!(cli_source.contains("import { main } from './modules/runtime/source-1-helpers.js';"));
-    assert!(helper_source.contains("import { packageInit } from '../package.js';"));
-    assert!(helper_source.contains("packageInit();"));
+    assert!(cli_source.contains("import { main } from './modules/entrypoint.js';"));
+    assert!(entrypoint_source.contains("import { packageInit } from './package.js';"));
+    assert!(entrypoint_source.contains("packageInit();"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "adapter-required package entrypoint dependencies should import their owner directly"
+    );
     let package_source = package_file.body.join("\n");
     assert_eq!(package_file.imports.len(), 1);
     assert_eq!(
@@ -6444,25 +6428,19 @@ fn entrypoint_runtime_drops_noop_runtime_side_effects() {
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let cli_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "cli.ts")
-        .expect("cli entrypoint should be planned");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
-    let cli_source = cli_file.body.join("\n");
-    let helper_source = helper_file.body.join("\n");
+    let cli_source = planned_source(&plan, "cli.ts");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
     assert!(!cli_source.contains("noop();"));
     assert!(!cli_source.contains("var noop"));
     assert!(!cli_source.contains("function main()"));
-    assert!(!helper_source.contains("noop();"));
-    assert!(!helper_source.contains("var noop"));
-    assert!(helper_source.contains("function main()"));
+    assert!(!entrypoint_source.contains("noop();"));
+    assert!(!entrypoint_source.contains("var noop"));
+    assert!(entrypoint_source.contains("function main()"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "noop-only entrypoint island should not keep runtime helper code"
+    );
 }
 
 #[test]
@@ -6496,24 +6474,18 @@ fn entrypoint_runtime_keeps_non_noop_runtime_side_effect_dependencies() {
     let plan = planner
         .plan_enriched_program(&enriched)
         .expect("fixture should normalize");
-    let cli_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "cli.ts")
-        .expect("cli entrypoint should be planned");
-    let helper_file = plan
-        .files
-        .iter()
-        .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
-        .expect("runtime helper file should be planned");
-    let cli_source = cli_file.body.join("\n");
-    let helper_source = helper_file.body.join("\n");
+    let cli_source = planned_source(&plan, "cli.ts");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
 
     assert!(!cli_source.contains("var setup"));
     assert!(!cli_source.contains("setup();"));
-    assert!(helper_source.contains("var setup"));
-    assert!(helper_source.contains("setup();"));
-    assert!(helper_source.contains("globalThis.ready = true"));
+    assert!(entrypoint_source.contains("var setup"));
+    assert!(entrypoint_source.contains("setup();"));
+    assert!(entrypoint_source.contains("globalThis.ready = true"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only side-effect dependencies should not keep runtime helper code"
+    );
 }
 
 #[test]
@@ -12720,15 +12692,24 @@ fn lazy_initializer_fold_preserves_tail_side_effect_order_before_entrypoint() {
         .find(|file| file.path == "modules/runtime/source-1-helpers.ts")
         .expect("runtime helper file should be planned");
     let helper_source = helper_file.body.join("\n");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
     let init_assignment = helper_source
         .find("shared = 1;")
-        .expect("pure initializer assignment should be before side effects");
-    let tail_effect = helper_source
+        .expect("pure initializer assignment should stay in runtime helper before imports finish");
+    let shared_import = entrypoint_source
+        .lines()
+        .find(|line| line.contains("from './runtime/source-1-helpers.js';"))
+        .filter(|line| line.contains("shared"))
+        .and_then(|line| entrypoint_source.find(line))
+        .expect("entrypoint island should import initialized shared binding");
+    let tail_effect = entrypoint_source
         .find("console.log(shared)")
-        .expect("entrypoint side effect should be preserved");
+        .expect("entrypoint side effect should be preserved in the island");
 
-    assert!(init_assignment < tail_effect);
+    assert!(init_assignment < helper_source.len());
+    assert!(shared_import < tail_effect);
     assert!(!helper_source.contains("\ninitShared();"));
+    assert!(entrypoint_source.contains("initShared();"));
     assert!(helper_source.contains("var initShared = () => {};"));
     assert!(helper_source.contains("export { initShared"));
     assert!(helper_source.contains("shared };"));

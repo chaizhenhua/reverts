@@ -11,7 +11,12 @@ use crate::package_runtime_accumulator::PackageRuntimeAccumulator;
 use crate::planner_context::PlannerContext;
 use crate::runtime_helper_usage::RuntimeHelperUsageAccumulator;
 use crate::runtime_plan_preparation::RuntimePlanPreparation;
-use crate::{EmitPlan, PlanError, cli_entrypoint, runtime_entrypoint, runtime_helper_emission};
+use crate::{
+    EmitPlan, PlanError, cli_entrypoint, runtime_entrypoint, runtime_helper_emission,
+    top_level_definitions_in_source,
+};
+use reverts_ir::BindingName;
+use std::collections::BTreeSet;
 
 pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitPlan, PlanError> {
     let mut state = PlanningState::new(context);
@@ -95,9 +100,23 @@ impl PlanningPass for MarkEntrypointRuntimePass {
                 &entrypoint.callee,
             )
         {
-            state
-                .runtime_helpers
-                .mark_entrypoint(entrypoint.source_file_id, &entrypoint.callee);
+            let occupied =
+                occupied_runtime_bindings_for_entrypoint(context, state, entrypoint.source_file_id);
+            if let Some(island) = cli_entrypoint::entrypoint_island_plan(
+                context.program(),
+                &state.runtime.binding_owners,
+                &occupied,
+                &context.analysis().externalized_packages,
+                Some(&state.plan),
+            ) {
+                state
+                    .runtime_helpers
+                    .mark_runtime_bindings(island.source_file_id, &island.runtime_bindings);
+            } else {
+                state
+                    .runtime_helpers
+                    .mark_entrypoint(entrypoint.source_file_id, &entrypoint.callee);
+            }
         }
         Ok(())
     }
@@ -145,8 +164,49 @@ impl PlanningPass for EmitCliEntrypointPass {
         cli_entrypoint::emit_cli_entrypoint(
             context.program(),
             &state.runtime.runtime_var_migrations,
+            &state.runtime.binding_owners,
+            &runtime_entrypoint(context.program())
+                .map(|(_prelude, entrypoint)| {
+                    occupied_runtime_bindings_for_entrypoint(
+                        context,
+                        state,
+                        entrypoint.source_file_id,
+                    )
+                })
+                .unwrap_or_default(),
+            &context.analysis().externalized_packages,
             &mut state.plan,
         );
         Ok(())
     }
+}
+
+fn occupied_runtime_bindings_for_entrypoint(
+    context: &PlannerContext<'_>,
+    state: &PlanningState,
+    source_file_id: u32,
+) -> BTreeSet<BindingName> {
+    let mut occupied = state
+        .runtime_helpers
+        .occupied_runtime_bindings(source_file_id);
+    if let Some(chunks) = context
+        .analysis()
+        .runtime_lazy_folds
+        .chunks_by_source_file
+        .get(&source_file_id)
+    {
+        let prelude = context
+            .program()
+            .model()
+            .graph()
+            .runtime_prelude(source_file_id);
+        for chunk in chunks {
+            occupied.extend(
+                top_level_definitions_in_source(chunk.source.as_str())
+                    .into_iter()
+                    .filter(|binding| prelude.is_none_or(|prelude| !prelude.defines(binding))),
+            );
+        }
+    }
+    occupied
 }

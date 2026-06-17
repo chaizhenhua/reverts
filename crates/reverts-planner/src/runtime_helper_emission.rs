@@ -99,7 +99,7 @@ pub(crate) fn emit_runtime_helper_files(
             continue;
         };
         let mut file = PlannedFile::new(runtime_helpers_path(*source_file_id));
-        let mut public_helper_bindings = exported_runtime_helper_bindings
+        let public_helper_bindings = exported_runtime_helper_bindings
             .get(source_file_id)
             .cloned()
             .unwrap_or_default();
@@ -127,13 +127,13 @@ pub(crate) fn emit_runtime_helper_files(
             .iter()
             .map(|export| export.helper.clone())
             .collect::<BTreeSet<_>>();
-        public_helper_bindings.retain(|binding| {
-            !namespace_export_helpers.contains(binding)
-                || consumed_helper_bindings.contains(binding)
-                || entrypoint_callee
-                    .as_ref()
-                    .is_some_and(|callee| callee == binding)
-        });
+        // Keep the requested public surface intact. Namespace helper roots may
+        // be pruned from the helper body below when nobody consumes them, but
+        // folded-runtime consumers can still import module-owned namespace
+        // members through the helper surface until their imports are migrated
+        // to the owner module. The final export step intersects this set with
+        // emitted/imported bindings, so stale requests cannot create undefined
+        // ESM exports.
         let mut root_bindings = required_runtime_helper_bindings
             .get(source_file_id)
             .cloned()
@@ -306,6 +306,18 @@ pub(crate) fn emit_runtime_helper_files(
             &module_owned_bindings_for_source,
             runtime_externalized_binding_scan.source_module_imports,
         );
+        for binding in &public_helper_bindings {
+            if helper_closure.emitted_bindings.contains(binding) {
+                continue;
+            }
+            let Some(owner) = module_owned_bindings_for_source.get(binding) else {
+                continue;
+            };
+            helper_imports
+                .entry(*owner)
+                .or_default()
+                .insert(binding.clone());
+        }
         for (module_id, bindings) in
             runtime_var_migrations.runtime_reexport_source_deps_for_source(*source_file_id)
         {
@@ -315,9 +327,27 @@ pub(crate) fn emit_runtime_helper_files(
                 .extend(bindings);
         }
         let package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        let helper_path = runtime_helpers_path(*source_file_id);
+        let helper_imported_bindings = helper_imports
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let fallback_public_imports = planned_public_export_imports(
+            plan,
+            helper_path.as_str(),
+            &public_helper_bindings,
+            &helper_closure.emitted_bindings,
+            &helper_imported_bindings,
+            &package_init_shims,
+        );
+        let fallback_imported_bindings = fallback_public_imports
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
         emitted_runtime_bindings.extend(package_init_shims.iter().cloned());
-        let helper_path = runtime_helpers_path(*source_file_id);
         let unresolved = unresolved_runtime_helper_references(
             prelude,
             helper_closure.source.as_str(),
@@ -337,6 +367,11 @@ pub(crate) fn emit_runtime_helper_files(
             helper_path.as_str(),
             &helper_imports,
         );
+        for (owner_path, bindings) in &fallback_public_imports {
+            let specifier =
+                crate::relative_paths::relative_import_specifier(helper_path.as_str(), owner_path);
+            file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
+        }
         let helper_uses_lazy_module =
             source_contains_top_level_call(helper_closure.source.as_str(), "lazyModule");
         let helper_uses_lazy_value =
@@ -378,7 +413,14 @@ pub(crate) fn emit_runtime_helper_files(
         if !setter_bindings.is_empty() {
             file.push_source(runtime_helper_setter_declarations(&setter_bindings));
         }
-        let mut exported_bindings = public_helper_bindings.clone();
+        let mut exportable_helper_bindings = helper_closure.emitted_bindings.clone();
+        exportable_helper_bindings.extend(helper_imported_bindings.iter().cloned());
+        exportable_helper_bindings.extend(fallback_imported_bindings.iter().cloned());
+        exportable_helper_bindings.extend(package_init_shims.iter().cloned());
+        let mut exported_bindings = public_helper_bindings
+            .intersection(&exportable_helper_bindings)
+            .cloned()
+            .collect::<BTreeSet<_>>();
         exported_bindings.extend(
             setter_bindings
                 .iter()
@@ -387,14 +429,20 @@ pub(crate) fn emit_runtime_helper_files(
         // Phase 10b: drop module-owned bindings from the runtime helper's
         // own named export. All consumers should import the owner module
         // directly; the runtime file is no longer a compatibility barrel.
+        // When an older folded-runtime consumer still requests a helper
+        // surface, re-export the owner import rather than resurrecting the
+        // module-owned source into the shared runtime helper.
         for binding in &module_owned_binding_names_for_source {
-            exported_bindings.remove(binding);
+            if !helper_imported_bindings.contains(binding) {
+                exported_bindings.remove(binding);
+            }
         }
         if !exported_bindings.is_empty() {
             file.push_source(named_export_statement(exported_bindings.iter()));
         }
         for binding in public_helper_bindings
             .iter()
+            .filter(|binding| exportable_helper_bindings.contains(*binding))
             .filter(|binding| !module_owned_bindings_for_source.contains_key(*binding))
             .cloned()
         {
@@ -426,6 +474,62 @@ pub(crate) fn emit_runtime_helper_files(
     }
     Ok(())
 }
+
+fn planned_public_export_imports(
+    plan: &EmitPlan,
+    helper_path: &str,
+    public_bindings: &BTreeSet<BindingName>,
+    emitted_bindings: &BTreeSet<BindingName>,
+    helper_imported_bindings: &BTreeSet<BindingName>,
+    package_init_shims: &BTreeSet<BindingName>,
+) -> BTreeMap<String, BTreeSet<BindingName>> {
+    let mut imports = BTreeMap::<String, BTreeSet<BindingName>>::new();
+    for binding in public_bindings {
+        if emitted_bindings.contains(binding)
+            || helper_imported_bindings.contains(binding)
+            || package_init_shims.contains(binding)
+        {
+            continue;
+        }
+        let Some(owner_path) = planned_public_export_owner_path(plan, helper_path, binding) else {
+            continue;
+        };
+        imports
+            .entry(owner_path)
+            .or_default()
+            .insert(binding.clone());
+    }
+    imports
+}
+
+fn planned_public_export_owner_path(
+    plan: &EmitPlan,
+    helper_path: &str,
+    binding: &BindingName,
+) -> Option<String> {
+    for file in &plan.files {
+        if file.path == helper_path
+            || file.path == ENTRYPOINT_ISLAND_PATH_FOR_RUNTIME_HELPER
+            || file.path.starts_with("modules/runtime/")
+            || !file.exports.iter().any(|export| export.binding == *binding)
+        {
+            continue;
+        }
+        let helper_specifier =
+            crate::relative_paths::relative_import_specifier(file.path.as_str(), helper_path);
+        if file
+            .body
+            .iter()
+            .any(|source| source.contains(helper_specifier.as_str()))
+        {
+            continue;
+        }
+        return Some(file.path.clone());
+    }
+    None
+}
+
+const ENTRYPOINT_ISLAND_PATH_FOR_RUNTIME_HELPER: &str = "modules/entrypoint.ts";
 
 fn emit_runtime_lazy_helper_file(
     plan: &mut EmitPlan,

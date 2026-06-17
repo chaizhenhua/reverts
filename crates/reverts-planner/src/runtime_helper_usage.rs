@@ -32,6 +32,45 @@ impl RuntimeHelperUsageAccumulator {
         usage
     }
 
+    pub(crate) fn mark_runtime_bindings(
+        &mut self,
+        source_file_id: u32,
+        bindings: &BTreeSet<BindingName>,
+    ) {
+        if bindings.is_empty() {
+            return;
+        }
+        self.used_runtime_helper_files
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        self.exported_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+        self.required_runtime_helper_bindings
+            .entry(source_file_id)
+            .or_default()
+            .extend(bindings.iter().cloned());
+    }
+
+    pub(crate) fn occupied_runtime_bindings(&self, source_file_id: u32) -> BTreeSet<BindingName> {
+        let mut bindings = BTreeSet::new();
+        if let Some(used) = self.used_runtime_helper_files.get(&source_file_id) {
+            bindings.extend(used.iter().cloned());
+        }
+        if let Some(exported) = self.exported_runtime_helper_bindings.get(&source_file_id) {
+            bindings.extend(exported.iter().cloned());
+        }
+        if let Some(required) = self.required_runtime_helper_bindings.get(&source_file_id) {
+            bindings.extend(required.iter().cloned());
+        }
+        if let Some(setters) = self.used_runtime_helper_setters.get(&source_file_id) {
+            bindings.extend(setters.iter().cloned());
+        }
+        bindings
+    }
+
     pub(crate) fn mark_entrypoint(&mut self, source_file_id: u32, callee: &BindingName) {
         self.used_runtime_helper_files
             .entry(source_file_id)
