@@ -240,6 +240,8 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     print_histogram(&recall.score_histogram, ref_modules.len());
     print_axis_winners(&recall.winning_axis_counts);
 
+    print_exact_match_summary(&ref_bags, &sub_bags);
+
     let precision = precision_against_baseline(
         &ref_modules,
         &sub_modules,
@@ -752,6 +754,104 @@ fn precision_against_baseline(
         }
     }
     report
+}
+
+/// Counts how many ref modules / ref functions have AT LEAST ONE per-axis
+/// fingerprint hash that exactly appears in some subject module's
+/// fingerprint bag (any axis-matched). Reported per axis and unioned.
+///
+/// This is the "no Jaccard" floor: how much of the ref corpus can be linked
+/// to the subject purely on the strength of exact hash identity (across the
+/// normalization passes that union into each bag).
+fn print_exact_match_summary(ref_bags: &[ModuleBag], sub_bags: &[ModuleBag]) {
+    let mut subject_hashes: BTreeMap<AxisKind, BTreeSet<u64>> = BTreeMap::new();
+    for &axis in SCORING_AXES {
+        subject_hashes.insert(axis, BTreeSet::new());
+    }
+    for bag in sub_bags {
+        for (axis, hashes) in &bag.by_axis {
+            let target = subject_hashes
+                .get_mut(axis)
+                .expect("axis pre-inserted above");
+            for &h in hashes {
+                target.insert(h);
+            }
+        }
+    }
+
+    let mut per_axis_module_hits: BTreeMap<AxisKind, usize> = BTreeMap::new();
+    let mut per_axis_hash_hits: BTreeMap<AxisKind, usize> = BTreeMap::new();
+    let mut per_axis_hash_total: BTreeMap<AxisKind, usize> = BTreeMap::new();
+    for &axis in SCORING_AXES {
+        per_axis_module_hits.insert(axis, 0);
+        per_axis_hash_hits.insert(axis, 0);
+        per_axis_hash_total.insert(axis, 0);
+    }
+    let mut any_axis_module_hits = 0usize;
+    let mut fingerprintable_modules = 0usize;
+    for bag in ref_bags {
+        if bag.function_count == 0 {
+            continue;
+        }
+        fingerprintable_modules += 1;
+        let mut any_axis_hit = false;
+        for (axis, hashes) in &bag.by_axis {
+            let total = per_axis_hash_total
+                .get_mut(axis)
+                .expect("axis pre-inserted above");
+            *total += hashes.len();
+            let subject_set = subject_hashes.get(axis).expect("axis pre-inserted above");
+            let module_hit_count = hashes.iter().filter(|h| subject_set.contains(*h)).count();
+            if module_hit_count > 0 {
+                *per_axis_module_hits
+                    .get_mut(axis)
+                    .expect("axis pre-inserted above") += 1;
+                *per_axis_hash_hits
+                    .get_mut(axis)
+                    .expect("axis pre-inserted above") += module_hit_count;
+                any_axis_hit = true;
+            }
+        }
+        if any_axis_hit {
+            any_axis_module_hits += 1;
+        }
+    }
+    println!(
+        "[exact match (no Jaccard)]: {} / {} fingerprintable ref modules have >= 1 axis-hash present in subject ({:.2}%)",
+        any_axis_module_hits,
+        fingerprintable_modules,
+        pct(any_axis_module_hits, fingerprintable_modules),
+    );
+    let mut axes: Vec<_> = per_axis_module_hits.iter().collect();
+    axes.sort_by_key(|(axis, _)| axis.as_str());
+    let module_line = axes
+        .iter()
+        .map(|(axis, hits)| {
+            format!(
+                "{}: {}/{} ({:.0}%)",
+                axis.as_str(),
+                hits,
+                fingerprintable_modules,
+                pct(**hits, fingerprintable_modules),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("  per-axis ref-module exact-hit rate: {module_line}");
+    let hash_line = axes
+        .iter()
+        .map(|(axis, _)| {
+            let hits = per_axis_hash_hits.get(axis).copied().unwrap_or(0);
+            let total = per_axis_hash_total.get(axis).copied().unwrap_or(0);
+            format!(
+                "{}: {hits}/{total} ({:.0}%)",
+                axis.as_str(),
+                pct(hits, total),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("  per-axis ref-hash exact-hit rate: {hash_line}");
 }
 
 fn score_pair(
