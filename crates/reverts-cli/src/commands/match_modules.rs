@@ -145,6 +145,28 @@ pub struct MatchModulesRecallArgs {
     /// matcher's pick, and the named subject the matcher should have picked.
     #[arg(long, default_value_t = 0)]
     pub show_mispairs: usize,
+    /// Minimum tier confidence required for a function-tier match to count
+    /// toward `tier_unique` naming coverage. Filters the per-function
+    /// cascade *after* the fact — does not change which subject module wins
+    /// at the module level. `high` only accepts exact AST matches; `medium`
+    /// also accepts structural-anchored (Cfg + literal/callee/throw anchor)
+    /// matches; `low` (default) accepts every tier the cascade returns,
+    /// including weak structural_only fallbacks.
+    #[arg(long, value_enum, default_value_t = TierConfidence::Low)]
+    pub min_tier_confidence: TierConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TierConfidence {
+    /// Accept only [`MatchTier::Exact`] and [`MatchTier::ExactAlternate`]
+    /// — i.e. AST-identical functions across passes.
+    High,
+    /// Accept exact tiers plus [`MatchTier::StructuralAnchored`] and its
+    /// alternate variant (CFG + ≥1 anchor axis overlap on identity-keyed
+    /// dedup).
+    Medium,
+    /// Accept every cascade tier including structural-only fallbacks.
+    Low,
 }
 
 impl MatchModulesRecallArgs {
@@ -988,7 +1010,19 @@ fn print_function_naming_coverage(
         return;
     }
 
-    let tier_unique: usize = report.tier_counts.values().sum();
+    let tier_unique_low: usize = report.tier_counts.values().sum();
+    let tier_unique_medium: usize = report
+        .tier_counts
+        .iter()
+        .filter(|(label, _)| label_clears_confidence(label, TierConfidence::Medium))
+        .map(|(_, count)| *count)
+        .sum();
+    let tier_unique_high: usize = report
+        .tier_counts
+        .iter()
+        .filter(|(label, _)| label_clears_confidence(label, TierConfidence::High))
+        .map(|(_, count)| *count)
+        .sum();
 
     // Subject AST-hash universe: which AST hashes appear anywhere in
     // subject (primary or alt). A ref function whose AST hash is in here
@@ -1027,10 +1061,14 @@ fn print_function_naming_coverage(
         .sum();
 
     println!(
-        "  function naming coverage: {} ref functions total\n    tier_unique (direct name transfer): {} ({:.2}%)\n    any_ast_match (≥1 content-equal subject fn): {} ({:.2}%)\n    inside module_matched (inherit via module pick): {} ({:.2}%)",
+        "  function naming coverage: {} ref functions total\n    tier_unique high   (exact / exact_alt only):              {} ({:.2}%)\n    tier_unique medium (+ structural_anchored*):             {} ({:.2}%)\n    tier_unique low    (+ structural_only*, default cascade): {} ({:.2}%)\n    any_ast_match (≥1 content-equal subject fn):             {} ({:.2}%)\n    inside module_matched (inherit via module pick):         {} ({:.2}%)",
         total_fns,
-        tier_unique,
-        pct(tier_unique, total_fns),
+        tier_unique_high,
+        pct(tier_unique_high, total_fns),
+        tier_unique_medium,
+        pct(tier_unique_medium, total_fns),
+        tier_unique_low,
+        pct(tier_unique_low, total_fns),
         any_ast_match,
         pct(any_ast_match, total_fns),
         module_matched,
@@ -1051,6 +1089,20 @@ fn tier_label(m: &reverts_package_matcher::FunctionMatch<ModuleOwner>) -> &'stat
         MatchTier::FeatureSimilarityAlternate => "feature_similarity_alt",
         MatchTier::StructuralOnly => "structural_only",
         MatchTier::StructuralOnlyAlternate => "structural_only_alt",
+    }
+}
+
+/// True iff a tier label clears the requested confidence bar. Names are
+/// the same strings the per-tier counter uses, so we can filter
+/// `tier_counts` directly without re-walking match results.
+fn label_clears_confidence(label: &str, min: TierConfidence) -> bool {
+    match min {
+        TierConfidence::Low => true,
+        TierConfidence::Medium => matches!(
+            label,
+            "exact" | "exact_alt" | "structural_anchored" | "structural_anchored_alt"
+        ),
+        TierConfidence::High => matches!(label, "exact" | "exact_alt"),
     }
 }
 
