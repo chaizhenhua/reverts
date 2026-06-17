@@ -550,6 +550,11 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             const PROP_RESCUE: f64 = 0.40;
             // ≥2 rare-AST hash hits on the same subject is a smoking gun.
             const RARE_RESCUE: f64 = 2.0;
+            // Strong evidence threshold to bypass category-respect:
+            // ≥3 rare AST hashes pointing to the same subject is hard
+            // to fake even across categories (vendored packages re-
+            // classified between versions).
+            const RARE_CROSS_CAT: f64 = 3.0;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -564,6 +569,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_rare = 0usize;
             let mut rescued_band = 0usize;
             let mut rescued_consensus = 0usize;
+            let mut rescued_cross_cat = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
                 let r = ref_modules[ref_idx].category.as_str();
@@ -647,6 +653,17 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_rare += 1;
                     }
                 }
+                // Cross-cat bypass: very strong rare-anchor evidence
+                // overrides the category-respect filter.
+                if pick.is_none() {
+                    let rare_pick = rare_best[ref_idx];
+                    if rare_pick.score >= RARE_CROSS_CAT
+                        && let Some(sub_idx) = rare_pick.subject_idx
+                    {
+                        pick = Some(sub_idx);
+                        rescued_cross_cat += 1;
+                    }
+                }
                 // Consensus rescue: if ≥2 weak signals agree on the same
                 // subject, pin it. Each signal alone is noisy at low
                 // thresholds; agreement is the filter.
@@ -690,7 +707,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
