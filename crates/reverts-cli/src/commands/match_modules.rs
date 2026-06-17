@@ -240,7 +240,14 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     print_histogram(&recall.score_histogram, ref_modules.len());
     print_axis_winners(&recall.winning_axis_counts);
 
-    let precision = precision_against_baseline(&ref_modules, &sub_modules, &best_per_ref);
+    let precision = precision_against_baseline(
+        &ref_modules,
+        &sub_modules,
+        &ref_bags,
+        &sub_bags,
+        &best_per_ref,
+        &scoring_context,
+    );
     print_precision(&precision);
     if args.show_mispairs > 0 {
         print_mispair_samples(
@@ -672,12 +679,25 @@ struct PrecisionReport {
     mispaired: usize,
     /// Of those, ref modules whose scorer returned no candidate at all.
     unranked: usize,
+    /// Baseline pairs where the same-named subject also has confident content
+    /// overlap with the ref (truth_score >= 0.3). These are the pairs where
+    /// the baseline really is a valid ground-truth pairing.
+    verified_universe: usize,
+    /// Within `verified_universe`, ref modules whose best pick is the named
+    /// subject — i.e. the matcher genuinely identifies the right counterpart
+    /// when the counterpart exists.
+    verified_correctly_paired: usize,
 }
+
+const VERIFIED_TRUTH_SCORE_THRESHOLD: f64 = 0.3;
 
 fn precision_against_baseline(
     ref_modules: &[ModuleRecord],
     sub_modules: &[ModuleRecord],
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
     best_per_ref: &[BestMatch],
+    context: &ScoringContext,
 ) -> PrecisionReport {
     let mut subject_names_by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (idx, module) in sub_modules.iter().enumerate() {
@@ -691,11 +711,32 @@ fn precision_against_baseline(
         let Some(name) = ref_module.semantic_name.as_deref() else {
             continue;
         };
-        if !subject_names_by_name.contains_key(name) {
+        let Some(truth_indexes) = subject_names_by_name.get(name) else {
             continue;
-        }
+        };
         report.baseline_universe += 1;
         let best = best_per_ref[ref_idx];
+
+        // Verified universe: same-named subject also has confident content
+        // overlap, so the baseline is a real pairing.
+        let mut best_truth_score = 0.0_f64;
+        for &truth_idx in truth_indexes {
+            let truth_score = score_pair(
+                ref_idx,
+                truth_idx,
+                &ref_bags[ref_idx],
+                &sub_bags[truth_idx],
+                context,
+            );
+            if truth_score > best_truth_score {
+                best_truth_score = truth_score;
+            }
+        }
+        let verified = best_truth_score >= VERIFIED_TRUTH_SCORE_THRESHOLD;
+        if verified {
+            report.verified_universe += 1;
+        }
+
         let Some(subject_idx) = best.subject_idx else {
             report.unranked += 1;
             continue;
@@ -703,6 +744,9 @@ fn precision_against_baseline(
         let picked_name = sub_modules[subject_idx].semantic_name.as_deref();
         if picked_name == Some(name) {
             report.correctly_paired += 1;
+            if verified {
+                report.verified_correctly_paired += 1;
+            }
         } else {
             report.mispaired += 1;
         }
@@ -846,6 +890,22 @@ fn print_precision(report: &PrecisionReport) {
         report.mispaired,
         report.unranked,
     );
+    // The verified universe filters out baseline pairs where the cli's
+    // same-name attribution is itself noise (the named subject has no real
+    // content overlap with the ref module). What remains is genuine
+    // ground-truth pairs the matcher should hit.
+    if report.verified_universe == 0 {
+        println!(
+            "[verified precision]: 0 / 0 — no baseline pairs reached truth_score >= {VERIFIED_TRUTH_SCORE_THRESHOLD:.2}; the same-name attributions in the subject have no content overlap with the ref"
+        );
+    } else {
+        println!(
+            "[verified precision]: {} / {} ({:.2}%) — restricted to baseline pairs whose same-name subject has truth_score >= {VERIFIED_TRUTH_SCORE_THRESHOLD:.2}",
+            report.verified_correctly_paired,
+            report.verified_universe,
+            pct(report.verified_correctly_paired, report.verified_universe),
+        );
+    }
 }
 
 const HISTOGRAM_LABELS: &[&str] = &["≥0.1", "≥0.3", "≥0.5", "≥0.7", "≥0.9"];
