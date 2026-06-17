@@ -813,3 +813,28 @@ direct-owner imports, package-runtime imports, and runtime-partition emission.
 The package source/cache helpers are still root-private utilities shared by the
 new use-case module; they can move behind dedicated storage/package-source
 adapter modules next.
+
+### 2026-05-24 — package source/cache workflow split
+
+Scope: continue the CLI adapter cleanup without changing crate boundaries or
+introducing machine-enforced architecture tests.
+
+- Moved package source/cache orchestration out of `reverts-cli::lib` into
+  `package_source_workflow.rs`, leaving the CLI facade focused on public
+  command wrappers, argument parsing, and report shaping.
+- Split externalization-hint candidate loading and source promotion into
+  `package_source_workflow::externalization`, so hint validation/proof matching
+  no longer sits beside command dispatch.
+- Extracted cache-column policy handling into `PackageSourceCacheColumns` and a
+  `load_cached_package_sources` helper. The top-level `load_package_sources`
+  now reads as an ordered workflow: cache, filesystem roots, materialization,
+  externalization promotion, build-variant filtering, path-hint filtering, and
+  deduplication.
+- Updated `pkg_sources::filtering` to depend directly on the persistence-owned
+  cache entry-path helper instead of reaching through the CLI root facade.
+
+Remaining non-enforced architecture debt: `package_source_workflow` is still a
+CLI-local adapter module and should eventually split again into source-unit
+enrichment, cache storage, package-root discovery, and app-level use-case
+orchestration. The planner `NormalRuntimePass` and remaining source-surgery
+scanner modules are unchanged by this session and remain the next deep seams.

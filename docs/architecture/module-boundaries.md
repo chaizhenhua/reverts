@@ -146,7 +146,12 @@ crate tests / integration tests
 - `reverts-cli` owns command orchestration, argument parsing, paths, and process
   exit behavior. Core behavior should remain testable without invoking the CLI;
   project writing is isolated behind the CLI `project_writer` adapter and
-  consumes `AcceptedProject` rather than unaudited bytes.
+  consumes `AcceptedProject` rather than unaudited bytes. DB-backed
+  `match-packages` orchestration lives in `package_match_usecase`, package
+  source/cache loading lives in `package_source_workflow`, and
+  externalization-hint promotion is isolated in
+  `package_source_workflow::externalization` until those adapters are promoted
+  to dedicated crates.
 - `reverts-fixtures` owns fixture builders used by tests. It must not become a
   source of production behavior.
 

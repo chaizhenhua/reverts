@@ -15,7 +15,7 @@ use reverts_package_matcher::{
     normalize_hint_text, package_source_semantic_surface_hint_score,
 };
 
-use crate::package_source_cache_entry_path;
+use crate::persistence::source_cache::package_source_cache_entry_path;
 
 pub(crate) fn filter_package_sources_to_best_build_variants(
     rows: &InputRows,
