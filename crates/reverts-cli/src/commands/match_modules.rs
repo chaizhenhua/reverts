@@ -539,6 +539,10 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let prop_best = score_via_property_name(&ref_fps, &sub_fps);
             let rare_best = score_via_rare_ast_anchor(&ref_bags, &sub_bags);
             const BAG_ACCEPT: f64 = 0.20;
+            // Tighter category check (no 'unknown' wildcard) allows a
+            // lower bag-jaccard floor without absorbing cross-category
+            // noise: in-category 0.15-0.20 is still a real signal.
+            const BAG_ACCEPT_STRICT: f64 = 0.15;
             const STR_RESCUE: f64 = 0.50;
             const KW_RESCUE: f64 = 0.90;
             const PROP_RESCUE: f64 = 0.40;
@@ -556,12 +560,20 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_kw = 0usize;
             let mut rescued_prop = 0usize;
             let mut rescued_rare = 0usize;
+            let mut rescued_band = 0usize;
             let mut rescued_consensus = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
                 let r = ref_modules[ref_idx].category.as_str();
                 let s = sub_modules[sub_idx].category.as_str();
                 r == s || r.is_empty() || s.is_empty() || r == "unknown" || s == "unknown"
+            };
+            // Strict: no 'unknown' wildcard. Gates the lower bag-jaccard
+            // band where cross-category noise would be too risky.
+            let category_strict_ok = |ref_idx: usize, sub_idx: usize| -> bool {
+                let r = ref_modules[ref_idx].category.as_str();
+                let s = sub_modules[sub_idx].category.as_str();
+                r == s || r.is_empty() || s.is_empty()
             };
             for ref_idx in 0..ref_modules.len() {
                 let mut pick: Option<usize> = None;
@@ -574,6 +586,14 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                     } else {
                         dropped_cross_category += 1;
                     }
+                }
+                if pick.is_none()
+                    && bag.score >= BAG_ACCEPT_STRICT
+                    && let Some(sub_idx) = bag.subject_idx
+                    && category_strict_ok(ref_idx, sub_idx)
+                {
+                    pick = Some(sub_idx);
+                    rescued_band += 1;
                 }
                 if pick.is_none() {
                     let str_pick = str_best[ref_idx];
@@ -658,7 +678,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
