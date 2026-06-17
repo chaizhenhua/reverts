@@ -2720,17 +2720,24 @@ fn print_function_naming_coverage(
 
     // Anchor-spread (global fn-tier): per-function unique global
     // cascade hits. Union with module-matched: a function is "namable"
-    // if its module pinned OR it has a unique global cascade match.
+    // if its module pinned OR it has a unique global cascade match OR
+    // its AST hash has any subject equivalent (production can pick).
     let per_fn_hits = score_global_fn_unique_per_function(ref_fps, sub_fps);
     let mut namable_union: usize = 0;
     let mut global_only: usize = 0;
     for ref_idx in 0..ref_fps.len() {
         let module_pinned = report.best[ref_idx].subject_idx.is_some();
-        for hit in &per_fn_hits[ref_idx] {
-            if module_pinned || *hit {
+        for (fp_idx, hit) in per_fn_hits[ref_idx].iter().enumerate() {
+            let fp = &ref_fps[ref_idx].raw[fp_idx];
+            let has_ast = subject_ast.contains(&fp.primary.ast)
+                || fp
+                    .alternates
+                    .iter()
+                    .any(|alt| subject_ast.contains(&alt.axes.ast));
+            if module_pinned || *hit || has_ast {
                 namable_union += 1;
             }
-            if !module_pinned && *hit {
+            if !module_pinned && (*hit || has_ast) {
                 global_only += 1;
             }
         }
