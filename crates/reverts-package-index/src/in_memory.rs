@@ -91,6 +91,33 @@ impl<Owner: Clone> FingerprintIndex<Owner> {
     }
 }
 
+/// Borrowing query variants for hot scoring loops that only need to read
+/// candidate identities. Avoids the per-query `Vec<Candidate>` allocation
+/// the cloning API forces — significant when a tier scorer fires ~10
+/// queries per fingerprint on a corpus with tens of thousands of
+/// fingerprints.
+impl<Owner> FingerprintIndex<Owner> {
+    #[must_use]
+    pub fn lookup_exact(&self, key: ExactKey) -> &[Candidate<Owner>] {
+        self.exact.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub fn lookup_cfg(&self, key: CfgKey) -> &[Candidate<Owner>] {
+        self.cfg.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub fn lookup_feature(&self, key: FeatureKey) -> &[Candidate<Owner>] {
+        self.feature.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub fn lookup_structural(&self, key: StructuralKey) -> &[Candidate<Owner>] {
+        self.structural.get(&key).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
+
 impl<Owner> FingerprintIndex<Owner> {
     #[must_use]
     pub fn corpus_stats(&self) -> &CorpusStats {

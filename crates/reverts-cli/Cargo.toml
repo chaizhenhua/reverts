@@ -17,6 +17,7 @@ reverts-js = { path = "../reverts-js" }
 reverts-model = { path = "../reverts-model" }
 reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
+reverts-package-index = { path = "../reverts-package-index" }
 reverts-package-matcher = { path = "../reverts-package-matcher" }
 reverts-pipeline = { path = "../reverts-pipeline" }
 clap = { version = "4", features = ["derive"] }

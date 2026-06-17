@@ -14,6 +14,9 @@ use std::time::Instant;
 use clap::{Args, ValueEnum};
 use reverts_graph::FunctionExtractor;
 use reverts_ir::{AxisKind, FunctionFingerprint, ModuleId};
+use reverts_package_index::{
+    Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, StructuralKey,
+};
 use rusqlite::{Connection, OpenFlags, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
@@ -48,6 +51,20 @@ pub enum SimilarityMetric {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MatchStrategy {
+    /// Bag-of-fingerprints scoring with per-axis Jaccard/Overlap, combined
+    /// across axes. This is the original module-matcher; tunable via
+    /// `--metric`, `--combiner`, `--threshold-percent`.
+    BagJaccard,
+    /// Per-function tier-based matching that reuses the package matcher's
+    /// `FingerprintIndex`. Each ref function looks up subject candidates in
+    /// the shared inverted index, dedups by subject module, and aggregates
+    /// function-level wins up to the ref module. No Jaccard threshold; the
+    /// only knob is the per-tier acceptance ladder.
+    FunctionTier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum AxisCombiner {
     /// Per pair, take the single best per-axis score. Recall-friendly but
     /// over-rewards modules whose shape coincidentally matches on one
@@ -72,6 +89,11 @@ pub struct MatchModulesRecallArgs {
     pub ground_truth_project_id: u32,
     #[arg(long, value_parser = parse_project_id)]
     pub subject_project_id: u32,
+    /// Which matching strategy to evaluate. Bag-Jaccard is the original;
+    /// function-tier reuses the package matcher's shared FingerprintIndex
+    /// for per-function exact-and-cascade matching.
+    #[arg(long, value_enum, default_value_t = MatchStrategy::BagJaccard)]
+    pub strategy: MatchStrategy,
     /// Similarity threshold percent (0-100) above which a (ref, subject) pair
     /// counts as a match. Default 30 — calibrated for the mean-axis combiner.
     #[arg(long, default_value_t = 30)]
@@ -145,6 +167,12 @@ struct ModuleBag {
     function_count: usize,
 }
 
+/// Subject-module owner stored inside [`FingerprintIndex`] candidates for
+/// the function-tier strategy. Plain index into the subject module slice;
+/// the matcher never carries package metadata so we keep the owner type
+/// minimal.
+type ModuleOwner = usize;
+
 pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     let conn = Connection::open_with_flags(&args.input, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|source| CliRunError::MatchModulesRecall(format!("open db: {source}")))?;
@@ -201,8 +229,10 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     );
 
     let fp_started = Instant::now();
-    let ref_bags = fingerprint_modules(&ref_modules);
-    let sub_bags = fingerprint_modules(&sub_modules);
+    let ref_fps = fingerprint_modules(&ref_modules);
+    let sub_fps = fingerprint_modules(&sub_modules);
+    let ref_bags: Vec<ModuleBag> = ref_fps.iter().map(|m| m.bag.clone()).collect();
+    let sub_bags: Vec<ModuleBag> = sub_fps.iter().map(|m| m.bag.clone()).collect();
     println!(
         "fingerprinted ref ({} fps over {} modules) and subject ({} fps over {} modules) in {:.2}s",
         ref_bags.iter().map(|b| b.function_count).sum::<usize>(),
@@ -216,29 +246,48 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     let threshold = f64::from(args.threshold_percent) / 100.0;
     let use_idf = !args.no_idf;
     let use_size_prior = args.size_prior;
-    let (best_per_ref, scoring_context) = score_best_subjects(
-        &ref_bags,
-        &sub_bags,
-        args.metric,
-        args.combiner,
-        use_idf,
-        use_size_prior,
-    );
-    let recall = summarise_recall(&best_per_ref, threshold);
-    println!(
-        "[multi_axis_{}_{}{}{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
-        combiner_label(args.combiner),
-        metric_label(args.metric),
-        if use_idf { "_idf" } else { "" },
-        if use_size_prior { "_sz" } else { "" },
-        threshold,
-        recall.matched,
-        ref_modules.len(),
-        pct(recall.matched, ref_modules.len()),
-        scoring_started.elapsed().as_secs_f64(),
-    );
-    print_histogram(&recall.score_histogram, ref_modules.len());
-    print_axis_winners(&recall.winning_axis_counts);
+    let (best_per_ref, scoring_context_opt) = match args.strategy {
+        MatchStrategy::BagJaccard => {
+            let (best, context) = score_best_subjects(
+                &ref_bags,
+                &sub_bags,
+                args.metric,
+                args.combiner,
+                use_idf,
+                use_size_prior,
+            );
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[bag_jaccard_{}_{}{}{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                combiner_label(args.combiner),
+                metric_label(args.metric),
+                if use_idf { "_idf" } else { "" },
+                if use_size_prior { "_sz" } else { "" },
+                threshold,
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_axis_winners(&recall.winning_axis_counts);
+            (best, Some(context))
+        }
+        MatchStrategy::FunctionTier => {
+            let report = score_via_function_tier(&ref_fps, &sub_fps);
+            let recall = summarise_recall(&report.best, threshold);
+            println!(
+                "[function_tier (shared FingerprintIndex)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_tier_breakdown(&report.tier_counts);
+            (report.best, None)
+        }
+    };
 
     print_exact_match_summary(&ref_bags, &sub_bags);
 
@@ -248,17 +297,19 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
         &ref_bags,
         &sub_bags,
         &best_per_ref,
-        &scoring_context,
+        scoring_context_opt.as_ref(),
     );
     print_precision(&precision);
-    if args.show_mispairs > 0 {
+    if args.show_mispairs > 0
+        && let Some(context) = scoring_context_opt.as_ref()
+    {
         print_mispair_samples(
             &ref_modules,
             &sub_modules,
             &ref_bags,
             &sub_bags,
             &best_per_ref,
-            &scoring_context,
+            context,
             args.show_mispairs,
         );
     }
@@ -333,7 +384,16 @@ fn load_modules(
     Ok(out)
 }
 
-fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleBag> {
+/// Per-module fingerprint payload: both the per-axis bag (used by the
+/// bag-Jaccard strategy) and the raw `FunctionFingerprint` list (used by
+/// the function-tier strategy that talks to [`FingerprintIndex`]). One
+/// pass over the source so both strategies see the same fingerprints.
+struct ModuleFingerprints {
+    bag: ModuleBag,
+    raw: Vec<FunctionFingerprint>,
+}
+
+fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
     let mut source_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::with_capacity(modules.len());
     for module in modules {
@@ -341,7 +401,10 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleBag> {
             .entry(module.file_path.clone())
             .or_insert_with(|| fs::read_to_string(&module.file_path).ok());
         let Some(source_text) = source.as_deref() else {
-            out.push(ModuleBag::default());
+            out.push(ModuleFingerprints {
+                bag: ModuleBag::default(),
+                raw: Vec::new(),
+            });
             continue;
         };
         let start = module.byte_start as usize;
@@ -350,12 +413,16 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleBag> {
             .get(start..end.min(source_text.len()))
             .filter(|slice| !slice.is_empty());
         let Some(slice) = slice else {
-            out.push(ModuleBag::default());
+            out.push(ModuleFingerprints {
+                bag: ModuleBag::default(),
+                raw: Vec::new(),
+            });
             continue;
         };
         let module_id = ModuleId(u32::try_from(module.id).unwrap_or(u32::MAX));
-        let fingerprints = FunctionExtractor::fingerprint(module_id, slice);
-        out.push(bag_from_fingerprints(&fingerprints));
+        let raw = FunctionExtractor::fingerprint(module_id, slice);
+        let bag = bag_from_fingerprints(&raw);
+        out.push(ModuleFingerprints { bag, raw });
     }
     out
 }
@@ -582,6 +649,397 @@ fn score_best_subjects_with(
 /// modules have the same number of functions; falls toward 0 as the counts
 /// diverge. Used to suppress tiny generic helper modules from beating the
 /// genuinely-sized true counterpart on coincidental hash overlap.
+// ---------------------------------------------------------------------------
+// function-tier strategy (shared FingerprintIndex with the package matcher)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct FunctionTierReport {
+    best: Vec<BestMatch>,
+    /// Total subject-module winning votes attributed via each tier across all
+    /// ref functions. Mirrors the package matcher's MatchTier ladder without
+    /// dragging in the package-specific dedup logic.
+    tier_counts: BTreeMap<&'static str, usize>,
+}
+
+/// Weighted tier scores. Match the package matcher's `MatchTier::weight()`
+/// ordering: exact > exact-alt > structural-anchored > structural-anchored-alt
+/// > feature-similarity > feature-similarity-alt > structural-only > structural-only-alt.
+const TIER_EXACT: f64 = 1000.0;
+const TIER_EXACT_ALT: f64 = 900.0;
+const TIER_STRUCTURAL_ANCHORED: f64 = 800.0;
+const TIER_STRUCTURAL_ANCHORED_ALT: f64 = 500.0;
+const TIER_FEATURE_SIMILARITY: f64 = 100.0;
+const TIER_FEATURE_SIMILARITY_ALT: f64 = 50.0;
+const TIER_STRUCTURAL_ONLY: f64 = 10.0;
+const TIER_STRUCTURAL_ONLY_ALT: f64 = 5.0;
+
+/// Mirrors the package matcher's STRUCTURAL_FREQUENCY_LIMIT — a structural
+/// anchor seen in >50 subject functions carries almost no identification
+/// power and is also expensive to walk through.
+const STRUCTURAL_FREQUENCY_LIMIT: u32 = 50;
+const STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT: u32 = 250;
+const FEATURE_FREQUENCY_LIMIT: u32 = 250;
+
+fn score_via_function_tier(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> FunctionTierReport {
+    let mut index: FingerprintIndex<ModuleOwner> = FingerprintIndex::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            insert_function_into_index(&mut index, sub_idx, fp);
+        }
+    }
+
+    let mut report = FunctionTierReport::default();
+    for label in [
+        "exact",
+        "exact_alt",
+        "structural_anchored",
+        "structural_anchored_alt",
+        "feature_similarity",
+        "feature_similarity_alt",
+        "structural_only",
+        "structural_only_alt",
+    ] {
+        report.tier_counts.insert(label, 0);
+    }
+
+    let max_score_per_ref_fp = TIER_EXACT;
+
+    report.best.resize(ref_fps.len(), BestMatch::default());
+    for (ref_idx, ref_module) in ref_fps.iter().enumerate() {
+        if ref_module.raw.is_empty() {
+            continue;
+        }
+        let mut subject_scores: HashMap<usize, f64> = HashMap::new();
+        for fp in &ref_module.raw {
+            let (sub_idx, weight, tier_label) = cascade_function_match(&index, fp);
+            if let (Some(sub_idx), Some(label)) = (sub_idx, tier_label) {
+                *subject_scores.entry(sub_idx).or_default() += weight;
+                *report.tier_counts.entry(label).or_default() += 1;
+            }
+        }
+
+        let mut best_subject = None;
+        let mut best_total = 0.0_f64;
+        for (sub_idx, total) in subject_scores {
+            if total > best_total {
+                best_total = total;
+                best_subject = Some(sub_idx);
+            }
+        }
+        let normalised =
+            (best_total / (ref_module.raw.len() as f64 * max_score_per_ref_fp)).clamp(0.0, 1.0);
+        report.best[ref_idx] = BestMatch {
+            subject_idx: best_subject,
+            score: normalised,
+            axis: None,
+        };
+    }
+    report
+}
+
+fn insert_function_into_index(
+    index: &mut FingerprintIndex<ModuleOwner>,
+    sub_idx: ModuleOwner,
+    fp: &FunctionFingerprint,
+) {
+    // Unique-per-function id within (sub_idx). The (sub_idx, byte_start)
+    // pair is unique because each function occupies a distinct span in its
+    // module's source slice.
+    let fn_id = u64::from(fp.id.span.start);
+    let make = |axis: AxisKind, alt: Option<reverts_ir::NormalizationPassId>| Candidate {
+        owner: sub_idx,
+        external_function_id: fn_id,
+        matched_axis: axis,
+        matched_alternate: alt,
+    };
+
+    index.insert_exact(
+        ExactKey {
+            param_count: fp.param_count,
+            statement_count: fp.statement_count,
+            ast_hash: fp.primary.ast,
+        },
+        make(AxisKind::Ast, None),
+    );
+    index.insert_cfg(
+        CfgKey {
+            param_count: fp.param_count,
+            cfg_hash: fp.primary.cfg,
+        },
+        make(AxisKind::Cfg, None),
+    );
+    index.insert_structural(
+        StructuralKey {
+            param_count: fp.param_count,
+            structural_anchor: fp.primary.structural_anchor,
+        },
+        make(AxisKind::StructuralAnchor, None),
+    );
+    for axis in [
+        AxisKind::LiteralAnchor,
+        AxisKind::CalleeSet,
+        AxisKind::ThrowSet,
+        AxisKind::ReturnPattern,
+        AxisKind::EffectPattern,
+        AxisKind::BindingPattern,
+    ] {
+        if let Some(hash) = fp.primary.get(axis) {
+            index.insert_feature(
+                FeatureKey {
+                    param_count: fp.param_count,
+                    kind: axis,
+                    hash,
+                },
+                make(axis, None),
+            );
+        }
+    }
+    for alt in &fp.alternates {
+        index.insert_exact(
+            ExactKey {
+                param_count: fp.param_count,
+                statement_count: alt.statement_count,
+                ast_hash: alt.axes.ast,
+            },
+            make(AxisKind::Ast, Some(alt.pass)),
+        );
+        index.insert_cfg(
+            CfgKey {
+                param_count: fp.param_count,
+                cfg_hash: alt.axes.cfg,
+            },
+            make(AxisKind::Cfg, Some(alt.pass)),
+        );
+        index.insert_structural(
+            StructuralKey {
+                param_count: fp.param_count,
+                structural_anchor: alt.axes.structural_anchor,
+            },
+            make(AxisKind::StructuralAnchor, Some(alt.pass)),
+        );
+        for axis in [
+            AxisKind::LiteralAnchor,
+            AxisKind::CalleeSet,
+            AxisKind::ThrowSet,
+            AxisKind::ReturnPattern,
+            AxisKind::EffectPattern,
+            AxisKind::BindingPattern,
+        ] {
+            if let Some(hash) = alt.axes.get(axis) {
+                index.insert_feature(
+                    FeatureKey {
+                        param_count: fp.param_count,
+                        kind: axis,
+                        hash,
+                    },
+                    make(axis, Some(alt.pass)),
+                );
+            }
+        }
+    }
+}
+
+/// Returns the unique owner if all candidates share one — never clones.
+fn unique_owner(cands: &[Candidate<ModuleOwner>]) -> Option<ModuleOwner> {
+    let first = cands.first()?.owner;
+    if cands.iter().all(|c| c.owner == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+/// Walks the same tier ladder the package matcher uses, but dedups by
+/// subject_module instead of (package, fn_id). Returns the winning subject
+/// module index along with weight + tier label when a tier finds a unique
+/// owner.
+fn cascade_function_match(
+    index: &FingerprintIndex<ModuleOwner>,
+    fp: &FunctionFingerprint,
+) -> (Option<ModuleOwner>, f64, Option<&'static str>) {
+    // Tier 1: exact AST.
+    if let Some(owner) = unique_owner(index.lookup_exact(ExactKey {
+        param_count: fp.param_count,
+        statement_count: fp.statement_count,
+        ast_hash: fp.primary.ast,
+    })) {
+        return (Some(owner), TIER_EXACT, Some("exact"));
+    }
+    // Tier 1b: exact-alt AST.
+    for alt in &fp.alternates {
+        if let Some(owner) = unique_owner(index.lookup_exact(ExactKey {
+            param_count: fp.param_count,
+            statement_count: alt.statement_count,
+            ast_hash: alt.axes.ast,
+        })) {
+            return (Some(owner), TIER_EXACT_ALT, Some("exact_alt"));
+        }
+    }
+    // Tier 2: structural anchored.
+    if let Some(owner) = structural_anchored_match(index, fp.param_count, &fp.primary) {
+        return (
+            Some(owner),
+            TIER_STRUCTURAL_ANCHORED,
+            Some("structural_anchored"),
+        );
+    }
+    for alt in &fp.alternates {
+        if let Some(owner) = structural_anchored_match(index, fp.param_count, &alt.axes) {
+            return (
+                Some(owner),
+                TIER_STRUCTURAL_ANCHORED_ALT,
+                Some("structural_anchored_alt"),
+            );
+        }
+    }
+    // Tier 3: feature similarity (one unique distinctive-axis hit suffices).
+    let stats = index.corpus_stats();
+    for axis in [
+        AxisKind::CalleeSet,
+        AxisKind::ThrowSet,
+        AxisKind::LiteralAnchor,
+        AxisKind::AccessPattern,
+    ] {
+        if let Some(hash) = fp.primary.get(axis) {
+            if stats.frequency(axis, hash) > FEATURE_FREQUENCY_LIMIT {
+                continue;
+            }
+            if let Some(owner) = unique_owner(index.lookup_feature(FeatureKey {
+                param_count: fp.param_count,
+                kind: axis,
+                hash,
+            })) {
+                return (
+                    Some(owner),
+                    TIER_FEATURE_SIMILARITY,
+                    Some("feature_similarity"),
+                );
+            }
+        }
+    }
+    for alt in &fp.alternates {
+        for axis in [
+            AxisKind::CalleeSet,
+            AxisKind::ThrowSet,
+            AxisKind::LiteralAnchor,
+            AxisKind::AccessPattern,
+        ] {
+            if let Some(hash) = alt.axes.get(axis) {
+                if stats.frequency(axis, hash) > FEATURE_FREQUENCY_LIMIT {
+                    continue;
+                }
+                if let Some(owner) = unique_owner(index.lookup_feature(FeatureKey {
+                    param_count: fp.param_count,
+                    kind: axis,
+                    hash,
+                })) {
+                    return (
+                        Some(owner),
+                        TIER_FEATURE_SIMILARITY_ALT,
+                        Some("feature_similarity_alt"),
+                    );
+                }
+            }
+        }
+    }
+    // Tier 4: structural only.
+    if stats.frequency(AxisKind::StructuralAnchor, fp.primary.structural_anchor)
+        <= STRUCTURAL_FREQUENCY_LIMIT
+        && let Some(owner) = unique_owner(index.lookup_structural(StructuralKey {
+            param_count: fp.param_count,
+            structural_anchor: fp.primary.structural_anchor,
+        }))
+    {
+        return (Some(owner), TIER_STRUCTURAL_ONLY, Some("structural_only"));
+    }
+    for alt in &fp.alternates {
+        if stats.frequency(AxisKind::StructuralAnchor, alt.axes.structural_anchor)
+            <= STRUCTURAL_FREQUENCY_LIMIT
+            && let Some(owner) = unique_owner(index.lookup_structural(StructuralKey {
+                param_count: fp.param_count,
+                structural_anchor: alt.axes.structural_anchor,
+            }))
+        {
+            return (
+                Some(owner),
+                TIER_STRUCTURAL_ONLY_ALT,
+                Some("structural_only_alt"),
+            );
+        }
+    }
+    (None, 0.0, None)
+}
+
+fn structural_anchored_match(
+    index: &FingerprintIndex<ModuleOwner>,
+    param_count: u32,
+    axes: &reverts_ir::AxisHashes,
+) -> Option<ModuleOwner> {
+    if index.corpus_stats().frequency(AxisKind::Cfg, axes.cfg)
+        > STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT
+    {
+        return None;
+    }
+    let cfg_candidates = index.lookup_cfg(CfgKey {
+        param_count,
+        cfg_hash: axes.cfg,
+    });
+    if cfg_candidates.is_empty() {
+        return None;
+    }
+    let anchors: [(AxisKind, Option<u64>); 3] = [
+        (AxisKind::LiteralAnchor, axes.literal_anchor),
+        (AxisKind::CalleeSet, axes.callee_set),
+        (AxisKind::ThrowSet, axes.throw_set),
+    ];
+    let any_anchor = anchors.iter().any(|(_, h)| h.is_some());
+    if !any_anchor {
+        return None;
+    }
+    let mut survivor: Option<ModuleOwner> = None;
+    for c in cfg_candidates {
+        let has_overlap = anchors.iter().any(|(axis, maybe_hash)| {
+            if let Some(hash) = maybe_hash {
+                index
+                    .lookup_feature(FeatureKey {
+                        param_count,
+                        kind: *axis,
+                        hash: *hash,
+                    })
+                    .iter()
+                    .any(|fc| {
+                        fc.owner == c.owner && fc.external_function_id == c.external_function_id
+                    })
+            } else {
+                false
+            }
+        });
+        if has_overlap {
+            match survivor {
+                None => survivor = Some(c.owner),
+                Some(prev) if prev == c.owner => {}
+                Some(_) => return None,
+            }
+        }
+    }
+    survivor
+}
+
+fn print_tier_breakdown(tier_counts: &BTreeMap<&'static str, usize>) {
+    let mut entries: Vec<_> = tier_counts.iter().collect();
+    entries.sort_by_key(|(label, _)| *label);
+    let line = entries
+        .iter()
+        .map(|(label, count)| format!("{label}: {count}"))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("  function-match tier wins: {line}");
+}
+
 fn size_prior(ref_fp: usize, sub_fp: usize) -> f64 {
     if ref_fp == 0 || sub_fp == 0 {
         return 0.5;
@@ -699,7 +1157,7 @@ fn precision_against_baseline(
     ref_bags: &[ModuleBag],
     sub_bags: &[ModuleBag],
     best_per_ref: &[BestMatch],
-    context: &ScoringContext,
+    context: Option<&ScoringContext>,
 ) -> PrecisionReport {
     let mut subject_names_by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (idx, module) in sub_modules.iter().enumerate() {
@@ -720,21 +1178,28 @@ fn precision_against_baseline(
         let best = best_per_ref[ref_idx];
 
         // Verified universe: same-named subject also has confident content
-        // overlap, so the baseline is a real pairing.
-        let mut best_truth_score = 0.0_f64;
-        for &truth_idx in truth_indexes {
-            let truth_score = score_pair(
-                ref_idx,
-                truth_idx,
-                &ref_bags[ref_idx],
-                &sub_bags[truth_idx],
-                context,
-            );
-            if truth_score > best_truth_score {
-                best_truth_score = truth_score;
+        // overlap, so the baseline is a real pairing. Only the bag-Jaccard
+        // strategy carries a `ScoringContext`; the function-tier strategy
+        // reports the same `baseline / correctly_paired` numbers but skips
+        // the verified-universe slice (no per-pair score to threshold on).
+        let verified = if let Some(ctx) = context {
+            let mut best_truth_score = 0.0_f64;
+            for &truth_idx in truth_indexes {
+                let truth_score = score_pair(
+                    ref_idx,
+                    truth_idx,
+                    &ref_bags[ref_idx],
+                    &sub_bags[truth_idx],
+                    ctx,
+                );
+                if truth_score > best_truth_score {
+                    best_truth_score = truth_score;
+                }
             }
-        }
-        let verified = best_truth_score >= VERIFIED_TRUTH_SCORE_THRESHOLD;
+            best_truth_score >= VERIFIED_TRUTH_SCORE_THRESHOLD
+        } else {
+            false
+        };
         if verified {
             report.verified_universe += 1;
         }

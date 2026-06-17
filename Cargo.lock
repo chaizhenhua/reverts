@@ -1056,6 +1056,7 @@ dependencies = [
  "reverts-model",
  "reverts-observe",
  "reverts-package",
+ "reverts-package-index",
  "reverts-package-matcher",
  "reverts-pipeline",
  "rusqlite",
