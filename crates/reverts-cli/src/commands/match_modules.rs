@@ -2539,6 +2539,45 @@ fn score_via_function_first_pin(
     out
 }
 
+/// Per-function global cascade: for each ref function, look it up in
+/// the project-wide subject index and record whether the cascade picked
+/// a unique winner. Used by the naming-coverage report to capture
+/// functions that are namable even when their containing module didn't
+/// pin (the anchor-then-spread case).
+fn score_global_fn_unique_per_function(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<Vec<bool>> {
+    use reverts_package_matcher::{
+        try_exact, try_exact_alternate, try_structural_anchored, try_structural_anchored_alternate,
+        try_structural_only, try_structural_only_alternate,
+    };
+
+    let mut index: FingerprintIndex<ModuleOwner> = FingerprintIndex::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            insert_function_into_index(&mut index, sub_idx, fp);
+        }
+    }
+
+    let mut out: Vec<Vec<bool>> = Vec::with_capacity(ref_fps.len());
+    for m in ref_fps {
+        let mut row = Vec::with_capacity(m.raw.len());
+        for fp in &m.raw {
+            let hit = try_exact(fp, &index)
+                .or_else(|| try_exact_alternate(fp, &index))
+                .or_else(|| try_structural_anchored(fp, &index))
+                .or_else(|| try_structural_anchored_alternate(fp, &index))
+                .or_else(|| try_structural_only(fp, &index))
+                .or_else(|| try_structural_only_alternate(fp, &index))
+                .is_some();
+            row.push(hit);
+        }
+        out.push(row);
+    }
+    out
+}
+
 /// Module-pinned function-tier scoring. For each ref module that has a
 /// `pinned` subject partner, build a fingerprint index over JUST that
 /// subject module's functions and run the shared cascade against it. With
@@ -2679,8 +2718,26 @@ fn print_function_naming_coverage(
         .map(|ref_idx| ref_fps[ref_idx].raw.len())
         .sum();
 
+    // Anchor-spread (global fn-tier): per-function unique global
+    // cascade hits. Union with module-matched: a function is "namable"
+    // if its module pinned OR it has a unique global cascade match.
+    let per_fn_hits = score_global_fn_unique_per_function(ref_fps, sub_fps);
+    let mut namable_union: usize = 0;
+    let mut global_only: usize = 0;
+    for ref_idx in 0..ref_fps.len() {
+        let module_pinned = report.best[ref_idx].subject_idx.is_some();
+        for hit in &per_fn_hits[ref_idx] {
+            if module_pinned || *hit {
+                namable_union += 1;
+            }
+            if !module_pinned && *hit {
+                global_only += 1;
+            }
+        }
+    }
+
     println!(
-        "  function naming coverage: {} ref functions total\n    tier_unique high   (exact / exact_alt only):              {} ({:.2}%)\n    tier_unique medium (+ structural_anchored*):             {} ({:.2}%)\n    tier_unique low    (+ structural_only*, default cascade): {} ({:.2}%)\n    any_ast_match (≥1 content-equal subject fn):             {} ({:.2}%)\n    inside module_matched (inherit via module pick):         {} ({:.2}%)",
+        "  function naming coverage: {} ref functions total\n    tier_unique high   (exact / exact_alt only):              {} ({:.2}%)\n    tier_unique medium (+ structural_anchored*):             {} ({:.2}%)\n    tier_unique low    (+ structural_only*, default cascade): {} ({:.2}%)\n    any_ast_match (≥1 content-equal subject fn):             {} ({:.2}%)\n    inside module_matched (inherit via module pick):         {} ({:.2}%)\n    namable (module_pin ∪ global fn-tier hit):               {} ({:.2}%)  [+{global_only} from anchor-spread]",
         total_fns,
         tier_unique_high,
         pct(tier_unique_high, total_fns),
@@ -2692,6 +2749,8 @@ fn print_function_naming_coverage(
         pct(any_ast_match, total_fns),
         module_matched,
         pct(module_matched, total_fns),
+        namable_union,
+        pct(namable_union, total_fns),
     );
 }
 
