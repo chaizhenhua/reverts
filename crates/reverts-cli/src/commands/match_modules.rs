@@ -90,6 +90,13 @@ pub struct MatchModulesRecallArgs {
     /// good for precision because common shapes stop dominating.
     #[arg(long, default_value_t = false)]
     pub no_idf: bool,
+    /// Enable a function-count size prior multiplier on the per-pair score.
+    /// Penalises pairs whose function counts diverge. Off by default — on the
+    /// CC 2.1.89 src-ref vs bundle data it suppresses recall without lifting
+    /// precision, because many cli "named" modules legitimately differ in
+    /// size from the source counterpart (re-export thin / inlined fat).
+    #[arg(long, default_value_t = false)]
+    pub size_prior: bool,
     /// Restrict to modules of this category (e.g. "application", "package").
     /// Repeatable. Empty = all categories.
     #[arg(long = "category")]
@@ -97,6 +104,10 @@ pub struct MatchModulesRecallArgs {
     /// Optional cap on modules per project (for fast iteration).
     #[arg(long)]
     pub limit: Option<usize>,
+    /// Print up to N baseline-pair mispair examples, showing ref name, the
+    /// matcher's pick, and the named subject the matcher should have picked.
+    #[arg(long, default_value_t = 0)]
+    pub show_mispairs: usize,
 }
 
 impl MatchModulesRecallArgs {
@@ -204,14 +215,22 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     let scoring_started = Instant::now();
     let threshold = f64::from(args.threshold_percent) / 100.0;
     let use_idf = !args.no_idf;
-    let best_per_ref =
-        score_best_subjects(&ref_bags, &sub_bags, args.metric, args.combiner, use_idf);
+    let use_size_prior = args.size_prior;
+    let (best_per_ref, scoring_context) = score_best_subjects(
+        &ref_bags,
+        &sub_bags,
+        args.metric,
+        args.combiner,
+        use_idf,
+        use_size_prior,
+    );
     let recall = summarise_recall(&best_per_ref, threshold);
     println!(
-        "[multi_axis_{}_{}{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        "[multi_axis_{}_{}{}{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
         combiner_label(args.combiner),
         metric_label(args.metric),
         if use_idf { "_idf" } else { "" },
+        if use_size_prior { "_sz" } else { "" },
         threshold,
         recall.matched,
         ref_modules.len(),
@@ -223,6 +242,17 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
     let precision = precision_against_baseline(&ref_modules, &sub_modules, &best_per_ref);
     print_precision(&precision);
+    if args.show_mispairs > 0 {
+        print_mispair_samples(
+            &ref_modules,
+            &sub_modules,
+            &ref_bags,
+            &sub_bags,
+            &best_per_ref,
+            &scoring_context,
+            args.show_mispairs,
+        );
+    }
 
     Ok(())
 }
@@ -361,6 +391,62 @@ struct BestMatch {
     axis: Option<AxisKind>,
 }
 
+/// Precomputed weighting structures derived from the subject corpus. The
+/// same `ScoringContext` is reused for best-subject scoring and for ad-hoc
+/// per-pair scoring (e.g. mispair debugging), so all paths agree on weights.
+struct ScoringContext {
+    metric: SimilarityMetric,
+    combiner: AxisCombiner,
+    use_size_prior: bool,
+    /// (axis, hash) -> IDF weight (1.0 when IDF disabled).
+    hash_weight: HashMap<(AxisKind, u64), f64>,
+    /// Per ref bag, per axis: sum of weights across the bag's hashes.
+    ref_axis_weight: Vec<BTreeMap<AxisKind, f64>>,
+    /// Per subject bag, per axis: sum of weights across the bag's hashes.
+    sub_axis_weight: Vec<BTreeMap<AxisKind, f64>>,
+    /// Inverted index: (axis, hash) -> subject indexes containing it.
+    by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>>,
+}
+
+fn build_scoring_context(
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
+    metric: SimilarityMetric,
+    combiner: AxisCombiner,
+    use_idf: bool,
+    use_size_prior: bool,
+) -> ScoringContext {
+    let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
+    for (sub_idx, bag) in sub_bags.iter().enumerate() {
+        for (axis, hashes) in &bag.by_axis {
+            for &hash in hashes {
+                by_axis_hash.entry((*axis, hash)).or_default().push(sub_idx);
+            }
+        }
+    }
+    let total_subjects = sub_bags.len().max(1) as f64;
+    let mut hash_weight: HashMap<(AxisKind, u64), f64> = HashMap::with_capacity(by_axis_hash.len());
+    for ((axis, hash), subjects) in &by_axis_hash {
+        let weight = if use_idf {
+            (total_subjects / subjects.len() as f64).ln().max(0.0)
+        } else {
+            1.0
+        };
+        hash_weight.insert((*axis, *hash), weight);
+    }
+    let ref_axis_weight = weighted_axis_sums(ref_bags, &hash_weight);
+    let sub_axis_weight = weighted_axis_sums(sub_bags, &hash_weight);
+    ScoringContext {
+        metric,
+        combiner,
+        use_size_prior,
+        hash_weight,
+        ref_axis_weight,
+        sub_axis_weight,
+        by_axis_hash,
+    }
+}
+
 /// Returns the best (subject_idx, score, axis) for each ref module, indexed
 /// alongside `ref_bags`. Uses an (axis, hash) inverted index to skip
 /// candidates that share no fingerprint hash, so we do not pay O(R · S).
@@ -375,35 +461,29 @@ fn score_best_subjects(
     metric: SimilarityMetric,
     combiner: AxisCombiner,
     use_idf: bool,
+    use_size_prior: bool,
+) -> (Vec<BestMatch>, ScoringContext) {
+    let context = build_scoring_context(
+        ref_bags,
+        sub_bags,
+        metric,
+        combiner,
+        use_idf,
+        use_size_prior,
+    );
+    let best = score_best_subjects_with(&context, ref_bags, sub_bags);
+    (best, context)
+}
+
+fn score_best_subjects_with(
+    context: &ScoringContext,
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
 ) -> Vec<BestMatch> {
-    // Inverted index: (axis, hash) -> Vec<subject_index>.
-    let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
-    for (sub_idx, bag) in sub_bags.iter().enumerate() {
-        for (axis, hashes) in &bag.by_axis {
-            for &hash in hashes {
-                by_axis_hash.entry((*axis, hash)).or_default().push(sub_idx);
-            }
-        }
-    }
-
-    // Pre-compute IDF weights per (axis, hash). A hash that appears in every
-    // subject contributes 0 to the score; a hash unique to one subject
-    // contributes ln(N).
-    let total_subjects = sub_bags.len().max(1) as f64;
-    let mut hash_weight: HashMap<(AxisKind, u64), f64> = HashMap::with_capacity(by_axis_hash.len());
-    for ((axis, hash), subjects) in &by_axis_hash {
-        let weight = if use_idf {
-            (total_subjects / subjects.len() as f64).ln().max(0.0)
-        } else {
-            1.0
-        };
-        hash_weight.insert((*axis, *hash), weight);
-    }
-
-    // Pre-compute per-bag per-axis weighted size = sum of weights over that
-    // bag's hashes on that axis. Used as the Jaccard/Overlap denominator.
-    let ref_axis_weight = weighted_axis_sums(ref_bags, &hash_weight);
-    let sub_axis_weight = weighted_axis_sums(sub_bags, &hash_weight);
+    let hash_weight = &context.hash_weight;
+    let by_axis_hash = &context.by_axis_hash;
+    let ref_axis_weight = &context.ref_axis_weight;
+    let sub_axis_weight = &context.sub_axis_weight;
 
     let mut out = vec![BestMatch::default(); ref_bags.len()];
 
@@ -459,7 +539,7 @@ fn score_best_subjects(
                 if intersect <= 0.0 {
                     continue;
                 }
-                per_axis_scores[idx] = match metric {
+                per_axis_scores[idx] = match context.metric {
                     SimilarityMetric::Jaccard => {
                         let union = ref_weight + sub_weight - intersect;
                         if union <= 0.0 { 0.0 } else { intersect / union }
@@ -467,8 +547,13 @@ fn score_best_subjects(
                     SimilarityMetric::Overlap => intersect / ref_weight.min(sub_weight),
                 };
             }
-            let (score, winning_axis) =
-                combine_axis_scores(&per_axis_scores, ref_active_axes, combiner);
+            let (raw_score, winning_axis) =
+                combine_axis_scores(&per_axis_scores, ref_active_axes, context.combiner);
+            let score = if context.use_size_prior {
+                raw_score * size_prior(ref_bag.function_count, sub_bags[sub_idx].function_count)
+            } else {
+                raw_score
+            };
             if score > best_score {
                 best_score = score;
                 best_axis = winning_axis;
@@ -482,6 +567,19 @@ fn score_best_subjects(
         };
     }
     out
+}
+
+/// Function-count similarity prior in `[0, 1]`. Peaks at 1.0 when both
+/// modules have the same number of functions; falls toward 0 as the counts
+/// diverge. Used to suppress tiny generic helper modules from beating the
+/// genuinely-sized true counterpart on coincidental hash overlap.
+fn size_prior(ref_fp: usize, sub_fp: usize) -> f64 {
+    if ref_fp == 0 || sub_fp == 0 {
+        return 0.5;
+    }
+    let diff = ref_fp.abs_diff(sub_fp) as f64;
+    let total = (ref_fp + sub_fp) as f64;
+    (1.0 - diff / total).max(0.1)
 }
 
 fn weighted_axis_sums(
@@ -610,6 +708,129 @@ fn precision_against_baseline(
         }
     }
     report
+}
+
+fn score_pair(
+    ref_idx: usize,
+    sub_idx: usize,
+    ref_bag: &ModuleBag,
+    sub_bag: &ModuleBag,
+    context: &ScoringContext,
+) -> f64 {
+    let mut per_axis_scores: [f64; SCORING_AXES.len()] = [0.0; SCORING_AXES.len()];
+    let mut ref_active_axes: usize = 0;
+    for (idx, &axis) in SCORING_AXES.iter().enumerate() {
+        let ref_weight = context.ref_axis_weight[ref_idx]
+            .get(&axis)
+            .copied()
+            .unwrap_or(0.0);
+        if ref_weight <= 0.0 {
+            continue;
+        }
+        ref_active_axes += 1;
+        let sub_weight = context.sub_axis_weight[sub_idx]
+            .get(&axis)
+            .copied()
+            .unwrap_or(0.0);
+        if sub_weight <= 0.0 {
+            continue;
+        }
+        // Direct intersection by walking the smaller axis bag against the
+        // larger one. Cheaper than rebuilding the per-axis inverted index.
+        let (small, large) = match (ref_bag.by_axis.get(&axis), sub_bag.by_axis.get(&axis)) {
+            (Some(r), Some(s)) if r.len() <= s.len() => (r, s),
+            (Some(r), Some(s)) => (s, r),
+            _ => continue,
+        };
+        let mut intersect: f64 = 0.0;
+        for hash in small {
+            if large.contains(hash) {
+                intersect += context
+                    .hash_weight
+                    .get(&(axis, *hash))
+                    .copied()
+                    .unwrap_or(0.0);
+            }
+        }
+        if intersect <= 0.0 {
+            continue;
+        }
+        per_axis_scores[idx] = match context.metric {
+            SimilarityMetric::Jaccard => {
+                let union = ref_weight + sub_weight - intersect;
+                if union <= 0.0 { 0.0 } else { intersect / union }
+            }
+            SimilarityMetric::Overlap => intersect / ref_weight.min(sub_weight),
+        };
+    }
+    let (raw_score, _) = combine_axis_scores(&per_axis_scores, ref_active_axes, context.combiner);
+    if context.use_size_prior {
+        raw_score * size_prior(ref_bag.function_count, sub_bag.function_count)
+    } else {
+        raw_score
+    }
+}
+
+fn print_mispair_samples(
+    ref_modules: &[ModuleRecord],
+    sub_modules: &[ModuleRecord],
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
+    best_per_ref: &[BestMatch],
+    context: &ScoringContext,
+    limit: usize,
+) {
+    let mut subject_by_name: BTreeMap<&str, usize> = BTreeMap::new();
+    for (idx, module) in sub_modules.iter().enumerate() {
+        if let Some(name) = module.semantic_name.as_deref() {
+            subject_by_name.entry(name).or_insert(idx);
+        }
+    }
+    println!("--- mispair samples ---");
+    let mut shown = 0;
+    for (ref_idx, ref_module) in ref_modules.iter().enumerate() {
+        if shown >= limit {
+            break;
+        }
+        let Some(name) = ref_module.semantic_name.as_deref() else {
+            continue;
+        };
+        let Some(&truth_idx) = subject_by_name.get(name) else {
+            continue;
+        };
+        let best = best_per_ref[ref_idx];
+        let picked = best.subject_idx.map(|idx| {
+            sub_modules[idx]
+                .semantic_name
+                .as_deref()
+                .unwrap_or("<unnamed>")
+        });
+        let picked_name = picked.unwrap_or("<no pick>");
+        if picked == Some(name) {
+            continue;
+        }
+        let ref_fp = ref_bags[ref_idx].function_count;
+        let truth_fp = sub_bags[truth_idx].function_count;
+        let picked_fp = best
+            .subject_idx
+            .map_or(0, |idx| sub_bags[idx].function_count);
+        let axis = best.axis.map(AxisKind::as_str).unwrap_or("-");
+        let truth_score = score_pair(
+            ref_idx,
+            truth_idx,
+            &ref_bags[ref_idx],
+            &sub_bags[truth_idx],
+            context,
+        );
+        println!(
+            "  ref={name} (fps={ref_fp}) truth_sub={name} (fps={truth_fp}, score={truth_score:.3}) picked_sub={picked_name} (fps={picked_fp}, score={:.3}) axis={axis}",
+            best.score,
+        );
+        shown += 1;
+    }
+    if shown == 0 {
+        println!("  (no mispairs)");
+    }
 }
 
 fn print_precision(report: &PrecisionReport) {
