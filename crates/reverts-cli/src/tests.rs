@@ -382,10 +382,11 @@ fn runtime_emitted_setter_blockers_count_batched_setter_declarations() {
         total_bindings: 2,
         ..Default::default()
     };
-    report.add_reason(
+    report.add_reason_with_sub(
         1,
         BindingName::new("X"),
         RuntimeSetterMigrationBlockerReason::ReaderNonSnippetUse,
+        Some("lazy_init_cycle_import"),
     );
     report.add_reason(
         1,
@@ -407,6 +408,13 @@ fn runtime_emitted_setter_blockers_count_batched_setter_declarations() {
         emitted
             .reasons
             .get(&RuntimeSetterMigrationBlockerReason::RuntimeNonSnippetRead),
+        Some(&1)
+    );
+    assert_eq!(
+        emitted.sub_reasons.get(&(
+            RuntimeSetterMigrationBlockerReason::ReaderNonSnippetUse,
+            "lazy_init_cycle_import"
+        )),
         Some(&1)
     );
 }

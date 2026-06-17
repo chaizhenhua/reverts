@@ -228,9 +228,10 @@ fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrat
                 .binding_statuses
                 .iter()
                 .filter_map(|(key, status)| match status {
-                    RuntimeSetterMigrationBindingStatus::Blocked(blocked_reason)
-                        if *blocked_reason == reason =>
-                    {
+                    RuntimeSetterMigrationBindingStatus::Blocked {
+                        reason: blocked_reason,
+                        ..
+                    } if *blocked_reason == reason => {
                         Some(format!("{}:{}", key.source_file_id, key.binding.as_str()))
                     }
                     _ => None,
@@ -464,8 +465,8 @@ pub(crate) fn runtime_emitted_setter_blockers_from_files(
                 Some(RuntimeSetterMigrationBindingStatus::Accepted) => {
                     emitted.add_accepted(source_file_id, binding);
                 }
-                Some(RuntimeSetterMigrationBindingStatus::Blocked(reason)) => {
-                    emitted.add_reason(source_file_id, binding, reason);
+                Some(RuntimeSetterMigrationBindingStatus::Blocked { reason, sub_reason }) => {
+                    emitted.add_reason_with_sub(source_file_id, binding, reason, sub_reason);
                 }
                 None => emitted.add_reason(
                     source_file_id,

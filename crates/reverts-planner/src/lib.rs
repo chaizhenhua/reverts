@@ -3846,6 +3846,29 @@ pub(crate) fn selected_runtime_dependencies_for_binding(
     deps
 }
 
+fn add_runtime_setter_blocker_reason(
+    report: &mut RuntimeSetterMigrationBlockerReport,
+    source_id: u32,
+    binding: BindingName,
+    reason: RuntimeSetterMigrationBlockerReason,
+    sub_reason: Option<&'static str>,
+    is_setter_dependency: bool,
+) {
+    let (reason, sub_reason) = if is_setter_dependency {
+        (
+            RuntimeSetterMigrationBlockerReason::RuntimeReaderWriteSetterDependency,
+            Some(sub_reason.unwrap_or_else(|| reason.as_str())),
+        )
+    } else {
+        (reason, sub_reason)
+    };
+    if let Some(sub_reason) = sub_reason {
+        report.add_reason_with_sub(source_id, binding, reason, Some(sub_reason));
+    } else {
+        report.add_reason(source_id, binding, reason);
+    }
+}
+
 pub(crate) fn runtime_setter_migration_blocker_report(
     program: &EnrichedProgram,
     source_module_wiring: &SourceModuleWiring,
@@ -3930,45 +3953,38 @@ pub(crate) fn runtime_setter_migration_blocker_report(
             report.add_accepted(*source_id, binding.clone());
             continue;
         }
-        if runtime_reader_write_setter_deps.contains(&(*source_id, binding.clone())) {
-            report.add_reason(
-                *source_id,
-                binding.clone(),
-                RuntimeSetterMigrationBlockerReason::RuntimeReaderWriteSetterDependency,
-            );
-            continue;
-        }
+        let is_setter_dependency =
+            runtime_reader_write_setter_deps.contains(&(*source_id, binding.clone()));
         let eligible = eligible_writers
             .get(&(*source_id, binding.clone()))
             .cloned()
             .unwrap_or_default();
         if eligible.is_empty() {
-            if excluded_folded.contains_key(&(*source_id, binding.clone())) {
-                report.add_reason(
-                    *source_id,
-                    binding.clone(),
-                    RuntimeSetterMigrationBlockerReason::FoldedWriterOnly,
-                );
+            let reason = if excluded_folded.contains_key(&(*source_id, binding.clone())) {
+                RuntimeSetterMigrationBlockerReason::FoldedWriterOnly
             } else if excluded_externalized.contains_key(&(*source_id, binding.clone())) {
-                report.add_reason(
-                    *source_id,
-                    binding.clone(),
-                    RuntimeSetterMigrationBlockerReason::ExternalizedPackageWriterOnly,
-                );
+                RuntimeSetterMigrationBlockerReason::ExternalizedPackageWriterOnly
             } else {
-                report.add_reason(
-                    *source_id,
-                    binding.clone(),
-                    RuntimeSetterMigrationBlockerReason::NoEligibleWriter,
-                );
-            }
+                RuntimeSetterMigrationBlockerReason::NoEligibleWriter
+            };
+            add_runtime_setter_blocker_reason(
+                &mut report,
+                *source_id,
+                binding.clone(),
+                reason,
+                None,
+                is_setter_dependency,
+            );
             continue;
         }
         if eligible.len() > 1 {
-            report.add_reason(
+            add_runtime_setter_blocker_reason(
+                &mut report,
                 *source_id,
                 binding.clone(),
                 RuntimeSetterMigrationBlockerReason::MultipleEligibleWriters,
+                None,
+                is_setter_dependency,
             );
             continue;
         }
@@ -3985,10 +4001,15 @@ pub(crate) fn runtime_setter_migration_blocker_report(
     for (source_id, candidates) in by_source {
         let Some(prelude) = program.model().graph().runtime_prelude(source_id) else {
             for (binding, _owner_module) in candidates {
-                report.add_reason(
+                let is_setter_dependency =
+                    runtime_reader_write_setter_deps.contains(&(source_id, binding.clone()));
+                add_runtime_setter_blocker_reason(
+                    &mut report,
                     source_id,
                     binding,
                     RuntimeSetterMigrationBlockerReason::MissingRuntimePrelude,
+                    None,
+                    is_setter_dependency,
                 );
             }
             continue;
@@ -3996,10 +4017,15 @@ pub(crate) fn runtime_setter_migration_blocker_report(
         let mut initialized_candidates = Vec::<(BindingName, ModuleId)>::new();
         for (binding, owner_module) in candidates {
             if migratable_runtime_var_initializer(prelude, &binding).is_none() {
-                report.add_reason(
+                let is_setter_dependency =
+                    runtime_reader_write_setter_deps.contains(&(source_id, binding.clone()));
+                add_runtime_setter_blocker_reason(
+                    &mut report,
                     source_id,
                     binding,
                     RuntimeSetterMigrationBlockerReason::InitializerNotMigratable,
+                    None,
+                    is_setter_dependency,
                 );
                 continue;
             }
@@ -4054,12 +4080,17 @@ pub(crate) fn runtime_setter_migration_blocker_report(
             if reported_primary_bindings.contains(&binding) {
                 continue;
             }
+            let is_setter_dependency =
+                runtime_reader_write_setter_deps.contains(&(source_id, binding.clone()));
             match runtime_binding_read_profile_diagnostic(&read_index, &binding) {
                 Ok(RuntimeBindingReadProfile::NoReads) => {
-                    report.add_reason(
+                    add_runtime_setter_blocker_reason(
+                        &mut report,
                         source_id,
                         binding.clone(),
                         RuntimeSetterMigrationBlockerReason::NoDiagnosticStatus,
+                        None,
+                        is_setter_dependency,
                     );
                     reported_primary_bindings.insert(binding);
                 }
@@ -4071,16 +4102,21 @@ pub(crate) fn runtime_setter_migration_blocker_report(
                         readers,
                     );
                     match cluster_result {
-                        Ok(_) => report.add_reason(
+                        Ok(_) => add_runtime_setter_blocker_reason(
+                            &mut report,
                             source_id,
                             binding,
                             RuntimeSetterMigrationBlockerReason::ReaderClusterOverlapsMigratedBinding,
+                            None,
+                            is_setter_dependency,
                         ),
-                        Err(blocker) => report.add_reason_with_sub(
+                        Err(blocker) => add_runtime_setter_blocker_reason(
+                            &mut report,
                             source_id,
                             binding,
                             blocker.into(),
                             blocker.sub_reason(),
+                            is_setter_dependency,
                         ),
                     }
                 }
@@ -4103,22 +4139,34 @@ pub(crate) fn runtime_setter_migration_blocker_report(
                                 readers,
                             );
                             match cluster_result {
-                                Ok(_) => report.add_reason(
+                                Ok(_) => add_runtime_setter_blocker_reason(
+                                    &mut report,
                                     source_id,
                                     binding,
                                     RuntimeSetterMigrationBlockerReason::ReaderClusterOverlapsMigratedBinding,
+                                    None,
+                                    is_setter_dependency,
                                 ),
-                                Err(blocker) => report.add_reason_with_sub(
+                                Err(blocker) => add_runtime_setter_blocker_reason(
+                                    &mut report,
                                     source_id,
                                     binding,
                                     blocker.into(),
                                     blocker.sub_reason(),
+                                    is_setter_dependency,
                                 ),
                             }
                             continue;
                         }
                     }
-                    report.add_reason(source_id, binding, reason)
+                    add_runtime_setter_blocker_reason(
+                        &mut report,
+                        source_id,
+                        binding,
+                        reason,
+                        None,
+                        is_setter_dependency,
+                    )
                 }
             }
         }
@@ -4477,6 +4525,10 @@ type RuntimeReaderClusterResult =
     Result<RuntimeReaderClusterMigration, RuntimeReaderClusterBlocker>;
 
 const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
+/// Keep very large lazy writer modules as source modules instead of
+/// folding them into the shared runtime helper. They may still import
+/// runtime setters, but the bulky lazy body stays out of runtime.
+const MAX_RUNTIME_LAZY_FOLD_SOURCE_LINES: usize = 100;
 /// Floor for the reader-cluster line cap. `runtime_reader_cluster_cap_for_owner`
 /// raises this proportionally for owners whose own source is large, but
 /// never lowers it below this floor.
@@ -4941,8 +4993,12 @@ pub(crate) fn localize_reader_runtime_setter_deps(
         };
         if owners.len() != 1
             || selected_primary_bindings.contains(&dep)
-            || ctx.movable_bindings.contains(&dep)
             || aliased_runtime_deps.contains(&dep)
+            || (ctx.movable_bindings.contains(&dep)
+                && ctx
+                    .candidate_owners
+                    .get(&dep)
+                    .is_none_or(|dep_owner| *dep_owner != owner_module))
             || pinned_runtime_dep_owners
                 .get(&dep)
                 .is_some_and(|owners| owners.iter().any(|owner| *owner != owner_module))
@@ -5012,7 +5068,16 @@ pub(crate) fn runtime_setter_dep_can_localize_with_reader_owner(
     if ctx
         .source_consumers_by_runtime_binding
         .get(&(ctx.source_file_id, binding.clone()))
-        .is_some_and(|consumers| consumers.iter().any(|consumer| *consumer != owner_module))
+        .is_some_and(|consumers| {
+            consumers.iter().any(|consumer| {
+                *consumer != owner_module
+                    && module_dependency_path_exists(
+                        ctx.module_dependencies_by_owner,
+                        owner_module,
+                        *consumer,
+                    )
+            })
+        })
     {
         return false;
     }
@@ -6668,6 +6733,9 @@ pub(crate) fn runtime_lazy_fold_plan(
             continue;
         };
         if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
+            continue;
+        }
+        if folded_source.lines().count() > MAX_RUNTIME_LAZY_FOLD_SOURCE_LINES {
             continue;
         }
         // A self-contained lazy writer module does not need to become a

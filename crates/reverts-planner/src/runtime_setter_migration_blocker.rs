@@ -6,10 +6,10 @@
 //! to operators so they can see why a specific binding wasn't migrated
 //! and aggregate failures across a project.
 //!
-//! The `Accepted` vs `Blocked(reason)` distinction is per-binding (keyed
-//! by `(source_file_id, binding)`) rather than per-module so that a
-//! module with mixed outcomes is faithfully represented — the planner
-//! intentionally migrates partial subsets when that's safe.
+//! The `Accepted` vs `Blocked { reason, sub_reason }` distinction is
+//! per-binding (keyed by `(source_file_id, binding)`) rather than per-module
+//! so that a module with mixed outcomes is faithfully represented — the
+//! planner intentionally migrates partial subsets when that's safe.
 //!
 //! Sub-reasons (`sub_reasons`) are a secondary taxonomy used for blockers
 //! that we want to refine without churning the public reason enum.
@@ -75,7 +75,7 @@ impl RuntimeSetterMigrationBlockerReport {
                 source_file_id,
                 binding,
             },
-            RuntimeSetterMigrationBindingStatus::Blocked(reason),
+            RuntimeSetterMigrationBindingStatus::Blocked { reason, sub_reason },
         );
     }
 
@@ -109,12 +109,20 @@ impl RuntimeSetterMigrationBlockerReport {
             RuntimeSetterMigrationBindingStatus::Accepted => {
                 self.accepted_bindings = self.accepted_bindings.saturating_sub(1);
             }
-            RuntimeSetterMigrationBindingStatus::Blocked(reason) => {
+            RuntimeSetterMigrationBindingStatus::Blocked { reason, sub_reason } => {
                 self.blocked_bindings = self.blocked_bindings.saturating_sub(1);
                 if let Some(count) = self.reasons.get_mut(&reason) {
                     *count = count.saturating_sub(1);
                     if *count == 0 {
                         self.reasons.remove(&reason);
+                    }
+                }
+                if let Some(label) = sub_reason
+                    && let Some(count) = self.sub_reasons.get_mut(&(reason, label))
+                {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.sub_reasons.remove(&(reason, label));
                     }
                 }
             }
@@ -131,7 +139,10 @@ pub struct RuntimeSetterMigrationBindingKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeSetterMigrationBindingStatus {
     Accepted,
-    Blocked(RuntimeSetterMigrationBlockerReason),
+    Blocked {
+        reason: RuntimeSetterMigrationBlockerReason,
+        sub_reason: Option<&'static str>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

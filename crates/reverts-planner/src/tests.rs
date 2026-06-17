@@ -8920,6 +8920,78 @@ fn reader_cluster_runtime_var_migration_localizes_leftover_runtime_write() {
 }
 
 #[test]
+fn reader_cluster_runtime_var_migration_localizes_setter_dep_with_other_source_reader() {
+    let prelude = concat!(
+        "var shared;\n",
+        "var side;\n",
+        "function readShared() { side = shared; return shared; }\n",
+    );
+    let writer_body = "shared = 'ok';\nexport { shared };\n";
+    let consumer_body = "var value = readShared();\nexport { value };\n";
+    let observer_body = "var observed = side;\nexport { observed };\n";
+    let source = format!("{prelude}{writer_body}{consumer_body}{observer_body}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + writer_body.len()) as u32,
+            )),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(2), "consumer", "modules/consumer.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                (prelude.len() + writer_body.len()) as u32,
+                (prelude.len() + writer_body.len() + consumer_body.len()) as u32,
+            )),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(3), "observer", "modules/observer.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                (prelude.len() + writer_body.len() + consumer_body.len()) as u32,
+                source.len() as u32,
+            )),
+    );
+
+    let plan = plan_from_rows(rows);
+    let writer_source = planned_source(&plan, "modules/writer.ts");
+    let consumer_source = planned_source(&plan, "modules/consumer.ts");
+    let observer_source = planned_source(&plan, "modules/observer.ts");
+
+    assert!(
+        !writer_source.contains("source-1-helpers"),
+        "{writer_source}"
+    );
+    assert!(
+        writer_source.contains("var shared, side;")
+            || writer_source.contains("var shared;") && writer_source.contains("var side;"),
+        "{writer_source}"
+    );
+    assert!(
+        writer_source.contains("function readShared() { side = shared; return shared; }"),
+        "{writer_source}"
+    );
+    assert!(
+        !writer_source.contains("__reverts_set_side"),
+        "{writer_source}"
+    );
+    assert!(consumer_source.contains("import { readShared } from './writer.js';"));
+    assert!(
+        observer_source.contains("import { side } from './writer.js';"),
+        "{observer_source}"
+    );
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "runtime helper should be fully eliminated"
+    );
+}
+
+#[test]
 fn reader_cluster_runtime_var_migration_localizes_nested_leftover_runtime_write() {
     let prelude = concat!(
         "var shared;\n",
@@ -12082,6 +12154,54 @@ fn write_only_runtime_prelude_binding_imports_setter_without_value() {
         .expect("helper should emit a generated export list");
     assert!(exports.contains(&BindingName::new("__reverts_set_shared")));
     assert!(!exports.contains(&BindingName::new("shared")));
+}
+
+#[test]
+fn large_lazy_initializer_module_stays_source_local() {
+    let planner = ImportExportPlanner;
+    let prelude = "function lazyValue(init) { return init; }\nfunction makeShared() { return 0; }\nvar shared = makeShared();\n";
+    let mut body = String::from("var init = lazyValue(() => {\n");
+    for index in 0..120 {
+        body.push_str(format!("\tshared = {index};\n").as_str());
+    }
+    body.push_str("});\nexport { init, shared };\n");
+    let source = format!("{prelude}{body}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let entry_source = planned_source(&plan, "modules/entry.ts");
+    let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
+
+    assert!(
+        entry_source.contains(
+            "import { lazyValue, shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
+        ),
+        "{entry_source}"
+    );
+    assert!(entry_source.contains("var init = lazyValue(() => {"));
+    assert!(entry_source.contains("__reverts_set_shared(119);"));
+    assert!(entry_source.contains("export { init, shared };"));
+    assert!(
+        !helper_source.contains("__reverts_set_shared(119);"),
+        "large lazy module body should not be folded into runtime helper"
+    );
 }
 
 #[test]
