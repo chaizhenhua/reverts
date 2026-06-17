@@ -194,6 +194,20 @@ accepts a long positional parameter list; callers pass a typed
 be introduced as a named pass, context, or accumulator before adding cross-module
 `pub(crate)` plumbing.
 
+Normal-module planning is further split inside `compute_modules` into explicit
+per-module stages:
+
+```text
+FoldedModulePass
+  -> package/source import planning
+  -> NormalRuntimePass
+  -> NormalModuleBodyPass
+  -> export completion
+```
+
+The top-level `plan_one_module` is a stage driver; runtime helper routing and
+source-body assembly live behind pass structs with typed outputs.
+
 ## Pre-Accept Output Stage
 
 Pre-accept transforms are explicit, ordered, in-memory transforms that run after
@@ -213,10 +227,11 @@ callers cannot mistake it for accepted output; project writers must write
 
 Text/byte-level edits are centralized in `reverts-planner::source_surgery` for
 the remaining cases where AST-first output is not yet practical. The module owns
-the shared edit applier and line-removal newline policy, with parse and
-delimiter-boundary tests. Passes that still scan source bytes must document why
-they cannot use AST-first rewriting and should use `source_surgery`/`byte_lexer`
-helpers rather than ad hoc string repair.
+the shared edit applier, parser-derived top-level statement spans, previous
+non-whitespace lookup, initializer-operator scanning, and line-removal newline
+policy, with parse and delimiter-boundary tests. Passes that still scan source
+bytes must document why they cannot use AST-first rewriting and should use
+`source_surgery`/`byte_lexer` helpers rather than ad hoc string repair.
 
 ## Compiler Lowering Pipeline
 

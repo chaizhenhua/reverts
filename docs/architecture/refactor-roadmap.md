@@ -787,3 +787,29 @@ Remaining non-enforced architecture debt: source-surgery scanner modules still
 need gradual migration into `source_surgery`/`reverts-js`, and the CLI still
 contains package-source/cache command use-cases that can become smaller app or
 storage adapter modules later.
+
+### 2026-05-24 — per-module pass extraction + CLI match use-case seam
+
+Scope: continue the non-machine-enforced cleanup by splitting the three remaining
+large seams rather than only documenting them.
+
+- `compute_modules::plan_one_module` is now a stage driver. Folded stubs run
+  through `FoldedModulePass`; normal runtime import/helper routing runs through
+  `NormalRuntimePass` with a typed `NormalRuntimePassOutput`; source-body
+  assembly runs through `NormalModuleBodyPass`; export completion is a separate
+  function.
+- More planner byte utilities moved into `source_surgery`: parser-derived
+  top-level statement spans/slices, previous-non-whitespace lookup, and
+  delimiter-aware initializer-operator scanning now live beside the shared edit
+  applier and line-removal policy.
+- The DB-backed `match-packages` command workflow moved out of the CLI facade
+  into `package_match_usecase.rs`. The public root function remains as a stable
+  wrapper, while package-source/cache matching orchestration has its own module
+  boundary.
+
+Remaining non-enforced architecture debt: the normal-module runtime pass is
+still substantial internally and should eventually split into helper-filtering,
+direct-owner imports, package-runtime imports, and runtime-partition emission.
+The package source/cache helpers are still root-private utilities shared by the
+new use-case module; they can move behind dedicated storage/package-source
+adapter modules next.

@@ -5,6 +5,12 @@
 //! source snippets (runtime helper bodies, template raw text, or trivia) and
 //! OXC cannot round-trip the bytes without changing observable output.
 
+use reverts_js::{
+    ParseGoal, collect_top_level_statement_facts, skip_block_comment, skip_line_comment,
+};
+
+use crate::byte_lexer::{looks_like_regex_literal, skip_quoted};
+
 /// Apply non-overlapping byte-range edits to `source`.
 ///
 /// Callers are responsible for producing ranges at syntax-aware boundaries
@@ -48,6 +54,94 @@ pub(crate) fn expand_line_removal_edits(
             (drop_start, drop_end, replacement.clone())
         })
         .collect()
+}
+
+/// Return parser-derived top-level statement slices for a generated module.
+///
+/// This remains in source surgery because consumers use the byte ranges to
+/// remove or rewrite exact statements while preserving raw snippets/trivia.
+pub(crate) fn top_level_statement_slices(source: &str) -> Vec<&str> {
+    top_level_statement_spans(source)
+        .into_iter()
+        .map(|(start, end)| &source[start..end])
+        .collect()
+}
+
+/// Return parser-derived top-level statement byte ranges for a generated module.
+pub(crate) fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
+    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
+        .expect("planner top-level statement facts require parseable generated TypeScript source")
+        .into_iter()
+        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
+        .collect()
+}
+
+/// True when an unparenthesized initializer `=` appears after `cursor`.
+///
+/// This is a delimiter-aware byte scan used after parser-derived statement
+/// slicing; it is not used to discover arbitrary JS syntax.
+pub(crate) fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
+            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
+                cursor = skip_line_comment(bytes, cursor + 2);
+            }
+            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
+                cursor = skip_block_comment(bytes, cursor + 2);
+            }
+            b'/' if looks_like_regex_literal(bytes, cursor) => {
+                cursor = crate::byte_lexer::skip_regex_literal(bytes, cursor);
+            }
+            b'(' => {
+                paren_depth += 1;
+                cursor += 1;
+            }
+            b'[' => {
+                bracket_depth += 1;
+                cursor += 1;
+            }
+            b'{' => {
+                brace_depth += 1;
+                cursor += 1;
+            }
+            b')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'}' => {
+                brace_depth = brace_depth.saturating_sub(1);
+                cursor += 1;
+            }
+            b'=' if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && bytes.get(cursor + 1) != Some(&b'=')
+                && bytes.get(cursor + 1) != Some(&b'>') =>
+            {
+                return true;
+            }
+            _ => cursor += 1,
+        }
+    }
+    false
+}
+
+/// Return the previous non-whitespace byte index before `before`.
+pub(crate) fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
+    let mut cursor = before.checked_sub(1)?;
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor = cursor.checked_sub(1)?;
+    }
+    Some(cursor)
 }
 
 #[cfg(test)]

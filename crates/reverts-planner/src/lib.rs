@@ -206,7 +206,10 @@ use runtime_var_migration::{
 };
 
 use source_module_facts::SourceModuleFacts;
-pub(crate) use source_surgery::{apply_text_edits, expand_line_removal_edits};
+pub(crate) use source_surgery::{
+    apply_text_edits, contains_top_level_initializer_operator, expand_line_removal_edits,
+    previous_non_ws, top_level_statement_slices, top_level_statement_spans,
+};
 
 #[allow(unused_imports)]
 use destructure_writes::{
@@ -275,9 +278,10 @@ use reverts_graph::{
 };
 use reverts_input::{ModuleDependencyTarget, ModuleInput};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
+#[cfg(test)]
+use reverts_js::{ParseGoal, collect_top_level_statement_facts};
 use reverts_js::{
-    ParseGoal, collect_top_level_statement_facts, format_source_pretty,
-    is_ascii_identifier_continue as is_identifier_continue,
+    format_source_pretty, is_ascii_identifier_continue as is_identifier_continue,
     is_ascii_identifier_start as is_identifier_start, is_js_keyword, skip_block_comment,
     skip_line_comment,
 };
@@ -7118,21 +7122,6 @@ pub(crate) fn purify_private_runtime_lazy_initializers(
     apply_text_edits(source, &edits)
 }
 
-pub(crate) fn top_level_statement_slices(source: &str) -> Vec<&str> {
-    top_level_statement_spans(source)
-        .into_iter()
-        .map(|(start, end)| &source[start..end])
-        .collect()
-}
-
-pub(crate) fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
-    collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
-        .expect("planner top-level statement facts require parseable generated TypeScript source")
-        .into_iter()
-        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
-        .collect()
-}
-
 pub(crate) fn variable_declaration_without_initializer(statement: &str) -> bool {
     let statement = statement.trim().trim_end_matches(';').trim();
     let Some((keyword, after_keyword)) = declaration_keyword_at_start(statement) else {
@@ -7167,61 +7156,6 @@ pub(crate) fn looks_like_lowered_lazy_initializer(initializer: &str) -> bool {
     compact.starts_with("lazyValue(()=>{") && compact.ends_with("})")
 }
 
-pub(crate) fn contains_top_level_initializer_operator(source: &str, mut cursor: usize) -> bool {
-    let bytes = source.as_bytes();
-    let mut paren_depth = 0usize;
-    let mut bracket_depth = 0usize;
-    let mut brace_depth = 0usize;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\'' | b'"' | b'`' => cursor = skip_quoted(bytes, cursor, bytes[cursor]),
-            b'/' if bytes.get(cursor + 1) == Some(&b'/') => {
-                cursor = skip_line_comment(bytes, cursor + 2);
-            }
-            b'/' if bytes.get(cursor + 1) == Some(&b'*') => {
-                cursor = skip_block_comment(bytes, cursor + 2);
-            }
-            b'/' if looks_like_regex_literal(bytes, cursor) => {
-                cursor = skip_regex_literal(bytes, cursor);
-            }
-            b'(' => {
-                paren_depth += 1;
-                cursor += 1;
-            }
-            b'[' => {
-                bracket_depth += 1;
-                cursor += 1;
-            }
-            b'{' => {
-                brace_depth += 1;
-                cursor += 1;
-            }
-            b')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b'}' => {
-                brace_depth = brace_depth.saturating_sub(1);
-                cursor += 1;
-            }
-            b'=' if paren_depth == 0
-                && bracket_depth == 0
-                && brace_depth == 0
-                && bytes.get(cursor + 1) != Some(&b'=')
-                && bytes.get(cursor + 1) != Some(&b'>') =>
-            {
-                return true;
-            }
-            _ => cursor += 1,
-        }
-    }
-    false
-}
-
 pub(crate) fn ensure_planned_module_exports(
     plan: &mut EmitPlan,
     program: &EnrichedProgram,
@@ -7251,14 +7185,6 @@ pub(crate) fn ensure_planned_module_exports(
     for binding in missing {
         file.add_export_with_source_backed(binding, true);
     }
-}
-
-pub(crate) fn previous_non_ws(bytes: &[u8], before: usize) -> Option<usize> {
-    let mut cursor = before.checked_sub(1)?;
-    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
-        cursor = cursor.checked_sub(1)?;
-    }
-    Some(cursor)
 }
 
 pub(crate) fn source_module_wiring(

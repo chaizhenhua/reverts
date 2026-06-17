@@ -2,6 +2,7 @@ mod args;
 mod commands;
 mod errors;
 mod help;
+mod package_match_usecase;
 mod persistence;
 mod pkg_sources;
 mod project_writer;
@@ -32,7 +33,6 @@ use persistence::externalization_hints::{
     PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION, PackageExternalizationHint,
     persist_package_externalization_hints,
 };
-use persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
 pub(crate) use persistence::source_cache::{
     PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION, package_source_cache_entry_path,
     package_source_from_row, persist_package_source_cache, stale_package_source_cache_versions,
@@ -56,9 +56,8 @@ pub(crate) use pkg_sources::version_resolution::{
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use reverts_input::sqlite::load_project_rows_from_connection;
 use reverts_input::{InputRows, ModuleDependencyTarget, PackageEmissionMode};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::{ModuleKind, is_valid_package_name, split_bare_specifier};
@@ -66,12 +65,11 @@ use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::is_node_builtin;
 use reverts_package_matcher::{
     PackageModuleSourceQuality, PackageSource, clean_package_semantic_path_hint,
-    has_accepted_external_attribution, is_exact_package_version_hint, match_packages_with_pipeline,
+    has_accepted_external_attribution, is_exact_package_version_hint,
     package_import_names_from_sources, package_module_source_quality, package_source_entry_path,
     package_source_exported_members, package_source_normalized_hash,
     package_source_public_export_proofs, strip_source_extension,
 };
-use reverts_pipeline::prepare_input_rows_for_pipeline;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
 use semver::Version;
 
@@ -611,149 +609,7 @@ pub fn match_packages_from_connection(
     connection: &mut Connection,
     args: &MatchPackagesArgs,
 ) -> Result<MatchPackagesOutcome, MatchPackagesError> {
-    let timing_enabled = std::env::var_os("REVERTS_MATCH_TIMING").is_some();
-    let timing_started = Instant::now();
-    let mut timing_last = timing_started;
-    macro_rules! mark_timing {
-        ($stage:literal) => {
-            if timing_enabled {
-                let now = Instant::now();
-                eprintln!(
-                    "match-packages timing: {} stage={:.3}s total={:.3}s",
-                    $stage,
-                    now.duration_since(timing_last).as_secs_f64(),
-                    now.duration_since(timing_started).as_secs_f64()
-                );
-                timing_last = now;
-            }
-        };
-    }
-    let mut rows = load_project_rows_from_connection(connection, args.project_id)
-        .map_err(MatchPackagesError::LoadInput)?;
-    mark_timing!("load_project_rows");
-
-    // Shared bundle-aware row preparation: split recognised bundle wrappers
-    // into per-module rows before either matcher or generator sees them.
-    let prepared = prepare_input_rows_for_pipeline(rows);
-    let extraction_audit = prepared.audit;
-    // Snapshot new_modules from the shared preparation — we need them later
-    // to persist synthetic rows into the SQLite modules table so
-    // function-level attributions can FK them.
-    let synthetic_modules = prepared.synthetic_modules;
-    rows = prepared.rows;
-    enrich_package_modules_from_source_units(connection, &mut rows, args.project_id)?;
-    mark_timing!("bundle_extract_enrich");
-
-    let mut source_import_audit = AuditReport::default();
-    let package_names =
-        package_source_load_scope(&rows, &args.package_names, &mut source_import_audit);
-    remove_package_attributions_for_revalidation(&mut rows, &package_names);
-    let mut package_sources = load_package_sources(
-        connection,
-        &rows,
-        &package_names,
-        &args.package_source_roots,
-        args.materialize_package_sources,
-        args.apply,
-    )?;
-    mark_timing!("load_package_sources");
-    let package_versions_before_resolution = package_versions_by_module(&rows);
-    resolve_package_version_hints_to_available_sources(
-        &mut rows,
-        &package_sources,
-        &package_names,
-    )?;
-    let package_version_resolutions =
-        package_version_resolution_evidence(&package_versions_before_resolution, &rows);
-    mark_timing!("resolve_versions");
-    filter_package_sources_to_referenced_package_versions(&rows, &mut package_sources);
-    mark_timing!("filter_referenced_versions");
-    let source_quality_counts = package_module_source_quality_counts(
-        &rows,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
-    mark_timing!("source_quality_counts");
-    let pipeline_report = match_packages_with_pipeline(
-        &rows,
-        &package_sources,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
-    mark_timing!("match_pipeline");
-    let mut report = pipeline_report.package_report;
-    report.audit.extend(source_import_audit);
-    let external_import_candidates = report.attributions.len();
-    let external_import_safety =
-        persistence::attributions::filter_unsafe_interpackage_external_attributions(
-            &rows,
-            &mut report,
-        );
-    let function_attributions = pipeline_report.function_attributions;
-    let function_ownership_matches = pipeline_report.function_ownership_matches;
-
-    let (written_attributions, written_surfaces, written_function_attributions) = if args.apply {
-        let mut persistence = SqliteMatchPackagePersistence::new(connection);
-        let outcome = persistence.persist_match_package_outputs(
-            &rows,
-            &synthetic_modules,
-            &report,
-            &package_names,
-            &package_version_resolutions,
-            &function_attributions,
-        )?;
-        (
-            outcome.written_attributions,
-            outcome.written_surfaces,
-            outcome.written_function_attributions,
-        )
-    } else {
-        (0, 0, 0)
-    };
-    mark_timing!("persist");
-    if timing_enabled {
-        let _ = timing_last;
-    }
-
-    let matched_modules = report.matches.len();
-    let loaded_package_modules = rows
-        .modules
-        .iter()
-        .filter(|module| module.kind == ModuleKind::Package)
-        .count();
-    let source_elimination = persistence::attributions::package_source_elimination_stats_for_report(
-        &rows,
-        &report,
-        loaded_package_modules,
-    );
-    let matched_package_surfaces = report.surfaces.len();
-    let mut audit = extraction_audit;
-    audit.extend(report.audit);
-    let audit = dedup_audit_report(audit);
-
-    Ok(MatchPackagesOutcome {
-        project_id: args.project_id,
-        loaded_package_modules,
-        loaded_package_sources: package_sources.len(),
-        matched_modules,
-        external_import_modules: source_elimination.direct_external_import_modules,
-        private_source_suppressed_package_modules: source_elimination
-            .private_source_suppressed_package_modules,
-        source_eliminated_package_modules: source_elimination.source_eliminated_package_modules,
-        remaining_package_source_modules: source_elimination.remaining_package_source_modules,
-        external_import_candidates,
-        unsafe_external_import_modules: external_import_safety.removed_modules,
-        matched_package_surfaces,
-        written_attributions,
-        written_surfaces,
-        function_attributions: function_attributions.len(),
-        function_ownership_matches,
-        written_function_attributions,
-        package_source_quality_trusted: source_quality_counts.trusted,
-        package_source_quality_weak: source_quality_counts.weak,
-        package_source_quality_invalid: source_quality_counts.invalid,
-        package_source_quality_missing: source_quality_counts.missing,
-        audit,
-        external_import_blockers: external_import_safety.blockers,
-    })
+    package_match_usecase::match_packages_from_connection(connection, args)
 }
 
 fn remove_package_attributions_for_revalidation(
