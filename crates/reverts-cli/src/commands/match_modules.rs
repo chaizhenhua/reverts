@@ -538,6 +538,8 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
             let prop_best = score_via_property_name(&ref_fps, &sub_fps);
             let rare_best = score_via_rare_ast_anchor(&ref_bags, &sub_bags);
+            let rare_struct_best =
+                score_via_rare_axis_anchor(&ref_bags, &sub_bags, AxisKind::StructuralAnchor);
             const BAG_ACCEPT: f64 = 0.20;
             // Tighter category check (no 'unknown' wildcard) allows a
             // lower bag-jaccard floor without absorbing cross-category
@@ -627,6 +629,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                 }
                 if pick.is_none() {
                     let rare_pick = rare_best[ref_idx];
+                    if rare_pick.score >= RARE_RESCUE
+                        && let Some(sub_idx) = rare_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_rare += 1;
+                    }
+                }
+                if pick.is_none() {
+                    let rare_pick = rare_struct_best[ref_idx];
                     if rare_pick.score >= RARE_RESCUE
                         && let Some(sub_idx) = rare_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
@@ -2094,22 +2106,31 @@ fn score_via_property_name(
 /// Score is the count of rare-hash hits (not a Jaccard fraction) — the
 /// caller compares against a small absolute threshold.
 fn score_via_rare_ast_anchor(ref_bags: &[ModuleBag], sub_bags: &[ModuleBag]) -> Vec<BestMatch> {
-    // Subject-side inverted index: hash -> list of modules containing it.
+    score_via_rare_axis_anchor(ref_bags, sub_bags, AxisKind::Ast)
+}
+
+/// Generic version: walk a single axis, drop hashes shared by many
+/// subjects (vendor/duplicate noise), and pin to the subject holding
+/// the most distinct rare hashes. Use with strong-discrimination axes
+/// like Ast and StructuralAnchor.
+fn score_via_rare_axis_anchor(
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
+    axis: AxisKind,
+) -> Vec<BestMatch> {
     let mut by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (sub_idx, bag) in sub_bags.iter().enumerate() {
-        if let Some(hashes) = bag.by_axis.get(&AxisKind::Ast) {
+        if let Some(hashes) = bag.by_axis.get(&axis) {
             for &h in hashes {
                 by_hash.entry(h).or_default().push(sub_idx);
             }
         }
     }
-    // A hash is "rare" when ≤ MAX_HOLDERS subject modules contain it.
-    // Tuned conservatively: this is the anchor threshold, not a Jaccard.
     const MAX_HOLDERS: usize = 4;
 
     let mut out = vec![BestMatch::default(); ref_bags.len()];
     for (ref_idx, bag) in ref_bags.iter().enumerate() {
-        let Some(hashes) = bag.by_axis.get(&AxisKind::Ast) else {
+        let Some(hashes) = bag.by_axis.get(&axis) else {
             continue;
         };
         let mut hits: HashMap<usize, usize> = HashMap::new();
