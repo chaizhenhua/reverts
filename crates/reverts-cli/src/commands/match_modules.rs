@@ -662,29 +662,23 @@ struct FunctionTierReport {
     tier_counts: BTreeMap<&'static str, usize>,
 }
 
-/// Weighted tier scores. Match the package matcher's `MatchTier::weight()`
-/// ordering: exact > exact-alt > structural-anchored > structural-anchored-alt
-/// > feature-similarity > feature-similarity-alt > structural-only > structural-only-alt.
-const TIER_EXACT: f64 = 1000.0;
-const TIER_EXACT_ALT: f64 = 900.0;
-const TIER_STRUCTURAL_ANCHORED: f64 = 800.0;
-const TIER_STRUCTURAL_ANCHORED_ALT: f64 = 500.0;
-const TIER_FEATURE_SIMILARITY: f64 = 100.0;
-const TIER_FEATURE_SIMILARITY_ALT: f64 = 50.0;
-const TIER_STRUCTURAL_ONLY: f64 = 10.0;
-const TIER_STRUCTURAL_ONLY_ALT: f64 = 5.0;
-
-/// Mirrors the package matcher's STRUCTURAL_FREQUENCY_LIMIT — a structural
-/// anchor seen in >50 subject functions carries almost no identification
-/// power and is also expensive to walk through.
-const STRUCTURAL_FREQUENCY_LIMIT: u32 = 50;
-const STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT: u32 = 250;
-const FEATURE_FREQUENCY_LIMIT: u32 = 250;
+/// Top-tier weight (Hungarian) used as the per-ref-function ceiling when
+/// normalising aggregated module scores. Matches `MatchTier::Exact::weight()`
+/// from `reverts-ir`.
+const TIER_EXACT_WEIGHT: f64 = 1000.0;
 
 fn score_via_function_tier(
     ref_fps: &[ModuleFingerprints],
     sub_fps: &[ModuleFingerprints],
 ) -> FunctionTierReport {
+    use reverts_package_matcher::{
+        try_exact, try_exact_alternate, try_structural_anchored, try_structural_anchored_alternate,
+        try_structural_only, try_structural_only_alternate,
+    };
+
+    // Build the shared FingerprintIndex over subject functions. Owner =
+    // subject module index; tier scoring dedups by `(owner, fn_id)` via the
+    // CandidateOwner trait.
     let mut index: FingerprintIndex<ModuleOwner> = FingerprintIndex::new();
     for (sub_idx, m) in sub_fps.iter().enumerate() {
         for fp in &m.raw {
@@ -692,46 +686,45 @@ fn score_via_function_tier(
         }
     }
 
+    // For each ref function, run the package matcher's `try_*` ladder in
+    // strongest-to-weakest order, stopping at the first tier with a unique
+    // winner. The expensive Jaccard-style `try_feature_similarity` tier is
+    // intentionally skipped — at module-corpus sizes its per-candidate
+    // inner loop dominates wall-clock without adding meaningful precision
+    // (the bag-jaccard strategy already covers that signal more cheaply).
     let mut report = FunctionTierReport::default();
-    for label in [
-        "exact",
-        "exact_alt",
-        "structural_anchored",
-        "structural_anchored_alt",
-        "feature_similarity",
-        "feature_similarity_alt",
-        "structural_only",
-        "structural_only_alt",
-    ] {
-        report.tier_counts.insert(label, 0);
+    let mut subject_scores: Vec<HashMap<usize, f64>> = vec![HashMap::new(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        for fp in &m.raw {
+            let top = try_exact(fp, &index)
+                .or_else(|| try_exact_alternate(fp, &index))
+                .or_else(|| try_structural_anchored(fp, &index))
+                .or_else(|| try_structural_anchored_alternate(fp, &index))
+                .or_else(|| try_structural_only(fp, &index))
+                .or_else(|| try_structural_only_alternate(fp, &index));
+            let Some(top) = top else {
+                continue;
+            };
+            *subject_scores[ref_idx]
+                .entry(top.candidate.owner)
+                .or_default() += f64::from(top.tier.weight());
+            *report.tier_counts.entry(tier_label(&top)).or_default() += 1;
+        }
     }
-
-    let max_score_per_ref_fp = TIER_EXACT;
 
     report.best.resize(ref_fps.len(), BestMatch::default());
     for (ref_idx, ref_module) in ref_fps.iter().enumerate() {
-        if ref_module.raw.is_empty() {
-            continue;
-        }
-        let mut subject_scores: HashMap<usize, f64> = HashMap::new();
-        for fp in &ref_module.raw {
-            let (sub_idx, weight, tier_label) = cascade_function_match(&index, fp);
-            if let (Some(sub_idx), Some(label)) = (sub_idx, tier_label) {
-                *subject_scores.entry(sub_idx).or_default() += weight;
-                *report.tier_counts.entry(label).or_default() += 1;
-            }
-        }
-
+        let scores = &subject_scores[ref_idx];
         let mut best_subject = None;
         let mut best_total = 0.0_f64;
-        for (sub_idx, total) in subject_scores {
+        for (&sub_idx, &total) in scores {
             if total > best_total {
                 best_total = total;
                 best_subject = Some(sub_idx);
             }
         }
-        let normalised =
-            (best_total / (ref_module.raw.len() as f64 * max_score_per_ref_fp)).clamp(0.0, 1.0);
+        let denom = (ref_module.raw.len() as f64).max(1.0) * TIER_EXACT_WEIGHT;
+        let normalised = (best_total / denom).clamp(0.0, 1.0);
         report.best[ref_idx] = BestMatch {
             subject_idx: best_subject,
             score: normalised,
@@ -739,6 +732,22 @@ fn score_via_function_tier(
         };
     }
     report
+}
+
+/// Maps a `MatchTier` to the stable string label printed in the recall
+/// report. Matches the package matcher's `MatchTier` enum (in `reverts-ir`).
+fn tier_label(m: &reverts_package_matcher::FunctionMatch<ModuleOwner>) -> &'static str {
+    use reverts_ir::MatchTier;
+    match m.tier {
+        MatchTier::Exact => "exact",
+        MatchTier::ExactAlternate => "exact_alt",
+        MatchTier::StructuralAnchored => "structural_anchored",
+        MatchTier::StructuralAnchoredAlternate => "structural_anchored_alt",
+        MatchTier::FeatureSimilarity => "feature_similarity",
+        MatchTier::FeatureSimilarityAlternate => "feature_similarity_alt",
+        MatchTier::StructuralOnly => "structural_only",
+        MatchTier::StructuralOnlyAlternate => "structural_only_alt",
+    }
 }
 
 fn insert_function_into_index(
@@ -841,192 +850,6 @@ fn insert_function_into_index(
             }
         }
     }
-}
-
-/// Returns the unique owner if all candidates share one — never clones.
-fn unique_owner(cands: &[Candidate<ModuleOwner>]) -> Option<ModuleOwner> {
-    let first = cands.first()?.owner;
-    if cands.iter().all(|c| c.owner == first) {
-        Some(first)
-    } else {
-        None
-    }
-}
-
-/// Walks the same tier ladder the package matcher uses, but dedups by
-/// subject_module instead of (package, fn_id). Returns the winning subject
-/// module index along with weight + tier label when a tier finds a unique
-/// owner.
-fn cascade_function_match(
-    index: &FingerprintIndex<ModuleOwner>,
-    fp: &FunctionFingerprint,
-) -> (Option<ModuleOwner>, f64, Option<&'static str>) {
-    // Tier 1: exact AST.
-    if let Some(owner) = unique_owner(index.lookup_exact(ExactKey {
-        param_count: fp.param_count,
-        statement_count: fp.statement_count,
-        ast_hash: fp.primary.ast,
-    })) {
-        return (Some(owner), TIER_EXACT, Some("exact"));
-    }
-    // Tier 1b: exact-alt AST.
-    for alt in &fp.alternates {
-        if let Some(owner) = unique_owner(index.lookup_exact(ExactKey {
-            param_count: fp.param_count,
-            statement_count: alt.statement_count,
-            ast_hash: alt.axes.ast,
-        })) {
-            return (Some(owner), TIER_EXACT_ALT, Some("exact_alt"));
-        }
-    }
-    // Tier 2: structural anchored.
-    if let Some(owner) = structural_anchored_match(index, fp.param_count, &fp.primary) {
-        return (
-            Some(owner),
-            TIER_STRUCTURAL_ANCHORED,
-            Some("structural_anchored"),
-        );
-    }
-    for alt in &fp.alternates {
-        if let Some(owner) = structural_anchored_match(index, fp.param_count, &alt.axes) {
-            return (
-                Some(owner),
-                TIER_STRUCTURAL_ANCHORED_ALT,
-                Some("structural_anchored_alt"),
-            );
-        }
-    }
-    // Tier 3: feature similarity (one unique distinctive-axis hit suffices).
-    let stats = index.corpus_stats();
-    for axis in [
-        AxisKind::CalleeSet,
-        AxisKind::ThrowSet,
-        AxisKind::LiteralAnchor,
-        AxisKind::AccessPattern,
-    ] {
-        if let Some(hash) = fp.primary.get(axis) {
-            if stats.frequency(axis, hash) > FEATURE_FREQUENCY_LIMIT {
-                continue;
-            }
-            if let Some(owner) = unique_owner(index.lookup_feature(FeatureKey {
-                param_count: fp.param_count,
-                kind: axis,
-                hash,
-            })) {
-                return (
-                    Some(owner),
-                    TIER_FEATURE_SIMILARITY,
-                    Some("feature_similarity"),
-                );
-            }
-        }
-    }
-    for alt in &fp.alternates {
-        for axis in [
-            AxisKind::CalleeSet,
-            AxisKind::ThrowSet,
-            AxisKind::LiteralAnchor,
-            AxisKind::AccessPattern,
-        ] {
-            if let Some(hash) = alt.axes.get(axis) {
-                if stats.frequency(axis, hash) > FEATURE_FREQUENCY_LIMIT {
-                    continue;
-                }
-                if let Some(owner) = unique_owner(index.lookup_feature(FeatureKey {
-                    param_count: fp.param_count,
-                    kind: axis,
-                    hash,
-                })) {
-                    return (
-                        Some(owner),
-                        TIER_FEATURE_SIMILARITY_ALT,
-                        Some("feature_similarity_alt"),
-                    );
-                }
-            }
-        }
-    }
-    // Tier 4: structural only.
-    if stats.frequency(AxisKind::StructuralAnchor, fp.primary.structural_anchor)
-        <= STRUCTURAL_FREQUENCY_LIMIT
-        && let Some(owner) = unique_owner(index.lookup_structural(StructuralKey {
-            param_count: fp.param_count,
-            structural_anchor: fp.primary.structural_anchor,
-        }))
-    {
-        return (Some(owner), TIER_STRUCTURAL_ONLY, Some("structural_only"));
-    }
-    for alt in &fp.alternates {
-        if stats.frequency(AxisKind::StructuralAnchor, alt.axes.structural_anchor)
-            <= STRUCTURAL_FREQUENCY_LIMIT
-            && let Some(owner) = unique_owner(index.lookup_structural(StructuralKey {
-                param_count: fp.param_count,
-                structural_anchor: alt.axes.structural_anchor,
-            }))
-        {
-            return (
-                Some(owner),
-                TIER_STRUCTURAL_ONLY_ALT,
-                Some("structural_only_alt"),
-            );
-        }
-    }
-    (None, 0.0, None)
-}
-
-fn structural_anchored_match(
-    index: &FingerprintIndex<ModuleOwner>,
-    param_count: u32,
-    axes: &reverts_ir::AxisHashes,
-) -> Option<ModuleOwner> {
-    if index.corpus_stats().frequency(AxisKind::Cfg, axes.cfg)
-        > STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT
-    {
-        return None;
-    }
-    let cfg_candidates = index.lookup_cfg(CfgKey {
-        param_count,
-        cfg_hash: axes.cfg,
-    });
-    if cfg_candidates.is_empty() {
-        return None;
-    }
-    let anchors: [(AxisKind, Option<u64>); 3] = [
-        (AxisKind::LiteralAnchor, axes.literal_anchor),
-        (AxisKind::CalleeSet, axes.callee_set),
-        (AxisKind::ThrowSet, axes.throw_set),
-    ];
-    let any_anchor = anchors.iter().any(|(_, h)| h.is_some());
-    if !any_anchor {
-        return None;
-    }
-    let mut survivor: Option<ModuleOwner> = None;
-    for c in cfg_candidates {
-        let has_overlap = anchors.iter().any(|(axis, maybe_hash)| {
-            if let Some(hash) = maybe_hash {
-                index
-                    .lookup_feature(FeatureKey {
-                        param_count,
-                        kind: *axis,
-                        hash: *hash,
-                    })
-                    .iter()
-                    .any(|fc| {
-                        fc.owner == c.owner && fc.external_function_id == c.external_function_id
-                    })
-            } else {
-                false
-            }
-        });
-        if has_overlap {
-            match survivor {
-                None => survivor = Some(c.owner),
-                Some(prev) if prev == c.owner => {}
-                Some(_) => return None,
-            }
-        }
-    }
-    survivor
 }
 
 fn print_tier_breakdown(tier_counts: &BTreeMap<&'static str, usize>) {

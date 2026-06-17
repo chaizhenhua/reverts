@@ -71,8 +71,9 @@ pub use proof::public_exports::package_source_public_export_proofs;
 pub(crate) use proof::scratch::ExternalImportProofScratch;
 pub use scoring::{
     AcceptanceDecision, FunctionMatch, STRUCTURAL_FREQUENCY_LIMIT, assign_max_weight, classify,
-    try_exact, try_exact_alternate, try_feature_similarity, try_structural_anchored,
-    try_structural_only,
+    try_exact, try_exact_alternate, try_feature_similarity, try_feature_similarity_alternate,
+    try_structural_anchored, try_structural_anchored_alternate, try_structural_only,
+    try_structural_only_alternate,
 };
 pub(crate) use scoring::{
     accepted_attribution_from_match, best_source_match, disambiguate_exact_source_candidate,

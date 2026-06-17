@@ -45,6 +45,40 @@ pub struct StructuralKey {
     pub structural_anchor: u64,
 }
 
+/// Owner abstraction used by every generic scoring helper. The matcher
+/// dedups candidate sets by `(identity_key, external_function_id)`, so each
+/// concrete owner type decides what counts as "the same library" for
+/// deduplication purposes:
+///
+/// * Package owners collapse different versions of the same package into a
+///   single identity, because two `pretty-bytes` versions with identical
+///   helper code are unambiguous evidence — version disambiguation happens
+///   later, in [`crate::PackageCandidate`]'s downstream pipeline.
+/// * Cross-project module owners are dedup'd by subject module index.
+/// * Future owners (cross-bundle, cross-project symbol) pick whatever
+///   coarsest grouping makes a tier-unique winner meaningful.
+pub trait CandidateOwner: Clone {
+    type IdentityKey: Ord + Eq;
+
+    fn identity_key(&self) -> Self::IdentityKey;
+}
+
+impl CandidateOwner for PackageOwner {
+    type IdentityKey = String;
+
+    fn identity_key(&self) -> Self::IdentityKey {
+        self.package.name.clone()
+    }
+}
+
+impl CandidateOwner for usize {
+    type IdentityKey = Self;
+
+    fn identity_key(&self) -> Self::IdentityKey {
+        *self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Candidate<Owner> {
     pub owner: Owner,

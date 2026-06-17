@@ -1,12 +1,13 @@
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
 use reverts_package_index::{
-    CfgKey, ExactKey, FeatureKey, PackageCandidate, PackageFingerprintIndex, StructuralKey,
+    Candidate, CandidateOwner, CfgKey, ExactKey, FeatureKey, FingerprintIndex, PackageOwner,
+    StructuralKey,
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FunctionMatch {
+pub struct FunctionMatch<Owner = PackageOwner> {
     pub tier: MatchTier,
-    pub candidate: PackageCandidate,
+    pub candidate: Candidate<Owner>,
     pub margin: f64,
     pub top_score: f64,
     pub runner_up_score: f64,
@@ -27,10 +28,10 @@ pub struct FunctionMatch {
 }
 
 #[must_use]
-pub fn try_exact(
+pub fn try_exact<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     exact_for_axes(
         fp.param_count,
         fp.statement_count,
@@ -41,27 +42,27 @@ pub fn try_exact(
     )
 }
 
-fn exact_for_axes(
+fn exact_for_axes<O: CandidateOwner>(
     param_count: u32,
     statement_count: u32,
     ast_hash: u64,
-    index: &PackageFingerprintIndex,
+    index: &FingerprintIndex<O>,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
-) -> Option<FunctionMatch> {
+) -> Option<FunctionMatch<O>> {
     let key = ExactKey {
         param_count,
         statement_count,
         ast_hash,
     };
-    let candidates = index.query_exact(key);
+    let candidates = index.lookup_exact(key);
     pick_unique(candidates, tier, matched_alternate, vec![AxisKind::Ast])
 }
 
-fn first_alternate_match(
+fn first_alternate_match<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    mut match_alternate: impl FnMut(u32, &AxisHashes, NormalizationPassId) -> Option<FunctionMatch>,
-) -> Option<FunctionMatch> {
+    mut match_alternate: impl FnMut(u32, &AxisHashes, NormalizationPassId) -> Option<FunctionMatch<O>>,
+) -> Option<FunctionMatch<O>> {
     for alt in &fp.alternates {
         if let Some(function_match) = match_alternate(alt.statement_count, &alt.axes, alt.pass) {
             return Some(function_match);
@@ -71,10 +72,10 @@ fn first_alternate_match(
 }
 
 #[must_use]
-pub fn try_exact_alternate(
+pub fn try_exact_alternate<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     first_alternate_match(fp, |statement_count, axes, pass| {
         exact_for_axes(
             fp.param_count,
@@ -88,10 +89,10 @@ pub fn try_exact_alternate(
 }
 
 #[must_use]
-pub fn try_structural_anchored(
+pub fn try_structural_anchored<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     structural_anchored_for_axes(
         fp.param_count,
         &fp.primary,
@@ -109,10 +110,10 @@ pub fn try_structural_anchored(
 /// one when both compete — and falls back to the alternate when only
 /// it has evidence.
 #[must_use]
-pub fn try_structural_anchored_alternate(
+pub fn try_structural_anchored_alternate<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_anchored_for_axes(
             fp.param_count,
@@ -124,13 +125,13 @@ pub fn try_structural_anchored_alternate(
     })
 }
 
-fn structural_anchored_for_axes(
+fn structural_anchored_for_axes<O: CandidateOwner>(
     param_count: u32,
     axes: &AxisHashes,
-    index: &PackageFingerprintIndex,
+    index: &FingerprintIndex<O>,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
-) -> Option<FunctionMatch> {
+) -> Option<FunctionMatch<O>> {
     let cfg_frequency = index.corpus_stats().frequency(AxisKind::Cfg, axes.cfg);
     if cfg_frequency > STRUCTURAL_ANCHORED_CFG_FREQUENCY_LIMIT {
         return None;
@@ -139,7 +140,7 @@ fn structural_anchored_for_axes(
         param_count,
         cfg_hash: axes.cfg,
     };
-    let cfg_candidates = index.query_cfg(cfg_key);
+    let cfg_candidates = index.lookup_cfg(cfg_key);
     if cfg_candidates.is_empty() {
         return None;
     }
@@ -158,21 +159,21 @@ fn structural_anchored_for_axes(
         return None;
     }
 
-    let surviving: Vec<(PackageCandidate, Vec<AxisKind>)> = cfg_candidates
-        .into_iter()
+    let surviving: Vec<(Candidate<O>, Vec<AxisKind>)> = cfg_candidates
+        .iter()
         .filter_map(|c| {
             let overlap_axes: Vec<AxisKind> = fp_anchors
                 .iter()
                 .filter(|(axis, h)| {
                     index
-                        .query_feature(FeatureKey {
+                        .lookup_feature(FeatureKey {
                             param_count,
                             kind: *axis,
                             hash: *h,
                         })
                         .iter()
                         .any(|cand| {
-                            cand.owner.package == c.owner.package
+                            cand.owner.identity_key() == c.owner.identity_key()
                                 && cand.external_function_id == c.external_function_id
                         })
                 })
@@ -181,14 +182,14 @@ fn structural_anchored_for_axes(
             if overlap_axes.is_empty() {
                 None
             } else {
-                Some((c, overlap_axes))
+                Some((c.clone(), overlap_axes))
             }
         })
         .collect();
 
     let mut unique = surviving;
     unique.dedup_by(|a, b| {
-        a.0.owner.package == b.0.owner.package
+        a.0.owner.identity_key() == b.0.owner.identity_key()
             && a.0.external_function_id == b.0.external_function_id
     });
     if unique.len() != 1 {
@@ -214,10 +215,10 @@ fn structural_anchored_for_axes(
 /// query the index, and rank survivors by Jaccard overlap over the
 /// remaining axis hashes. Require Jaccard ≥ 0.6 and unique best.
 #[must_use]
-pub fn try_feature_similarity(
+pub fn try_feature_similarity<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     feature_similarity_for_axes(
         fp.param_count,
         &fp.primary,
@@ -234,10 +235,10 @@ pub fn try_feature_similarity(
 /// match when one exists, and falls back to an alternate when only
 /// the alt-source axes line up.
 #[must_use]
-pub fn try_feature_similarity_alternate(
+pub fn try_feature_similarity_alternate<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         feature_similarity_for_axes(
             fp.param_count,
@@ -249,20 +250,20 @@ pub fn try_feature_similarity_alternate(
     })
 }
 
-fn feature_similarity_for_axes(
+fn feature_similarity_for_axes<O: CandidateOwner>(
     param_count: u32,
     axes: &AxisHashes,
-    index: &PackageFingerprintIndex,
+    index: &FingerprintIndex<O>,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
-) -> Option<FunctionMatch> {
+) -> Option<FunctionMatch<O>> {
     let (primary_axis, primary_hash) = priority_axis(axes)?;
     let primary_frequency = index.corpus_stats().frequency(primary_axis, primary_hash);
     if primary_frequency > FEATURE_SIMILARITY_PRIMARY_FREQUENCY_LIMIT {
         return None;
     }
 
-    let cands = index.query_feature(FeatureKey {
+    let cands = index.lookup_feature(FeatureKey {
         param_count,
         kind: primary_axis,
         hash: primary_hash,
@@ -273,18 +274,18 @@ fn feature_similarity_for_axes(
 
     let remaining = collect_remaining_axes(axes, primary_axis);
 
-    let mut scored: Vec<(PackageCandidate, f64, Vec<AxisKind>)> = cands
-        .into_iter()
+    let mut scored: Vec<(Candidate<O>, f64, Vec<AxisKind>)> = cands
+        .iter()
         .map(|cand| {
             let mut overlap_axes = Vec::new();
             for (axis, hash) in &remaining {
-                let cand_hits = index.query_feature(FeatureKey {
+                let cand_hits = index.lookup_feature(FeatureKey {
                     param_count,
                     kind: *axis,
                     hash: *hash,
                 });
                 if cand_hits.iter().any(|c| {
-                    c.owner.package == cand.owner.package
+                    c.owner.identity_key() == cand.owner.identity_key()
                         && c.external_function_id == cand.external_function_id
                 }) {
                     overlap_axes.push(*axis);
@@ -292,7 +293,7 @@ fn feature_similarity_for_axes(
             }
             let denom = remaining.len().max(1) as f64;
             let score = overlap_axes.len() as f64 / denom;
-            (cand, score, overlap_axes)
+            (cand.clone(), score, overlap_axes)
         })
         .collect();
 
@@ -420,10 +421,10 @@ const FEATURE_SIMILARITY_CANDIDATE_LIMIT: usize = 250;
 const STRUCTURAL_FREQUENCY_LIMIT_ALT: u32 = 75;
 
 #[must_use]
-pub fn try_structural_only(
+pub fn try_structural_only<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     structural_only_for_anchor(
         fp.param_count,
         fp.primary.structural_anchor,
@@ -441,10 +442,10 @@ pub fn try_structural_only(
 /// `infinite_for_to_while`, `conditional_statement_expanded`) shifts
 /// the loop/cond counts that feed `structural_anchor`.
 #[must_use]
-pub fn try_structural_only_alternate(
+pub fn try_structural_only_alternate<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &PackageFingerprintIndex,
-) -> Option<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_only_for_anchor(
             fp.param_count,
@@ -456,13 +457,13 @@ pub fn try_structural_only_alternate(
     })
 }
 
-fn structural_only_for_anchor(
+fn structural_only_for_anchor<O: CandidateOwner>(
     param_count: u32,
     structural_anchor: u64,
-    index: &PackageFingerprintIndex,
+    index: &FingerprintIndex<O>,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
-) -> Option<FunctionMatch> {
+) -> Option<FunctionMatch<O>> {
     let freq = index
         .corpus_stats()
         .frequency(AxisKind::StructuralAnchor, structural_anchor);
@@ -478,21 +479,22 @@ fn structural_only_for_anchor(
         param_count,
         structural_anchor,
     };
-    let cands = index.query_structural(key);
+    let cands = index.lookup_structural(key);
     if cands.is_empty() {
         return None;
     }
 
-    let mut distinct = cands.clone();
-    distinct.dedup_by(|a, b| {
-        a.owner.package == b.owner.package && a.external_function_id == b.external_function_id
-    });
-
-    if distinct.len() == 1 {
-        let only = distinct.into_iter().next()?;
+    // Single-shared-identity fast path: every candidate at this structural
+    // hash collapses to the same `(identity_key, fn_id)` → unique winner
+    // without an extra allocation or sort.
+    let first_key = (cands[0].owner.identity_key(), cands[0].external_function_id);
+    let all_same = cands
+        .iter()
+        .all(|c| (c.owner.identity_key(), c.external_function_id) == first_key);
+    if all_same {
         return Some(FunctionMatch {
             tier,
-            candidate: only,
+            candidate: cands[0].clone(),
             margin: 1.0,
             top_score: f64::from(tier.weight()),
             runner_up_score: 0.0,
@@ -504,42 +506,46 @@ fn structural_only_for_anchor(
     None
 }
 
-pub(crate) fn pick_unique(
-    mut candidates: Vec<PackageCandidate>,
+pub(crate) fn pick_unique<O: CandidateOwner>(
+    candidates: &[Candidate<O>],
     tier: MatchTier,
     alt: Option<NormalizationPassId>,
     matched_axes: Vec<AxisKind>,
-) -> Option<FunctionMatch> {
+) -> Option<FunctionMatch<O>> {
     if candidates.is_empty() {
         return None;
     }
-    // Sort by (package name, version) so duplicates are adjacent.
-    candidates.sort_by(|a, b| {
-        a.owner
-            .package
-            .name
-            .cmp(&b.owner.package.name)
-            .then_with(|| a.owner.package.version.cmp(&b.owner.package.version))
-            .then_with(|| a.external_function_id.cmp(&b.external_function_id))
-    });
-    // Dedupe by (package NAME, external_function_id) — different versions
-    // of the same package indexing the same function (e.g. pretty-bytes
-    // 6.1.0 and 6.1.1 with identical helper code) are not ambiguous;
-    // they are the same library. Later phases (version-narrowing,
-    // package-attribution Hungarian) resolve which specific version
-    // wins, so the cascade tier should treat the package as uniquely
-    // identified.
-    candidates.dedup_by(|a, b| {
-        a.owner.package.name == b.owner.package.name
-            && a.external_function_id == b.external_function_id
-    });
-    if candidates.len() != 1 {
+    // Fast path: a single candidate is the common winning case (and the
+    // common no-match case is `is_empty`, handled above). Save the Vec
+    // allocation + dedup pass when there is nothing to merge.
+    if candidates.len() == 1 {
+        return Some(FunctionMatch {
+            tier,
+            candidate: candidates[0].clone(),
+            margin: 1.0,
+            top_score: f64::from(tier.weight()),
+            runner_up_score: 0.0,
+            matched_alternate: alt,
+            matched_axes,
+        });
+    }
+    // Cheaper-than-sort path: scan once to verify every candidate shares
+    // the same `(identity_key, external_function_id)`. If so they collapse
+    // to a single library/module — same semantics as the historical
+    // sort+dedup but without the Vec allocation.
+    let first_key = (
+        candidates[0].owner.identity_key(),
+        candidates[0].external_function_id,
+    );
+    let all_same = candidates
+        .iter()
+        .all(|c| (c.owner.identity_key(), c.external_function_id) == first_key);
+    if !all_same {
         return None;
     }
-    let candidate = candidates.into_iter().next()?;
     Some(FunctionMatch {
         tier,
-        candidate,
+        candidate: candidates[0].clone(),
         margin: 1.0,
         top_score: f64::from(tier.weight()),
         runner_up_score: 0.0,

@@ -1,5 +1,5 @@
 use reverts_ir::{FunctionFingerprint, FunctionId};
-use reverts_package_index::PackageFingerprintIndex as FingerprintIndex;
+use reverts_package_index::{CandidateOwner, FingerprintIndex, PackageOwner};
 
 use crate::scoring::{
     FunctionMatch, assign_max_weight, try_exact, try_exact_alternate, try_feature_similarity,
@@ -8,7 +8,10 @@ use crate::scoring::{
 };
 
 #[must_use]
-pub fn match_function(fp: &FunctionFingerprint, index: &FingerprintIndex) -> Option<FunctionMatch> {
+pub fn match_function<O: CandidateOwner>(
+    fp: &FunctionFingerprint,
+    index: &FingerprintIndex<O>,
+) -> Option<FunctionMatch<O>> {
     try_exact(fp, index)
 }
 
@@ -24,10 +27,10 @@ pub fn match_function(fp: &FunctionFingerprint, index: &FingerprintIndex) -> Opt
 /// an external import unless the matched package source was already proven
 /// importable.
 #[must_use]
-pub fn cascade_candidates(
+pub fn cascade_candidates<O: CandidateOwner>(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
-) -> Vec<FunctionMatch> {
+    index: &FingerprintIndex<O>,
+) -> Vec<FunctionMatch<O>> {
     let mut all = Vec::new();
     if let Some(m) = try_exact(fp, index) {
         all.push(m);
@@ -64,13 +67,13 @@ pub fn cascade_candidates(
 /// real runner-up information) and the chosen match after the global
 /// bipartite assignment, when one exists.
 #[derive(Debug, Clone, PartialEq)]
-pub struct GlobalAssignment {
+pub struct GlobalAssignment<O = PackageOwner> {
     pub function_id: FunctionId,
-    pub candidates: Vec<FunctionMatch>,
-    pub chosen: Option<FunctionMatch>,
+    pub candidates: Vec<FunctionMatch<O>>,
+    pub chosen: Option<FunctionMatch<O>>,
 }
 
-impl GlobalAssignment {
+impl GlobalAssignment<PackageOwner> {
     /// The package name of the Hungarian-chosen candidate, if any. Equivalent
     /// to `self.chosen.as_ref().map(|m| m.candidate.owner.package.name.as_str())`
     /// but reads as a fact rather than a chain — call sites use this to
@@ -88,16 +91,17 @@ impl GlobalAssignment {
 ///
 /// For each bundle function, exact candidates are evaluated. A bipartite
 /// weight matrix is built over all unique
-/// `(package, external_function_id)` pairs seen across all candidate lists,
-/// and `assign_max_weight` picks the globally optimal one-to-one assignment.
+/// `(owner_identity, external_function_id)` pairs seen across all candidate
+/// lists, and `assign_max_weight` picks the globally optimal one-to-one
+/// assignment. The identity is whatever the owner type considers a unique
+/// match target — package name for the package matcher, subject module
+/// index for the module matcher.
 #[must_use]
-pub fn assign_globally(
+pub fn assign_globally<O: CandidateOwner>(
     bundle_fps: &[FunctionFingerprint],
-    index: &FingerprintIndex,
-) -> Vec<GlobalAssignment> {
-    use reverts_package_index::PackageId;
-
-    let mut out: Vec<GlobalAssignment> = bundle_fps
+    index: &FingerprintIndex<O>,
+) -> Vec<GlobalAssignment<O>> {
+    let mut out: Vec<GlobalAssignment<O>> = bundle_fps
         .iter()
         .map(|fp| GlobalAssignment {
             function_id: fp.id,
@@ -111,17 +115,20 @@ pub fn assign_globally(
     // mirrors the keys indexed by column for O(1) reverse lookup when we
     // decode the Hungarian assignment. Without the parallel vec this loop
     // would be O(n²) in the function count.
-    let mut col_index: std::collections::BTreeMap<(PackageId, u64), usize> =
+    let mut col_index: std::collections::BTreeMap<(O::IdentityKey, u64), usize> =
         std::collections::BTreeMap::new();
-    let mut col_keys: Vec<(PackageId, u64)> = Vec::new();
+    let mut col_keys: Vec<(O::IdentityKey, u64)> = Vec::new();
     for assignment in &out {
         for cand in &assignment.candidates {
             let key = (
-                cand.candidate.owner.package.clone(),
+                cand.candidate.owner.identity_key(),
                 cand.candidate.external_function_id,
             );
-            col_index.entry(key.clone()).or_insert_with(|| {
-                col_keys.push(key);
+            col_index.entry(key).or_insert_with(|| {
+                col_keys.push((
+                    cand.candidate.owner.identity_key(),
+                    cand.candidate.external_function_id,
+                ));
                 col_keys.len() - 1
             });
         }
@@ -144,7 +151,7 @@ pub fn assign_globally(
         let mut row_best_by_col = std::collections::BTreeMap::<usize, f64>::new();
         for (rank, cand) in assignment.candidates.iter().enumerate() {
             let key = (
-                cand.candidate.owner.package.clone(),
+                cand.candidate.owner.identity_key(),
                 cand.candidate.external_function_id,
             );
             if let Some(&col) = col_index.get(&key) {
@@ -232,9 +239,9 @@ pub fn assign_globally(
     out
 }
 
-fn choose_global_assignment(
-    out: &mut [GlobalAssignment],
-    col_keys: &[(reverts_package_index::PackageId, u64)],
+fn choose_global_assignment<O: CandidateOwner>(
+    out: &mut [GlobalAssignment<O>],
+    col_keys: &[(O::IdentityKey, u64)],
     row: usize,
     col: usize,
 ) {
@@ -243,7 +250,7 @@ fn choose_global_assignment(
         .candidates
         .iter()
         .find(|m| {
-            m.candidate.owner.package == key_pair.0
+            m.candidate.owner.identity_key() == key_pair.0
                 && m.candidate.external_function_id == key_pair.1
         })
         .cloned();
