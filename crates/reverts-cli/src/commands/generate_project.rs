@@ -4,24 +4,27 @@
 
 use std::path::PathBuf;
 
+use clap::Args;
 use reverts_input::sqlite::load_project_bundle_from_sqlite;
 use reverts_pipeline::generate_project_from_input;
 
+use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
-use crate::{format_audit_findings, next_path, parse_project_id};
+use crate::format_audit_findings;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct GenerateProjectV2Args {
+    #[arg(long)]
     pub input: PathBuf,
+    #[arg(long)]
     pub output: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
     pub project_id: u32,
 }
 
 impl GenerateProjectV2Args {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
-        let mut input = None;
-        let mut output = None;
-        let mut project_id = None;
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -29,27 +32,7 @@ impl GenerateProjectV2Args {
         {
             args.remove(0);
         }
-        let mut args = args.into_iter();
-
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--input" => input = Some(next_path(&mut args, "--input")?),
-                "--output" => output = Some(next_path(&mut args, "--output")?),
-                "--project-id" => {
-                    project_id = Some(parse_project_id(crate::next_value(
-                        &mut args,
-                        "--project-id",
-                    )?)?);
-                }
-                other => return Err(CliError::UnknownArgument(other.to_string())),
-            }
-        }
-
-        Ok(Self {
-            input: input.ok_or(CliError::MissingArgument("--input"))?,
-            output: output.ok_or(CliError::MissingArgument("--output"))?,
-            project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
-        })
+        parse_args_with_name(crate::help::GENERATE_PROJECT_V2_COMMAND, args)
     }
 }
 

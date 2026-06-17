@@ -31,7 +31,6 @@ pub use errors::{
 };
 pub use help::{HelpTopic, help_text, version_text};
 
-use args::{next_path, next_value, parse_project_id};
 pub(crate) use package_source_workflow::{
     clean_package_entry_path, enrich_package_modules_from_source_units,
     externalization_hint_candidates_from_cache,
@@ -71,6 +70,7 @@ pub(crate) use pkg_sources::version_resolution::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use clap::{Parser, Subcommand};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_observe::AuditReport;
 use reverts_package_matcher::{
@@ -98,62 +98,149 @@ pub enum CliCommand {
 impl CliCommand {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         let args = args.into_iter().collect::<Vec<_>>();
-        match args.first().map(String::as_str) {
-            Some(argument) if is_help_flag(argument) => parse_top_level_help(args.as_slice()),
-            Some(argument) if is_version_flag(argument) => parse_version(args.as_slice()),
-            Some("help") => parse_help_command(args.as_slice()),
-            Some("version") => parse_version(args.as_slice()),
-            Some(command) => {
-                if let Some(topic) = help::command_topic(command) {
-                    if is_command_help(args.as_slice()) {
-                        return Ok(Self::Help(topic));
-                    }
-                    match topic {
-                        HelpTopic::GenerateProjectV2 => {
-                            Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
-                        }
-                        HelpTopic::MatchPackages => {
-                            Ok(Self::MatchPackages(MatchPackagesArgs::parse(args)?))
-                        }
-                        HelpTopic::MatchPackagesReport => Ok(Self::MatchPackagesReport(
-                            MatchPackagesReportArgs::parse(args)?,
-                        )),
-                        HelpTopic::PackageVersionDiagnostics => {
-                            Ok(Self::PackageVersionDiagnostics(
-                                PackageVersionDiagnosticsArgs::parse(args)?,
-                            ))
-                        }
-                        HelpTopic::PackageCacheAudit => Ok(Self::PackageCacheAudit(
-                            PackageCacheArgs::parse(args, help::PACKAGE_CACHE_AUDIT_COMMAND)?,
-                        )),
-                        HelpTopic::PackageCachePruneStale => Ok(Self::PackageCachePruneStale(
-                            PackageCacheArgs::parse(args, help::PACKAGE_CACHE_PRUNE_STALE_COMMAND)?,
-                        )),
-                        HelpTopic::PackageExternalizationHints => {
-                            Ok(Self::PackageExternalizationHints(
-                                PackageExternalizationHintsArgs::parse(args)?,
-                            ))
-                        }
-                        HelpTopic::ExtractAssets => {
-                            Ok(Self::ExtractAssets(ExtractAssetsArgs::parse(args)?))
-                        }
-                        HelpTopic::RuntimeInventory => {
-                            Ok(Self::RuntimeInventory(RuntimeInventoryArgs::parse(args)?))
-                        }
-                        HelpTopic::SymbolNames => {
-                            Ok(Self::SymbolNames(SymbolNamesArgs::parse(args)?))
-                        }
-                        HelpTopic::TopLevel => Ok(Self::Help(HelpTopic::TopLevel)),
-                    }
-                } else if command.starts_with("--") {
-                    Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?))
-                } else {
-                    Err(CliError::UnknownCommand(command.to_string()))
-                }
-            }
-            None => Ok(Self::Help(HelpTopic::TopLevel)),
+        if args.is_empty() {
+            return Ok(Self::Help(HelpTopic::TopLevel));
         }
+        if matches!(args.first().map(String::as_str), Some(argument) if is_help_flag(argument)) {
+            return parse_top_level_help(args.as_slice());
+        }
+        if matches!(args.first().map(String::as_str), Some(argument) if is_version_flag(argument)) {
+            return parse_version(args.as_slice());
+        }
+        if matches!(args.first().map(String::as_str), Some("help")) {
+            return parse_help_command(args.as_slice());
+        }
+        if matches!(args.first().map(String::as_str), Some("version")) {
+            return parse_version(args.as_slice());
+        }
+        if is_command_help(args.as_slice()) {
+            let command = args[0].as_str();
+            return help::command_topic(command)
+                .map(CliCommand::Help)
+                .ok_or_else(|| CliError::UnknownCommand(command.to_string()));
+        }
+        if args
+            .first()
+            .is_some_and(|argument| argument.starts_with("--"))
+        {
+            return Ok(Self::GenerateProjectV2(GenerateProjectV2Args::parse(args)?));
+        }
+
+        let argv = std::iter::once("reverts-cli".to_string())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
+        let parsed = ClapCli::try_parse_from(argv).map_err(|error| {
+            if let Some(command) = args.first()
+                && !command.starts_with("--")
+                && help::command_topic(command).is_none()
+            {
+                return CliError::UnknownCommand(command.clone());
+            }
+            args::clap_error_to_cli(error)
+        })?;
+        parsed.into_cli_command()
     }
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "reverts-cli",
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+struct ClapCli {
+    #[command(subcommand)]
+    command: Option<ClapCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ClapCommand {
+    #[command(name = "generate-project-v2", disable_help_flag = true)]
+    GenerateProjectV2(GenerateProjectV2Args),
+    #[command(name = "match-packages", disable_help_flag = true)]
+    MatchPackages(MatchPackagesArgs),
+    #[command(name = "match-packages-report", disable_help_flag = true)]
+    MatchPackagesReport(MatchPackagesReportArgs),
+    #[command(name = "package-version-diagnostics", disable_help_flag = true)]
+    PackageVersionDiagnostics(PackageVersionDiagnosticsArgs),
+    #[command(name = "package-cache-audit", disable_help_flag = true)]
+    PackageCacheAudit(PackageCacheArgs),
+    #[command(name = "package-cache-prune-stale", disable_help_flag = true)]
+    PackageCachePruneStale(PackageCacheArgs),
+    #[command(name = "package-externalization-hints", disable_help_flag = true)]
+    PackageExternalizationHints(PackageExternalizationHintsArgs),
+    #[command(name = "extract-assets", disable_help_flag = true)]
+    ExtractAssets(ExtractAssetsArgs),
+    #[command(name = "runtime-inventory", disable_help_flag = true)]
+    RuntimeInventory(RuntimeInventoryArgs),
+    #[command(name = "symbol-names", disable_help_flag = true)]
+    SymbolNames(SymbolNamesArgs),
+}
+
+impl ClapCli {
+    fn into_cli_command(self) -> Result<CliCommand, CliError> {
+        Ok(match self.command {
+            Some(ClapCommand::GenerateProjectV2(args)) => CliCommand::GenerateProjectV2(args),
+            Some(ClapCommand::MatchPackages(args)) => CliCommand::MatchPackages(args),
+            Some(ClapCommand::MatchPackagesReport(args)) => {
+                CliCommand::MatchPackagesReport(validate_match_packages_report_for_cli(args)?)
+            }
+            Some(ClapCommand::PackageVersionDiagnostics(args)) => {
+                CliCommand::PackageVersionDiagnostics(args)
+            }
+            Some(ClapCommand::PackageCacheAudit(args)) => CliCommand::PackageCacheAudit(args),
+            Some(ClapCommand::PackageCachePruneStale(args)) => {
+                CliCommand::PackageCachePruneStale(args)
+            }
+            Some(ClapCommand::PackageExternalizationHints(args)) => {
+                CliCommand::PackageExternalizationHints(args)
+            }
+            Some(ClapCommand::ExtractAssets(args)) => CliCommand::ExtractAssets(args),
+            Some(ClapCommand::RuntimeInventory(args)) => {
+                CliCommand::RuntimeInventory(validate_runtime_inventory_for_cli(args)?)
+            }
+            Some(ClapCommand::SymbolNames(args)) => {
+                CliCommand::SymbolNames(validate_symbol_names_for_cli(args)?)
+            }
+            None => CliCommand::Help(HelpTopic::TopLevel),
+        })
+    }
+}
+
+fn validate_match_packages_report_for_cli(
+    args: MatchPackagesReportArgs,
+) -> Result<MatchPackagesReportArgs, CliError> {
+    if args.all_projects {
+        Ok(args)
+    } else {
+        Err(CliError::MissingArgument("--all-projects"))
+    }
+}
+
+fn validate_runtime_inventory_for_cli(
+    args: RuntimeInventoryArgs,
+) -> Result<RuntimeInventoryArgs, CliError> {
+    match (args.project_id, args.all_projects) {
+        (Some(_), true) => Err(CliError::UnknownArgument("--all-projects".to_string())),
+        (None, false) => Err(CliError::MissingArgument("--project-id")),
+        _ => Ok(args),
+    }
+}
+
+fn validate_symbol_names_for_cli(args: SymbolNamesArgs) -> Result<SymbolNamesArgs, CliError> {
+    if args.list
+        && (!args.sets.is_empty() || !args.clears.is_empty() || args.batch.is_some() || args.apply)
+    {
+        return Err(CliError::UnknownArgument(
+            "--list cannot be combined with mutations".to_string(),
+        ));
+    }
+    if !args.list && args.sets.is_empty() && args.clears.is_empty() && args.batch.is_none() {
+        return Err(CliError::MissingArgument(
+            "--list | --set | --clear | --batch",
+        ));
+    }
+    Ok(args)
 }
 
 fn parse_top_level_help(args: &[String]) -> Result<CliCommand, CliError> {

@@ -19,6 +19,7 @@ reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
 reverts-package-matcher = { path = "../reverts-package-matcher" }
 reverts-pipeline = { path = "../reverts-pipeline" }
+clap = { version = "4", features = ["derive"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 semver = "1"
 serde_json = "1"

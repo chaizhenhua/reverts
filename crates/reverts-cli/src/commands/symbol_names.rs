@@ -9,23 +9,32 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::Args;
 use reverts_js::sanitize_identifier;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
-use crate::args::{next_path, next_value, parse_project_id};
+use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError, SymbolNamesError};
 use crate::{collect_sqlite_rows, sqlite_table_has_column};
 
 pub const SYMBOL_NAME_SOURCE_MANUAL: &str = "manual";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct SymbolNamesArgs {
+    #[arg(long)]
     pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
     pub project_id: u32,
+    #[arg(long)]
     pub list: bool,
+    #[arg(long)]
     pub apply: bool,
+    #[arg(long = "set", value_parser = parse_set_spec)]
     pub sets: Vec<SymbolNameSetSpec>,
+    #[arg(long = "clear", value_parser = parse_clear_spec)]
     pub clears: Vec<SymbolNameClearSpec>,
+    #[arg(long)]
     pub batch: Option<PathBuf>,
 }
 
@@ -44,13 +53,6 @@ pub struct SymbolNameClearSpec {
 
 impl SymbolNamesArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
-        let mut input = None;
-        let mut project_id = None;
-        let mut list = false;
-        let mut apply = false;
-        let mut sets = Vec::new();
-        let mut clears = Vec::new();
-        let mut batch = None;
         let mut args = args.into_iter().collect::<Vec<_>>();
         if args
             .first()
@@ -58,43 +60,29 @@ impl SymbolNamesArgs {
         {
             args.remove(0);
         }
-        let mut args = args.into_iter();
+        let parsed: Self = parse_args_with_name(crate::help::SYMBOL_NAMES_COMMAND, args)?;
 
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--input" => input = Some(next_path(&mut args, "--input")?),
-                "--project-id" => {
-                    project_id = Some(parse_project_id(next_value(&mut args, "--project-id")?)?);
-                }
-                "--list" => list = true,
-                "--apply" => apply = true,
-                "--set" => sets.push(parse_set_spec(next_value(&mut args, "--set")?)?),
-                "--clear" => clears.push(parse_clear_spec(next_value(&mut args, "--clear")?)?),
-                "--batch" => batch = Some(next_path(&mut args, "--batch")?),
-                other => return Err(CliError::UnknownArgument(other.to_string())),
-            }
-        }
-
-        if list && (!sets.is_empty() || !clears.is_empty() || batch.is_some() || apply) {
+        if parsed.list
+            && (!parsed.sets.is_empty()
+                || !parsed.clears.is_empty()
+                || parsed.batch.is_some()
+                || parsed.apply)
+        {
             return Err(CliError::UnknownArgument(
                 "--list cannot be combined with mutations".to_string(),
             ));
         }
-        if !list && sets.is_empty() && clears.is_empty() && batch.is_none() {
+        if !parsed.list
+            && parsed.sets.is_empty()
+            && parsed.clears.is_empty()
+            && parsed.batch.is_none()
+        {
             return Err(CliError::MissingArgument(
                 "--list | --set | --clear | --batch",
             ));
         }
 
-        Ok(Self {
-            input: input.ok_or(CliError::MissingArgument("--input"))?,
-            project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
-            list,
-            apply,
-            sets,
-            clears,
-            batch,
-        })
+        Ok(parsed)
     }
 }
 
@@ -212,17 +200,17 @@ pub fn symbol_names_from_connection(
     })
 }
 
-fn parse_set_spec(value: String) -> Result<SymbolNameSetSpec, CliError> {
+fn parse_set_spec(value: &str) -> Result<SymbolNameSetSpec, String> {
     let Some((target, semantic_name)) = value.split_once('=') else {
-        return Err(CliError::UnknownArgument(format!(
+        return Err(format!(
             "invalid --set value {value}; expected MODULE_ID:ORIGINAL=SEMANTIC"
-        )));
+        ));
     };
-    let clear = parse_clear_spec(target.to_string())?;
+    let clear = parse_clear_spec(target)?;
     if semantic_name.trim().is_empty() {
-        return Err(CliError::UnknownArgument(format!(
+        return Err(format!(
             "invalid --set value {value}; semantic name is empty"
-        )));
+        ));
     }
     Ok(SymbolNameSetSpec {
         module_id: clear.module_id,
@@ -231,19 +219,19 @@ fn parse_set_spec(value: String) -> Result<SymbolNameSetSpec, CliError> {
     })
 }
 
-fn parse_clear_spec(value: String) -> Result<SymbolNameClearSpec, CliError> {
+fn parse_clear_spec(value: &str) -> Result<SymbolNameClearSpec, String> {
     let Some((module_id, original_name)) = value.split_once(':') else {
-        return Err(CliError::UnknownArgument(format!(
+        return Err(format!(
             "invalid symbol target {value}; expected MODULE_ID:ORIGINAL"
-        )));
+        ));
     };
     if original_name.is_empty() {
-        return Err(CliError::UnknownArgument(format!(
+        return Err(format!(
             "invalid symbol target {value}; original name is empty"
-        )));
+        ));
     }
     Ok(SymbolNameClearSpec {
-        module_id: parse_project_id(module_id.to_string())?,
+        module_id: parse_project_id(module_id)?,
         original_name: original_name.to_string(),
     })
 }
