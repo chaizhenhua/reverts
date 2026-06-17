@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Args, ValueEnum};
-use reverts_graph::FunctionExtractor;
+use reverts_graph::{FunctionExtractor, extract_import_specifiers};
 use reverts_ir::{AxisKind, FunctionFingerprint, ModuleId};
 use reverts_package_index::{
     Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, StructuralKey,
@@ -96,6 +96,14 @@ pub enum MatchStrategy {
     /// (Lever 5 lite). Identifier-invariant and bundler-stable, but
     /// coarse — strongest as one signal among many.
     KeywordHistogram,
+    /// Dep-graph anchor propagation. Bootstraps with the signal-cascade's
+    /// 3-or-more-signal-agreement pairs as anchors, then walks the cli
+    /// bundle's `module_dependencies` graph and the ref-side import-
+    /// specifier list in lockstep: an anchor's i-th ref import is
+    /// proposed as the partner of the anchor's i-th subject dep,
+    /// provided string-corpus or keyword-histogram backs it up. Iterates
+    /// until no new pairs land.
+    DepGraphPropagation,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,8 +309,18 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
     );
 
     let fp_started = Instant::now();
-    let ref_fps = fingerprint_modules(&ref_modules);
-    let sub_fps = fingerprint_modules(&sub_modules);
+    let mut ref_fps = fingerprint_modules(&ref_modules);
+    let mut sub_fps = fingerprint_modules(&sub_modules);
+    // Hydrate dep targets for the subject side from the cli bundle's
+    // `module_dependencies` rows so the dep-graph follow-up has both
+    // sides of the edge.
+    load_dependency_targets(&conn, args.subject_project_id, &sub_modules, &mut sub_fps)
+        .map_err(|source| CliRunError::MatchModulesRecall(format!("load sub deps: {source}")))?;
+    // Ref side has no DB-stored deps (typical for sources ingested as
+    // separate files); rely on the OXC import-specifier extractor that
+    // already populated `dependency_specifiers`. Leave `dependency_targets`
+    // empty for refs — pairs are resolved by specifier text, not idx.
+    let _ = &mut ref_fps;
     let ref_bags: Vec<ModuleBag> = ref_fps.iter().map(|m| m.bag.clone()).collect();
     let sub_bags: Vec<ModuleBag> = sub_fps.iter().map(|m| m.bag.clone()).collect();
     println!(
@@ -466,6 +484,41 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
             (best_per_ref, None)
+        }
+        MatchStrategy::DepGraphPropagation => {
+            // Build the specifier → ref_idx lookup the propagation pass
+            // needs. Ref semantic_names look like `bridge/foo` (no leading
+            // dot); specifiers in source look like `./bridge/foo` or
+            // `../shared/utils`. Normalize both sides to bare relative
+            // paths before joining.
+            let mut spec_to_ref: BTreeMap<String, usize> = BTreeMap::new();
+            for (idx, m) in ref_modules.iter().enumerate() {
+                if let Some(name) = m.semantic_name.as_deref() {
+                    spec_to_ref.insert(name.to_string(), idx);
+                    spec_to_ref.insert(format!("./{name}"), idx);
+                    // Also register every suffix of the path so specifiers
+                    // walking up directories still resolve. The cost is
+                    // O(path-depth) extra entries — typically <= 5.
+                    let mut suffix = name.to_string();
+                    while let Some(pos) = suffix.find('/') {
+                        suffix = suffix[pos + 1..].to_string();
+                        spec_to_ref.entry(format!("./{suffix}")).or_insert(idx);
+                        spec_to_ref.entry(format!("../{suffix}")).or_insert(idx);
+                    }
+                }
+            }
+            let best = score_via_dep_graph_propagation(&ref_fps, &sub_fps, &spec_to_ref);
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[dep_graph_propagation]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s — {} specifier entries",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+                spec_to_ref.len(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            (best, None)
         }
         MatchStrategy::KeywordHistogram => {
             let best = score_via_keyword_histogram(&ref_fps, &sub_fps);
@@ -648,6 +701,18 @@ struct ModuleFingerprints {
     raw: Vec<FunctionFingerprint>,
     string_corpus: BTreeSet<u64>,
     keyword_histogram: KeywordHistogram,
+    /// Ordered import specifiers (`import x from "specifier"`,
+    /// `require("specifier")`, dynamic `import("specifier")`). For the
+    /// ref side these come from an OXC visitor over the module source;
+    /// for the subject side they come from the `module_dependencies`
+    /// SQLite table after a sub-module-id ↦ sub-idx remap. The list is
+    /// the per-module degree signal used by the dep-graph follow-up.
+    dependency_specifiers: Vec<String>,
+    /// Indexes into the *peer* slice (ref→ref or sub→sub depending on
+    /// which fingerprint slice this belongs to). Populated only for
+    /// subjects via the `module_dependencies` join; remains empty for
+    /// ref modules.
+    dependency_targets: Vec<usize>,
 }
 
 /// Counts of structural JS keywords / `=>`. Bundler-stable (a minified
@@ -730,6 +795,8 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 raw: Vec::new(),
                 string_corpus: BTreeSet::new(),
                 keyword_histogram: KeywordHistogram::default(),
+                dependency_specifiers: Vec::new(),
+                dependency_targets: Vec::new(),
             });
             continue;
         };
@@ -744,6 +811,8 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 raw: Vec::new(),
                 string_corpus: BTreeSet::new(),
                 keyword_histogram: KeywordHistogram::default(),
+                dependency_specifiers: Vec::new(),
+                dependency_targets: Vec::new(),
             });
             continue;
         };
@@ -752,14 +821,56 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
         let bag = bag_from_fingerprints(&raw);
         let string_corpus = extract_string_corpus(slice);
         let keyword_histogram = extract_keyword_histogram(slice);
+        let dependency_specifiers = extract_import_specifiers(slice);
         out.push(ModuleFingerprints {
             bag,
             raw,
             string_corpus,
             keyword_histogram,
+            dependency_specifiers,
+            dependency_targets: Vec::new(),
         });
     }
     out
+}
+
+/// Hydrate per-subject-module dependency target lists from the cli
+/// bundle's `module_dependencies` SQLite table. Maps subject module id
+/// → its position in the `sub_fps` slice so propagation can walk the
+/// dep graph by index. Modules without a `dependency_id` row in the
+/// table get an empty `dependency_targets` Vec (the existing default).
+fn load_dependency_targets(
+    connection: &Connection,
+    project_id: u32,
+    sub_modules: &[ModuleRecord],
+    sub_fps: &mut [ModuleFingerprints],
+) -> Result<(), rusqlite::Error> {
+    let id_to_idx: BTreeMap<i64, usize> = sub_modules
+        .iter()
+        .enumerate()
+        .map(|(idx, m)| (m.id, idx))
+        .collect();
+    let mut stmt = connection.prepare(
+        r"
+        SELECT md.module_id, md.dependency_id
+        FROM module_dependencies md
+        JOIN modules m         ON m.id = md.module_id
+        JOIN project_files pf  ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+        ",
+    )?;
+    let rows = stmt.query_map(params![i64::from(project_id)], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+    for row in rows {
+        let (owner_id, dep_id) = row?;
+        let (Some(&owner_idx), Some(&dep_idx)) = (id_to_idx.get(&owner_id), id_to_idx.get(&dep_id))
+        else {
+            continue;
+        };
+        sub_fps[owner_idx].dependency_targets.push(dep_idx);
+    }
+    Ok(())
 }
 
 /// Count occurrences of structural JS keywords in a source slice. Reads
@@ -1367,6 +1478,152 @@ fn score_via_structural_bag(
             axis: None,
         })
         .collect()
+}
+
+/// Dep-graph anchor propagation. Two-pass:
+///
+/// 1. Bootstrap with the signal-cascade anchors that already have ≥ 3
+///    independent signals agreeing — those pairs are confident enough
+///    to seed propagation.
+/// 2. Walk each anchor's dependency edges in lockstep: the i-th ref
+///    import specifier is proposed as the partner of the i-th subject
+///    dep target. A proposal lands when neither side is already claimed
+///    by a stronger anchor AND the keyword-histogram cosine on the
+///    proposed pair clears 0.6 (cheap validation that we aren't
+///    pairing wildly different modules just because they happen to
+///    be at the same dep position).
+/// 3. New pairs become anchors for the next round; iterate until no
+///    new pairs land or a hard step cap is reached.
+fn score_via_dep_graph_propagation(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+    spec_to_ref: &BTreeMap<String, usize>,
+) -> Vec<BestMatch> {
+    // Seed anchors: cascade-3-agree pairs from signal-cascade.
+    let seed = score_via_cascade_three_agree(ref_fps, sub_fps);
+    let mut anchors: Vec<Option<usize>> = seed.iter().map(|m| m.subject_idx).collect();
+    let mut claimed: BTreeSet<usize> = anchors.iter().filter_map(|x| *x).collect();
+
+    const MAX_ROUNDS: usize = 6;
+    const PROPAGATE_VALIDATION_MIN: f64 = 0.6;
+    let mut last_added = usize::MAX;
+    let initial_anchors = anchors.iter().filter(|x| x.is_some()).count();
+    let mut diag_ref_no_specs = 0usize;
+    let mut diag_sub_no_targets = 0usize;
+    let mut diag_spec_unresolved = 0usize;
+    let mut diag_already_claimed = 0usize;
+    let mut diag_validation_failed = 0usize;
+    for _round in 0..MAX_ROUNDS {
+        if last_added == 0 {
+            break;
+        }
+        last_added = 0;
+        for ref_idx in 0..ref_fps.len() {
+            let Some(sub_idx) = anchors[ref_idx] else {
+                continue;
+            };
+            let ref_specs = &ref_fps[ref_idx].dependency_specifiers;
+            let sub_targets = &sub_fps[sub_idx].dependency_targets;
+            if ref_specs.is_empty() {
+                diag_ref_no_specs += 1;
+                continue;
+            }
+            if sub_targets.is_empty() {
+                diag_sub_no_targets += 1;
+                continue;
+            }
+            let limit = ref_specs.len().min(sub_targets.len());
+            for i in 0..limit {
+                let spec = ref_specs[i].as_str();
+                let Some(ref_dep_idx) = spec_to_ref.get(spec).copied() else {
+                    diag_spec_unresolved += 1;
+                    continue;
+                };
+                let sub_dep_idx = sub_targets[i];
+                if anchors[ref_dep_idx].is_some() || claimed.contains(&sub_dep_idx) {
+                    diag_already_claimed += 1;
+                    continue;
+                }
+                let validation = keyword_histogram_similarity(
+                    &ref_fps[ref_dep_idx].keyword_histogram,
+                    &sub_fps[sub_dep_idx].keyword_histogram,
+                );
+                if validation < PROPAGATE_VALIDATION_MIN {
+                    diag_validation_failed += 1;
+                    continue;
+                }
+                anchors[ref_dep_idx] = Some(sub_dep_idx);
+                claimed.insert(sub_dep_idx);
+                last_added += 1;
+            }
+        }
+    }
+    let total_anchors = anchors.iter().filter(|x| x.is_some()).count();
+    eprintln!(
+        "  dep-graph propagation diag: bootstrap={initial_anchors}, final={total_anchors}, refs-without-specs={diag_ref_no_specs}, subs-without-targets={diag_sub_no_targets}, specifier-unresolved={diag_spec_unresolved}, already-claimed={diag_already_claimed}, validation-failed={diag_validation_failed}"
+    );
+
+    anchors
+        .into_iter()
+        .map(|sub_idx| BestMatch {
+            subject_idx: sub_idx,
+            score: if sub_idx.is_some() { 1.0 } else { 0.0 },
+            axis: None,
+        })
+        .collect()
+}
+
+/// Reuses the signal-cascade vote-counting logic to produce a sparse
+/// list of (ref_idx -> sub_idx) for the highest-agreement bucket only.
+fn score_via_cascade_three_agree(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    let ref_bags: Vec<ModuleBag> = ref_fps.iter().map(|m| m.bag.clone()).collect();
+    let sub_bags: Vec<ModuleBag> = sub_fps.iter().map(|m| m.bag.clone()).collect();
+    let bag_context = build_scoring_context(
+        &ref_bags,
+        &sub_bags,
+        SimilarityMetric::Jaccard,
+        AxisCombiner::Mean,
+        true,
+        false,
+    );
+    let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
+    let str_best = score_via_string_literal(ref_fps, sub_fps);
+    let kw_best = score_via_keyword_histogram(ref_fps, sub_fps);
+    let pinned: Vec<Option<usize>> = bag_best
+        .iter()
+        .map(|m| m.subject_idx.filter(|_| m.score >= 0.20))
+        .collect();
+    let func_report = score_via_module_pinned_function_tier(ref_fps, sub_fps, &pinned);
+
+    let signals: [&[BestMatch]; 4] = [&bag_best, &str_best, &kw_best, &func_report.best];
+    let thresholds: [f64; 4] = [0.20, 0.30, 0.85, 0.30];
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for ref_idx in 0..ref_fps.len() {
+        let mut votes: HashMap<usize, usize> = HashMap::new();
+        for (i, signal) in signals.iter().enumerate() {
+            let pick = signal[ref_idx];
+            if pick.score < thresholds[i] {
+                continue;
+            }
+            if let Some(sub_idx) = pick.subject_idx {
+                *votes.entry(sub_idx).or_default() += 1;
+            }
+        }
+        if let Some((&sub_idx, &n)) = votes.iter().max_by_key(|(_, n)| *n)
+            && n >= 3
+        {
+            out[ref_idx] = BestMatch {
+                subject_idx: Some(sub_idx),
+                score: 1.0,
+                axis: None,
+            };
+        }
+    }
+    out
 }
 
 /// Pair ref modules with subject modules by cosine similarity over the

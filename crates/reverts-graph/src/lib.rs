@@ -1,5 +1,5 @@
 pub mod fingerprint;
-pub use fingerprint::{ExtractedFunction, FunctionExtractor};
+pub use fingerprint::{ExtractedFunction, FunctionExtractor, extract_import_specifiers};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
