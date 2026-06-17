@@ -68,6 +68,15 @@ pub enum MatchStrategy {
     /// shape coverage with the same tuned weights as the package matcher's
     /// `match_structural_bags` tier — no module-matcher-specific code.
     StructuralBag,
+    /// Two-pass matcher mirroring the package matcher's pipeline:
+    /// (1) bag-jaccard pairs ref modules with subject modules ("bucket"
+    /// selection — the analog of `(pkg_name, version)`), then (2) the
+    /// shared function-tier cascade runs **inside each paired bucket**.
+    /// Restricting candidate space to the partner module typically
+    /// collapses the noisy multi-candidate cases that drop function-tier
+    /// recall, so direct name transfer ratios jump (estimate from
+    /// `print_function_naming_coverage` analysis: 3.5 % → ~40 %).
+    ModulePinnedFunctionTier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -306,6 +315,50 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             );
             print_histogram(&recall.score_histogram, ref_modules.len());
             (best, None)
+        }
+        MatchStrategy::ModulePinnedFunctionTier => {
+            // Pass 1: bag-jaccard with the precision-friendly defaults to
+            // pair ref modules with subject modules.
+            let pin_context = build_scoring_context(
+                &ref_bags,
+                &sub_bags,
+                SimilarityMetric::Jaccard,
+                AxisCombiner::Mean,
+                true,
+                false,
+            );
+            let pin_best = score_best_subjects_with(&pin_context, &ref_bags, &sub_bags);
+            const PIN_ACCEPT_THRESHOLD: f64 = 0.20;
+            let pinned: Vec<Option<usize>> = pin_best
+                .iter()
+                .map(|m| m.subject_idx.filter(|_| m.score >= PIN_ACCEPT_THRESHOLD))
+                .collect();
+            let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
+            println!(
+                "  pass-1 bag-jaccard module pairing: {} / {} ref modules pinned (>= {:.2})",
+                pin_hits,
+                ref_modules.len(),
+                PIN_ACCEPT_THRESHOLD
+            );
+
+            // Pass 2: inside each (ref, subject) pair, build a tiny
+            // FingerprintIndex over the subject module's functions and run
+            // the shared function-tier cascade. This is the "bucket then
+            // cascade" pattern the package matcher uses for
+            // (pkg_name, version) buckets.
+            let report = score_via_module_pinned_function_tier(&ref_fps, &sub_fps, &pinned);
+            let recall = summarise_recall(&report.best, threshold);
+            println!(
+                "[module_pinned_function_tier]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_tier_breakdown(&report.tier_counts);
+            print_function_naming_coverage(&report, &ref_fps, &sub_fps);
+            (report.best, None)
         }
     };
 
@@ -843,6 +896,71 @@ fn score_via_structural_bag(
             axis: None,
         })
         .collect()
+}
+
+/// Module-pinned function-tier scoring. For each ref module that has a
+/// `pinned` subject partner, build a fingerprint index over JUST that
+/// subject module's functions and run the shared cascade against it. With
+/// the candidate set restricted from "all 27k subject functions" to "~10
+/// functions inside the partner module" the unique-winner condition
+/// becomes easy to satisfy, so the per-function naming coverage's
+/// `tier_unique` line typically jumps an order of magnitude.
+fn score_via_module_pinned_function_tier(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+    pinned: &[Option<usize>],
+) -> FunctionTierReport {
+    use reverts_package_matcher::{
+        try_exact, try_exact_alternate, try_structural_anchored, try_structural_anchored_alternate,
+        try_structural_only, try_structural_only_alternate,
+    };
+
+    let mut report = FunctionTierReport::default();
+    report.best.resize(ref_fps.len(), BestMatch::default());
+
+    for (ref_idx, ref_module) in ref_fps.iter().enumerate() {
+        let Some(sub_idx) = pinned[ref_idx] else {
+            continue;
+        };
+        if ref_module.raw.is_empty() {
+            continue;
+        }
+        let sub_module = &sub_fps[sub_idx];
+        if sub_module.raw.is_empty() {
+            continue;
+        }
+
+        // Per-pair mini-index. ModuleOwner uses the actual subject index so
+        // the dedup key matches what aggregations would expect, even though
+        // every candidate here resolves to a single owner.
+        let mut index: FingerprintIndex<ModuleOwner> = FingerprintIndex::new();
+        for fp in &sub_module.raw {
+            insert_function_into_index(&mut index, sub_idx, fp);
+        }
+
+        let mut total = 0.0_f64;
+        for fp in &ref_module.raw {
+            let top = try_exact(fp, &index)
+                .or_else(|| try_exact_alternate(fp, &index))
+                .or_else(|| try_structural_anchored(fp, &index))
+                .or_else(|| try_structural_anchored_alternate(fp, &index))
+                .or_else(|| try_structural_only(fp, &index))
+                .or_else(|| try_structural_only_alternate(fp, &index));
+            let Some(top) = top else {
+                continue;
+            };
+            total += f64::from(top.tier.weight());
+            *report.tier_counts.entry(tier_label(&top)).or_default() += 1;
+        }
+        let denom = (ref_module.raw.len() as f64).max(1.0) * TIER_EXACT_WEIGHT;
+        let normalised = (total / denom).clamp(0.0, 1.0);
+        report.best[ref_idx] = BestMatch {
+            subject_idx: Some(sub_idx),
+            score: normalised,
+            axis: None,
+        };
+    }
+    report
 }
 
 /// Per-function naming-coverage report. Answers: "how many of the ref
