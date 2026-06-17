@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Args, ValueEnum};
-use reverts_graph::{FunctionExtractor, extract_import_specifiers};
+use reverts_graph::{FunctionExtractor, extract_import_specifiers, extract_property_names};
 use reverts_ir::{AxisKind, FunctionFingerprint, ModuleId};
 use reverts_package_index::{
     Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, StructuralKey,
@@ -111,6 +111,11 @@ pub enum MatchStrategy {
     /// it. Recovers near-miss bag-jaccard modules that the orthogonal
     /// axes (which scoring noise affects independently) still see clearly.
     BagJaccardRescued,
+    /// Property/method/member-name Jaccard. Identifiers that bundlers
+    /// cannot rename (class methods, object literal keys, `.prop`
+    /// accesses) form a per-module corpus; pairs are scored by Jaccard
+    /// over those corpora. Orthogonal to everything else.
+    PropertyName,
     /// End-to-end composite — what production naming should run.
     /// Step 1: `bag-jaccard-rescued` produces high-recall module pairs
     /// (+ orthogonal-signal rescues). Step 2: feeds those pairs to
@@ -501,6 +506,20 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
             (best_per_ref, None)
         }
+        MatchStrategy::PropertyName => {
+            let best = score_via_property_name(&ref_fps, &sub_fps);
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[property_name (bundler-stable identifier corpus)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_property_corpus_stats(&ref_fps, &sub_fps);
+            (best, None)
+        }
         MatchStrategy::Composite => {
             // Step 1: rescued pairing. Same logic as the standalone
             // `bag-jaccard-rescued` strategy, but with a category-respect
@@ -517,13 +536,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
             let str_best = score_via_string_literal(&ref_fps, &sub_fps);
             let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
+            let prop_best = score_via_property_name(&ref_fps, &sub_fps);
             const BAG_ACCEPT: f64 = 0.20;
             const STR_RESCUE: f64 = 0.50;
             const KW_RESCUE: f64 = 0.90;
+            const PROP_RESCUE: f64 = 0.40;
 
             let mut pinned: Vec<Option<usize>> = Vec::with_capacity(ref_modules.len());
             let mut rescued_str = 0usize;
             let mut rescued_kw = 0usize;
+            let mut rescued_prop = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
                 ref_modules[ref_idx].category == sub_modules[sub_idx].category
@@ -562,11 +584,21 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_kw += 1;
                     }
                 }
+                if pick.is_none() {
+                    let prop_pick = prop_best[ref_idx];
+                    if prop_pick.score >= PROP_RESCUE
+                        && let Some(sub_idx) = prop_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_prop += 1;
+                    }
+                }
                 pinned.push(pick);
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -890,6 +922,13 @@ struct ModuleFingerprints {
     /// subjects via the `module_dependencies` join; remains empty for
     /// ref modules.
     dependency_targets: Vec<usize>,
+    /// Distinct hashed property / method / static-member-access names
+    /// (`componentDidMount`, `processInput`, `fromSSEResponse`, …) that
+    /// the module declares or calls. Bundlers cannot rename these
+    /// because external code may invoke them by name — so the set is
+    /// stable across the cross-version pair and a strong identity
+    /// signal orthogonal to AST/CFG fingerprints.
+    property_names: BTreeSet<u64>,
 }
 
 /// Counts of structural JS keywords / `=>`. Bundler-stable (a minified
@@ -974,6 +1013,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 keyword_histogram: KeywordHistogram::default(),
                 dependency_specifiers: Vec::new(),
                 dependency_targets: Vec::new(),
+                property_names: BTreeSet::new(),
             });
             continue;
         };
@@ -990,6 +1030,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
                 keyword_histogram: KeywordHistogram::default(),
                 dependency_specifiers: Vec::new(),
                 dependency_targets: Vec::new(),
+                property_names: BTreeSet::new(),
             });
             continue;
         };
@@ -999,6 +1040,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
         let string_corpus = extract_string_corpus(slice);
         let keyword_histogram = extract_keyword_histogram(slice);
         let dependency_specifiers = extract_import_specifiers(slice);
+        let property_names = extract_property_names(slice);
         out.push(ModuleFingerprints {
             bag,
             raw,
@@ -1006,6 +1048,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
             keyword_histogram,
             dependency_specifiers,
             dependency_targets: Vec::new(),
+            property_names,
         });
     }
     out
@@ -1912,6 +1955,87 @@ fn score_via_string_literal(
         };
     }
     out
+}
+
+/// Pair ref modules with subject modules by Jaccard over their
+/// property-name corpora (class methods, object keys, member accesses
+/// — names bundlers don't rewrite).
+fn score_via_property_name(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    let mut by_name: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for &h in &m.property_names {
+            by_name.entry(h).or_default().push(sub_idx);
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.property_names.is_empty() {
+            continue;
+        }
+        let mut intersect: HashMap<usize, usize> = HashMap::new();
+        for &h in &m.property_names {
+            if let Some(subs) = by_name.get(&h) {
+                for &sub_idx in subs {
+                    *intersect.entry(sub_idx).or_default() += 1;
+                }
+            }
+        }
+        let mut best_score = 0.0_f64;
+        let mut best_sub = None;
+        for (&sub_idx, &i) in &intersect {
+            let union = m.property_names.len() + sub_fps[sub_idx].property_names.len() - i;
+            if union == 0 {
+                continue;
+            }
+            let score = i as f64 / union as f64;
+            if score > best_score {
+                best_score = score;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_score,
+            axis: None,
+        };
+    }
+    out
+}
+
+fn print_property_corpus_stats(ref_fps: &[ModuleFingerprints], sub_fps: &[ModuleFingerprints]) {
+    let ref_total: usize = ref_fps.iter().map(|m| m.property_names.len()).sum();
+    let ref_nonempty = ref_fps
+        .iter()
+        .filter(|m| !m.property_names.is_empty())
+        .count();
+    let sub_total: usize = sub_fps.iter().map(|m| m.property_names.len()).sum();
+    let sub_nonempty = sub_fps
+        .iter()
+        .filter(|m| !m.property_names.is_empty())
+        .count();
+    let ref_distinct: BTreeSet<u64> = ref_fps
+        .iter()
+        .flat_map(|m| m.property_names.iter().copied())
+        .collect();
+    let sub_distinct: BTreeSet<u64> = sub_fps
+        .iter()
+        .flat_map(|m| m.property_names.iter().copied())
+        .collect();
+    let shared = ref_distinct.intersection(&sub_distinct).count();
+    println!(
+        "  property-corpus stats: ref {} names / {} modules ({} distinct); subject {} names / {} modules ({} distinct); {} hashes shared across sides",
+        ref_total,
+        ref_nonempty,
+        ref_distinct.len(),
+        sub_total,
+        sub_nonempty,
+        sub_distinct.len(),
+        shared,
+    );
 }
 
 fn print_string_corpus_stats(ref_fps: &[ModuleFingerprints], sub_fps: &[ModuleFingerprints]) {

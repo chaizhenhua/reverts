@@ -15,3 +15,6 @@ pub use extractor::{ExtractedFunction, FunctionExtractor};
 
 pub mod import_specifiers;
 pub use import_specifiers::extract_import_specifiers;
+
+pub mod property_names;
+pub use property_names::extract_property_names;
