@@ -4525,10 +4525,6 @@ type RuntimeReaderClusterResult =
     Result<RuntimeReaderClusterMigration, RuntimeReaderClusterBlocker>;
 
 const MAX_FOLDED_RUNTIME_DEP_READER_CLUSTER_LINES: usize = 200;
-/// Keep very large lazy writer modules as source modules instead of
-/// folding them into the shared runtime helper. They may still import
-/// runtime setters, but the bulky lazy body stays out of runtime.
-const MAX_RUNTIME_LAZY_FOLD_SOURCE_LINES: usize = 100;
 /// Floor for the reader-cluster line cap. `runtime_reader_cluster_cap_for_owner`
 /// raises this proportionally for owners whose own source is large, but
 /// never lowers it below this floor.
@@ -6733,9 +6729,6 @@ pub(crate) fn runtime_lazy_fold_plan(
             continue;
         };
         if !source_is_lazy_preserving_foldable(folded_source.as_str()) {
-            continue;
-        }
-        if folded_source.lines().count() > MAX_RUNTIME_LAZY_FOLD_SOURCE_LINES {
             continue;
         }
         // A self-contained lazy writer module does not need to become a

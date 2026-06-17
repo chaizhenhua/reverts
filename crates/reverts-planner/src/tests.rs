@@ -12157,54 +12157,6 @@ fn write_only_runtime_prelude_binding_imports_setter_without_value() {
 }
 
 #[test]
-fn large_lazy_initializer_module_stays_source_local() {
-    let planner = ImportExportPlanner;
-    let prelude = "function lazyValue(init) { return init; }\nfunction makeShared() { return 0; }\nvar shared = makeShared();\n";
-    let mut body = String::from("var init = lazyValue(() => {\n");
-    for index in 0..120 {
-        body.push_str(format!("\tshared = {index};\n").as_str());
-    }
-    body.push_str("});\nexport { init, shared };\n");
-    let source = format!("{prelude}{body}");
-    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    rows.source_files
-        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
-    rows.modules.push(
-        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
-            .with_source_file(1)
-            .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
-    );
-    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
-    let model = ProgramModel::from_input(input);
-    let enriched = reverts_model::EnrichedProgram::new(
-        model,
-        reverts_model::SemanticNameMap::default(),
-        Vec::new(),
-        reverts_ir::BindingShapeSolution::default(),
-    );
-
-    let plan = planner
-        .plan_enriched_program(&enriched)
-        .expect("fixture should normalize");
-    let entry_source = planned_source(&plan, "modules/entry.ts");
-    let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
-
-    assert!(
-        entry_source.contains(
-            "import { lazyValue, shared, __reverts_set_shared } from './runtime/source-1-helpers.js';"
-        ),
-        "{entry_source}"
-    );
-    assert!(entry_source.contains("var init = lazyValue(() => {"));
-    assert!(entry_source.contains("__reverts_set_shared(119);"));
-    assert!(entry_source.contains("export { init, shared };"));
-    assert!(
-        !helper_source.contains("__reverts_set_shared(119);"),
-        "large lazy module body should not be folded into runtime helper"
-    );
-}
-
-#[test]
 fn lazy_initializer_module_written_runtime_bindings_are_folded_into_helper() {
     let planner = ImportExportPlanner;
     let prelude = concat!(
