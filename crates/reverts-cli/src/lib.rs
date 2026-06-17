@@ -229,15 +229,29 @@ fn validate_runtime_inventory_for_cli(
 
 fn validate_symbol_names_for_cli(args: SymbolNamesArgs) -> Result<SymbolNamesArgs, CliError> {
     if args.list
-        && (!args.sets.is_empty() || !args.clears.is_empty() || args.batch.is_some() || args.apply)
+        && (!args.proposals.is_empty()
+            || !args.accepts.is_empty()
+            || !args.clear_active.is_empty()
+            || args.batch.is_some()
+            || args.apply)
     {
         return Err(CliError::UnknownArgument(
             "--list cannot be combined with mutations".to_string(),
         ));
     }
-    if !args.list && args.sets.is_empty() && args.clears.is_empty() && args.batch.is_none() {
+    if args.all_proposals && !args.list {
+        return Err(CliError::UnknownArgument(
+            "--all-proposals requires --list".to_string(),
+        ));
+    }
+    if !args.list
+        && args.proposals.is_empty()
+        && args.accepts.is_empty()
+        && args.clear_active.is_empty()
+        && args.batch.is_none()
+    {
         return Err(CliError::MissingArgument(
-            "--list | --set | --clear | --batch",
+            "--list | --propose | --accept | --clear-active | --batch",
         ));
     }
     Ok(args)

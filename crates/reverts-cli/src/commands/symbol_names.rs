@@ -1,12 +1,15 @@
-//! `symbol-names` command: inspect and manually set symbol semantic names.
+//! `symbol-names` command: inspect, propose, and accept symbol semantic names.
 //!
-//! The command writes the existing `symbols.semantic_name` input field rather
-//! than editing emitted output. The next `generate-project-v2` run then carries
-//! the requested names through the normal input → analyze → plan → emit path.
+//! `--propose` records a naming suggestion without changing emission.
+//! `--accept` records the suggestion and updates the active
+//! `symbols.semantic_name` input field, so the next `generate-project-v2` run
+//! carries the accepted name through the normal input → analyze → plan → emit
+//! path. Deprecated `--set`/`--clear` aliases are kept for compatibility, but
+//! help text advertises the clearer propose/accept/clear-active verbs.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
@@ -15,9 +18,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError, SymbolNamesError};
-use crate::{collect_sqlite_rows, sqlite_table_has_column};
+use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 
-pub const SYMBOL_NAME_SOURCE_MANUAL: &str = "manual";
+pub const SYMBOL_NAME_ORIGIN_AGENT: &str = "agent";
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -30,16 +33,27 @@ pub struct SymbolNamesArgs {
     pub list: bool,
     #[arg(long)]
     pub apply: bool,
-    #[arg(long = "set", value_parser = parse_set_spec)]
-    pub sets: Vec<SymbolNameSetSpec>,
-    #[arg(long = "clear", value_parser = parse_clear_spec)]
-    pub clears: Vec<SymbolNameClearSpec>,
+    #[arg(long, default_value = SYMBOL_NAME_ORIGIN_AGENT)]
+    pub origin: String,
+    #[arg(long)]
+    pub evidence: Option<String>,
+    /// Record a naming suggestion without changing emitted output.
+    #[arg(long = "propose", value_parser = parse_name_spec)]
+    pub proposals: Vec<SymbolNameSpec>,
+    /// Accept a semantic name and make it active for the next emit.
+    #[arg(long = "accept", alias = "set", value_parser = parse_name_spec)]
+    pub accepts: Vec<SymbolNameSpec>,
+    /// Clear the active semantic name; `--clear` is a compatibility alias.
+    #[arg(long = "clear-active", alias = "clear", value_parser = parse_clear_spec)]
+    pub clear_active: Vec<SymbolNameClearSpec>,
     #[arg(long)]
     pub batch: Option<PathBuf>,
+    #[arg(long = "all-proposals")]
+    pub all_proposals: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SymbolNameSetSpec {
+pub struct SymbolNameSpec {
     pub module_id: u32,
     pub original_name: String,
     pub semantic_name: String,
@@ -61,28 +75,7 @@ impl SymbolNamesArgs {
             args.remove(0);
         }
         let parsed: Self = parse_args_with_name(crate::help::SYMBOL_NAMES_COMMAND, args)?;
-
-        if parsed.list
-            && (!parsed.sets.is_empty()
-                || !parsed.clears.is_empty()
-                || parsed.batch.is_some()
-                || parsed.apply)
-        {
-            return Err(CliError::UnknownArgument(
-                "--list cannot be combined with mutations".to_string(),
-            ));
-        }
-        if !parsed.list
-            && parsed.sets.is_empty()
-            && parsed.clears.is_empty()
-            && parsed.batch.is_none()
-        {
-            return Err(CliError::MissingArgument(
-                "--list | --set | --clear | --batch",
-            ));
-        }
-
-        Ok(parsed)
+        validate_args(parsed)
     }
 }
 
@@ -90,6 +83,7 @@ impl SymbolNamesArgs {
 pub struct SymbolNamesOutcome {
     pub project_id: u32,
     pub listed: Vec<SymbolNameRow>,
+    pub listed_proposals: Vec<SymbolNameProposalRow>,
     pub requested_changes: usize,
     pub written_changes: usize,
     pub apply: bool,
@@ -106,14 +100,27 @@ pub struct SymbolNameRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolNameProposalRow {
+    pub module_id: u32,
+    pub original_name: String,
+    pub semantic_name: String,
+    pub origin: String,
+    pub accepted: bool,
+    pub evidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum SymbolNameOperation {
-    Set(SymbolNameSetSpec),
-    Clear(SymbolNameClearSpec),
+    Propose(SymbolNameSpec),
+    Accept(SymbolNameSpec),
+    ClearActive(SymbolNameClearSpec),
 }
 
 pub(crate) fn run(args: SymbolNamesArgs) -> Result<(), CliRunError> {
     let outcome = symbol_names_from_sqlite(&args).map_err(CliRunError::SymbolNames)?;
-    if args.list {
+    if args.list && args.all_proposals {
+        print_symbol_name_proposals(&outcome.listed_proposals);
+    } else if args.list {
         print_symbol_rows(&outcome.listed);
     } else if outcome.apply {
         println!(
@@ -127,6 +134,36 @@ pub(crate) fn run(args: SymbolNamesArgs) -> Result<(), CliRunError> {
         );
     }
     Ok(())
+}
+
+pub fn validate_args(args: SymbolNamesArgs) -> Result<SymbolNamesArgs, CliError> {
+    if args.list
+        && (!args.proposals.is_empty()
+            || !args.accepts.is_empty()
+            || !args.clear_active.is_empty()
+            || args.batch.is_some()
+            || args.apply)
+    {
+        return Err(CliError::UnknownArgument(
+            "--list cannot be combined with mutations".to_string(),
+        ));
+    }
+    if args.all_proposals && !args.list {
+        return Err(CliError::UnknownArgument(
+            "--all-proposals requires --list".to_string(),
+        ));
+    }
+    if !args.list
+        && args.proposals.is_empty()
+        && args.accepts.is_empty()
+        && args.clear_active.is_empty()
+        && args.batch.is_none()
+    {
+        return Err(CliError::MissingArgument(
+            "--list | --propose | --accept | --clear-active | --batch",
+        ));
+    }
+    Ok(args)
 }
 
 pub fn symbol_names_from_sqlite(
@@ -161,7 +198,16 @@ pub fn symbol_names_from_connection(
     if args.list {
         return Ok(SymbolNamesOutcome {
             project_id: args.project_id,
-            listed: load_symbol_name_rows(connection, args.project_id)?,
+            listed: if args.all_proposals {
+                Vec::new()
+            } else {
+                load_symbol_name_rows(connection, args.project_id)?
+            },
+            listed_proposals: if args.all_proposals {
+                load_symbol_name_proposals(connection, args.project_id)?
+            } else {
+                Vec::new()
+            },
             requested_changes: 0,
             written_changes: 0,
             apply: false,
@@ -172,6 +218,7 @@ pub fn symbol_names_from_connection(
 
     let written_changes = if args.apply {
         ensure_semantic_name_source_column(connection)?;
+        ensure_symbol_name_proposals_table(connection)?;
         let transaction = connection
             .transaction()
             .map_err(SymbolNamesError::ConfigureDatabase)?;
@@ -179,7 +226,13 @@ pub fn symbol_names_from_connection(
         validate_final_names(&transaction, args.project_id, &operations)?;
         let mut written = 0_usize;
         for operation in &operations {
-            written += apply_operation(&transaction, operation)?;
+            written += apply_operation(
+                &transaction,
+                args.project_id,
+                args.origin.as_str(),
+                args.evidence.as_deref(),
+                operation,
+            )?;
         }
         transaction
             .commit()
@@ -194,25 +247,26 @@ pub fn symbol_names_from_connection(
     Ok(SymbolNamesOutcome {
         project_id: args.project_id,
         listed: Vec::new(),
+        listed_proposals: Vec::new(),
         requested_changes: operations.len(),
         written_changes,
         apply: args.apply,
     })
 }
 
-fn parse_set_spec(value: &str) -> Result<SymbolNameSetSpec, String> {
+fn parse_name_spec(value: &str) -> Result<SymbolNameSpec, String> {
     let Some((target, semantic_name)) = value.split_once('=') else {
         return Err(format!(
-            "invalid --set value {value}; expected MODULE_ID:ORIGINAL=SEMANTIC"
+            "invalid symbol name spec {value}; expected MODULE_ID:ORIGINAL=SEMANTIC"
         ));
     };
     let clear = parse_clear_spec(target)?;
     if semantic_name.trim().is_empty() {
         return Err(format!(
-            "invalid --set value {value}; semantic name is empty"
+            "invalid symbol name spec {value}; semantic name is empty"
         ));
     }
-    Ok(SymbolNameSetSpec {
+    Ok(SymbolNameSpec {
         module_id: clear.module_id,
         original_name: clear.original_name,
         semantic_name: semantic_name.to_string(),
@@ -240,8 +294,24 @@ fn collect_operations(
     args: &SymbolNamesArgs,
 ) -> Result<Vec<SymbolNameOperation>, SymbolNamesError> {
     let mut operations = Vec::new();
-    operations.extend(args.sets.iter().cloned().map(SymbolNameOperation::Set));
-    operations.extend(args.clears.iter().cloned().map(SymbolNameOperation::Clear));
+    operations.extend(
+        args.proposals
+            .iter()
+            .cloned()
+            .map(SymbolNameOperation::Propose),
+    );
+    operations.extend(
+        args.accepts
+            .iter()
+            .cloned()
+            .map(SymbolNameOperation::Accept),
+    );
+    operations.extend(
+        args.clear_active
+            .iter()
+            .cloned()
+            .map(SymbolNameOperation::ClearActive),
+    );
     if let Some(batch) = &args.batch {
         operations.extend(load_batch_operations(batch.as_path())?);
     }
@@ -249,10 +319,8 @@ fn collect_operations(
     Ok(operations)
 }
 
-fn load_batch_operations(
-    path: &std::path::Path,
-) -> Result<Vec<SymbolNameOperation>, SymbolNamesError> {
-    let content = if path == std::path::Path::new("-") {
+fn load_batch_operations(path: &Path) -> Result<Vec<SymbolNameOperation>, SymbolNamesError> {
+    let content = if path == Path::new("-") {
         std::io::read_to_string(std::io::stdin()).map_err(SymbolNamesError::ReadBatch)?
     } else {
         fs::read_to_string(path).map_err(SymbolNamesError::ReadBatch)?
@@ -273,28 +341,34 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
             continue;
         }
         match fields.as_slice() {
-            ["set", module_id, original_name, semantic_name] => {
-                if original_name.is_empty() || semantic_name.is_empty() {
-                    return Err(SymbolNamesError::InvalidBatchLine {
-                        line: line_number,
-                        message: "set requires non-empty original_name and semantic_name"
-                            .to_string(),
-                    });
-                }
-                operations.push(SymbolNameOperation::Set(SymbolNameSetSpec {
-                    module_id: parse_batch_u32(module_id, line_number)?,
-                    original_name: (*original_name).to_string(),
-                    semantic_name: (*semantic_name).to_string(),
-                }));
+            ["propose", module_id, original_name, semantic_name]
+            | ["add", module_id, original_name, semantic_name] => {
+                operations.push(SymbolNameOperation::Propose(batch_name_spec(
+                    module_id,
+                    original_name,
+                    semantic_name,
+                    line_number,
+                    "propose",
+                )?));
             }
-            ["clear", module_id, original_name] => {
+            ["accept", module_id, original_name, semantic_name]
+            | ["set", module_id, original_name, semantic_name] => {
+                operations.push(SymbolNameOperation::Accept(batch_name_spec(
+                    module_id,
+                    original_name,
+                    semantic_name,
+                    line_number,
+                    "accept",
+                )?));
+            }
+            ["clear-active", module_id, original_name] | ["clear", module_id, original_name] => {
                 if original_name.is_empty() {
                     return Err(SymbolNamesError::InvalidBatchLine {
                         line: line_number,
-                        message: "clear requires non-empty original_name".to_string(),
+                        message: "clear-active requires non-empty original_name".to_string(),
                     });
                 }
-                operations.push(SymbolNameOperation::Clear(SymbolNameClearSpec {
+                operations.push(SymbolNameOperation::ClearActive(SymbolNameClearSpec {
                     module_id: parse_batch_u32(module_id, line_number)?,
                     original_name: (*original_name).to_string(),
                 }));
@@ -302,12 +376,32 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
             _ => {
                 return Err(SymbolNamesError::InvalidBatchLine {
                     line: line_number,
-                    message: "expected tab-separated set MODULE_ID ORIGINAL SEMANTIC or clear MODULE_ID ORIGINAL".to_string(),
+                    message: "expected tab-separated propose|accept MODULE_ID ORIGINAL SEMANTIC or clear-active MODULE_ID ORIGINAL".to_string(),
                 });
             }
         }
     }
     Ok(operations)
+}
+
+fn batch_name_spec(
+    module_id: &str,
+    original_name: &str,
+    semantic_name: &str,
+    line: usize,
+    action: &str,
+) -> Result<SymbolNameSpec, SymbolNamesError> {
+    if original_name.is_empty() || semantic_name.is_empty() {
+        return Err(SymbolNamesError::InvalidBatchLine {
+            line,
+            message: format!("{action} requires non-empty original_name and semantic_name"),
+        });
+    }
+    Ok(SymbolNameSpec {
+        module_id: parse_batch_u32(module_id, line)?,
+        original_name: original_name.to_string(),
+        semantic_name: semantic_name.to_string(),
+    })
 }
 
 fn parse_batch_u32(value: &str, line: usize) -> Result<u32, SymbolNamesError> {
@@ -322,20 +416,40 @@ fn parse_batch_u32(value: &str, line: usize) -> Result<u32, SymbolNamesError> {
 }
 
 fn validate_unique_operations(operations: &[SymbolNameOperation]) -> Result<(), SymbolNamesError> {
-    let mut seen = BTreeSet::<(u32, &str)>::new();
+    let mut active_targets = BTreeSet::<(u32, &str)>::new();
+    let mut proposals = BTreeSet::<(u32, &str, &str)>::new();
     for operation in operations {
-        let key = match operation {
-            SymbolNameOperation::Set(spec) => (spec.module_id, spec.original_name.as_str()),
-            SymbolNameOperation::Clear(spec) => (spec.module_id, spec.original_name.as_str()),
-        };
-        if !seen.insert(key) {
-            return Err(SymbolNamesError::ConflictingOperation {
-                module_id: key.0,
-                original_name: key.1.to_string(),
-            });
-        }
-        if let SymbolNameOperation::Set(spec) = operation {
-            validate_semantic_identifier(spec.semantic_name.as_str())?;
+        match operation {
+            SymbolNameOperation::Propose(spec) => {
+                if !proposals.insert((
+                    spec.module_id,
+                    spec.original_name.as_str(),
+                    spec.semantic_name.as_str(),
+                )) {
+                    return Err(SymbolNamesError::ConflictingOperation {
+                        module_id: spec.module_id,
+                        original_name: spec.original_name.clone(),
+                    });
+                }
+                validate_semantic_identifier(spec.semantic_name.as_str())?;
+            }
+            SymbolNameOperation::Accept(spec) => {
+                if !active_targets.insert((spec.module_id, spec.original_name.as_str())) {
+                    return Err(SymbolNamesError::ConflictingOperation {
+                        module_id: spec.module_id,
+                        original_name: spec.original_name.clone(),
+                    });
+                }
+                validate_semantic_identifier(spec.semantic_name.as_str())?;
+            }
+            SymbolNameOperation::ClearActive(spec) => {
+                if !active_targets.insert((spec.module_id, spec.original_name.as_str())) {
+                    return Err(SymbolNamesError::ConflictingOperation {
+                        module_id: spec.module_id,
+                        original_name: spec.original_name.clone(),
+                    });
+                }
+            }
         }
     }
     Ok(())
@@ -375,8 +489,10 @@ fn validate_operation_targets(
 ) -> Result<(), SymbolNamesError> {
     for operation in operations {
         let (module_id, original_name) = match operation {
-            SymbolNameOperation::Set(spec) => (spec.module_id, spec.original_name.as_str()),
-            SymbolNameOperation::Clear(spec) => (spec.module_id, spec.original_name.as_str()),
+            SymbolNameOperation::Propose(spec) | SymbolNameOperation::Accept(spec) => {
+                (spec.module_id, spec.original_name.as_str())
+            }
+            SymbolNameOperation::ClearActive(spec) => (spec.module_id, spec.original_name.as_str()),
         };
         if !module_belongs_to_project(connection, project_id, module_id)? {
             return Err(SymbolNamesError::UnknownModule {
@@ -443,20 +559,21 @@ fn validate_final_names(
     let mut states = load_symbol_name_states(connection, project_id)?;
     for operation in operations {
         match operation {
-            SymbolNameOperation::Set(spec) => {
+            SymbolNameOperation::Accept(spec) => {
                 if let Some(state) = states.get_mut(&spec.module_id) {
                     state
                         .semantic_names
                         .insert(spec.original_name.clone(), Some(spec.semantic_name.clone()));
                 }
             }
-            SymbolNameOperation::Clear(spec) => {
+            SymbolNameOperation::ClearActive(spec) => {
                 if let Some(state) = states.get_mut(&spec.module_id) {
                     state
                         .semantic_names
                         .insert(spec.original_name.clone(), None);
                 }
             }
+            SymbolNameOperation::Propose(_) => {}
         }
     }
 
@@ -550,43 +667,157 @@ fn ensure_semantic_name_source_column(connection: &Connection) -> Result<(), Sym
         .map_err(SymbolNamesError::WriteSymbolName)
 }
 
+fn ensure_symbol_name_proposals_table(connection: &Connection) -> Result<(), SymbolNamesError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS symbol_name_proposals (
+                project_id INTEGER NOT NULL,
+                module_id INTEGER NOT NULL,
+                original_name TEXT NOT NULL,
+                semantic_name TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                accepted INTEGER NOT NULL DEFAULT 0,
+                evidence TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (project_id, module_id, original_name, origin, semantic_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_symbol_name_proposals_symbol
+                ON symbol_name_proposals(project_id, module_id, original_name);
+            ",
+        )
+        .map_err(SymbolNamesError::WriteSymbolName)
+}
+
 fn apply_operation(
     connection: &Connection,
+    project_id: u32,
+    origin: &str,
+    evidence: Option<&str>,
     operation: &SymbolNameOperation,
 ) -> Result<usize, SymbolNamesError> {
     match operation {
-        SymbolNameOperation::Set(spec) => connection
-            .execute(
-                r"
-                UPDATE symbols
-                   SET semantic_name = ?3,
-                       semantic_name_source = ?4
-                 WHERE module_id = ?1
-                   AND original_name = ?2
-                   AND scope_level = 'module'
-                ",
-                params![
-                    i64::from(spec.module_id),
-                    spec.original_name.as_str(),
-                    spec.semantic_name.as_str(),
-                    SYMBOL_NAME_SOURCE_MANUAL,
-                ],
-            )
-            .map_err(SymbolNamesError::WriteSymbolName),
-        SymbolNameOperation::Clear(spec) => connection
-            .execute(
-                r"
-                UPDATE symbols
-                   SET semantic_name = NULL,
-                       semantic_name_source = NULL
-                 WHERE module_id = ?1
-                   AND original_name = ?2
-                   AND scope_level = 'module'
-                ",
-                params![i64::from(spec.module_id), spec.original_name.as_str()],
-            )
-            .map_err(SymbolNamesError::WriteSymbolName),
+        SymbolNameOperation::Propose(spec) => {
+            upsert_proposal(connection, project_id, spec, origin, evidence, false)?;
+            Ok(1)
+        }
+        SymbolNameOperation::Accept(spec) => {
+            upsert_proposal(connection, project_id, spec, origin, evidence, true)?;
+            deactivate_other_proposals(connection, project_id, spec, origin)?;
+            connection
+                .execute(
+                    r"
+                    UPDATE symbols
+                       SET semantic_name = ?3,
+                           semantic_name_source = ?4
+                     WHERE module_id = ?1
+                       AND original_name = ?2
+                       AND scope_level = 'module'
+                    ",
+                    params![
+                        i64::from(spec.module_id),
+                        spec.original_name.as_str(),
+                        spec.semantic_name.as_str(),
+                        origin,
+                    ],
+                )
+                .map_err(SymbolNamesError::WriteSymbolName)
+        }
+        SymbolNameOperation::ClearActive(spec) => {
+            let updated = connection
+                .execute(
+                    r"
+                    UPDATE symbols
+                       SET semantic_name = NULL,
+                           semantic_name_source = NULL
+                     WHERE module_id = ?1
+                       AND original_name = ?2
+                       AND scope_level = 'module'
+                    ",
+                    params![i64::from(spec.module_id), spec.original_name.as_str()],
+                )
+                .map_err(SymbolNamesError::WriteSymbolName)?;
+            connection
+                .execute(
+                    r"
+                    UPDATE symbol_name_proposals
+                       SET accepted = 0
+                     WHERE project_id = ?1
+                       AND module_id = ?2
+                       AND original_name = ?3
+                    ",
+                    params![
+                        i64::from(project_id),
+                        i64::from(spec.module_id),
+                        spec.original_name.as_str(),
+                    ],
+                )
+                .map_err(SymbolNamesError::WriteSymbolName)?;
+            Ok(updated)
+        }
     }
+}
+
+fn upsert_proposal(
+    connection: &Connection,
+    project_id: u32,
+    spec: &SymbolNameSpec,
+    origin: &str,
+    evidence: Option<&str>,
+    accepted: bool,
+) -> Result<(), SymbolNamesError> {
+    connection
+        .execute(
+            r"
+            INSERT INTO symbol_name_proposals (
+                project_id, module_id, original_name, semantic_name,
+                origin, accepted, evidence
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(project_id, module_id, original_name, origin, semantic_name)
+            DO UPDATE SET
+                accepted = excluded.accepted,
+                evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence)
+            ",
+            params![
+                i64::from(project_id),
+                i64::from(spec.module_id),
+                spec.original_name.as_str(),
+                spec.semantic_name.as_str(),
+                origin,
+                i64::from(accepted),
+                evidence,
+            ],
+        )
+        .map_err(SymbolNamesError::WriteSymbolName)?;
+    Ok(())
+}
+
+fn deactivate_other_proposals(
+    connection: &Connection,
+    project_id: u32,
+    spec: &SymbolNameSpec,
+    origin: &str,
+) -> Result<(), SymbolNamesError> {
+    connection
+        .execute(
+            r"
+            UPDATE symbol_name_proposals
+               SET accepted = 0
+             WHERE project_id = ?1
+               AND module_id = ?2
+               AND original_name = ?3
+               AND NOT (origin = ?4 AND semantic_name = ?5)
+            ",
+            params![
+                i64::from(project_id),
+                i64::from(spec.module_id),
+                spec.original_name.as_str(),
+                origin,
+                spec.semantic_name.as_str(),
+            ],
+        )
+        .map_err(SymbolNamesError::WriteSymbolName)?;
+    Ok(())
 }
 
 fn load_symbol_name_rows(
@@ -643,6 +874,47 @@ fn load_symbol_name_rows(
     collect_sqlite_rows(rows).map_err(SymbolNamesError::QuerySymbolNames)
 }
 
+fn load_symbol_name_proposals(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<SymbolNameProposalRow>, SymbolNamesError> {
+    if !sqlite_table_exists(connection, "symbol_name_proposals")
+        .map_err(SymbolNamesError::QuerySymbolNames)?
+    {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            r"
+            SELECT module_id, original_name, semantic_name, origin, accepted, evidence
+            FROM symbol_name_proposals
+            WHERE project_id = ?1
+            ORDER BY module_id, original_name, accepted DESC, origin, semantic_name
+            ",
+        )
+        .map_err(SymbolNamesError::QuerySymbolNames)?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            let module_id = row.get::<_, i64>(0)?;
+            Ok(SymbolNameProposalRow {
+                module_id: u32::try_from(module_id).map_err(|source| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Integer,
+                        Box::new(source),
+                    )
+                })?,
+                original_name: row.get(1)?,
+                semantic_name: row.get(2)?,
+                origin: row.get(3)?,
+                accepted: row.get::<_, i64>(4)? != 0,
+                evidence: row.get(5)?,
+            })
+        })
+        .map_err(SymbolNamesError::QuerySymbolNames)?;
+    collect_sqlite_rows(rows).map_err(SymbolNamesError::QuerySymbolNames)
+}
+
 fn print_symbol_rows(rows: &[SymbolNameRow]) {
     println!(
         "module_id\toriginal_name\tsemantic_name\tsemantic_name_source\texport_name\tscope_level"
@@ -660,28 +932,47 @@ fn print_symbol_rows(rows: &[SymbolNameRow]) {
     }
 }
 
+fn print_symbol_name_proposals(rows: &[SymbolNameProposalRow]) {
+    println!("module_id\toriginal_name\tsemantic_name\torigin\taccepted\tevidence");
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            row.module_id,
+            row.original_name,
+            row.semantic_name,
+            row.origin,
+            u8::from(row.accepted),
+            row.evidence.as_deref().unwrap_or("")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        SymbolNameClearSpec, SymbolNameSetSpec, SymbolNamesArgs, SymbolNamesError,
-        SymbolNamesOutcome, parse_batch_operations, symbol_names_from_connection,
+        SYMBOL_NAME_ORIGIN_AGENT, SymbolNameClearSpec, SymbolNameSpec, SymbolNamesArgs,
+        SymbolNamesError, SymbolNamesOutcome, parse_batch_operations, symbol_names_from_connection,
     };
 
-    fn args_with_set(apply: bool) -> SymbolNamesArgs {
+    fn args_with_accept(apply: bool) -> SymbolNamesArgs {
         SymbolNamesArgs {
             input: "fixture.db".into(),
             project_id: 1,
             list: false,
             apply,
-            sets: vec![SymbolNameSetSpec {
+            origin: SYMBOL_NAME_ORIGIN_AGENT.to_string(),
+            evidence: None,
+            proposals: Vec::new(),
+            accepts: vec![SymbolNameSpec {
                 module_id: 10,
                 original_name: "$F1".to_string(),
                 semantic_name: "createClient".to_string(),
             }],
-            clears: Vec::new(),
+            clear_active: Vec::new(),
             batch: None,
+            all_proposals: false,
         }
     }
 
@@ -728,19 +1019,19 @@ mod tests {
     }
 
     #[test]
-    fn batch_parser_accepts_set_clear_and_header() {
+    fn batch_parser_accepts_propose_accept_clear_and_legacy_aliases() {
         let operations = parse_batch_operations(
-            "action\tmodule_id\toriginal_name\tsemantic_name\nset\t10\t$F1\tcreateClient\nclear\t10\toldName\n",
+            "action\tmodule_id\toriginal_name\tsemantic_name\npropose\t10\t$F1\tmaybeClient\naccept\t10\ta\tsettings\nclear\t10\toldName\n",
         )
         .expect("batch should parse");
 
-        assert_eq!(operations.len(), 2);
+        assert_eq!(operations.len(), 3);
     }
 
     #[test]
     fn dry_run_does_not_write_symbol_name() {
         let mut connection = create_fixture();
-        let outcome = symbol_names_from_connection(&mut connection, &args_with_set(false))
+        let outcome = symbol_names_from_connection(&mut connection, &args_with_accept(false))
             .expect("dry-run should validate");
 
         assert_eq!(outcome.requested_changes, 1);
@@ -756,9 +1047,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_sets_semantic_name_and_adds_source_column() {
+    fn accept_sets_active_semantic_name_and_records_proposal() {
         let mut connection = create_fixture();
-        let outcome = symbol_names_from_connection(&mut connection, &args_with_set(true))
+        let outcome = symbol_names_from_connection(&mut connection, &args_with_accept(true))
             .expect("apply should write");
 
         assert_eq!(outcome.written_changes, 1);
@@ -770,16 +1061,55 @@ mod tests {
             )
             .expect("query symbol");
         assert_eq!(name, "createClient");
-        assert_eq!(source, "manual");
+        assert_eq!(source, "agent");
+        let accepted: i64 = connection
+            .query_row(
+                "SELECT accepted FROM symbol_name_proposals WHERE module_id = 10 AND original_name = '$F1' AND semantic_name = 'createClient'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query proposal");
+        assert_eq!(accepted, 1);
     }
 
     #[test]
-    fn clear_removes_semantic_name_and_source() {
+    fn propose_records_name_without_changing_active_semantic_name() {
         let mut connection = create_fixture();
-        let mut args = args_with_set(true);
-        symbol_names_from_connection(&mut connection, &args).expect("set should write");
-        args.sets.clear();
-        args.clears.push(SymbolNameClearSpec {
+        let mut args = args_with_accept(true);
+        args.accepts.clear();
+        args.proposals.push(SymbolNameSpec {
+            module_id: 10,
+            original_name: "$F1".to_string(),
+            semantic_name: "maybeClient".to_string(),
+        });
+
+        let outcome = symbol_names_from_connection(&mut connection, &args).expect("propose writes");
+        assert_eq!(outcome.written_changes, 1);
+        let stored: Option<String> = connection
+            .query_row(
+                "SELECT semantic_name FROM symbols WHERE module_id = 10 AND original_name = '$F1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query symbol");
+        assert_eq!(stored, None);
+        let accepted: i64 = connection
+            .query_row(
+                "SELECT accepted FROM symbol_name_proposals WHERE module_id = 10 AND original_name = '$F1' AND semantic_name = 'maybeClient'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query proposal");
+        assert_eq!(accepted, 0);
+    }
+
+    #[test]
+    fn clear_active_removes_semantic_name_and_deactivates_proposals() {
+        let mut connection = create_fixture();
+        let mut args = args_with_accept(true);
+        symbol_names_from_connection(&mut connection, &args).expect("accept should write");
+        args.accepts.clear();
+        args.clear_active.push(SymbolNameClearSpec {
             module_id: 10,
             original_name: "$F1".to_string(),
         });
@@ -794,13 +1124,21 @@ mod tests {
             .expect("query symbol");
         assert_eq!(name, None);
         assert_eq!(source, None);
+        let accepted: i64 = connection
+            .query_row(
+                "SELECT accepted FROM symbol_name_proposals WHERE module_id = 10 AND original_name = '$F1' AND semantic_name = 'createClient'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query proposal");
+        assert_eq!(accepted, 0);
     }
 
     #[test]
     fn rejects_name_collision_with_existing_original() {
         let mut connection = create_fixture();
-        let mut args = args_with_set(false);
-        args.sets[0].semantic_name = "otherName".to_string();
+        let mut args = args_with_accept(false);
+        args.accepts[0].semantic_name = "otherName".to_string();
 
         let error = symbol_names_from_connection(&mut connection, &args)
             .expect_err("collision should be rejected");
@@ -815,9 +1153,13 @@ mod tests {
             project_id: 1,
             list: true,
             apply: false,
-            sets: Vec::new(),
-            clears: Vec::new(),
+            origin: SYMBOL_NAME_ORIGIN_AGENT.to_string(),
+            evidence: None,
+            proposals: Vec::new(),
+            accepts: Vec::new(),
+            clear_active: Vec::new(),
             batch: None,
+            all_proposals: false,
         };
 
         let SymbolNamesOutcome { listed, .. } =
@@ -827,7 +1169,32 @@ mod tests {
     }
 
     #[test]
-    fn update_touches_all_duplicate_symbol_rows() {
+    fn list_all_proposals_reads_recorded_origins() {
+        let mut connection = create_fixture();
+        symbol_names_from_connection(&mut connection, &args_with_accept(true))
+            .expect("accept should write");
+        let args = SymbolNamesArgs {
+            input: "fixture.db".into(),
+            project_id: 1,
+            list: true,
+            apply: false,
+            origin: SYMBOL_NAME_ORIGIN_AGENT.to_string(),
+            evidence: None,
+            proposals: Vec::new(),
+            accepts: Vec::new(),
+            clear_active: Vec::new(),
+            batch: None,
+            all_proposals: true,
+        };
+
+        let outcome = symbol_names_from_connection(&mut connection, &args).expect("list proposals");
+        assert_eq!(outcome.listed_proposals.len(), 1);
+        assert!(outcome.listed_proposals[0].accepted);
+        assert_eq!(outcome.listed_proposals[0].origin, "agent");
+    }
+
+    #[test]
+    fn accept_touches_all_duplicate_symbol_rows() {
         let mut connection = create_fixture();
         connection
             .execute(
@@ -836,7 +1203,7 @@ mod tests {
             )
             .expect("insert duplicate");
 
-        let outcome = symbol_names_from_connection(&mut connection, &args_with_set(true))
+        let outcome = symbol_names_from_connection(&mut connection, &args_with_accept(true))
             .expect("apply should write duplicate rows");
         assert_eq!(outcome.written_changes, 2);
     }
