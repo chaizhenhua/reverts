@@ -6123,7 +6123,7 @@ fn external_adapter_preserves_canonical_subpath_hint_without_equivalence_proof()
 }
 
 #[test]
-fn external_adapter_allows_self_contained_language_module_hint() {
+fn external_adapter_allows_self_contained_subpath_identity_hint() {
     let planner = ImportExportPlanner;
     let app_source = "var value = mathematica();\nexport { value };\n";
     let package_source = "var mathematica = U((exports, module) => { module.exports = function() { return {}; }; });";
@@ -6145,20 +6145,20 @@ fn external_adapter_allows_self_contained_language_module_hint() {
         ModuleInput::package(
             ModuleId(2),
             "mathematica",
-            "modules/highlightjs/mathematica.ts",
-            "highlight.js",
-            Some("10.7.3".to_string()),
+            "modules/fixture-package/mathematica.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
         )
         .with_source_file(2),
     );
     rows.package_attributions.push(
         PackageAttributionInput::accepted_external(
             ModuleId(2),
-            "highlight.js",
-            "10.7.3",
-            "highlight.js/lib/languages/mathematica.js",
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/lib/plugins/mathematica.js",
         )
-        .with_resolved_file("highlight.js@10.7.3/lib/languages/mathematica.js"),
+        .with_resolved_file("fixture-package@1.0.0/lib/plugins/mathematica.js"),
     );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
@@ -6170,16 +6170,65 @@ fn external_adapter_allows_self_contained_language_module_hint() {
         super::PlannerAnalysis::from_program(&enriched)
             .external_package_adapters
             .contains_key(&ModuleId(2)),
-        "self-contained language package modules can use their matching package subpath"
+        "self-contained package modules can use their matching package subpath"
     );
     let source = planned_source(
         &planner
             .plan_enriched_program(&enriched)
             .expect("fixture should normalize"),
-        "modules/highlightjs/mathematica.ts",
+        "modules/fixture-package/mathematica.ts",
     );
-    assert!(source.contains("external_highlight_js"));
+    assert!(source.contains("external_fixture_package"));
     assert!(!source.contains("module.exports"));
+}
+
+#[test]
+fn external_adapter_rejects_ambiguous_index_subpath_identity() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some("var value = packageInit();\nexport { value };\n".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some("var packageInit = U((exports, module) => { module.exports = 1; });".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/fixture-package/index.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/lib/index.js",
+        )
+        .with_resolved_file("fixture-package@1.0.0/lib/index.js"),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    assert!(
+        !super::PlannerAnalysis::from_program(&enriched)
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "generic entrypoint names do not prove subpath identity for weak source hints"
+    );
 }
 
 #[test]

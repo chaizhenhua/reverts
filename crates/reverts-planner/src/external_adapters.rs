@@ -1053,7 +1053,7 @@ pub(crate) fn external_adapter_attribution_allows_eager_import(
     }
     adapter_kind == ExternalPackageAdapterKind::CommonJsWrapper
         && external_adapter_has_no_module_dependencies(program, module_id)
-        && attribution_matches_language_module_path(program, module_id, attribution)
+        && attribution_matches_self_contained_subpath_identity(program, module_id, attribution)
 }
 
 fn external_adapter_specifier_is_worker_asset(value: &str) -> bool {
@@ -1081,7 +1081,7 @@ fn external_adapter_has_no_module_dependencies(
         .all(|dependency| !matches!(dependency.target, ModuleDependencyTarget::Module(_)))
 }
 
-fn attribution_matches_language_module_path(
+fn attribution_matches_self_contained_subpath_identity(
     program: &EnrichedProgram,
     module_id: ModuleId,
     attribution: &PackageAttributionInput,
@@ -1093,18 +1093,12 @@ fn attribution_matches_language_module_path(
     else {
         return false;
     };
-    if attribution.package_name != "highlight.js" {
-        return false;
-    }
-    let source_path = source_path.to_ascii_lowercase();
-    if !source_path.contains("/lib/languages/") {
-        return false;
-    }
-    let Some(language_stem) = source_path
-        .rsplit('/')
-        .next()
-        .and_then(|name| name.split('.').next())
-        .filter(|stem| !stem.is_empty())
+    let source_identity = SourceSubpathIdentity::from_resolved_source_path(
+        source_path,
+        attribution.package_name.as_str(),
+        attribution.package_version.as_deref(),
+    );
+    let Some(source_identity) = source_identity.filter(|identity| identity.is_unambiguous_leaf())
     else {
         return false;
     };
@@ -1113,12 +1107,92 @@ fn attribution_matches_language_module_path(
         .modules()
         .iter()
         .find(|module| module.id == module_id)
-        .is_some_and(|module| {
-            module
-                .semantic_path
-                .to_ascii_lowercase()
-                .contains(language_stem)
+        .is_some_and(|module| source_identity.matches_module_semantic_path(&module.semantic_path))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceSubpathIdentity {
+    leaf_stem: String,
+    parent_segments: usize,
+}
+
+impl SourceSubpathIdentity {
+    fn from_resolved_source_path(
+        source_path: &str,
+        package_name: &str,
+        package_version: Option<&str>,
+    ) -> Option<Self> {
+        let relative_path = external_adapter_package_relative_source_path(
+            source_path,
+            package_name,
+            package_version,
+        )?;
+        let segments = relative_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        let file_name = segments.last()?;
+        let leaf_stem = file_name.split('.').next()?.trim();
+        if leaf_stem.is_empty() {
+            return None;
+        }
+        Some(Self {
+            leaf_stem: normalize_subpath_identity_segment(leaf_stem),
+            parent_segments: segments.len().saturating_sub(1),
         })
+    }
+
+    fn is_unambiguous_leaf(&self) -> bool {
+        !matches!(
+            self.leaf_stem.as_str(),
+            "index" | "main" | "module" | "browser" | "cjs" | "esm" | "umd"
+        ) && self.parent_segments > 0
+    }
+
+    fn matches_module_semantic_path(&self, semantic_path: &str) -> bool {
+        semantic_path
+            .split('/')
+            .filter_map(|segment| segment.split('.').next())
+            .map(normalize_subpath_identity_segment)
+            .any(|segment| {
+                segment == self.leaf_stem
+                    || (self.leaf_stem.len() >= 3 && segment.contains(&self.leaf_stem))
+            })
+    }
+}
+
+fn external_adapter_package_relative_source_path<'a>(
+    source_path: &'a str,
+    package_name: &str,
+    package_version: Option<&str>,
+) -> Option<&'a str> {
+    let trimmed = source_path
+        .rsplit(':')
+        .next()
+        .unwrap_or(source_path)
+        .trim()
+        .trim_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(version) = package_version
+        && let Some(relative) = trimmed
+            .strip_prefix(format!("{package_name}@{version}/").as_str())
+            .filter(|relative| !relative.is_empty())
+    {
+        return Some(relative);
+    }
+    trimmed
+        .strip_prefix(format!("{package_name}/").as_str())
+        .filter(|relative| !relative.is_empty())
+}
+
+fn normalize_subpath_identity_segment(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 pub(crate) fn external_package_adapter_namespace(
