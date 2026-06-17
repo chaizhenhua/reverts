@@ -1,3 +1,4 @@
+mod api;
 mod binding_signatures;
 mod index;
 mod matcher;
@@ -10,6 +11,7 @@ mod scoring;
 mod source;
 mod strategy;
 
+pub use api::{package_source_exported_members, package_source_normalized_hash};
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 pub(crate) use index::{module_match_fingerprint, package_source_fingerprint};
@@ -73,7 +75,6 @@ pub(crate) use scoring::{
     accepted_attribution_from_match, best_source_match, disambiguate_exact_source_candidate,
     module_package_match,
 };
-use source::exported_members::exported_members_from_source;
 pub use source::source_imports::{
     package_import_names_from_sources, package_import_sites_from_sources,
 };
@@ -83,21 +84,6 @@ pub use strategy::{
     assign_globally, cascade_candidates, match_function, match_structural_bags,
     match_structural_bags_with_excluded_modules, match_with_cascade,
 };
-
-use reverts_ir::hash::fnv1a_hex as stable_hash;
-use std::collections::BTreeSet;
-
-#[must_use]
-pub fn package_source_normalized_hash(path: &str, source: &str) -> Option<String> {
-    normalize_source(path, source)
-        .ok()
-        .map(|normalized| stable_hash(normalized.as_bytes()))
-}
-
-#[must_use]
-pub fn package_source_exported_members(path: &str, source: &str) -> BTreeSet<String> {
-    exported_members_from_source(path, source)
-}
 
 #[cfg(test)]
 mod tests;
