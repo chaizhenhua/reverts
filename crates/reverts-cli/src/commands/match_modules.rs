@@ -84,6 +84,14 @@ pub enum MatchStrategy {
     /// rarely rewrite string contents — so it covers many modules that
     /// AST/CFG-based scoring misses.
     StringLiteral,
+    /// Cascade of orthogonal signals. Runs bag-jaccard, string-literal,
+    /// and module-pinned function-tier independently; the final pick is
+    /// the subject with the most agreement (weighted vote). Each signal
+    /// that hits the same subject for a given ref module adds a vote,
+    /// scaled by that signal's confidence. Subjects with two or more
+    /// agreeing signals are considered high-confidence pairs even when
+    /// no single signal would have triggered alone.
+    SignalCascade,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -344,6 +352,98 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             );
             print_histogram(&recall.score_histogram, ref_modules.len());
             (best, None)
+        }
+        MatchStrategy::SignalCascade => {
+            // Three independent signals scoring the same (ref, subject)
+            // space. Each produces a best pick per ref module.
+            let bag_context = build_scoring_context(
+                &ref_bags,
+                &sub_bags,
+                SimilarityMetric::Jaccard,
+                AxisCombiner::Mean,
+                true,
+                false,
+            );
+            let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
+            let str_best = score_via_string_literal(&ref_fps, &sub_fps);
+            let pinned: Vec<Option<usize>> = bag_best
+                .iter()
+                .map(|m| m.subject_idx.filter(|_| m.score >= 0.20))
+                .collect();
+            let func_report = score_via_module_pinned_function_tier(&ref_fps, &sub_fps, &pinned);
+
+            let signals: [&[BestMatch]; 3] = [&bag_best, &str_best, &func_report.best];
+            let signal_names: [&str; 3] = [
+                "bag_jaccard",
+                "string_literal",
+                "module_pinned_function_tier",
+            ];
+            let signal_thresholds: [f64; 3] = [0.20, 0.30, 0.30];
+
+            let mut best_per_ref: Vec<BestMatch> = vec![BestMatch::default(); ref_modules.len()];
+            let mut agreement_counts: BTreeMap<usize, usize> = BTreeMap::new();
+            for (ref_idx, _) in ref_modules.iter().enumerate() {
+                let mut votes: HashMap<usize, (f64, usize)> = HashMap::new();
+                for (i, signal) in signals.iter().enumerate() {
+                    let pick = signal[ref_idx];
+                    if pick.score < signal_thresholds[i] {
+                        continue;
+                    }
+                    let Some(sub_idx) = pick.subject_idx else {
+                        continue;
+                    };
+                    let entry = votes.entry(sub_idx).or_insert((0.0, 0));
+                    entry.0 += pick.score;
+                    entry.1 += 1;
+                }
+                let mut best_subject = None;
+                let mut best_total = 0.0_f64;
+                let mut best_n = 0usize;
+                for (&sub_idx, &(total, n)) in &votes {
+                    let weighted = total * (n as f64);
+                    if weighted > best_total {
+                        best_total = weighted;
+                        best_subject = Some(sub_idx);
+                        best_n = n;
+                    }
+                }
+                if let Some(sub_idx) = best_subject {
+                    *agreement_counts.entry(best_n).or_default() += 1;
+                    best_per_ref[ref_idx] = BestMatch {
+                        subject_idx: Some(sub_idx),
+                        score: (best_total / signals.len() as f64).clamp(0.0, 1.0),
+                        axis: None,
+                    };
+                }
+            }
+            let recall = summarise_recall(&best_per_ref, threshold);
+            println!(
+                "[signal_cascade (bag_jaccard ∪ string_literal ∪ module_pinned_function_tier)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            let entries: Vec<_> = agreement_counts.iter().collect();
+            let line = entries
+                .iter()
+                .map(|(n, count)| format!("{n}-agree: {count}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            println!("  signal agreement breakdown: {line}");
+            for (i, name) in signal_names.iter().enumerate() {
+                let above = signals[i]
+                    .iter()
+                    .filter(|m| m.subject_idx.is_some() && m.score >= signal_thresholds[i])
+                    .count();
+                println!(
+                    "    signal {} hit {} ref modules at >= {:.2}",
+                    name, above, signal_thresholds[i]
+                );
+            }
+            print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
+            (best_per_ref, None)
         }
         MatchStrategy::StringLiteral => {
             let best = score_via_string_literal(&ref_fps, &sub_fps);
