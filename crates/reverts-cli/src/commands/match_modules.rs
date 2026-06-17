@@ -555,9 +555,9 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_consensus = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
-                ref_modules[ref_idx].category == sub_modules[sub_idx].category
-                    || ref_modules[ref_idx].category.is_empty()
-                    || sub_modules[sub_idx].category.is_empty()
+                let r = ref_modules[ref_idx].category.as_str();
+                let s = sub_modules[sub_idx].category.as_str();
+                r == s || r.is_empty() || s.is_empty() || r == "unknown" || s == "unknown"
             };
             for ref_idx in 0..ref_modules.len() {
                 let mut pick: Option<usize> = None;
