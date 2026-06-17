@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::ModuleId;
 
+use super::export_member::export_member_external_package_source_for_source_path;
 use super::policy::{
     dependency_edge_path_policy_allows, dependency_graph_source_fingerprint_policy_allows,
     dependency_graph_source_proof_label, dependency_graph_source_proof_rank,
@@ -16,7 +17,6 @@ use crate::source::package_refs::{
 use crate::{
     ConcretePackageSourcePath, ExternalImportSourceIndex, ExternalImportTarget,
     ModuleMatchFingerprint, PackageMatch, PackageSource, PackageSourceFingerprint,
-    export_member_external_package_source_for_source_path,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

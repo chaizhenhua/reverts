@@ -4,6 +4,7 @@ use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::ModuleId;
 use semver::Version;
 
+use super::export_member::export_member_external_package_source_for_source_path;
 use super::policy::{
     cross_package_exact_source_policy_allows, same_package_cross_version_source_policy_allows,
     source_only_match_can_be_promoted_to_import,
@@ -14,7 +15,7 @@ use crate::{
     ConcretePackageSourcePath, CorrectedPackageExternalImportTarget, ExternalImportSourceIndex,
     ExternalImportTarget, ModuleMatchStrategy, ModulePackageMatch, PackageMatch, PackageSource,
     PackageSourceFingerprint, PackageVersionCandidate, VersionedPackageMatcherConfig,
-    best_source_match, export_member_external_package_source_for_source_path,
+    best_source_match,
 };
 
 #[derive(Debug, Clone)]
