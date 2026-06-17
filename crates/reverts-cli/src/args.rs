@@ -158,6 +158,8 @@ pub struct RuntimeInventoryArgs {
     #[arg(long)]
     pub runtime_attribution: bool,
     #[arg(long)]
+    pub package_source_blockers: bool,
+    #[arg(long)]
     pub input: PathBuf,
 }
 

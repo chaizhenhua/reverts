@@ -11,7 +11,10 @@ use std::path::Path;
 
 use reverts_analyze::enrich_program;
 use reverts_input::sqlite::load_project_bundle_from_sqlite;
-use reverts_input::{InputBundle, ModuleInput};
+use reverts_input::{
+    InputBundle, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
+    PackageEmissionMode,
+};
 use reverts_ir::{BindingName, ModuleKind};
 use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
 use reverts_model::ProgramModel;
@@ -37,6 +40,7 @@ pub struct RuntimeInventoryOutcome {
     pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub runtime_attribution: Option<RuntimeLineAttributionReport>,
+    pub package_source_blockers: Option<PackageSourceBlockerReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +56,7 @@ pub struct RuntimeInventoryProject {
     pub setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub runtime_attribution: Option<RuntimeLineAttributionReport>,
+    pub package_source_blockers: Option<PackageSourceBlockerReport>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +101,43 @@ pub struct RuntimeLineAttributionItem {
     pub kind: String,
     pub binding: String,
     pub package: String,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PackageSourceBlockerReport {
+    pub source_package_files: usize,
+    pub source_package_bytes: usize,
+    pub items: Vec<PackageSourceBlockerItem>,
+    pub by_reason: BTreeMap<String, PackageSourceBlockerBucket>,
+    pub by_package: BTreeMap<String, PackageSourceBlockerBucket>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PackageSourceBlockerBucket {
+    pub files: usize,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSourceBlockerItem {
+    pub module_id: u32,
+    pub path: String,
+    pub package: String,
+    pub version: String,
+    pub bytes: usize,
+    pub reason: String,
+    pub detail: String,
+}
+
+impl PackageSourceBlockerReport {
+    fn add(&mut self, other: &Self) {
+        self.source_package_files += other.source_package_files;
+        self.source_package_bytes += other.source_package_bytes;
+        self.items.extend(other.items.iter().cloned());
+        merge_package_source_blocker_buckets(&mut self.by_reason, &other.by_reason);
+        merge_package_source_blocker_buckets(&mut self.by_package, &other.by_package);
+        sort_package_source_blocker_items(&mut self.items);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +204,9 @@ pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
         if let Some(report) = &project.runtime_attribution {
             print_runtime_line_attribution_report("  runtime_line_attribution", report);
         }
+        if let Some(report) = &project.package_source_blockers {
+            print_package_source_blocker_report("  package_source_blockers", report);
+        }
     }
     println!(
         "total: files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}, skipped_source_bytes={}",
@@ -189,6 +234,9 @@ pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
     }
     if let Some(report) = &outcome.runtime_attribution {
         print_runtime_line_attribution_report("total runtime_line_attribution", report);
+    }
+    if let Some(report) = &outcome.package_source_blockers {
+        print_package_source_blocker_report("total package_source_blockers", report);
     }
     Ok(())
 }
@@ -316,6 +364,61 @@ fn print_runtime_line_attribution_report(label: &str, report: &RuntimeLineAttrib
     }
 }
 
+fn print_package_source_blocker_report(label: &str, report: &PackageSourceBlockerReport) {
+    println!(
+        "{label}: files={}, bytes={}",
+        report.source_package_files, report.source_package_bytes
+    );
+    let mut reasons = report
+        .by_reason
+        .iter()
+        .map(|(reason, bucket)| (reason, *bucket))
+        .collect::<Vec<_>>();
+    reasons.sort_by(|(left_reason, left), (right_reason, right)| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| left_reason.cmp(right_reason))
+    });
+    for (reason, bucket) in reasons.iter().take(12) {
+        println!(
+            "  reason {}: files={}, bytes={}",
+            reason, bucket.files, bucket.bytes
+        );
+    }
+    let mut packages = report
+        .by_package
+        .iter()
+        .map(|(package, bucket)| (package, *bucket))
+        .collect::<Vec<_>>();
+    packages.sort_by(|(left_package, left), (right_package, right)| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| right.files.cmp(&left.files))
+            .then_with(|| left_package.cmp(right_package))
+    });
+    for (package, bucket) in packages.iter().take(12) {
+        println!(
+            "  package {}: files={}, bytes={}",
+            package, bucket.files, bucket.bytes
+        );
+    }
+    for item in report.items.iter().take(20) {
+        println!(
+            "  top module={} package={} version={} reason={} bytes={} path={} detail={}",
+            item.module_id,
+            item.package,
+            item.version,
+            item.reason,
+            item.bytes,
+            item.path,
+            item.detail
+        );
+    }
+}
+
 pub fn runtime_inventory_from_sqlite(
     args: &RuntimeInventoryArgs,
 ) -> Result<RuntimeInventoryOutcome, RuntimeInventoryError> {
@@ -334,6 +437,9 @@ pub fn runtime_inventory_from_sqlite(
     let mut runtime_attribution = args
         .runtime_attribution
         .then(RuntimeLineAttributionReport::default);
+    let mut package_source_blockers = args
+        .package_source_blockers
+        .then(PackageSourceBlockerReport::default);
 
     for selection in selections {
         if args
@@ -354,12 +460,14 @@ pub fn runtime_inventory_from_sqlite(
                 setter_blockers: None,
                 emitted_setter_blockers: None,
                 runtime_attribution: None,
+                package_source_blockers: None,
             });
             continue;
         }
 
         let input = load_project_bundle_from_sqlite(args.input.as_path(), selection.project_id)
             .map_err(RuntimeInventoryError::LoadInput)?;
+        let source_blocker_input = args.package_source_blockers.then(|| input.clone());
         let runtime_package_ownership = args
             .runtime_attribution
             .then(|| runtime_package_ownership_by_binding(&input));
@@ -381,6 +489,15 @@ pub fn runtime_inventory_from_sqlite(
         if let (Some(total), Some(project_report)) = (
             runtime_attribution.as_mut(),
             project_runtime_attribution.as_ref(),
+        ) {
+            total.add(project_report);
+        }
+        let project_package_source_blockers = source_blocker_input
+            .as_ref()
+            .map(|input| package_source_blocker_report_from_files(input, &run.project.files));
+        if let (Some(total), Some(project_report)) = (
+            package_source_blockers.as_mut(),
+            project_package_source_blockers.as_ref(),
         ) {
             total.add(project_report);
         }
@@ -431,6 +548,7 @@ pub fn runtime_inventory_from_sqlite(
             setter_blockers: project_setter_blockers,
             emitted_setter_blockers: project_emitted_setter_blockers,
             runtime_attribution: project_runtime_attribution,
+            package_source_blockers: project_package_source_blockers,
         });
     }
 
@@ -443,7 +561,195 @@ pub fn runtime_inventory_from_sqlite(
         setter_blockers,
         emitted_setter_blockers,
         runtime_attribution,
+        package_source_blockers,
     })
+}
+
+pub(crate) fn package_source_blocker_report_from_files(
+    input: &InputBundle,
+    files: &[EmittedFile],
+) -> PackageSourceBlockerReport {
+    let files_by_path = files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect::<BTreeMap<_, _>>();
+    let attributions_by_module = input
+        .package_attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        })
+        .map(|attribution| (attribution.module_id, attribution))
+        .collect::<BTreeMap<_, _>>();
+    let mut report = PackageSourceBlockerReport::default();
+    for module in input
+        .modules
+        .iter()
+        .filter(|module| module.kind == ModuleKind::Package)
+    {
+        let Some(file) = files_by_path.get(module.semantic_path.as_str()) else {
+            continue;
+        };
+        if emitted_file_is_external_adapter(file) {
+            continue;
+        }
+        let package = module
+            .package_name
+            .clone()
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let version = module.package_version.clone().unwrap_or_default();
+        let attribution = attributions_by_module.get(&module.id).copied();
+        let (reason, detail) = package_source_blocker_reason(attribution, file.source.as_str());
+        let bytes = file.source.len();
+        report.source_package_files += 1;
+        report.source_package_bytes += bytes;
+        add_package_source_blocker_bucket(&mut report.by_reason, reason.as_str(), bytes);
+        add_package_source_blocker_bucket(
+            &mut report.by_package,
+            package_source_blocker_package_key(package.as_str(), version.as_str()).as_str(),
+            bytes,
+        );
+        report.items.push(PackageSourceBlockerItem {
+            module_id: module.id.0,
+            path: file.path.clone(),
+            package,
+            version,
+            bytes,
+            reason,
+            detail,
+        });
+    }
+    sort_package_source_blocker_items(&mut report.items);
+    report
+}
+
+fn package_source_blocker_reason(
+    attribution: Option<&PackageAttributionInput>,
+    source: &str,
+) -> (String, String) {
+    let Some(attribution) = attribution else {
+        return (
+            "no_external_attribution".to_string(),
+            "package module has no accepted external attribution".to_string(),
+        );
+    };
+    if package_source_blocker_has_worker_asset_hint(attribution) {
+        return (
+            "worker_asset".to_string(),
+            attribution
+                .export_specifier
+                .clone()
+                .or_else(|| attribution.resolved_file.clone())
+                .unwrap_or_default(),
+        );
+    }
+    let Some(resolved_file) = attribution.resolved_file.as_deref() else {
+        return (
+            "missing_source_equivalence_proof".to_string(),
+            attribution.export_specifier.clone().unwrap_or_default(),
+        );
+    };
+    if package_source_blocker_has_commonjs_named_exports(source)
+        && !resolved_file.starts_with("forced-external:export-members:")
+    {
+        return (
+            "commonjs_named_exports_need_member_proof".to_string(),
+            resolved_file.to_string(),
+        );
+    }
+    if !resolved_file.contains(':') {
+        return (
+            "plain_cache_path_suggestion".to_string(),
+            resolved_file.to_string(),
+        );
+    }
+    for (prefix, reason) in [
+        (
+            "forced-external:canonical-subpath:",
+            "canonical_subpath_suggestion",
+        ),
+        (
+            "forced-external:semantic-source:",
+            "semantic_source_suggestion",
+        ),
+        (
+            "forced-external:dependency-graph-source:",
+            "dependency_graph_source_suggestion",
+        ),
+        (
+            "forced-external:dependency-edge-path:",
+            "dependency_edge_path_suggestion",
+        ),
+    ] {
+        if resolved_file.starts_with(prefix) {
+            return (reason.to_string(), resolved_file.to_string());
+        }
+    }
+    (
+        "source_order_or_runtime_dependency".to_string(),
+        resolved_file.to_string(),
+    )
+}
+
+fn emitted_file_is_external_adapter(file: &EmittedFile) -> bool {
+    file.source.contains("import * as external_")
+        && file.source.contains("Object.prototype.hasOwnProperty.call")
+}
+
+fn package_source_blocker_has_worker_asset_hint(attribution: &PackageAttributionInput) -> bool {
+    [
+        attribution.export_specifier.as_deref(),
+        attribution.resolved_file.as_deref(),
+        attribution.subpath.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| value.to_ascii_lowercase().contains(".worker"))
+}
+
+fn package_source_blocker_has_commonjs_named_exports(source: &str) -> bool {
+    let compact = source.split_whitespace().collect::<String>();
+    compact.contains("exports.") || compact.contains(".exports={")
+}
+
+fn package_source_blocker_package_key(package: &str, version: &str) -> String {
+    if version.is_empty() {
+        package.to_string()
+    } else {
+        format!("{package}@{version}")
+    }
+}
+
+fn add_package_source_blocker_bucket(
+    buckets: &mut BTreeMap<String, PackageSourceBlockerBucket>,
+    key: &str,
+    bytes: usize,
+) {
+    let bucket = buckets.entry(key.to_string()).or_default();
+    bucket.files += 1;
+    bucket.bytes += bytes;
+}
+
+fn merge_package_source_blocker_buckets(
+    target: &mut BTreeMap<String, PackageSourceBlockerBucket>,
+    source: &BTreeMap<String, PackageSourceBlockerBucket>,
+) {
+    for (key, bucket) in source {
+        let target_bucket = target.entry(key.clone()).or_default();
+        target_bucket.files += bucket.files;
+        target_bucket.bytes += bucket.bytes;
+    }
+}
+
+fn sort_package_source_blocker_items(items: &mut [PackageSourceBlockerItem]) {
+    items.sort_by(|left, right| {
+        right
+            .bytes
+            .cmp(&left.bytes)
+            .then_with(|| left.package.cmp(&right.package))
+            .then_with(|| left.path.cmp(&right.path))
+    });
 }
 
 pub(crate) fn runtime_emitted_setter_blockers_from_files(

@@ -20,10 +20,11 @@ use rusqlite::{Connection, params};
 
 use super::commands::generate_project::{checked_output_path, write_emitted_project};
 use super::commands::runtime_inventory::{
-    RuntimeSourceSpanOwner, runtime_emitted_setter_blockers_from_files,
-    runtime_inventory_counts_from_files, runtime_inventory_project_selections,
-    runtime_line_attribution_from_files, runtime_module_owner_label,
-    runtime_original_name_owners_by_binding, runtime_source_span_owner_label_for_range,
+    RuntimeSourceSpanOwner, package_source_blocker_report_from_files,
+    runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
+    runtime_inventory_project_selections, runtime_line_attribution_from_files,
+    runtime_module_owner_label, runtime_original_name_owners_by_binding,
+    runtime_source_span_owner_label_for_range,
 };
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
@@ -226,6 +227,7 @@ fn parses_runtime_inventory_command() {
         "1000000".to_string(),
         "--setter-blockers".to_string(),
         "--runtime-attribution".to_string(),
+        "--package-source-blockers".to_string(),
     ])
     .expect("args should parse");
 
@@ -237,6 +239,7 @@ fn parses_runtime_inventory_command() {
     assert_eq!(args.max_source_bytes, Some(1_000_000));
     assert!(args.setter_blockers);
     assert!(args.runtime_attribution);
+    assert!(args.package_source_blockers);
 
     let command = CliCommand::parse([
         "runtime-inventory".to_string(),
@@ -370,6 +373,68 @@ fn runtime_inventory_counts_only_real_setter_declarations() {
     let counts = runtime_inventory_counts_from_files(&files);
 
     assert_eq!(counts.setter_function_definitions, 2);
+}
+
+#[test]
+fn package_source_blocker_report_groups_preserved_package_source() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "package.js",
+        Some("var init = 1;".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "init",
+            "modules/pkg.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(11),
+            "adapter",
+            "modules/adapter.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(ModuleId(10), "pkg", "1.0.0", "pkg/internal")
+            .with_resolved_file("forced-external:semantic-source:pkg@1.0.0/internal.js"),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(ModuleId(11), "pkg", "1.0.0", "pkg")
+            .with_resolved_file("exact-hint:pkg@1.0.0:quality=trusted"),
+    );
+    let input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+    let files = vec![
+        EmittedFile {
+            path: "modules/pkg.ts".to_string(),
+            source: "var pkgInit = 1;\nexport { pkgInit };".to_string(),
+        },
+        EmittedFile {
+            path: "modules/adapter.ts".to_string(),
+            source: "import * as external_pkg from 'pkg';\nfunction adapter() { return Object.prototype.hasOwnProperty.call(external_pkg, \"default\") ? external_pkg.default : external_pkg; }\nexport { adapter };".to_string(),
+        },
+    ];
+
+    let report = package_source_blocker_report_from_files(&input, &files);
+
+    assert_eq!(report.source_package_files, 1);
+    assert_eq!(report.items[0].module_id, 10);
+    assert_eq!(report.items[0].reason, "semantic_source_suggestion");
+    assert_eq!(
+        report
+            .by_package
+            .get("pkg@1.0.0")
+            .map(|bucket| bucket.files),
+        Some(1)
+    );
 }
 
 #[test]
@@ -574,6 +639,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         max_source_bytes: Some(10),
         setter_blockers: false,
         runtime_attribution: false,
+        package_source_blockers: false,
     };
     let selections =
         runtime_inventory_project_selections(&newest_args).expect("select newest projects");
@@ -593,6 +659,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         max_source_bytes: None,
         setter_blockers: false,
         runtime_attribution: false,
+        package_source_blockers: false,
     };
     let selections =
         runtime_inventory_project_selections(&single_project_args).expect("select single project");
