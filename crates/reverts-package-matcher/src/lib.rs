@@ -84,7 +84,6 @@ pub use strategy::{
     match_structural_bags_with_excluded_modules, match_with_cascade,
 };
 
-use reverts_input::{InputRows, PackageAttributionStatus};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use std::collections::BTreeSet;
 
@@ -98,13 +97,6 @@ pub fn package_source_normalized_hash(path: &str, source: &str) -> Option<String
 #[must_use]
 pub fn package_source_exported_members(path: &str, source: &str) -> BTreeSet<String> {
     exported_members_from_source(path, source)
-}
-
-pub(crate) fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
-    rows.package_surfaces.iter().any(|surface| {
-        surface.status == PackageAttributionStatus::Accepted
-            && surface.export_specifier.as_str() == specifier
-    })
 }
 
 #[cfg(test)]

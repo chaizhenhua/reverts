@@ -28,9 +28,7 @@ use reverts_js::{JsError, ParseError, ParseGoal, parse_options_for, source_type_
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::is_node_builtin;
 
-use crate::{
-    PackageImportSite, PackageSource, SourcePackageImportParseError, has_accepted_surface,
-};
+use crate::{PackageImportSite, PackageSource, SourcePackageImportParseError};
 
 pub fn package_import_names_from_sources(
     rows: &InputRows,
@@ -131,6 +129,13 @@ pub(crate) fn resolve_source_package_surfaces(
         );
     }
     surfaces
+}
+
+fn has_accepted_surface(rows: &InputRows, specifier: &str) -> bool {
+    rows.package_surfaces.iter().any(|surface| {
+        surface.status == PackageAttributionStatus::Accepted
+            && surface.export_specifier.as_str() == specifier
+    })
 }
 
 fn package_import_sites_from_source_file(
