@@ -36,8 +36,8 @@ use crate::runtime_helper_writes::inline_internal_setter_calls;
 use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::statements::{
     lazy_module_helper_source, lazy_value_helper_source, named_export_statement,
-    noop_function_statement, runtime_helper_setter_declarations, runtime_helper_setter_name,
-    runtime_helpers_path,
+    named_import_statement, noop_function_statement, runtime_helper_setter_declarations,
+    runtime_helper_setter_name, runtime_helpers_path, runtime_lazy_helpers_path,
 };
 use crate::{
     EmitPlan, ExternalPackageAdapterPlan, PlanError, PlannedBinding, PlannedFile,
@@ -48,8 +48,8 @@ use crate::{
     private_noop_runtime_helpers_in_source, prune_orphan_runtime_bindings,
     purify_private_runtime_lazy_initializers, rewrite_noop_runtime_helper_calls,
     runtime_entrypoint_root_bindings, runtime_module_owner_imports_for_source,
-    scan_runtime_externalized_bindings, strip_runtime_noop_declarations,
-    unresolved_runtime_helper_references,
+    scan_runtime_externalized_bindings, source_contains_top_level_call,
+    strip_runtime_noop_declarations, unresolved_runtime_helper_references,
 };
 
 pub(crate) struct RuntimeHelperEmissionContext<'a> {
@@ -87,6 +87,12 @@ pub(crate) fn emit_runtime_helper_files(
     let used_lazy_value = ctx.used_lazy_value;
     let exported_lazy_module = ctx.exported_lazy_module;
     let exported_lazy_value = ctx.exported_lazy_value;
+
+    emit_runtime_lazy_helper_file(
+        plan,
+        !used_lazy_module.is_empty() || !exported_lazy_module.is_empty(),
+        !used_lazy_value.is_empty() || !exported_lazy_value.is_empty(),
+    );
 
     for (source_file_id, helper_bindings) in used_runtime_helper_files {
         let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
@@ -331,6 +337,27 @@ pub(crate) fn emit_runtime_helper_files(
             helper_path.as_str(),
             &helper_imports,
         );
+        let helper_uses_lazy_module =
+            source_contains_top_level_call(helper_closure.source.as_str(), "lazyModule");
+        let helper_uses_lazy_value =
+            source_contains_top_level_call(helper_closure.source.as_str(), "lazyValue");
+        if helper_uses_lazy_module || helper_uses_lazy_value {
+            let mut lazy_imports = BTreeSet::new();
+            if helper_uses_lazy_module {
+                lazy_imports.insert(BindingName::new("lazyModule"));
+            }
+            if helper_uses_lazy_value {
+                lazy_imports.insert(BindingName::new("lazyValue"));
+            }
+            let specifier = crate::relative_paths::relative_import_specifier(
+                helper_path.as_str(),
+                runtime_lazy_helpers_path(),
+            );
+            file.push_source(named_import_statement(
+                lazy_imports.iter(),
+                specifier.as_str(),
+            ));
+        }
         for binding in &package_init_shims {
             file.push_source(noop_function_statement(binding));
         }
@@ -351,16 +378,6 @@ pub(crate) fn emit_runtime_helper_files(
         if !setter_bindings.is_empty() {
             file.push_source(runtime_helper_setter_declarations(&setter_bindings));
         }
-        let emits_lazy_module = used_lazy_module.contains(source_file_id);
-        let emits_lazy_value = used_lazy_value.contains(source_file_id);
-        let exports_lazy_module = exported_lazy_module.contains(source_file_id);
-        let exports_lazy_value = exported_lazy_value.contains(source_file_id);
-        if emits_lazy_module {
-            file.push_source(lazy_module_helper_source());
-        }
-        if emits_lazy_value {
-            file.push_source(lazy_value_helper_source());
-        }
         let mut exported_bindings = public_helper_bindings.clone();
         exported_bindings.extend(
             setter_bindings
@@ -372,12 +389,6 @@ pub(crate) fn emit_runtime_helper_files(
         // directly; the runtime file is no longer a compatibility barrel.
         for binding in &module_owned_binding_names_for_source {
             exported_bindings.remove(binding);
-        }
-        if exports_lazy_module {
-            exported_bindings.insert(BindingName::new("lazyModule"));
-        }
-        if exports_lazy_value {
-            exported_bindings.insert(BindingName::new("lazyValue"));
         }
         if !exported_bindings.is_empty() {
             file.push_source(named_export_statement(exported_bindings.iter()));
@@ -407,22 +418,6 @@ pub(crate) fn emit_runtime_helper_files(
             ));
             file.add_export_with_source_backed(setter, true);
         }
-        for lazy_name in [
-            exports_lazy_module.then_some("lazyModule"),
-            exports_lazy_value.then_some("lazyValue"),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let binding = BindingName::new(lazy_name);
-            file.add_binding(PlannedBinding::new(
-                binding.clone(),
-                binding.clone(),
-                BindingShape::Callable,
-                true,
-            ));
-            file.add_export_with_source_backed(binding, true);
-        }
         if file.body.is_empty() {
             continue;
         }
@@ -430,6 +425,45 @@ pub(crate) fn emit_runtime_helper_files(
         plan.push_file(file);
     }
     Ok(())
+}
+
+fn emit_runtime_lazy_helper_file(
+    plan: &mut EmitPlan,
+    exports_lazy_module: bool,
+    exports_lazy_value: bool,
+) {
+    if !exports_lazy_module && !exports_lazy_value {
+        return;
+    }
+    let mut file = PlannedFile::new(runtime_lazy_helpers_path());
+    let mut exported_bindings = BTreeSet::new();
+    if exports_lazy_module {
+        let binding = BindingName::new("lazyModule");
+        file.push_source(lazy_module_helper_source());
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            BindingShape::Callable,
+            true,
+        ));
+        file.add_export_with_source_backed(binding.clone(), true);
+        exported_bindings.insert(binding);
+    }
+    if exports_lazy_value {
+        let binding = BindingName::new("lazyValue");
+        file.push_source(lazy_value_helper_source());
+        file.add_binding(PlannedBinding::new(
+            binding.clone(),
+            binding.clone(),
+            BindingShape::Callable,
+            true,
+        ));
+        file.add_export_with_source_backed(binding.clone(), true);
+        exported_bindings.insert(binding);
+    }
+    file.push_source(named_export_statement(exported_bindings.iter()));
+    crate::finalize_planned_file(&mut file);
+    plan.push_file(file);
 }
 
 pub(crate) fn planned_runtime_helper_consumed_bindings(

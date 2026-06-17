@@ -341,6 +341,36 @@ fn emit_plan_coalesces_duplicate_generated_named_imports() {
 }
 
 #[test]
+fn lazy_helper_imports_use_shared_runtime_lazy_file() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::application(
+        ModuleId(1),
+        "entry",
+        "modules/entry.ts",
+    ));
+    let program = enriched_from_rows(rows);
+    let mut file = PlannedFile::new("modules/entry.ts");
+    let mut planned_bindings = BTreeSet::new();
+
+    super::emit_lowered_runtime_helper_import(
+        &program,
+        ModuleId(1),
+        "modules/entry.ts",
+        &mut file,
+        &mut planned_bindings,
+        1,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &["lazyValue"],
+    );
+    finalize_planned_file(&mut file);
+
+    let source = file.body.join("\n");
+    assert!(source.contains("import { lazyValue } from './runtime/lazy.js';"));
+    assert!(!source.contains("source-1-helpers"));
+}
+
+#[test]
 fn emit_plan_coalesces_generated_default_and_named_imports() {
     let mut file = PlannedFile::new("modules/consumer.ts");
     file.push_source("import defaultValue from './dep.js';");
@@ -7000,8 +7030,11 @@ fn lazy_folded_source_keeps_prelude_dependencies_used_by_folded_chunk() {
     assert!(helper_source.contains("function buildShared()"));
     assert!(helper_source.contains("shared = buildShared();"));
     assert!(helper_source.contains("var initShared = lazyValue(() => {"));
-    assert!(helper_source.contains("function lazyValue(factory) {"));
+    assert!(helper_source.contains("import { lazyValue } from './lazy.js';"));
     assert!(helper_source.contains("export { initShared, shared };"));
+    let lazy_source = planned_source(&plan, "modules/runtime/lazy.ts");
+    assert!(lazy_source.contains("function lazyValue(factory) {"));
+    assert!(lazy_source.contains("export { lazyValue };"));
     assert!(
         !helper_source.contains("import { initShared }"),
         "folded chunk definitions are local to the runtime helper and must not be re-imported"
@@ -12137,7 +12170,9 @@ fn impure_lazy_initializer_keeps_lazy_thunk_while_folding_into_helper() {
             .contains("export { initShared, shared } from './runtime/source-1-helpers.js';")
     );
     assert!(helper_source.contains("var initShared = lazyValue(() => {"));
-    assert!(helper_source.contains("function lazyValue(factory) {"));
+    assert!(helper_source.contains("import { lazyValue } from './lazy.js';"));
+    let lazy_source = planned_source(&plan, "modules/runtime/lazy.ts");
+    assert!(lazy_source.contains("function lazyValue(factory) {"));
     assert!(helper_source.contains("shared = Date.now()"));
     assert!(!helper_source.contains("__reverts_set_shared"));
     assert!(helper_source.contains("export { initShared, shared };"));

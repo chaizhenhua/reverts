@@ -265,8 +265,8 @@ use statements::{
     named_import_alias_statement, named_import_statement, named_reexport_statement,
     namespace_import_statement, node_require_prelude_statement, noop_function_statement,
     runtime_helper_import_statement, runtime_helper_setter_declarations,
-    runtime_helper_setter_name, runtime_helpers_path, runtime_namespace_export_statement,
-    variable_declaration_statement,
+    runtime_helper_setter_name, runtime_helpers_path, runtime_lazy_helpers_path,
+    runtime_namespace_export_statement, variable_declaration_statement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -1410,12 +1410,12 @@ pub(crate) fn emit_runtime_import_partitions(
     }
 }
 
-/// Emit the runtime-helper companion import for this module's
-/// lowered source — a single `import { helpers, __reverts_set_*,
-/// lazyValue, lazyModule } from "runtime-helpers/..."` covering
-/// remaining-read helpers, written setters, and the lazy helper
-/// imports — and add `PlannedBinding` entries for the read bindings.
-/// Skipped entirely when every category is empty.
+/// Emit the runtime-helper companion imports for this module's lowered
+/// source. Source-specific helpers/setters still come from
+/// `source-<N>-helpers.ts`, while the pure `lazyValue` / `lazyModule`
+/// memoizers come from the shared `runtime/lazy.ts` file so lazy-only
+/// consumers do not depend on a large per-source helper island. Skipped
+/// entirely when every category is empty.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_lowered_runtime_helper_import(
     program: &EnrichedProgram,
@@ -1434,14 +1434,25 @@ pub(crate) fn emit_lowered_runtime_helper_import(
     {
         return;
     }
-    let specifier =
-        relative_import_specifier(module_path, runtime_helpers_path(source_file_id).as_str());
-    file.push_source(runtime_helper_import_statement(
-        remaining_runtime_helpers,
-        written_runtime_helpers,
-        lazy_helper_names,
-        specifier.as_str(),
-    ));
+    if !remaining_runtime_helpers.is_empty() || !written_runtime_helpers.is_empty() {
+        let specifier =
+            relative_import_specifier(module_path, runtime_helpers_path(source_file_id).as_str());
+        file.push_source(runtime_helper_import_statement(
+            remaining_runtime_helpers,
+            written_runtime_helpers,
+            &[],
+            specifier.as_str(),
+        ));
+    }
+    if !lazy_helper_names.is_empty() {
+        let specifier = relative_import_specifier(module_path, runtime_lazy_helpers_path());
+        file.push_source(runtime_helper_import_statement(
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            lazy_helper_names,
+            specifier.as_str(),
+        ));
+    }
     for binding in remaining_runtime_helpers {
         if planned_bindings.contains(binding) {
             continue;
@@ -1479,10 +1490,7 @@ pub(crate) fn record_lowered_runtime_helper_usage(
     exported_lazy_value: &mut BTreeSet<u32>,
 ) {
     let source_file_id = lowered_source.source_file_id;
-    if !remaining_runtime_helpers.is_empty()
-        || !written_runtime_helpers.is_empty()
-        || !lazy_helper_names.is_empty()
-    {
+    if !remaining_runtime_helpers.is_empty() || !written_runtime_helpers.is_empty() {
         used_runtime_helper_files.entry(source_file_id).or_default();
     }
     if !remaining_runtime_helpers.is_empty() {

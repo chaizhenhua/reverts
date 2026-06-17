@@ -115,6 +115,10 @@ pub(crate) fn runtime_helpers_path(source_file_id: u32) -> String {
     format!("modules/runtime/source-{source_file_id}-helpers.ts")
 }
 
+pub(crate) fn runtime_lazy_helpers_path() -> &'static str {
+    "modules/runtime/lazy.ts"
+}
+
 pub(crate) fn runtime_helper_setter_name(binding: &BindingName) -> String {
     format!("__reverts_set_{}", binding.as_str())
 }
