@@ -328,6 +328,97 @@ fn build_package_bags(
         .collect()
 }
 
+/// Public façade: a self-contained structural bag built from a single set of
+/// function fingerprints. Used by the cross-project module matcher so it can
+/// reuse the same axis_count / pair_count / shape_count / score machinery
+/// that `match_structural_bags` runs internally for the package matcher,
+/// without having to reach into the package-specific (`InputRows`,
+/// `PackageSource`) plumbing.
+///
+/// Carries both sides of the asymmetric `score_candidate` API: the
+/// per-function bags (used as the "module" query side) and the aggregate
+/// counts plus per-axis function counts (used as the "package" reference
+/// side). This way the same `StructuralBag` value can be passed to either
+/// side of a pair score without an extra round trip through synthetic
+/// per-function lists.
+#[derive(Debug, Clone)]
+pub struct StructuralBag {
+    module_view: ModuleStructuralBag,
+    package_view: PackageStructuralBag,
+}
+
+/// Build a `StructuralBag` from a fingerprint slice. Returns `None` if the
+/// slice produces no scoring weight (empty fingerprints, or no axis hashes).
+#[must_use]
+pub fn build_structural_bag(fingerprints: &[FunctionFingerprint]) -> Option<StructuralBag> {
+    let functions = structural_functions(fingerprints);
+    if functions.is_empty() {
+        return None;
+    }
+    let (axis_counts, total_weight) = axis_counts_for_functions(&functions);
+    if total_weight == 0 {
+        return None;
+    }
+    let (pair_counts, total_pair_weight) = pair_counts_for_functions(&functions);
+    let (shape_counts, total_shapes) = shape_counts_for_functions(&functions);
+    let mut axis_function_counts = BTreeMap::<AxisKey, usize>::new();
+    let mut pair_function_counts = BTreeMap::<AxisPairKey, usize>::new();
+    let mut shape_function_counts = BTreeMap::<FunctionShapeKey, usize>::new();
+    for function in &functions {
+        for key in &function.keys {
+            *axis_function_counts.entry(*key).or_default() += 1;
+        }
+        for key in &function.pairs {
+            *pair_function_counts.entry(*key).or_default() += 1;
+        }
+        for key in &function.shapes {
+            *shape_function_counts.entry(*key).or_default() += 1;
+        }
+    }
+    let function_count = functions.len();
+    let module_view = ModuleStructuralBag {
+        module_id: ModuleId(0),
+        package_name: None,
+        package_version: None,
+        axis_counts: axis_counts.clone(),
+        pair_counts: pair_counts.clone(),
+        shape_counts: shape_counts.clone(),
+        total_weight,
+        total_pair_weight,
+        total_shapes,
+        functions,
+    };
+    let package_view = PackageStructuralBag {
+        // package_name/version are unused by `score_candidate`; supply
+        // empty strings so the same struct backs both package matching
+        // (where these fields drive the per-version winner) and
+        // cross-project module matching (where the caller already knows
+        // both sides' identity).
+        package_name: String::new(),
+        package_version: String::new(),
+        axis_counts,
+        axis_function_counts,
+        pair_counts,
+        pair_function_counts,
+        shape_counts,
+        shape_function_counts,
+        total_weight,
+        function_count,
+    };
+    Some(StructuralBag {
+        module_view,
+        package_view,
+    })
+}
+
+/// Score one structural bag against another, returning the headline
+/// composite score (the same number `match_structural_bags` ranks package
+/// candidates by). Returns `None` when there is no overlap to score.
+#[must_use]
+pub fn score_structural_bags(query: &StructuralBag, reference: &StructuralBag) -> Option<f64> {
+    score_candidate(&query.module_view, &reference.package_view).map(|score| score.score)
+}
+
 fn structural_functions(fingerprints: &[FunctionFingerprint]) -> Vec<FunctionStructuralBag> {
     fingerprints
         .iter()

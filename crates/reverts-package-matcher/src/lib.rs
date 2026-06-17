@@ -84,9 +84,10 @@ pub use source::source_imports::{
 };
 pub(crate) use source::source_text::normalize_source;
 pub use strategy::{
-    CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, StructuralBagMatchReport,
-    assign_globally, cascade_candidates, match_function, match_structural_bags,
-    match_structural_bags_with_excluded_modules, match_with_cascade,
+    CascadeMatchReport, CascadeOwnershipMatch, GlobalAssignment, StructuralBag,
+    StructuralBagMatchReport, assign_globally, build_structural_bag, cascade_candidates,
+    match_function, match_structural_bags, match_structural_bags_with_excluded_modules,
+    match_with_cascade, score_structural_bags,
 };
 
 #[cfg(test)]

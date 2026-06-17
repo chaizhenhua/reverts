@@ -53,8 +53,8 @@ pub enum SimilarityMetric {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MatchStrategy {
     /// Bag-of-fingerprints scoring with per-axis Jaccard/Overlap, combined
-    /// across axes. This is the original module-matcher; tunable via
-    /// `--metric`, `--combiner`, `--threshold-percent`.
+    /// across axes. The original module-matcher; tunable via `--metric`,
+    /// `--combiner`, `--threshold-percent`.
     BagJaccard,
     /// Per-function tier-based matching that reuses the package matcher's
     /// `FingerprintIndex`. Each ref function looks up subject candidates in
@@ -62,6 +62,12 @@ pub enum MatchStrategy {
     /// function-level wins up to the ref module. No Jaccard threshold; the
     /// only knob is the per-tier acceptance ladder.
     FunctionTier,
+    /// Aggregate structural-bag scorer reused verbatim from the package
+    /// matcher (`reverts_package_matcher::score_structural_bags`). Compares
+    /// per-axis multiset counts, axis-pair combinations, and per-function
+    /// shape coverage with the same tuned weights as the package matcher's
+    /// `match_structural_bags` tier — no module-matcher-specific code.
+    StructuralBag,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -286,6 +292,19 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             print_histogram(&recall.score_histogram, ref_modules.len());
             print_tier_breakdown(&report.tier_counts);
             (report.best, None)
+        }
+        MatchStrategy::StructuralBag => {
+            let best = score_via_structural_bag(&ref_fps, &sub_fps);
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[structural_bag (shared package-matcher scorer)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            (best, None)
         }
     };
 
@@ -732,6 +751,97 @@ fn score_via_function_tier(
         };
     }
     report
+}
+
+/// Score ref↔subject pairs with the package matcher's structural-bag
+/// scorer. Each ref module's fingerprints become a `StructuralBag`; each
+/// subject module's fingerprints become another `StructuralBag`; the
+/// shared `score_structural_bags` returns the same weighted composite
+/// score `match_structural_bags` uses to rank package versions.
+///
+/// Per ref, picks the subject with the highest score. Normalised to a
+/// rough [0, 1] by the maximum score observed across the run (the
+/// underlying scorer is unbounded; the absolute number depends on bag
+/// sizes, so we rescale for histogram parity with the other strategies).
+fn score_via_structural_bag(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    use reverts_package_matcher::{StructuralBag, build_structural_bag, score_structural_bags};
+
+    let sub_bags: Vec<Option<StructuralBag>> = sub_fps
+        .iter()
+        .map(|m| build_structural_bag(&m.raw))
+        .collect();
+    let ref_bags: Vec<Option<StructuralBag>> = ref_fps
+        .iter()
+        .map(|m| build_structural_bag(&m.raw))
+        .collect();
+
+    // Pre-filter subject candidates via the shared FingerprintIndex on the
+    // AST axis: only subjects that share at least one AST hash with the ref
+    // module are worth scoring. This turns the worst-case O(R × S)
+    // structural-bag scoring (3576 × 1810 ≈ 6.5M pairs on the CC dataset)
+    // into O(R × avg-candidates-per-ref), typically a single-digit number.
+    let mut sub_ast_index: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            sub_ast_index
+                .entry(fp.primary.ast)
+                .or_default()
+                .push(sub_idx);
+            for alt in &fp.alternates {
+                sub_ast_index.entry(alt.axes.ast).or_default().push(sub_idx);
+            }
+        }
+    }
+
+    let mut raw_scores: Vec<(Option<usize>, f64)> = Vec::with_capacity(ref_bags.len());
+    let mut global_max: f64 = 0.0;
+    for (ref_idx, ref_bag_opt) in ref_bags.iter().enumerate() {
+        let Some(ref_bag) = ref_bag_opt else {
+            raw_scores.push((None, 0.0));
+            continue;
+        };
+        let mut candidates: BTreeSet<usize> = BTreeSet::new();
+        for fp in &ref_fps[ref_idx].raw {
+            if let Some(subs) = sub_ast_index.get(&fp.primary.ast) {
+                candidates.extend(subs.iter().copied());
+            }
+            for alt in &fp.alternates {
+                if let Some(subs) = sub_ast_index.get(&alt.axes.ast) {
+                    candidates.extend(subs.iter().copied());
+                }
+            }
+        }
+        let mut best_score = 0.0_f64;
+        let mut best_sub: Option<usize> = None;
+        for sub_idx in candidates {
+            let Some(sub_bag) = sub_bags[sub_idx].as_ref() else {
+                continue;
+            };
+            if let Some(score) = score_structural_bags(ref_bag, sub_bag)
+                && score > best_score
+            {
+                best_score = score;
+                best_sub = Some(sub_idx);
+            }
+        }
+        if best_score > global_max {
+            global_max = best_score;
+        }
+        raw_scores.push((best_sub, best_score));
+    }
+
+    let normaliser = if global_max > 0.0 { global_max } else { 1.0 };
+    raw_scores
+        .into_iter()
+        .map(|(subject_idx, score)| BestMatch {
+            subject_idx,
+            score: (score / normaliser).clamp(0.0, 1.0),
+            axis: None,
+        })
+        .collect()
 }
 
 /// Maps a `MatchTier` to the stable string label printed in the recall
