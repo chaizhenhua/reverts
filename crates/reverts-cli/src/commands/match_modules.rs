@@ -291,6 +291,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             );
             print_histogram(&recall.score_histogram, ref_modules.len());
             print_tier_breakdown(&report.tier_counts);
+            print_function_naming_coverage(&report, &ref_fps, &sub_fps);
             (report.best, None)
         }
         MatchStrategy::StructuralBag => {
@@ -842,6 +843,81 @@ fn score_via_structural_bag(
             axis: None,
         })
         .collect()
+}
+
+/// Per-function naming-coverage report. Answers: "how many of the ref
+/// project's functions are reachable for cross-version name assignment, and
+/// at what level of confidence?".
+///
+/// Three layers, narrow → wide:
+/// * `tier_unique`  — function-tier produced exactly one winning subject
+///   for this ref function. Name can be transferred 1:1, high confidence.
+/// * `any_ast_match` — at least one subject function shares this ref
+///   function's AST hash (primary or alt pass). Still narrow but not
+///   unique; downstream can pick by majority / Hungarian / module pin.
+/// * `module_matched` — the ref function lives inside a module the
+///   function-tier strategy picked a subject for. Every function in such a
+///   module inherits the subject module's surface, so they can be named
+///   via module-level transfer even if the function itself is unmatched.
+fn print_function_naming_coverage(
+    report: &FunctionTierReport,
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) {
+    let total_fns: usize = ref_fps.iter().map(|m| m.raw.len()).sum();
+    if total_fns == 0 {
+        println!("  function naming coverage: 0 ref functions to evaluate");
+        return;
+    }
+
+    let tier_unique: usize = report.tier_counts.values().sum();
+
+    // Subject AST-hash universe: which AST hashes appear anywhere in
+    // subject (primary or alt). A ref function whose AST hash is in here
+    // has at least one content-equal subject candidate.
+    let mut subject_ast: BTreeSet<u64> = BTreeSet::new();
+    for m in sub_fps {
+        for fp in &m.raw {
+            subject_ast.insert(fp.primary.ast);
+            for alt in &fp.alternates {
+                subject_ast.insert(alt.axes.ast);
+            }
+        }
+    }
+    let mut any_ast_match: usize = 0;
+    for m in ref_fps {
+        for fp in &m.raw {
+            let any = subject_ast.contains(&fp.primary.ast)
+                || fp
+                    .alternates
+                    .iter()
+                    .any(|alt| subject_ast.contains(&alt.axes.ast));
+            if any {
+                any_ast_match += 1;
+            }
+        }
+    }
+
+    // Functions covered transitively via module-level match: their parent
+    // ref module produced *any* winning subject pick.
+    let module_matched: usize = report
+        .best
+        .iter()
+        .enumerate()
+        .filter_map(|(ref_idx, best)| best.subject_idx.map(|_| ref_idx))
+        .map(|ref_idx| ref_fps[ref_idx].raw.len())
+        .sum();
+
+    println!(
+        "  function naming coverage: {} ref functions total\n    tier_unique (direct name transfer): {} ({:.2}%)\n    any_ast_match (≥1 content-equal subject fn): {} ({:.2}%)\n    inside module_matched (inherit via module pick): {} ({:.2}%)",
+        total_fns,
+        tier_unique,
+        pct(tier_unique, total_fns),
+        any_ast_match,
+        pct(any_ast_match, total_fns),
+        module_matched,
+        pct(module_matched, total_fns),
+    );
 }
 
 /// Maps a `MatchTier` to the stable string label printed in the recall
