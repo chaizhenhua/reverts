@@ -16,11 +16,11 @@ use oxc_span::{GetSpan, SPAN};
 use oxc_syntax::{reference::ReferenceId, symbol::SymbolId};
 
 use crate::ReadabilityReport;
-use crate::identifier::sanitize_identifier;
-use crate::rename_hints::{
+use crate::commonjs_exports::{
     commonjs_export_property_name, commonjs_module_exports_target, module_export_identifier_name,
     object_define_property_export_getter, property_key_readability_name,
 };
+use crate::identifier::sanitize_identifier;
 
 #[derive(Debug, Clone)]
 struct AliasCandidate {

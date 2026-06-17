@@ -1,4 +1,5 @@
 mod classify;
+mod commonjs_exports;
 mod errors;
 mod facts;
 mod format;
@@ -21,6 +22,11 @@ pub use classify::{
     DeclarationCallability, ImportUsageScope, classify_import_usage_scope,
     classify_top_level_bindings, verify_only_immediate_call_references,
 };
+pub use commonjs_exports::{
+    commonjs_create_binding_export_member, commonjs_export_property_name,
+    commonjs_module_exports_target, expression_is_commonjs_exports_object, module_export_name,
+    object_define_property_export_member,
+};
 pub use format::{format_source_minified, format_source_pretty, normalize_source_for_pipeline};
 pub use format_module_items::{
     format_source_with_module_items, format_source_with_module_items_and_renames,
@@ -38,8 +44,9 @@ pub use facts::{
     lazy_value_sub_snippets,
 };
 pub use identifier::{
-    is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_part,
-    is_identifier_start, is_js_keyword, sanitize_identifier, skip_block_comment, skip_line_comment,
+    is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,
+    is_identifier_part, is_identifier_start, is_js_keyword, sanitize_identifier,
+    skip_block_comment, skip_line_comment,
 };
 pub use lazy::{
     LazyBodyClassification, classify_lazy_module_body, extract_lazy_module_eager_value,

@@ -12,16 +12,13 @@
 
 use reverts_js::{
     is_ascii_identifier_continue as is_identifier_continue,
-    is_ascii_identifier_start as is_identifier_start,
+    is_ascii_identifier_start as is_identifier_start, is_identifier_like_ascii,
 };
 
 use crate::byte_lexer::skip_ws;
 
 pub(crate) fn is_identifier_like(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    !bytes.is_empty()
-        && is_identifier_start(bytes[0])
-        && bytes[1..].iter().all(|byte| is_identifier_continue(*byte))
+    is_identifier_like_ascii(value)
 }
 
 pub(crate) fn parse_identifier(source: &str, start: usize) -> Option<(&str, usize)> {

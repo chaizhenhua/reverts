@@ -1,9 +1,9 @@
 use oxc_ast::{
     Visit,
     ast::{
-        Argument, AssignmentExpression, BindingPatternKind, CallExpression, ExportNamedDeclaration,
-        Expression, ImportDeclarationSpecifier, ModuleExportName, ObjectExpression, ObjectProperty,
-        ObjectPropertyKind, Program, PropertyKey, Statement,
+        AssignmentExpression, BindingPatternKind, CallExpression, ExportNamedDeclaration,
+        Expression, ImportDeclarationSpecifier, ObjectExpression, ObjectProperty,
+        ObjectPropertyKind, Program, Statement,
     },
     visit::walk::{
         walk_assignment_expression, walk_call_expression, walk_export_named_declaration,
@@ -11,7 +11,10 @@ use oxc_ast::{
     },
 };
 
-use crate::expression_identifier;
+use crate::commonjs_exports::{
+    commonjs_export_property_name, commonjs_module_exports_target, module_export_identifier_name,
+    object_define_property_export_getter, property_key_readability_name,
+};
 use crate::identifier::sanitize_identifier;
 use crate::rename_apply::{ReadabilityRenameHint, ReadabilityRenameSource};
 
@@ -302,151 +305,6 @@ fn lower_type_name(name: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-pub(crate) fn module_export_identifier_name(name: &ModuleExportName<'_>) -> Option<String> {
-    match name {
-        ModuleExportName::IdentifierName(identifier) => Some(identifier.name.as_str().to_string()),
-        ModuleExportName::IdentifierReference(identifier) => {
-            Some(identifier.name.as_str().to_string())
-        }
-        ModuleExportName::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
-    }
-}
-
-pub(crate) fn property_key_readability_name(key: &PropertyKey<'_>) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str().to_string()),
-        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
-        _ => None,
-    }
-}
-
-pub(crate) fn commonjs_export_property_name(
-    target: &oxc_ast::ast::AssignmentTarget<'_>,
-) -> Option<String> {
-    match target {
-        oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) => {
-            if expression_is_commonjs_exports_object(&member.object) {
-                return Some(member.property.name.as_str().to_string());
-            }
-        }
-        oxc_ast::ast::AssignmentTarget::ComputedMemberExpression(member) => {
-            if expression_is_commonjs_exports_object(&member.object)
-                && let Expression::StringLiteral(property) = &member.expression
-            {
-                return Some(property.value.as_str().to_string());
-            }
-        }
-        _ => {}
-    }
-    None
-}
-
-pub(crate) fn commonjs_module_exports_target(target: &oxc_ast::ast::AssignmentTarget<'_>) -> bool {
-    let oxc_ast::ast::AssignmentTarget::StaticMemberExpression(member) = target else {
-        return false;
-    };
-    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
-}
-
-fn expression_is_commonjs_exports_object(expression: &Expression<'_>) -> bool {
-    if expression_identifier(expression) == Some("exports") {
-        return true;
-    }
-    let Expression::StaticMemberExpression(member) = expression else {
-        return false;
-    };
-    expression_identifier(&member.object) == Some("module") && member.property.name == "exports"
-}
-
-pub(crate) fn object_define_property_export_getter(
-    call: &CallExpression<'_>,
-) -> Option<(String, String)> {
-    let Expression::StaticMemberExpression(callee) = &call.callee else {
-        return None;
-    };
-    if expression_identifier(&callee.object) != Some("Object")
-        || callee.property.name != "defineProperty"
-        || call.arguments.len() < 3
-    {
-        return None;
-    }
-    if !argument_is_commonjs_exports_object(&call.arguments[0]) {
-        return None;
-    }
-    let exported = argument_string_literal(&call.arguments[1])?;
-    let descriptor = argument_object_expression(&call.arguments[2])?;
-    let local = descriptor_getter_return_identifier(descriptor)?;
-    Some((exported, local))
-}
-
-fn argument_is_commonjs_exports_object(argument: &Argument<'_>) -> bool {
-    match argument {
-        Argument::Identifier(identifier) => identifier.name == "exports",
-        Argument::StaticMemberExpression(member) => {
-            expression_identifier(&member.object) == Some("module")
-                && member.property.name == "exports"
-        }
-        _ => false,
-    }
-}
-
-fn argument_string_literal(argument: &Argument<'_>) -> Option<String> {
-    let Argument::StringLiteral(literal) = argument else {
-        return None;
-    };
-    Some(literal.value.as_str().to_string())
-}
-
-fn argument_object_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a ObjectExpression<'a>> {
-    let Argument::ObjectExpression(object) = argument else {
-        return None;
-    };
-    Some(object)
-}
-
-fn descriptor_getter_return_identifier(descriptor: &ObjectExpression<'_>) -> Option<String> {
-    for property in &descriptor.properties {
-        let ObjectPropertyKind::ObjectProperty(property) = property else {
-            continue;
-        };
-        if property.computed
-            || property_key_readability_name(&property.key).as_deref() != Some("get")
-        {
-            continue;
-        }
-        if let Some(identifier) = returned_identifier_from_invokable(&property.value) {
-            return Some(identifier);
-        }
-    }
-    None
-}
-
-fn returned_identifier_from_invokable(expression: &Expression<'_>) -> Option<String> {
-    match expression {
-        Expression::ArrowFunctionExpression(arrow) => {
-            single_returned_identifier_from_body(&arrow.body)
-        }
-        Expression::FunctionExpression(function) => function
-            .body
-            .as_deref()
-            .and_then(single_returned_identifier_from_body),
-        _ => None,
-    }
-}
-
-fn single_returned_identifier_from_body(body: &oxc_ast::ast::FunctionBody<'_>) -> Option<String> {
-    if !body.directives.is_empty() || body.statements.len() != 1 {
-        return None;
-    }
-    let Statement::ReturnStatement(statement) = &body.statements[0] else {
-        return None;
-    };
-    let Some(Expression::Identifier(identifier)) = &statement.argument else {
-        return None;
-    };
-    Some(identifier.name.as_str().to_string())
 }
 
 fn is_generated_package_namespace_alias(local: &str) -> bool {

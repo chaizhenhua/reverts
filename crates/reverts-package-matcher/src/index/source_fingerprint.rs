@@ -28,15 +28,16 @@ use reverts_ir::hash::{
 };
 use reverts_js::normalize::{apply_to_source, stable_passes};
 use reverts_js::{
-    JsError, ParseError, ParseGoal, parse_error_message, parse_options_for, source_type_candidates,
+    JsError, ParseError, ParseGoal, commonjs_create_binding_export_member,
+    commonjs_export_property_name, commonjs_module_exports_target, module_export_name,
+    object_define_property_export_member, parse_error_message, parse_options_for,
+    source_type_candidates,
 };
 
 use crate::normalize_source;
 use crate::package_helpers::normalize_hint_text;
 use crate::source::ast_export_helpers::{
-    commonjs_create_binding_export_member, commonjs_export_property_name,
-    commonjs_module_exports_target, declaration_binding_names, module_export_name,
-    object_define_property_export_member, object_expression_static_keys, property_key_name,
+    declaration_binding_names, object_expression_static_keys, property_key_name,
 };
 use crate::source::exported_members::{is_identifier_name, is_usable_export_member};
 

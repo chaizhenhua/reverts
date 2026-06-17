@@ -6,6 +6,11 @@ use oxc_ast::ast::{
 use reverts_ir::NormalizationPassId;
 
 use super::NormalizationPass;
+use crate::commonjs_exports::{
+    argument_is_commonjs_exports_object, argument_object_expression,
+    commonjs_module_exports_target, expression_is_commonjs_exports_object,
+};
+use crate::expression_identifier;
 
 /// Removes CommonJS export-boundary boilerplate when it only re-exports a
 /// local binding. This is intentionally conservative: it drops statements such
@@ -53,8 +58,7 @@ fn is_commonjs_export_target(target: &AssignmentTarget<'_>) -> bool {
     match target {
         AssignmentTarget::StaticMemberExpression(member) => {
             expression_is_commonjs_exports_object(&member.object)
-                || (expression_identifier(&member.object) == Some("module")
-                    && member.property.name.as_str() == "exports")
+                || commonjs_module_exports_target(target)
         }
         AssignmentTarget::ComputedMemberExpression(member) => {
             expression_is_commonjs_exports_object(&member.object)
@@ -62,17 +66,6 @@ fn is_commonjs_export_target(target: &AssignmentTarget<'_>) -> bool {
         }
         _ => false,
     }
-}
-
-fn expression_is_commonjs_exports_object(expression: &Expression<'_>) -> bool {
-    if expression_identifier(expression) == Some("exports") {
-        return true;
-    }
-    let Expression::StaticMemberExpression(member) = expression else {
-        return false;
-    };
-    expression_identifier(&member.object) == Some("module")
-        && member.property.name.as_str() == "exports"
 }
 
 fn is_reexported_local_binding(expression: &Expression<'_>) -> bool {
@@ -113,24 +106,6 @@ fn is_commonjs_define_property_export_boundary(call: &oxc_ast::ast::CallExpressi
         return false;
     };
     descriptor_is_reexport_boundary(descriptor)
-}
-
-fn argument_is_commonjs_exports_object(argument: &Argument<'_>) -> bool {
-    match argument {
-        Argument::Identifier(identifier) => identifier.name.as_str() == "exports",
-        Argument::StaticMemberExpression(member) => {
-            expression_identifier(&member.object) == Some("module")
-                && member.property.name.as_str() == "exports"
-        }
-        _ => false,
-    }
-}
-
-fn argument_object_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a ObjectExpression<'a>> {
-    let Argument::ObjectExpression(object) = argument else {
-        return None;
-    };
-    Some(object)
 }
 
 fn descriptor_is_reexport_boundary(descriptor: &ObjectExpression<'_>) -> bool {
@@ -197,13 +172,6 @@ fn single_returned_reexported_binding_from_body(body: &FunctionBody<'_>) -> bool
         .argument
         .as_ref()
         .is_some_and(is_reexported_local_binding)
-}
-
-fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
-    let Expression::Identifier(identifier) = expression else {
-        return None;
-    };
-    Some(identifier.name.as_str())
 }
 
 #[cfg(test)]

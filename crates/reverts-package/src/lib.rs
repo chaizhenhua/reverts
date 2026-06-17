@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{
-    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+    ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
+    PackageSurfaceInput,
 };
-use reverts_ir::{ModuleId, PackageSurface, is_valid_package_name, split_bare_specifier};
+use reverts_ir::{
+    ModuleId, ModuleKind, PackageSurface, is_identifier_like_ascii, is_valid_package_name,
+    split_bare_specifier,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PackageSurfaceIndex {
@@ -147,6 +151,38 @@ pub fn accepted_external_attribution_for_module(
             && is_accepted_external_attribution(attribution)
             && attribution.export_specifier.is_some()
     })
+}
+
+#[must_use]
+pub fn same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
+        return false;
+    };
+    !module_package.is_empty() && module_package == consumer_package
+}
+
+#[must_use]
+pub fn external_import_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
+    match consumer.kind {
+        ModuleKind::Application => true,
+        ModuleKind::Package => !same_package_consumer(module, consumer),
+        ModuleKind::Builtin => true,
+    }
+}
+
+#[must_use]
+pub fn source_suppressed_consumer_is_boundary(
+    module: &ModuleInput,
+    consumer: &ModuleInput,
+) -> bool {
+    match consumer.kind {
+        ModuleKind::Application => true,
+        ModuleKind::Package => !same_package_consumer(module, consumer),
+        ModuleKind::Builtin => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,7 +384,7 @@ pub fn parse_export_members_import_proof(resolved_file: &str) -> Option<ExportMe
     let exported_members = members
         .split(',')
         .map(str::trim)
-        .filter(|member| is_identifier_like(member))
+        .filter(|member| is_identifier_like_ascii(member))
         .map(ToOwned::to_owned)
         .collect::<BTreeSet<_>>();
     let aliases = export_member_import_proof_aliases(tail);
@@ -384,19 +420,10 @@ fn export_member_import_proof_aliases(tail: &str) -> BTreeMap<String, String> {
             let (local, exported) = alias.split_once('=')?;
             let local = local.trim();
             let exported = exported.trim();
-            (is_identifier_like(local) && is_identifier_like(exported))
+            (is_identifier_like_ascii(local) && is_identifier_like_ascii(exported))
                 .then(|| (local.to_string(), exported.to_string()))
         })
         .collect()
-}
-
-fn is_identifier_like(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first == '$' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 fn record_import_attribute_candidate(

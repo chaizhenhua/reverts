@@ -20,13 +20,14 @@ use oxc_ast::{
     },
 };
 use oxc_parser::Parser;
-use reverts_js::{ParseGoal, parse_options_for, source_type_candidates};
-
-use super::ast_export_helpers::{
-    commonjs_create_binding_export_member, commonjs_export_property_name,
-    commonjs_module_exports_target, declaration_binding_names, module_export_name,
-    object_define_property_export_member, object_expression_static_keys,
+use reverts_ir::is_identifier_like_ascii;
+use reverts_js::{
+    ParseGoal, commonjs_create_binding_export_member, commonjs_export_property_name,
+    commonjs_module_exports_target, module_export_name, object_define_property_export_member,
+    parse_options_for, source_type_candidates,
 };
+
+use super::ast_export_helpers::{declaration_binding_names, object_expression_static_keys};
 use super::commonjs_exports::commonjs_export_members_from_text;
 use crate::package_helpers::normalize_hint_text;
 
@@ -197,10 +198,5 @@ pub(crate) fn is_specific_export_member(member: &str) -> bool {
 
 #[must_use]
 pub(crate) fn is_identifier_name(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first == '$' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
+    is_identifier_like_ascii(value)
 }

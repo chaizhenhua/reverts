@@ -1,3 +1,7 @@
+pub use reverts_ir::{
+    is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,
+};
+
 #[must_use]
 pub fn sanitize_identifier(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
@@ -37,16 +41,6 @@ pub fn is_identifier_start(ch: char) -> bool {
 #[must_use]
 pub fn is_identifier_part(ch: char) -> bool {
     u8::try_from(ch).is_ok_and(is_ascii_identifier_continue)
-}
-
-#[must_use]
-pub fn is_ascii_identifier_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
-}
-
-#[must_use]
-pub fn is_ascii_identifier_continue(byte: u8) -> bool {
-    is_ascii_identifier_start(byte) || byte.is_ascii_digit()
 }
 
 #[must_use]

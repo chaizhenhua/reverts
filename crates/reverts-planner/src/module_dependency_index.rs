@@ -15,6 +15,10 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
+pub(crate) use reverts_package::{
+    same_package_consumer as source_suppressed_same_package_consumer,
+    source_suppressed_consumer_is_boundary,
+};
 
 pub(crate) fn module_dependency_path_exists(
     dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
@@ -142,30 +146,6 @@ pub(crate) fn source_suppressed_package_dependency_closure(
     }
 
     reachable
-}
-
-pub(crate) fn source_suppressed_consumer_is_boundary(
-    module: &ModuleInput,
-    consumer: &ModuleInput,
-) -> bool {
-    match consumer.kind {
-        ModuleKind::Application => true,
-        ModuleKind::Package => !source_suppressed_same_package_consumer(module, consumer),
-        ModuleKind::Builtin => false,
-    }
-}
-
-pub(crate) fn source_suppressed_same_package_consumer(
-    module: &ModuleInput,
-    consumer: &ModuleInput,
-) -> bool {
-    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    !module_package.is_empty() && module_package == consumer_package
 }
 
 pub(crate) fn package_ownership_proven_module_ids(program: &EnrichedProgram) -> BTreeSet<ModuleId> {

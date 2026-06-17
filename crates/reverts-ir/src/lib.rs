@@ -11,6 +11,26 @@ pub use fingerprint::{
 
 pub mod hash;
 
+#[must_use]
+pub fn is_ascii_identifier_start(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+#[must_use]
+pub fn is_ascii_identifier_continue(byte: u8) -> bool {
+    is_ascii_identifier_start(byte) || byte.is_ascii_digit()
+}
+
+#[must_use]
+pub fn is_identifier_like_ascii(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && is_ascii_identifier_start(bytes[0])
+        && bytes[1..]
+            .iter()
+            .all(|byte| is_ascii_identifier_continue(*byte))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ModuleId(pub u32);
 

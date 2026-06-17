@@ -17,7 +17,11 @@ use reverts_input::{
     PackageAttributionStatus, PackageEmissionMode,
 };
 use reverts_ir::{ModuleId, ModuleKind};
-use reverts_package::external_import_proof_label;
+use reverts_package::{
+    external_import_consumer_is_boundary, external_import_proof_label,
+    is_accepted_external_attribution, same_package_consumer,
+    source_suppressed_consumer_is_boundary,
+};
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality,
     VersionMatchScore, VersionedPackageMatchReport, ownership_by_module,
@@ -625,11 +629,6 @@ fn package_match_proves_module_ownership(
             })
 }
 
-fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bool {
-    attribution.status == PackageAttributionStatus::Accepted
-        && attribution.emission_mode == PackageEmissionMode::ExternalImport
-}
-
 fn external_import_blocker_summaries(
     rejected: &BTreeSet<ModuleId>,
     accepted_external_modules: &BTreeSet<ModuleId>,
@@ -792,32 +791,6 @@ fn external_import_source_boundary_modules(
         }
     }
     boundary
-}
-
-fn external_import_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
-    match consumer.kind {
-        ModuleKind::Application => true,
-        ModuleKind::Package => !same_package_consumer(module, consumer),
-        ModuleKind::Builtin => true,
-    }
-}
-
-fn source_suppressed_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
-    match consumer.kind {
-        ModuleKind::Application => true,
-        ModuleKind::Package => !same_package_consumer(module, consumer),
-        ModuleKind::Builtin => false,
-    }
-}
-
-fn same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bool {
-    let Some(module_package) = module.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    let Some(consumer_package) = consumer.package_name.as_deref().map(str::trim) else {
-        return false;
-    };
-    !module_package.is_empty() && module_package == consumer_package
 }
 
 fn external_import_source_suppressed_package_closure(
@@ -1420,7 +1393,7 @@ fn persist_package_attribution(
         "source_path": module_match.source_path,
         "normalized_source_hash": module_match.normalized_source_hash,
         "match_strategy": module_match.strategy.as_str(),
-        "external_import_proof": external_import_proof_kind(module_match.source_path.as_str()),
+        "external_import_proof": external_import_proof_label(module_match.source_path.as_str()),
         "version_resolution": version_resolution,
         "function_signature_matches": module_match.function_signature_matches,
         "string_anchor_matches": module_match.string_anchor_matches,
@@ -1554,8 +1527,4 @@ fn persist_rejected_package_attribution(
         )
         .map_err(MatchPackagesError::WriteAttribution)?;
     Ok(())
-}
-
-fn external_import_proof_kind(source_path: &str) -> &'static str {
-    external_import_proof_label(source_path)
 }
