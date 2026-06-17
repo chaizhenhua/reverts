@@ -14,6 +14,7 @@ mod package_runtime;
 mod package_runtime_accumulator;
 mod plan;
 mod plan_error;
+mod plan_reachability;
 mod planner_context;
 mod planner_pipeline;
 mod pure_reexport_bypass;

@@ -60,6 +60,10 @@ pub fn load_project_rows_from_connection(
     rows.symbols = load_module_symbols(connection, project_id)?;
     rows.dependencies = load_module_dependencies(connection, project_id)?;
     rows.package_attributions = load_package_attributions(connection, project_id)?;
+    rows.package_attributions
+        .extend(load_function_package_ownership_attributions(
+            connection, project_id,
+        )?);
     rows.package_surfaces = load_package_surfaces(connection, project_id)?;
     rows.assets = load_project_assets(connection, project_id)?;
     InputRows::from_database_rows(rows).map_err(SqliteInputError::InputBundle)
@@ -308,6 +312,72 @@ fn load_package_attributions(
     })?;
 
     collect_sqlite_rows(rows)
+}
+
+fn load_function_package_ownership_attributions(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<Vec<PackageAttributionRow>, SqliteInputError> {
+    if !table_exists(connection, "package_function_attributions")? {
+        return Ok(Vec::new());
+    }
+
+    let mut statement = connection.prepare(
+        r"
+        SELECT
+            pfa.module_id,
+            pfa.package_name,
+            pfa.package_version
+        FROM package_function_attributions pfa
+        JOIN modules m ON m.id = pfa.module_id
+        JOIN project_files pf ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+          AND m.module_category = 'package'
+          AND TRIM(COALESCE(pfa.package_name, '')) != ''
+          AND TRIM(COALESCE(pfa.package_version, '')) != ''
+          AND TRIM(COALESCE(m.package_name, '')) = pfa.package_name
+          AND (
+              TRIM(COALESCE(m.package_version, '')) = ''
+              OR m.package_version = pfa.package_version
+          )
+        GROUP BY pfa.module_id, pfa.package_name, pfa.package_version
+        ORDER BY pfa.module_id, pfa.package_name, pfa.package_version
+        ",
+    )?;
+    let rows = statement.query_map(params![i64::from(project_id)], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let ownership_candidates = collect_sqlite_rows(rows)?;
+
+    let mut counts_by_module = std::collections::BTreeMap::<i64, usize>::new();
+    for (module_id, _, _) in &ownership_candidates {
+        *counts_by_module.entry(*module_id).or_default() += 1;
+    }
+
+    Ok(ownership_candidates
+        .into_iter()
+        .filter(|(module_id, _, _)| counts_by_module.get(module_id) == Some(&1))
+        .map(
+            |(module_id, package_name, package_version)| PackageAttributionRow {
+                module_id,
+                package_name,
+                package_version: Some(package_version),
+                subpath: None,
+                resolved_file: None,
+                export_specifier: None,
+                emission_mode: PackageEmissionMode::ApplicationSource,
+                status: PackageAttributionStatus::Rejected,
+                rejection_reason: Some(
+                    "function-level package ownership evidence; source emission remains local"
+                        .to_string(),
+                ),
+            },
+        )
+        .collect())
 }
 
 fn load_package_surfaces(
@@ -837,6 +907,108 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn sqlite_loader_projects_function_attributions_as_ownership_only_rows() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        create_package_function_attributions_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+        connection
+            .execute("DELETE FROM package_attributions WHERE module_id = 11", [])
+            .expect("fixture module attribution should be removed");
+        connection
+            .execute(
+                r"
+                INSERT INTO package_function_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     export_specifier, function_span_start, function_span_end, tier,
+                     matched_axes_json, top_score, runner_up_score, margin,
+                     created_at, updated_at)
+                VALUES
+                    (11, 'lodash_map', 'lodash', '4.17.21', 'lodash/map',
+                     0, 12, 'exact', '[]', 10000.0, 0.0, 1.0,
+                     datetime('now'), datetime('now'))
+                ",
+                [],
+            )
+            .expect("function attribution should be inserted");
+
+        let bundle = load_project_bundle_from_connection(&connection, 7)
+            .expect("function ownership row should satisfy package attribution contract");
+
+        assert_eq!(bundle.package_attributions.len(), 1);
+        let attribution = &bundle.package_attributions[0];
+        assert_eq!(attribution.module_id, ModuleId(11));
+        assert_eq!(attribution.package_name, "lodash");
+        assert_eq!(attribution.package_version.as_deref(), Some("4.17.21"));
+        assert_eq!(attribution.status, PackageAttributionStatus::Rejected);
+        assert_eq!(
+            attribution.emission_mode,
+            PackageEmissionMode::ApplicationSource
+        );
+        assert!(attribution.export_specifier.is_none());
+        assert!(
+            attribution
+                .rejection_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("function-level package ownership")),
+        );
+    }
+
+    #[test]
+    fn sqlite_loader_skips_ambiguous_function_ownership_rows() {
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        create_package_function_attributions_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+        connection
+            .execute("DELETE FROM package_attributions WHERE module_id = 11", [])
+            .expect("fixture module attribution should be removed");
+        connection
+            .execute(
+                "UPDATE modules SET package_version = NULL WHERE id = 11",
+                [],
+            )
+            .expect("fixture module version should be cleared");
+        connection
+            .execute_batch(
+                r"
+                INSERT INTO package_function_attributions
+                    (module_id, module_original_name, package_name, package_version,
+                     export_specifier, function_span_start, function_span_end, tier,
+                     matched_axes_json, top_score, runner_up_score, margin,
+                     created_at, updated_at)
+                VALUES
+                    (11, 'lodash_map', 'lodash', '4.17.21', 'lodash/map',
+                     0, 12, 'exact', '[]', 10000.0, 0.0, 1.0,
+                     datetime('now'), datetime('now')),
+                    (11, 'lodash_map', 'lodash', '4.17.20', 'lodash/map',
+                     20, 32, 'exact', '[]', 10000.0, 0.0, 1.0,
+                     datetime('now'), datetime('now'));
+                ",
+            )
+            .expect("ambiguous function attributions should be inserted");
+
+        let error = load_project_bundle_from_connection(&connection, 7);
+
+        assert!(matches!(
+            error,
+            Err(super::SqliteInputError::InputBundle(
+                InputBundleError::MissingPackageAttribution {
+                    module_id: ModuleId(11)
+                }
+            ))
+        ));
+    }
+
     fn create_schema(connection: &Connection) {
         create_schema_without_project_assets(connection);
         connection
@@ -856,6 +1028,33 @@ mod tests {
                 ",
             )
             .expect("fixture asset schema should be created");
+    }
+
+    fn create_package_function_attributions_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE package_function_attributions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    module_id INTEGER NOT NULL,
+                    module_original_name TEXT NOT NULL,
+                    package_name TEXT NOT NULL,
+                    package_version TEXT NOT NULL,
+                    export_specifier TEXT NOT NULL,
+                    function_span_start INTEGER NOT NULL,
+                    function_span_end INTEGER NOT NULL,
+                    tier TEXT NOT NULL,
+                    matched_alternate TEXT,
+                    matched_axes_json TEXT NOT NULL,
+                    top_score REAL NOT NULL,
+                    runner_up_score REAL NOT NULL,
+                    margin REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                ",
+            )
+            .expect("fixture function attribution schema should be created");
     }
 
     fn create_schema_without_project_assets(connection: &Connection) {
