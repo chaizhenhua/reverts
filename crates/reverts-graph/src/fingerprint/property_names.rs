@@ -62,7 +62,7 @@ fn record(set: &mut BTreeSet<u64>, name: &str) {
     if name.len() < MIN_NAME_LEN {
         return;
     }
-    if NOISE_NAMES.iter().any(|n| *n == name) {
+    if NOISE_NAMES.contains(&name) {
         return;
     }
     set.insert(fnv1a(name.as_bytes()));
