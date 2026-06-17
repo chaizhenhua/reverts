@@ -8,4 +8,5 @@ pub(crate) mod extract_assets;
 pub(crate) mod generate_project;
 pub(crate) mod match_packages;
 pub(crate) mod package_cache;
+pub(crate) mod package_version_diagnostics;
 pub(crate) mod runtime_inventory;

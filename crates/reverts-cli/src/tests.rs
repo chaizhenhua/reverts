@@ -35,8 +35,8 @@ use super::pkg_sources::{
 use super::{
     CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic, MatchPackagesArgs,
     MatchPackagesError, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
-    PackageExternalizationHintsArgs, PackageVersionResolutionPlan, RuntimeInventoryArgs,
-    best_matching_package_version_by_binary_search, dedup_audit_report,
+    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, PackageVersionResolutionPlan,
+    RuntimeInventoryArgs, best_matching_package_version_by_binary_search, dedup_audit_report,
     filter_package_sources_to_best_build_variants, filter_package_sources_to_relevant_path_hints,
     help_text, load_package_sources, match_packages_from_connection,
     network_package_version_resolution_hints, package_export_specifier,
@@ -144,6 +144,47 @@ fn parses_package_externalization_hints_command() {
         command,
         CliCommand::PackageExternalizationHints(parsed) if parsed.input.as_path() == Path::new("input.db")
     ));
+}
+
+#[test]
+fn parses_package_version_diagnostics_command() {
+    let args = PackageVersionDiagnosticsArgs::parse([
+        "package-version-diagnostics".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "1".to_string(),
+        "--package-name".to_string(),
+        "@opentelemetry/api".to_string(),
+        "--package-source-root".to_string(),
+        "node_modules".to_string(),
+        "--materialize-package-sources".to_string(),
+        "--top".to_string(),
+        "3".to_string(),
+    ])
+    .expect("args should parse");
+
+    assert_eq!(args.input, PathBuf::from("input.db"));
+    assert_eq!(args.project_id, 1);
+    assert_eq!(args.package_names, vec!["@opentelemetry/api"]);
+    assert_eq!(
+        args.package_source_roots,
+        vec![PathBuf::from("node_modules")]
+    );
+    assert!(args.materialize_package_sources);
+    assert_eq!(args.top, 3);
+
+    let command = CliCommand::parse([
+        "package-version-diagnostics".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "1".to_string(),
+    ])
+    .expect("command should parse");
+    assert!(
+        matches!(command, CliCommand::PackageVersionDiagnostics(parsed) if parsed.project_id == 1)
+    );
 }
 
 #[test]
@@ -282,6 +323,7 @@ fn help_text_documents_commands_and_options() {
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
     assert!(help_text(HelpTopic::MatchPackagesReport).contains("source_eliminated"));
+    assert!(help_text(HelpTopic::PackageVersionDiagnostics).contains("--top <N>"));
     assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
     assert!(help_text(HelpTopic::RuntimeInventory).contains("--all-projects"));
     assert!(version_text().starts_with("reverts-cli "));

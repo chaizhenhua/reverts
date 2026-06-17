@@ -11,7 +11,7 @@ mod tests;
 
 pub use args::{
     ExtractAssetsArgs, MatchPackagesArgs, MatchPackagesReportArgs, PackageCacheArgs,
-    PackageExternalizationHintsArgs, RuntimeInventoryArgs,
+    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
@@ -80,6 +80,7 @@ pub enum CliCommand {
     GenerateProjectV2(GenerateProjectV2Args),
     MatchPackages(MatchPackagesArgs),
     MatchPackagesReport(MatchPackagesReportArgs),
+    PackageVersionDiagnostics(PackageVersionDiagnosticsArgs),
     PackageCacheAudit(PackageCacheArgs),
     PackageCachePruneStale(PackageCacheArgs),
     PackageExternalizationHints(PackageExternalizationHintsArgs),
@@ -110,6 +111,11 @@ impl CliCommand {
                         HelpTopic::MatchPackagesReport => Ok(Self::MatchPackagesReport(
                             MatchPackagesReportArgs::parse(args)?,
                         )),
+                        HelpTopic::PackageVersionDiagnostics => {
+                            Ok(Self::PackageVersionDiagnostics(
+                                PackageVersionDiagnosticsArgs::parse(args)?,
+                            ))
+                        }
                         HelpTopic::PackageCacheAudit => Ok(Self::PackageCacheAudit(
                             PackageCacheArgs::parse(args, help::PACKAGE_CACHE_AUDIT_COMMAND)?,
                         )),
@@ -195,6 +201,9 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::GenerateProjectV2(args) => commands::generate_project::run(args),
         CliCommand::MatchPackages(args) => commands::match_packages::run(args),
         CliCommand::MatchPackagesReport(args) => commands::match_packages::run_report(args),
+        CliCommand::PackageVersionDiagnostics(args) => {
+            commands::package_version_diagnostics::run(args)
+        }
         CliCommand::PackageCacheAudit(args) => commands::package_cache::run_audit(args),
         CliCommand::PackageCachePruneStale(args) => commands::package_cache::run_prune_stale(args),
         CliCommand::PackageExternalizationHints(args) => {

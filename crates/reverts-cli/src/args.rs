@@ -137,6 +137,66 @@ impl MatchPackagesReportArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageVersionDiagnosticsArgs {
+    pub input: PathBuf,
+    pub project_id: u32,
+    pub package_names: Vec<String>,
+    pub package_source_roots: Vec<PathBuf>,
+    pub materialize_package_sources: bool,
+    pub top: u32,
+}
+
+impl PackageVersionDiagnosticsArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut input = None;
+        let mut project_id = None;
+        let mut package_names = Vec::new();
+        let mut package_source_roots = Vec::new();
+        let mut materialize_package_sources = false;
+        let mut top = 5;
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|argument| argument == help::PACKAGE_VERSION_DIAGNOSTICS_COMMAND)
+        {
+            args.remove(0);
+        }
+        let mut args = args.into_iter();
+
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--input" => input = Some(next_path(&mut args, "--input")?),
+                "--project-id" => {
+                    project_id = Some(parse_project_id(next_value(&mut args, "--project-id")?)?);
+                }
+                "--package-name" => {
+                    let package_name = next_value(&mut args, "--package-name")?;
+                    if package_name.trim().is_empty() {
+                        return Err(CliError::InvalidPackageName(package_name));
+                    }
+                    package_names.push(package_name);
+                }
+                "--package-source-root" => {
+                    package_source_roots.push(next_path(&mut args, "--package-source-root")?);
+                }
+                "--materialize-package-sources" => materialize_package_sources = true,
+                "--top" => top = parse_limit(next_value(&mut args, "--top")?)?,
+                other => return Err(CliError::UnknownArgument(other.to_string())),
+            }
+        }
+
+        Ok(Self {
+            input: input.ok_or(CliError::MissingArgument("--input"))?,
+            project_id: project_id.ok_or(CliError::MissingArgument("--project-id"))?,
+            package_names,
+            package_source_roots,
+            materialize_package_sources,
+            top,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageCacheArgs {
     pub input: PathBuf,
     pub apply: bool,
