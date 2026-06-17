@@ -729,3 +729,31 @@ If a commit can't satisfy these in one step, the chunk is too big — split it.
 **Solving "all architecture problems" is 22-38 sessions of focused work.**
 This roadmap exists so the work can be picked up in chunks across many
 sessions without losing the plot.
+
+
+### Session of 2026-05-24 — adapter split + planner/pre-accept typestate
+
+Current architecture hardening pass:
+
+- Added `reverts-rollup-adapter` as the SQLite/tooling home for rollup probe,
+  apply, emission-stats bins, DB snapshot loading, and apply tests. Removed
+  `rusqlite`, `serde_json`, and `src/bin/*` from `reverts-analyze`; analyze now
+  keeps only pure `rollup::{model, oracle, projection, report}` logic.
+- Introduced planner facade/pipeline modules: `planner_context.rs` and
+  `planner_pipeline.rs`. The planner now runs named passes over `PlanningState`
+  and separates immutable `RuntimePlanPreparation`, `RuntimeHelperUsageAccumulator`,
+  and `PackageRuntimeAccumulator`.
+- Strengthened emit typestate with `ValidatedEmitPlan` and
+  `ValidatedPlannedFile`; validation now rejects duplicate output paths, empty
+  file paths, duplicate planned imports, duplicate generated exports, and empty
+  import namespaces before the emitter sees the plan.
+- Added `source_surgery.rs` as the shared text-edit primitive home, documented
+  the remaining byte/text surgery passes, and added parse/boundary tests for
+  statement-safe edits.
+- Added `pre_accept.rs`: pre-accept transforms are now ordered named passes with
+  `PreAcceptTransformReport`; audit-clean output becomes `AcceptedProject`, and
+  the project writer consumes `AcceptedProject` in production.
+
+Remaining planner debt: `compute_modules::plan_one_module` still has a large
+argument list and should be split into smaller per-module passes once its source
+import/runtime/package branches have stable context structs.

@@ -1,7 +1,8 @@
-use reverts_analyze::rollup::db::{Snapshot, load_snapshot};
+use reverts_analyze::rollup::model::Snapshot;
 use reverts_analyze::rollup::oracle::{OracleConfig, OracleVerdict, build_oracle};
 use reverts_analyze::rollup::projection::{Projection, ProjectionKind, project};
 use reverts_analyze::rollup::report::{RollupReport, summarize};
+use reverts_rollup_adapter::db::load_snapshot;
 use rusqlite::Connection;
 
 fn seed() -> Connection {

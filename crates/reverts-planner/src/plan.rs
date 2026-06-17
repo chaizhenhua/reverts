@@ -21,6 +21,113 @@ impl EmitPlan {
     pub fn push_file(&mut self, file: PlannedFile) {
         self.files.push(file);
     }
+
+    pub fn validate(self) -> Result<ValidatedEmitPlan, crate::PlanError> {
+        let mut paths = BTreeSet::<String>::new();
+        let mut files = Vec::with_capacity(self.files.len());
+        for file in self.files {
+            if !paths.insert(file.path.clone()) {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!("duplicate planned output path '{}'", file.path),
+                });
+            }
+            files.push(ValidatedPlannedFile::try_from(file)?);
+        }
+        Ok(ValidatedEmitPlan { files })
+    }
+}
+
+/// Emit plan that has passed planner-owned structural validation.
+///
+/// The validation is intentionally narrow today: it rejects duplicate output
+/// paths and malformed file-level plan records before the emitter can see them.
+/// Recoverable semantic findings (for example rejected package imports) remain
+/// audit-owned per ADR 0002. New fatal planner-bug invariants should be added
+/// here so the emitter accepts a typed, pre-checked plan instead of
+/// rediscovering them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedEmitPlan {
+    files: Vec<ValidatedPlannedFile>,
+}
+
+impl ValidatedEmitPlan {
+    pub fn files(&self) -> impl Iterator<Item = &PlannedFile> {
+        self.files.iter().map(ValidatedPlannedFile::as_file)
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> EmitPlan {
+        EmitPlan {
+            files: self
+                .files
+                .into_iter()
+                .map(ValidatedPlannedFile::into_inner)
+                .collect(),
+        }
+    }
+}
+
+/// File-level typestate produced by [`PlannedFile::validate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedPlannedFile {
+    file: PlannedFile,
+}
+
+impl ValidatedPlannedFile {
+    #[must_use]
+    pub const fn as_file(&self) -> &PlannedFile {
+        &self.file
+    }
+
+    #[must_use]
+    pub fn into_inner(self) -> PlannedFile {
+        self.file
+    }
+}
+
+impl TryFrom<PlannedFile> for ValidatedPlannedFile {
+    type Error = crate::PlanError;
+
+    fn try_from(file: PlannedFile) -> Result<Self, Self::Error> {
+        if file.path.trim().is_empty() {
+            return Err(crate::PlanError::InvalidEmitPlan {
+                message: "planned file path is empty".to_string(),
+            });
+        }
+        let mut imports = BTreeSet::<(String, Option<String>, bool)>::new();
+        for import in &file.imports {
+            if import.namespace.as_str().trim().is_empty() {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!("file '{}' has an import with an empty namespace", file.path),
+                });
+            }
+            let key = (
+                import.namespace.as_str().to_string(),
+                import.resolution.specifier().map(str::to_string),
+                import.source_backed,
+            );
+            if !imports.insert(key) {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!(
+                        "file '{}' has a duplicate planned import for '{}'",
+                        file.path, import.namespace
+                    ),
+                });
+            }
+        }
+        let mut generated_exports = BTreeSet::<String>::new();
+        for export in file.exports.iter().filter(|export| !export.source_backed) {
+            if !generated_exports.insert(export.binding.as_str().to_string()) {
+                return Err(crate::PlanError::InvalidEmitPlan {
+                    message: format!(
+                        "file '{}' has a duplicate generated export for '{}'",
+                        file.path, export.binding
+                    ),
+                });
+            }
+        }
+        Ok(Self { file })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

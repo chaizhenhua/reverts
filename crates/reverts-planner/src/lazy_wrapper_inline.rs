@@ -1,3 +1,10 @@
+//! Lazy wrapper inlining for residual runtime `lazyValue` calls.
+//!
+//! Source surgery note: this pass works on byte-exact lowered runtime snippets
+//! where preserving the untouched source matters more than reprinting a whole
+//! AST. It uses delimiter-aware byte scans and routes all mutations through
+//! `source_surgery::apply_text_edits`.
+
 use reverts_ir::BindingName;
 
 use crate::byte_lexer::{expect_arrow, find_matching_paren, skip_non_code_at, skip_ws};

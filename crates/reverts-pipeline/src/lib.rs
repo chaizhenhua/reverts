@@ -1,6 +1,7 @@
 mod assets;
 mod audit;
 mod output_paths;
+mod pre_accept;
 mod runtime_dependencies;
 mod source_rewrites;
 
@@ -8,7 +9,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use assets::{audit_required_assets, collect_emitted_assets, rewrite_emitted_asset_references};
+use assets::{audit_required_assets, collect_emitted_assets};
 pub use assets::{collect_required_asset_references, collect_required_asset_references_from_rows};
 use audit::{
     audit_binding_shape_consistency, audit_emit_plan_synthesis, audit_emitted_project_parse,
@@ -18,18 +19,16 @@ use output_paths::module_output_paths;
 pub(crate) use output_paths::relative_asset_specifier;
 use runtime_dependencies::collect_runtime_dependencies;
 pub(crate) use source_rewrites::rewrite_string_literal_values;
-use source_rewrites::{
-    canonicalize_emitted_source_locations, fold_multiline_static_template_literals,
-};
 
 use reverts_analyze::enrich_program;
-use reverts_emitter::{EmitError, emit_project};
+use reverts_emitter::{EmitError, emit_validated_project};
 use reverts_input::{InputBundle, InputBundleError, InputRows, ModuleInput, SourceFileInput};
 use reverts_ir::ModuleId;
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::AuditReport;
 use reverts_planner::{ImportExportPlanner, PlanError};
 
+pub use pre_accept::{AcceptedProject, PreAcceptProject, PreAcceptTransformReport};
 pub use reverts_emitter::{EmittedFile, EmittedProject};
 pub use reverts_planner::{
     RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
@@ -39,6 +38,8 @@ pub use reverts_planner::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputRun {
     pub project: EmittedProject,
+    pub accepted_project: Option<AcceptedProject>,
+    pub pre_accept_report: Option<PreAcceptTransformReport>,
     pub audit: AuditReport,
     pub runtime_dependencies: Vec<RuntimeDependency>,
     pub assets: Vec<EmittedAsset>,
@@ -195,6 +196,8 @@ pub fn generate_project_from_prepared(
     if audit.has_errors() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
+            accepted_project: None,
+            pre_accept_report: None,
             audit,
             runtime_dependencies,
             assets,
@@ -209,6 +212,8 @@ pub fn generate_project_from_prepared(
     if audit.has_errors() {
         return Ok(OutputRun {
             project: EmittedProject::default(),
+            accepted_project: None,
+            pre_accept_report: None,
             audit,
             runtime_dependencies,
             assets,
@@ -216,21 +221,34 @@ pub fn generate_project_from_prepared(
     }
 
     let module_output_paths = module_output_paths(&program);
-    let outcome = emit_project(&plan).map_err(PipelineError::Emit)?;
+    let validated_plan = plan.clone().validate().map_err(PipelineError::Plan)?;
+    let outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
     for finding in outcome.findings {
         audit.push(finding);
     }
-    let mut project = outcome.project;
-    canonicalize_emitted_source_locations(&mut project);
-    rewrite_emitted_asset_references(&mut project, input, &asset_references, &module_output_paths);
-    fold_multiline_static_template_literals(&mut project);
+    let pre_accept = pre_accept::apply_pre_accept_transforms(
+        outcome.project,
+        &pre_accept::PreAcceptContext {
+            input,
+            asset_references: &asset_references,
+            module_output_paths: &module_output_paths,
+        },
+    );
+    let project = pre_accept.project.clone();
+    let pre_accept_report = pre_accept.report.clone();
 
     audit.extend(audit_emitted_project_parse(&project));
     audit.extend(audit_binding_shape_consistency(&plan, &project));
     audit.extend(audit_namespace_object_member_consistency(&plan, &project));
+    let accepted_project = pre_accept.accept_if_clean(&audit);
+    let project = accepted_project
+        .as_ref()
+        .map_or(project, |accepted| accepted.project.clone());
 
     Ok(OutputRun {
         project,
+        accepted_project,
+        pre_accept_report: Some(pre_accept_report),
         audit,
         runtime_dependencies,
         assets,

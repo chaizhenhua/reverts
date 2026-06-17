@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::rollup::db::Snapshot;
+use crate::rollup::model::Snapshot;
 use crate::rollup::projection::{Projection, ProjectionKind};
 
 #[derive(Debug, Clone, Serialize, Default)]

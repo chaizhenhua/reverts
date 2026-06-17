@@ -30,6 +30,9 @@ pub enum PlanError {
         path: String,
         bindings: Vec<BindingName>,
     },
+    InvalidEmitPlan {
+        message: String,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -55,6 +58,7 @@ impl fmt::Display for PlanError {
                     "runtime helper {path} has unresolved references: {bindings}"
                 )
             }
+            Self::InvalidEmitPlan { message } => write!(formatter, "invalid emit plan: {message}"),
         }
     }
 }

@@ -16,6 +16,9 @@
 //! intact rather than partially rewritten — the planner does not split
 //! a namespace export into "some inline / some preserved" because that
 //! would split the binding identity across forms.
+//!
+//! Source surgery note: only the proven member-access spans are replaced; the
+//! rest of the raw helper snippet is preserved byte-for-byte.
 
 use std::collections::{BTreeMap, BTreeSet};
 

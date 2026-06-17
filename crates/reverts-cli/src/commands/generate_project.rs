@@ -6,7 +6,9 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use reverts_input::sqlite::load_project_bundle_from_sqlite;
-use reverts_pipeline::{EmittedAsset, EmittedFile, RuntimeDependency, generate_project_from_input};
+use reverts_pipeline::{
+    AcceptedProject, EmittedAsset, EmittedFile, RuntimeDependency, generate_project_from_input,
+};
 use semver::{Version, VersionReq};
 
 use crate::errors::{CliError, CliRunError};
@@ -76,8 +78,12 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         );
     }
 
-    let written = write_emitted_project(
-        &run.project.files,
+    let accepted_project = run
+        .accepted_project
+        .as_ref()
+        .ok_or_else(|| CliRunError::AuditRejected(format_audit_findings(&run.audit)))?;
+    let written = write_accepted_project(
+        accepted_project,
         &run.assets,
         &args.output,
         &run.runtime_dependencies,
@@ -90,7 +96,31 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     Ok(())
 }
 
+pub(crate) fn write_accepted_project(
+    project: &AcceptedProject,
+    assets: &[EmittedAsset],
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+) -> Result<usize, CliRunError> {
+    write_project_files(
+        project.files.as_slice(),
+        assets,
+        output,
+        runtime_dependencies,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn write_emitted_project(
+    files: &[EmittedFile],
+    assets: &[EmittedAsset],
+    output: &Path,
+    runtime_dependencies: &[RuntimeDependency],
+) -> Result<usize, CliRunError> {
+    write_project_files(files, assets, output, runtime_dependencies)
+}
+
+fn write_project_files(
     files: &[EmittedFile],
     assets: &[EmittedAsset],
     output: &Path,

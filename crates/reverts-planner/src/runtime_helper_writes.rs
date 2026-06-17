@@ -25,6 +25,9 @@
 //! `++`/`--` operator while routing the mutation through the setter.
 //! Both Prefix and Postfix variants are encoded explicitly so the audit
 //! sees the right sequence-points.
+//!
+//! Source surgery note: the pass cannot be an AST reprint because it must keep
+//! recovered helper bodies byte-stable except for the exact write sites.
 
 use std::collections::BTreeSet;
 

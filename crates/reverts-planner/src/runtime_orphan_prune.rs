@@ -1,3 +1,10 @@
+//! Prune unreachable private runtime declarations from migrated helper bodies.
+//!
+//! Source surgery note: the pass first builds a lightweight binding graph from
+//! top-level statement ranges, then removes whole statement ranges. We avoid an
+//! AST rewrite here because the helper body may contain raw snippets whose
+//! formatting and template text must remain byte-stable.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::BindingName;

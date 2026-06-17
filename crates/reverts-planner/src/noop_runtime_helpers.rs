@@ -1,3 +1,11 @@
+//! Runtime no-op helper localization and pruning.
+//!
+//! Source surgery note: this pass removes or rewrites exact top-level helper
+//! statements after byte-lexer scans prove the referenced helpers are no-ops.
+//! AST codegen would not preserve the raw runtime snippets/trivia this pass is
+//! intentionally compacting, so edits are range-based and applied through
+//! `source_surgery::apply_text_edits`.
+
 use std::collections::BTreeSet;
 
 use reverts_graph::RuntimePrelude;

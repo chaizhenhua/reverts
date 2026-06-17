@@ -6,9 +6,10 @@
 //!   single comma-separated expression.
 //! - `compact_pure_static_runtime_literals` collapses safe top-level
 //!   object/array literals onto a single line.
-//! - `apply_text_edits` is the shared edit-application primitive used by
-//!   the passes above and by sibling modules.
+//! - source edits are applied through `source_surgery::apply_text_edits`;
+//!   callers here produce syntax-aware ranges before handing them off.
 
+use crate::apply_text_edits;
 use crate::byte_lexer::{
     find_matching_brace, find_matching_bracket, find_matching_paren, looks_like_regex_literal,
     skip_non_code_at, skip_quoted, skip_regex_literal, skip_template_literal, skip_ws,
@@ -429,19 +430,4 @@ pub(crate) fn simple_runtime_reference_expression(source: &str) -> bool {
         cursor = next;
     }
     true
-}
-
-pub(crate) fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -> String {
-    let mut edits = edits.to_vec();
-    edits.sort_by_key(|(start, _, _)| *start);
-    let mut output = String::with_capacity(source.len());
-    let mut cursor = 0usize;
-    for (start, end, replacement) in edits {
-        debug_assert!(start >= cursor, "text edits must not overlap");
-        output.push_str(&source[cursor..start]);
-        output.push_str(replacement.as_str());
-        cursor = end;
-    }
-    output.push_str(&source[cursor..]);
-    output
 }

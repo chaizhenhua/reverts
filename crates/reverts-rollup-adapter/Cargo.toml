@@ -1,5 +1,5 @@
 [package]
-name = "reverts-analyze"
+name = "reverts-rollup-adapter"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-reverts-graph = { path = "../reverts-graph" }
+reverts-analyze = { path = "../reverts-analyze" }
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
-reverts-js = { path = "../reverts-js" }
-reverts-model = { path = "../reverts-model" }
-reverts-observe = { path = "../reverts-observe" }
 reverts-package = { path = "../reverts-package" }
-serde = { version = "1", features = ["derive"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde_json = "1"

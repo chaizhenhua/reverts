@@ -1,4 +1,4 @@
-use crate::rollup::db::{AttributionRow, Snapshot};
+use crate::rollup::model::{AttributionRow, Snapshot};
 use crate::rollup::oracle::{Oracle, OracleVerdict};
 
 #[derive(Debug, Clone)]

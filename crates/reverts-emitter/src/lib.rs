@@ -7,7 +7,7 @@ use reverts_js::{
     format_source_with_module_items_and_renames, sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
-use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile};
+use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmittedProject {
@@ -27,6 +27,27 @@ pub struct EmitOutcome {
 }
 
 pub fn emit_project(plan: &EmitPlan) -> Result<EmitOutcome, EmitError> {
+    emit_project_unchecked(plan)
+}
+
+pub fn emit_validated_project(plan: &ValidatedEmitPlan) -> Result<EmitOutcome, EmitError> {
+    let plan_files = plan.files().collect::<Vec<_>>();
+    let mut files = Vec::with_capacity(plan_files.len());
+    let mut findings = Vec::new();
+    for file in plan_files {
+        let (emitted, finding) = emit_file(file)?;
+        files.push(emitted);
+        if let Some(finding) = finding {
+            findings.push(finding);
+        }
+    }
+    Ok(EmitOutcome {
+        project: EmittedProject { files },
+        findings,
+    })
+}
+
+fn emit_project_unchecked(plan: &EmitPlan) -> Result<EmitOutcome, EmitError> {
     let mut files = Vec::with_capacity(plan.files.len());
     let mut findings = Vec::new();
     for file in &plan.files {

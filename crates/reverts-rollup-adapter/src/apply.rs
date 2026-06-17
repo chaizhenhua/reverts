@@ -3,7 +3,7 @@
 //! `apply_rollup_projections` runs inside a caller-supplied transaction and:
 //!
 //! 1. Flips every `status='rejected'` row whose module the oracle judges
-//!    externalizable (via [`crate::rollup::projection::project`]) to
+//!    externalizable (via [`reverts_analyze::rollup::projection::project`]) to
 //!    `status='accepted'`, `emission_mode='external_import'`, stamped with the
 //!    current [`reverts_input::PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION`].
 //! 2. Backfills `package_surfaces` rows for every accepted external-import
@@ -21,9 +21,9 @@ use std::fmt;
 use reverts_input::PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION;
 use rusqlite::{Transaction, params};
 
-use crate::rollup::db::Snapshot;
-use crate::rollup::oracle::{Oracle, OracleVerdict};
-use crate::rollup::projection::{ProjectionKind, project};
+use reverts_analyze::rollup::model::Snapshot;
+use reverts_analyze::rollup::oracle::{Oracle, OracleVerdict};
+use reverts_analyze::rollup::projection::{ProjectionKind, project};
 
 /// A single rolled-up projection ready to be materialized.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,8 +192,8 @@ pub fn apply_rollup_projections(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rollup::db::load_snapshot;
-    use crate::rollup::oracle::{OracleConfig, build_oracle};
+    use crate::db::load_snapshot;
+    use reverts_analyze::rollup::oracle::{OracleConfig, build_oracle};
     use rusqlite::Connection;
 
     /// Build the bare-minimum schema this module touches: `package_attributions`,

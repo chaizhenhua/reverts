@@ -31,6 +31,7 @@ use persistence::externalization_hints::{
     PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION, PackageExternalizationHint,
     persist_package_externalization_hints,
 };
+use persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
 pub(crate) use persistence::source_cache::{
     PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION, package_source_cache_entry_path,
     package_source_from_row, persist_package_source_cache, stale_package_source_cache_versions,
@@ -689,48 +690,19 @@ pub fn match_packages_from_connection(
     let function_ownership_matches = pipeline_report.function_ownership_matches;
 
     let (written_attributions, written_surfaces, written_function_attributions) = if args.apply {
-        // Persist synthetic modules first so the FK from
-        // package_attributions.module_id and
-        // package_function_attributions.module_id resolves.
-        persistence::synthetic_modules::persist_synthetic_modules(connection, &synthetic_modules)?;
-        // A few synthetic modules may have been skipped by `INSERT OR
-        // IGNORE` due to `UNIQUE(file_id, original_name)` collisions
-        // with pre-existing rows. Build the set of module ids
-        // that actually live in the SQLite `modules` table now, and
-        // filter function-level attributions to only those — the alternative
-        // is a foreign-key violation that aborts the whole apply.
-        let mut persisted_ids = std::collections::BTreeSet::new();
-        {
-            let mut stmt = connection
-                .prepare("SELECT id FROM modules")
-                .map_err(MatchPackagesError::WriteAttribution)?;
-            let mut rs = stmt
-                .query([])
-                .map_err(MatchPackagesError::WriteAttribution)?;
-            while let Some(row) = rs.next().map_err(MatchPackagesError::WriteAttribution)? {
-                let id: u32 = row.get(0).map_err(MatchPackagesError::WriteAttribution)?;
-                persisted_ids.insert(reverts_ir::ModuleId(id));
-            }
-        }
-        let persistable_function_attributions = function_attributions
-            .iter()
-            .filter(|attribution| persisted_ids.contains(&attribution.module_id))
-            .cloned()
-            .collect::<Vec<_>>();
+        let mut persistence = SqliteMatchPackagePersistence::new(connection);
+        let outcome = persistence.persist_match_package_outputs(
+            &rows,
+            &synthetic_modules,
+            &report,
+            &package_names,
+            &package_version_resolutions,
+            &function_attributions,
+        )?;
         (
-            persistence::attributions::persist_package_attributions(
-                connection,
-                &rows,
-                &report,
-                &package_names,
-                &package_version_resolutions,
-            )?,
-            persistence::package_surfaces::persist_package_surfaces(connection, &rows, &report)?,
-            persistence::function_attributions::persist_function_attributions(
-                connection,
-                &rows,
-                &persistable_function_attributions,
-            )?,
+            outcome.written_attributions,
+            outcome.written_surfaces,
+            outcome.written_function_attributions,
         )
     } else {
         (0, 0, 0)

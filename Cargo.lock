@@ -915,9 +915,7 @@ dependencies = [
  "reverts-model",
  "reverts-observe",
  "reverts-package",
- "rusqlite",
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1097,6 +1095,18 @@ dependencies = [
  "reverts-js",
  "reverts-model",
  "reverts-package",
+]
+
+[[package]]
+name = "reverts-rollup-adapter"
+version = "0.1.0"
+dependencies = [
+ "reverts-analyze",
+ "reverts-input",
+ "reverts-ir",
+ "reverts-package",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

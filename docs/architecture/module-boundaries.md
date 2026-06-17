@@ -23,6 +23,7 @@ The workspace currently contains these output-v2 crates:
 | `reverts-emitter` | existing | Parseable emitted project generation from plans |
 | `reverts-pipeline` | existing | Pure in-memory minimal decompilation loop |
 | `reverts-cli` | existing | CLI argument contract for output v2 commands |
+| `reverts-rollup-adapter` | existing | SQLite-backed rollup probe/apply tools and bins; adapter around pure `reverts-analyze::rollup` projections |
 | `reverts-fixtures` | existing | Self-contained test fixture builders |
 
 ## Target Crate Map
@@ -41,6 +42,7 @@ planning, emission, and command orchestration.
 | `reverts-analyze` | analysis | Enrich the program model with semantic names, binding-shape solutions, and package-import decisions |
 | `reverts-package` | analysis | Resolve package names, builtins, exports, subpaths, and build the package-surface index from input attributions without emitting source |
 | `reverts-package-matcher` | analysis | Match bundle modules to cached npm package sources via AST fingerprints; produce accepted attribution rows the pipeline can later read |
+| `reverts-rollup-adapter` | adapter/tool | Own SQLite loading/apply logic and command-line probes for rollup externalization projections; depends on pure rollup analysis but is not part of core generation |
 | `reverts-planner` | planning | Produce file-level import, export, local binding, and synthetic binding plans |
 | `reverts-emitter` | emission | Convert accepted plans into AST-backed emitted files and `EmittedProject` |
 | `reverts-pipeline` | orchestration | Connect input, model enrichment, planning, emission, and parse audit for the core library loop |
@@ -71,7 +73,17 @@ reverts-cli
       -> reverts-input
       -> reverts-js
       -> reverts-observe
+
+reverts-rollup-adapter
+  -> reverts-analyze
+  -> reverts-input
+  -> reverts-package
 ```
+
+`reverts-rollup-adapter` is intentionally outside the core output loop: it may
+use SQLite, filesystem paths, and command-line process exits because it is an
+adapter/tool crate, while `reverts-analyze::rollup` remains pure projection and
+report logic.
 
 The foundation crates can be used by every production crate:
 
@@ -114,7 +126,9 @@ crate tests / integration tests
 - `reverts-model` owns stable program snapshots and enriched analysis records.
   It must not inspect databases, fetch packages, or emit source.
 - `reverts-analyze` owns pure enrichment from `ProgramModel` to
-  `EnrichedProgram`: semantic names, package decisions, and shape solutions.
+  `EnrichedProgram`: semantic names, package decisions, shape solutions, and
+  pure rollup projection/oracle/report logic. It must not own SQLite adapters
+  or command-line binaries.
 - `reverts-package` owns package-surface decisions and constructs the
   `PackageSurfaceIndex` from input attributions. It may accept, reject, or
   classify package imports, but it must not generate import statements.
@@ -127,8 +141,11 @@ crate tests / integration tests
   assembly. It must not repair invalid plans after generation.
 - `reverts-pipeline` owns the in-memory core loop. It coordinates crates but
   must keep filesystem, network, and external-program access out of core tests.
+  Its post-emission work is modelled as explicit pre-accept transforms that
+  produce `PreAcceptProject`; only audit-clean output becomes `AcceptedProject`.
 - `reverts-cli` owns command orchestration, argument parsing, paths, and process
-  exit behavior. Core behavior should remain testable without invoking the CLI.
+  exit behavior. Core behavior should remain testable without invoking the CLI;
+  project writing consumes `AcceptedProject` rather than unaudited bytes.
 - `reverts-fixtures` owns fixture builders used by tests. It must not become a
   source of production behavior.
 
@@ -141,13 +158,48 @@ InputBundle
   -> ProgramModel
   -> EnrichedProgram
   -> EmitPlan
+  -> ValidatedEmitPlan
   -> EmittedProject (+ EmittedAssets)
+  -> PreAcceptProject
   -> AuditReport
+  -> AcceptedProject (only when no errors)
 ```
 
 The planner and emitter receive already-validated structural data. If a required
 definition, import, package subpath, or binding shape is missing, the pipeline
 reports a structured finding before writing files.
+
+
+## Planner Pass Pipeline
+
+`reverts-planner` exposes `ImportExportPlanner` as a facade. Internally it now
+builds a `PlannerContext`, prepares immutable `RuntimePlanPreparation`, and
+runs named passes over `PlanningState`:
+
+```text
+PlanModulesPass
+  -> EmitPackageRuntimePass
+  -> MarkEntrypointRuntimePass
+  -> EmitRuntimeHelpersPass
+  -> EmitCliEntrypointPass
+```
+
+Mutable helper bookkeeping is split into `RuntimeHelperUsageAccumulator` and
+`PackageRuntimeAccumulator`. New planner work should be introduced as a named
+pass or accumulator before adding cross-module `pub(crate)` plumbing.
+
+## Pre-Accept Output Stage
+
+Pre-accept transforms are explicit, ordered, in-memory transforms that run after
+emission and before acceptance audit. They are not post-write repair passes.
+The current order is:
+
+1. `canonicalize_source_locations`
+2. `rewrite_asset_references`
+3. `fold_static_template_literals`
+
+The transform names are recorded in `PreAcceptTransformReport`; project writers
+must write `AcceptedProject`, not raw `EmittedProject`.
 
 ## Compiler Lowering Pipeline
 
@@ -206,6 +258,7 @@ Filesystem and external access are intentionally narrow:
 | `reverts-graph` | no | no | no |
 | `reverts-model` | no | no | no |
 | `reverts-analyze` | no | no | no |
+| `reverts-rollup-adapter` | yes, SQLite paths and optional JSON output | no | no |
 | `reverts-package` | optional offline cache adapter only | no required access | no |
 | `reverts-package-matcher` | no required access; reads package source rows from input | no | no |
 | `reverts-planner` | no | no | no |

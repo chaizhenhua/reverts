@@ -15,6 +15,7 @@ members = [
     "crates/reverts-package-index",
     "crates/reverts-package-matcher",
     "crates/reverts-pipeline",
+    "crates/reverts-rollup-adapter",
     "crates/reverts-planner",
 ]
 resolver = "3"

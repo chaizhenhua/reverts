@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use reverts_analyze::rollup::db::load_snapshot;
 use reverts_analyze::rollup::oracle::{OracleConfig, build_oracle};
 use reverts_analyze::rollup::projection::project;
 use reverts_analyze::rollup::report::summarize;
+use reverts_rollup_adapter::db::load_snapshot;
 use rusqlite::Connection;
 
 #[test]

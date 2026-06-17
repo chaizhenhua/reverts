@@ -1,13 +1,13 @@
-//! Thin CLI over [`reverts_analyze::rollup::apply::apply_rollup_projections`].
+//! Thin CLI over [`reverts_rollup_adapter::apply::apply_rollup_projections`].
 //! Core logic lives in the library so it can be unit-tested in isolation.
 
 use std::error::Error;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use reverts_analyze::rollup::apply::{ApplyOutcome, apply_rollup_projections, collect_rollups};
-use reverts_analyze::rollup::db::load_snapshot;
 use reverts_analyze::rollup::oracle::{OracleConfig, build_oracle};
+use reverts_rollup_adapter::apply::{ApplyOutcome, apply_rollup_projections, collect_rollups};
+use reverts_rollup_adapter::db::load_snapshot;
 use rusqlite::{Connection, OpenFlags};
 
 struct Args {

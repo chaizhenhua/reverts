@@ -21,6 +21,10 @@
 //! also live here because they share the same import-line parser
 //! plumbing — every consumer that needs to read information *out* of a
 //! recovered import statement (rather than emit one) routes through these.
+//!
+//! Source surgery note: this is a top-level import-only text pass. It uses a
+//! small statement parser so runtime/source snippets that follow imports are
+//! not reprinted or repaired.
 
 use std::collections::{BTreeMap, BTreeSet};
 

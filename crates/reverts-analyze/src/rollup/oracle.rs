@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::rollup::db::{AttributionRow, HintRow, ModuleRow, Snapshot};
+use crate::rollup::model::{AttributionRow, HintRow, ModuleRow, Snapshot};
 
 #[derive(Debug, Clone, Copy)]
 pub struct OracleConfig {
@@ -184,7 +184,7 @@ fn build_hint_index(rows: &[HintRow]) -> HintIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rollup::db::{AttributionRow, HintRow, ModuleRow};
+    use crate::rollup::model::{AttributionRow, HintRow, ModuleRow};
 
     fn package_module(id: i64, name: &str, version: &str) -> ModuleRow {
         ModuleRow {

@@ -12,6 +12,8 @@ mod import_coalesce;
 mod package_runtime;
 mod plan;
 mod plan_error;
+mod planner_context;
+mod planner_pipeline;
 mod pure_reexport_bypass;
 mod relative_paths;
 mod runtime_externalized_scan;
@@ -28,6 +30,7 @@ mod runtime_source_read;
 mod runtime_source_scan;
 mod runtime_var_migration;
 mod source_module_facts;
+mod source_surgery;
 mod top_level_definitions;
 
 use runtime_source_read::{
@@ -136,14 +139,14 @@ use local_bindings::{
 
 #[allow(unused_imports)]
 use runtime_literal_compaction::{
-    apply_text_edits, coalesce_runtime_lazy_initializer_call_runs,
-    coalesced_lazy_body_call_run_edits, coalescible_lazy_body_expression,
-    compact_pure_static_runtime_literals, compact_removed_separator_needs_space,
-    compact_static_container_literal, compact_static_literal_text,
-    compactable_array_container_literal, compactable_container_value_expression,
-    compactable_object_container_literal, compactable_object_container_property,
-    container_literal_can_start_runtime_compaction, flush_lazy_body_call_run_edit,
-    regex_literal_covers_source, simple_runtime_reference_expression, statement_leading_whitespace,
+    coalesce_runtime_lazy_initializer_call_runs, coalesced_lazy_body_call_run_edits,
+    coalescible_lazy_body_expression, compact_pure_static_runtime_literals,
+    compact_removed_separator_needs_space, compact_static_container_literal,
+    compact_static_literal_text, compactable_array_container_literal,
+    compactable_container_value_expression, compactable_object_container_literal,
+    compactable_object_container_property, container_literal_can_start_runtime_compaction,
+    flush_lazy_body_call_run_edit, regex_literal_covers_source,
+    simple_runtime_reference_expression, statement_leading_whitespace,
     static_container_literal_is_compaction_safe, static_literal_is_text_compaction_safe,
 };
 
@@ -188,19 +191,19 @@ use runtime_proxy_inline::inline_single_use_runtime_proxy_functions;
 use binding_owner::{BindingOwner, BindingOwnerPlan, RuntimeOwnerImportPartition};
 use package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, PackageRuntimeImportEmitter,
-    PackageRuntimeOwner, emit_package_runtime_helper_files, emit_package_runtime_helper_import,
-    package_runtime_island_plan, partition_package_runtime_bindings,
+    PackageRuntimeOwner, emit_package_runtime_helper_import, partition_package_runtime_bindings,
 };
 use runtime_singleton_inline::{
     RuntimeSingletonInlineEmitContext, RuntimeSingletonInlinePlan,
     emit_runtime_singleton_inline_helpers, module_exported_bindings,
-    partition_runtime_singleton_inline_bindings, runtime_singleton_inline_plan,
+    partition_runtime_singleton_inline_bindings,
 };
 use runtime_var_migration::{
     RuntimeOwnedSnippetMigration, RuntimeVarMigrationPlan, compute_runtime_var_migration_plan,
 };
 
 use source_module_facts::SourceModuleFacts;
+pub(crate) use source_surgery::apply_text_edits;
 
 #[allow(unused_imports)]
 use destructure_writes::{
@@ -220,9 +223,7 @@ use runtime_helper_writes::{
     update_operator_at,
 };
 
-use pure_reexport_bypass::{
-    PureReexportBypassPlan, folded_stub_modules_with_internal_consumers, pure_reexport_bypass_plan,
-};
+use pure_reexport_bypass::PureReexportBypassPlan;
 use runtime_namespace_rewrite::rewrite_runtime_namespace_member_accesses;
 
 use byte_lexer::{
@@ -239,6 +240,7 @@ use import_coalesce::{
 
 pub use plan::{
     EmitPlan, PlannedBinding, PlannedExport, PlannedFile, PlannedImport, PlannedRename,
+    ValidatedEmitPlan, ValidatedPlannedFile,
 };
 pub use plan_error::PlanError;
 use relative_paths::relative_import_specifier;
@@ -263,6 +265,7 @@ use statements::{
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use planner_context::{AnalysisReadyPass, PlannerContext, PlannerPass};
 use reverts_graph::{
     RevertsGraph, RuntimeNamespaceExport, RuntimePrelude, RuntimePreludeBindingKind,
     RuntimePreludeImport,
@@ -2316,9 +2319,10 @@ impl ImportExportPlanner {
         self,
         program: &EnrichedProgram,
     ) -> RuntimeSetterMigrationBlockerReport {
-        let analysis = PlannerAnalysis::from_program(program);
+        let context = PlannerContext::new(program);
+        let analysis = context.analysis();
         runtime_setter_migration_blocker_report(
-            program,
+            context.program(),
             &analysis.source_module_wiring,
             &analysis.lowered_runtime_sources,
             &analysis.runtime_lazy_folds,
@@ -2327,145 +2331,9 @@ impl ImportExportPlanner {
     }
 
     pub fn plan_enriched_program(self, program: &EnrichedProgram) -> Result<EmitPlan, PlanError> {
-        let mut plan = EmitPlan::default();
-        let mut used_runtime_helper_files = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        let mut exported_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        let mut required_runtime_helper_bindings = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        let mut used_runtime_helper_setters = BTreeMap::<u32, BTreeSet<BindingName>>::new();
-        let mut used_lazy_module = BTreeSet::<u32>::new();
-        let mut used_lazy_value = BTreeSet::<u32>::new();
-        let mut exported_lazy_module = BTreeSet::<u32>::new();
-        let mut exported_lazy_value = BTreeSet::<u32>::new();
-        let analysis = PlannerAnalysis::from_program(program);
-        let external_package_adapters = &analysis.external_package_adapters;
-        let externalized_packages = &analysis.externalized_packages;
-        let source_suppressed_packages = &analysis.source_suppressed_packages;
-        let source_module_wiring = &analysis.source_module_wiring;
-        let lowered_runtime_sources = &analysis.lowered_runtime_sources;
-        let runtime_lazy_folds = &analysis.runtime_lazy_folds;
-        let omitted_folded_stub_modules =
-            folded_stub_modules_with_internal_consumers(runtime_lazy_folds, source_module_wiring);
-        let pure_reexport_bypasses =
-            pure_reexport_bypass_plan(program, source_module_wiring, externalized_packages);
-        let runtime_var_migrations = compute_runtime_var_migration_plan(
-            program,
-            source_module_wiring,
-            lowered_runtime_sources,
-            runtime_lazy_folds,
-            source_suppressed_packages,
-        );
-        let package_runtime_islands = package_runtime_island_plan(
-            program,
-            lowered_runtime_sources,
-            runtime_lazy_folds,
-            &runtime_var_migrations,
-            source_suppressed_packages,
-        );
-        let runtime_prelude_direct_imports = runtime_prelude_direct_imports(program);
-        let runtime_singleton_inlines = runtime_singleton_inline_plan(
-            program,
-            source_module_wiring,
-            lowered_runtime_sources,
-            runtime_lazy_folds,
-            &runtime_var_migrations,
-            &runtime_prelude_direct_imports,
-            source_suppressed_packages,
-        );
-        let mut used_package_runtime_helper_files =
-            BTreeMap::<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>::new();
-        let runtime_edge_direct_prelude_imports = runtime_edge_direct_prelude_imports(
-            program,
-            lowered_runtime_sources,
-            runtime_lazy_folds,
-            &runtime_prelude_direct_imports,
-        );
-        let binding_owners = BindingOwnerPlan::from_parts(
-            &runtime_var_migrations,
-            &runtime_prelude_direct_imports,
-            &package_runtime_islands,
-        );
-
-        detect_folded_lazy_helper_use(
-            runtime_lazy_folds,
-            &mut used_lazy_module,
-            &mut used_lazy_value,
-        );
-
-        for module in program.model().modules() {
-            compute_modules::plan_one_module(
-                program,
-                module,
-                &mut plan,
-                &mut used_runtime_helper_files,
-                &mut exported_runtime_helper_bindings,
-                &mut required_runtime_helper_bindings,
-                &mut used_runtime_helper_setters,
-                &mut used_lazy_module,
-                &mut used_lazy_value,
-                &mut exported_lazy_module,
-                &mut exported_lazy_value,
-                &mut used_package_runtime_helper_files,
-                external_package_adapters,
-                externalized_packages,
-                source_suppressed_packages,
-                source_module_wiring,
-                lowered_runtime_sources,
-                runtime_lazy_folds,
-                &omitted_folded_stub_modules,
-                &pure_reexport_bypasses,
-                &runtime_var_migrations,
-                &runtime_prelude_direct_imports,
-                &runtime_singleton_inlines,
-                &runtime_edge_direct_prelude_imports,
-                &binding_owners,
-            )?;
-        }
-
-        emit_package_runtime_helper_files(
-            program,
-            &mut plan,
-            &used_package_runtime_helper_files,
-            externalized_packages,
-        )?;
-
-        if let Some((_prelude, entrypoint)) = runtime_entrypoint(program) {
-            used_runtime_helper_files
-                .entry(entrypoint.source_file_id)
-                .or_default()
-                .insert(entrypoint.callee.clone());
-            exported_runtime_helper_bindings
-                .entry(entrypoint.source_file_id)
-                .or_default()
-                .insert(entrypoint.callee.clone());
-            required_runtime_helper_bindings
-                .entry(entrypoint.source_file_id)
-                .or_default()
-                .insert(entrypoint.callee.clone());
-        }
-
-        runtime_helper_emission::emit_runtime_helper_files(
-            &runtime_helper_emission::RuntimeHelperEmissionContext {
-                program,
-                runtime_var_migrations: &runtime_var_migrations,
-                binding_owners: &binding_owners,
-                runtime_lazy_folds,
-                externalized_packages,
-                external_package_adapters,
-                used_runtime_helper_files: &used_runtime_helper_files,
-                exported_runtime_helper_bindings: &exported_runtime_helper_bindings,
-                required_runtime_helper_bindings: &required_runtime_helper_bindings,
-                used_runtime_helper_setters: &used_runtime_helper_setters,
-                used_lazy_module: &used_lazy_module,
-                used_lazy_value: &used_lazy_value,
-                exported_lazy_module: &exported_lazy_module,
-                exported_lazy_value: &exported_lazy_value,
-            },
-            &mut plan,
-        )?;
-
-        cli_entrypoint::emit_cli_entrypoint(program, &mut plan);
-
-        Ok(plan)
+        let context = PlannerContext::new(program);
+        AnalysisReadyPass.run(&context)?;
+        planner_pipeline::run_planner_pipeline(&context)
     }
 
     #[must_use]
