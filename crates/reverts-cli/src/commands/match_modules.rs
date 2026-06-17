@@ -556,9 +556,12 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // to fake even across categories (vendored packages re-
             // classified between versions).
             const RARE_CROSS_CAT: f64 = 3.0;
-            // ≥2 function-tier exact votes from the same subject module
-            // is rock-solid module evidence (two distinct fns agreeing).
-            const FN_FIRST_RESCUE: f64 = 2.0;
+            // A single unique cascade winner is already strong evidence
+            // (pick_unique only succeeds when one subject module owns the
+            // match), so a 1-vote floor is safe. Higher thresholds limit
+            // recall without adding precision because the cascade has
+            // already filtered ambiguous candidates.
+            const FN_FIRST_RESCUE: f64 = 1.0;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
