@@ -47,6 +47,21 @@ pub enum SimilarityMetric {
     Overlap,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AxisCombiner {
+    /// Per pair, take the single best per-axis score. Recall-friendly but
+    /// over-rewards modules whose shape coincidentally matches on one
+    /// structural axis (binding_pattern, structural_anchor).
+    Max,
+    /// Per pair, average the per-axis scores over axes where the ref bag has
+    /// at least one hash. Dilutes single-axis coincidences and lifts
+    /// multi-axis agreement — the precision-friendly default.
+    Mean,
+    /// Per pair, count axes whose per-axis score >= 0.5 and normalise by 9.
+    /// Strongly categorical: "how many independent signals agree".
+    Agreement,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
 #[allow(clippy::struct_field_names)]
@@ -58,15 +73,18 @@ pub struct MatchModulesRecallArgs {
     #[arg(long, value_parser = parse_project_id)]
     pub subject_project_id: u32,
     /// Similarity threshold percent (0-100) above which a (ref, subject) pair
-    /// counts as a match. Default 70 — the Jaccard knee point for clean
-    /// matches on CC 2.1.89 src-ref vs bundle.
-    #[arg(long, default_value_t = 70)]
+    /// counts as a match. Default 30 — calibrated for the mean-axis combiner.
+    #[arg(long, default_value_t = 30)]
     pub threshold_percent: u32,
     /// Similarity metric used to combine per-axis fingerprint overlap. Jaccard
     /// is the principled default; overlap is more forgiving but easily fires
     /// on subset coincidences and should be reserved for diagnostic sweeps.
     #[arg(long, value_enum, default_value_t = SimilarityMetric::Jaccard)]
     pub metric: SimilarityMetric,
+    /// How to combine per-axis scores into a single pair score. Mean is the
+    /// precision-friendly default.
+    #[arg(long, value_enum, default_value_t = AxisCombiner::Mean)]
+    pub combiner: AxisCombiner,
     /// Restrict to modules of this category (e.g. "application", "package").
     /// Repeatable. Empty = all categories.
     #[arg(long = "category")]
@@ -180,10 +198,11 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
     let scoring_started = Instant::now();
     let threshold = f64::from(args.threshold_percent) / 100.0;
-    let best_per_ref = score_best_subjects(&ref_bags, &sub_bags, args.metric);
+    let best_per_ref = score_best_subjects(&ref_bags, &sub_bags, args.metric, args.combiner);
     let recall = summarise_recall(&best_per_ref, threshold);
     println!(
-        "[multi_axis_{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        "[multi_axis_{}_{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        combiner_label(args.combiner),
         metric_label(args.metric),
         threshold,
         recall.matched,
@@ -204,6 +223,14 @@ const fn metric_label(metric: SimilarityMetric) -> &'static str {
     match metric {
         SimilarityMetric::Jaccard => "jaccard",
         SimilarityMetric::Overlap => "overlap",
+    }
+}
+
+const fn combiner_label(combiner: AxisCombiner) -> &'static str {
+    match combiner {
+        AxisCombiner::Max => "max",
+        AxisCombiner::Mean => "mean",
+        AxisCombiner::Agreement => "agreement",
     }
 }
 
@@ -333,6 +360,7 @@ fn score_best_subjects(
     ref_bags: &[ModuleBag],
     sub_bags: &[ModuleBag],
     metric: SimilarityMetric,
+    combiner: AxisCombiner,
 ) -> Vec<BestMatch> {
     // Inverted index: (axis, hash) -> Vec<subject_index>.
     let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
@@ -377,13 +405,19 @@ fn score_best_subjects(
             candidate_indexes.extend(table.keys().copied());
         }
         for sub_idx in candidate_indexes {
-            for &axis in SCORING_AXES {
+            let mut per_axis_scores: [f64; SCORING_AXES.len()] = [0.0; SCORING_AXES.len()];
+            let mut ref_active_axes: usize = 0;
+            for (idx, &axis) in SCORING_AXES.iter().enumerate() {
                 let ref_size = ref_bag.by_axis.get(&axis).map_or(0, BTreeSet::len);
+                if ref_size == 0 {
+                    continue;
+                }
+                ref_active_axes += 1;
                 let sub_size = sub_bags[sub_idx]
                     .by_axis
                     .get(&axis)
                     .map_or(0, BTreeSet::len);
-                if ref_size == 0 || sub_size == 0 {
+                if sub_size == 0 {
                     continue;
                 }
                 let intersect = axis_overlap
@@ -393,18 +427,20 @@ fn score_best_subjects(
                 if intersect == 0 {
                     continue;
                 }
-                let score = match metric {
+                per_axis_scores[idx] = match metric {
                     SimilarityMetric::Jaccard => {
                         let union = ref_size + sub_size - intersect;
                         intersect as f64 / union as f64
                     }
                     SimilarityMetric::Overlap => intersect as f64 / ref_size.min(sub_size) as f64,
                 };
-                if score > best_score {
-                    best_score = score;
-                    best_axis = Some(axis);
-                    best_subject = Some(sub_idx);
-                }
+            }
+            let (score, winning_axis) =
+                combine_axis_scores(&per_axis_scores, ref_active_axes, combiner);
+            if score > best_score {
+                best_score = score;
+                best_axis = winning_axis;
+                best_subject = Some(sub_idx);
             }
         }
         out[ref_idx] = BestMatch {
@@ -414,6 +450,42 @@ fn score_best_subjects(
         };
     }
     out
+}
+
+fn combine_axis_scores(
+    per_axis: &[f64; SCORING_AXES.len()],
+    ref_active_axes: usize,
+    combiner: AxisCombiner,
+) -> (f64, Option<AxisKind>) {
+    let mut best_axis_score = 0.0_f64;
+    let mut best_axis: Option<AxisKind> = None;
+    let mut sum = 0.0_f64;
+    let mut agreement_count = 0usize;
+    for (idx, &score) in per_axis.iter().enumerate() {
+        if score > best_axis_score {
+            best_axis_score = score;
+            best_axis = Some(SCORING_AXES[idx]);
+        }
+        sum += score;
+        if score >= 0.5 {
+            agreement_count += 1;
+        }
+    }
+    match combiner {
+        AxisCombiner::Max => (best_axis_score, best_axis),
+        AxisCombiner::Mean => {
+            let score = if ref_active_axes == 0 {
+                0.0
+            } else {
+                sum / ref_active_axes as f64
+            };
+            (score, best_axis)
+        }
+        AxisCombiner::Agreement => (
+            agreement_count as f64 / SCORING_AXES.len() as f64,
+            best_axis,
+        ),
+    }
 }
 
 fn summarise_recall(best_per_ref: &[BestMatch], threshold: f64) -> RecallReport {
