@@ -2605,25 +2605,25 @@ fn score_via_function_majority_pin(
                 }
             }
         }
-        let mut best_sub = None;
-        let mut best_count = 0usize;
-        for (&sub_idx, &c) in &votes {
-            if c > best_count {
-                best_count = c;
-                best_sub = Some(sub_idx);
-            }
-        }
-        // Score = fraction of ref functions whose top-voted subject is
-        // the winner; high values mean the bundler clustered the source.
+        // Synthetic super-subject (D9): when no single subject
+        // dominates, the top-2 together may still capture a clear
+        // majority (bundler split one source across two chunks).
+        // Pin to the higher-voting member of that virtual pair.
+        let mut sorted: Vec<(usize, usize)> = votes.iter().map(|(s, c)| (*s, *c)).collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        let best_count = sorted.first().map(|(_, c)| *c).unwrap_or(0);
+        let best_sub = sorted.first().map(|(s, _)| *s);
+        let pair_count = sorted.iter().take(2).map(|(_, c)| *c).sum::<usize>();
         let denom = m.raw.len().max(1);
-        let score = best_count as f64 / denom as f64;
-        // Also require ≥10% module coverage so tiny-module noise is
-        // filtered. covered/denom approximates how much of the module's
-        // surface mapped to subject.
         let coverage = covered as f64 / denom as f64;
         if coverage < 0.10 {
             continue;
         }
+        // Use the larger of single-best vs top-2-pair share as the
+        // signal. The pair-share captures D9 (super-subject) cases
+        // without producing a "virtual" subject — pin still lands on
+        // the dominant member, which is the conservative choice.
+        let score = (best_count as f64 / denom as f64).max(pair_count as f64 / denom as f64 * 0.85);
         out[ref_idx] = BestMatch {
             subject_idx: best_sub,
             score,
