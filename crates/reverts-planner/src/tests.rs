@@ -5500,13 +5500,17 @@ fn entrypoint_runtime_imports_adapter_required_package_bindings() {
         )
         .with_source_file(2),
     );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
             ModuleId(2),
             "fixture-package",
             "1.0.0",
             "fixture-package",
-        ));
+        )
+        .with_resolved_file(
+            "exact-hint:fixture-package@1.0.0:quality=trusted:semantic_path=modules/package.ts",
+        ),
+    );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
         target: ModuleDependencyTarget::Module(ModuleId(2)),
@@ -5589,13 +5593,17 @@ fn adapter_required_commonjs_package_module_uses_external_adapter() {
         )
         .with_source_file(2),
     );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
             ModuleId(2),
             "fixture-package",
             "1.0.0",
             "fixture-package",
-        ));
+        )
+        .with_resolved_file(
+            "forced-external:export-members:source-equivalent:answer:fixture-package@1.0.0/index.js",
+        ),
+    );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
         target: ModuleDependencyTarget::Module(ModuleId(2)),
@@ -5632,10 +5640,79 @@ fn adapter_required_commonjs_package_module_uses_external_adapter() {
 }
 
 #[test]
-fn adapter_required_package_original_binding_stays_callable() {
+fn commonjs_external_adapter_exports_only_original_require_binding() {
+    let package_source = r#"
+        function helper() { return 42; }
+        var packageInit = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports) => { exports.answer = helper(); })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+    "#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        ));
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+    let bindings = BTreeSet::from([BindingName::new("helper"), BindingName::new("packageInit")]);
+
+    let narrowed = super::external_adapters::package_adapter_export_bindings_for_kind(
+        &enriched,
+        ModuleId(2),
+        bindings,
+        super::external_adapters::ExternalPackageAdapterKind::CommonJsWrapper,
+        None,
+    );
+
+    assert_eq!(narrowed, BTreeSet::from([BindingName::new("packageInit")]));
+}
+
+#[test]
+fn external_adapter_preserves_unproven_commonjs_named_exports() {
     let planner = ImportExportPlanner;
-    let app_source = "packageInit();\nexport const value = 1;\n";
-    let package_source = "var packageInit = E(() => {});\n";
+    let app_source = "var value = packageInit().answer;\nexport { value };\n";
+    let package_source = r#"
+        var packageInit = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports) => { exports.answer = 42; })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+        export { packageInit };
+    "#;
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
     rows.source_files.push(SourceFileInput::new(
         1,
@@ -5667,6 +5744,383 @@ fn adapter_required_package_original_binding_stays_callable() {
             "1.0.0",
             "fixture-package",
         ));
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    let analysis = super::PlannerAnalysis::from_program(&enriched);
+    assert!(
+        !analysis
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "named CommonJS object exports need package-member proof before source replacement"
+    );
+    assert!(!analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let package_source = planned_source(&plan, "modules/package.ts");
+    assert!(package_source.contains("_$cached"));
+    assert!(!package_source.contains("external_fixture_package"));
+}
+
+#[test]
+fn external_adapter_detects_commonjs_wrapper_without_synthetic_export() {
+    let package_source = r#"
+        var packageInit = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports) => { exports.answer = 42; })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+    "#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        ));
+    let enriched = enriched_from_rows(rows);
+
+    let kind = super::external_adapters::external_package_adapter_kind(
+        &enriched,
+        ModuleId(2),
+        &BTreeSet::from([BindingName::new("packageInit")]),
+    );
+
+    assert_eq!(
+        kind,
+        super::external_adapters::ExternalPackageAdapterKind::CommonJsWrapper
+    );
+}
+
+#[test]
+fn external_adapter_detects_commonjs_helper_alias_wrapper() {
+    let package_source =
+        "var packageInit = U((exports, module) => { module.exports.answer = 42; });";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        ));
+    let enriched = enriched_from_rows(rows);
+
+    let kind = super::external_adapters::external_package_adapter_kind(
+        &enriched,
+        ModuleId(2),
+        &BTreeSet::from([BindingName::new("packageInit")]),
+    );
+
+    assert_eq!(
+        kind,
+        super::external_adapters::ExternalPackageAdapterKind::CommonJsWrapper
+    );
+}
+
+#[test]
+fn external_adapter_preserves_worker_asset_source() {
+    let planner = ImportExportPlanner;
+    let app_source = "packageInit();\nexport const value = 1;\n";
+    let package_source =
+        "var packageInit = U((exports, module) => { module.exports.answer = 42; });";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/dist/file.worker.js",
+        )
+        .with_resolved_file("fixture-package@1.0.0/dist/file.worker.js"),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    let analysis = super::PlannerAnalysis::from_program(&enriched);
+    assert!(
+        !analysis
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "worker package assets must not be converted into eager adapter imports"
+    );
+    assert!(!analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let package_source = planned_source(&plan, "modules/package.ts");
+    assert!(package_source.contains("var packageInit = U("));
+    assert!(!package_source.contains("external_fixture_package"));
+}
+
+#[test]
+fn external_adapter_preserves_weak_graph_source_proof() {
+    let planner = ImportExportPlanner;
+    let app_source = "var value = packageInit()();\nexport { value };\n";
+    let package_source = r#"
+        var packageInit = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports, module) => { module.exports = function() { return 42; }; })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+        export { packageInit };
+    "#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/lib/internal.js",
+        )
+        .with_resolved_file(
+            "forced-external:dependency-graph-source:dependency-neighborhood:graph=2/2:functions=0:strings=0:fixture-package@1.0.0/lib/internal.js",
+        ),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    let analysis = super::PlannerAnalysis::from_program(&enriched);
+    assert!(
+        !analysis
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "dependency graph source hints are ownership suggestions, not exact adapter replacement proof"
+    );
+    assert!(!analysis.source_suppressed_packages.contains(&ModuleId(2)));
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let package_source = planned_source(&plan, "modules/package.ts");
+    assert!(package_source.contains("_$cached"));
+    assert!(!package_source.contains("external_fixture_package"));
+}
+
+#[test]
+fn external_adapter_preserves_plain_package_cache_source_hint() {
+    let planner = ImportExportPlanner;
+    let app_source = "var value = packageInit().PublicApi;\nexport { value };\n";
+    let package_source = r#"
+        var packageInit = (() => {
+            let _$cached;
+            return () => {
+                if (_$cached) return _$cached.exports;
+                var _$module = _$cached = { exports: {} };
+                ((exports, module) => { module.exports = { PublicApi: class PublicApi {} }; })(_$module.exports, _$module);
+                return _$module.exports;
+            };
+        })();
+        export { packageInit };
+    "#;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/lib/maybe.js",
+        )
+        .with_resolved_file("fixture-package@1.0.0/lib/maybe.js"),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    let analysis = super::PlannerAnalysis::from_program(&enriched);
+    assert!(
+        !analysis
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "plain package cache paths are suggestions until promoted to an exact proof"
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let package_source = planned_source(&plan, "modules/package.ts");
+    assert!(package_source.contains("PublicApi"));
+    assert!(!package_source.contains("external_fixture_package"));
+}
+
+#[test]
+fn external_adapter_preserves_canonical_subpath_hint_without_equivalence_proof() {
+    let attribution = PackageAttributionInput::accepted_external(
+        ModuleId(2),
+        "fixture-package",
+        "1.0.0",
+        "fixture-package/unsafe/internal.js",
+    )
+    .with_resolved_file("forced-external:canonical-subpath:fixture-package@1.0.0/internal.js");
+
+    assert!(
+        !super::external_adapters::external_adapter_attribution_allows_eager_import(&attribution),
+        "canonical subpath hints prove a possible import path, not adapter source equivalence"
+    );
+}
+
+#[test]
+fn adapter_required_package_original_binding_stays_callable() {
+    let planner = ImportExportPlanner;
+    let app_source = "packageInit();\nexport const value = 1;\n";
+    let package_source = "var packageInit = E(() => {});\n";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        )
+        .with_resolved_file(
+            "exact-hint:fixture-package@1.0.0:quality=trusted:semantic_path=modules/package.ts",
+        ),
+    );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
         target: ModuleDependencyTarget::Module(ModuleId(2)),
@@ -5725,13 +6179,17 @@ fn adapter_required_package_ignores_unused_exported_bindings() {
         )
         .with_source_file(2),
     );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
             ModuleId(2),
             "fixture-package",
             "1.0.0",
             "fixture-package",
-        ));
+        )
+        .with_resolved_file(
+            "exact-hint:fixture-package@1.0.0:quality=trusted:semantic_path=modules/package.ts",
+        ),
+    );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
         target: ModuleDependencyTarget::Module(ModuleId(2)),
@@ -5865,13 +6323,17 @@ fn adapter_required_external_package_suppresses_original_runtime_source() {
         )
         .with_source_file(2),
     );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
             ModuleId(2),
             "fixture-package",
             "1.0.0",
             "fixture-package",
-        ));
+        )
+        .with_resolved_file(
+            "exact-hint:fixture-package@1.0.0:quality=trusted:semantic_path=modules/package.ts",
+        ),
+    );
     rows.dependencies.push(ModuleDependencyInput {
         from_module_id: ModuleId(1),
         target: ModuleDependencyTarget::Module(ModuleId(2)),
@@ -7824,13 +8286,12 @@ fn accepted_external_package_read_from_runtime_helper_uses_external_adapter() {
             .with_source_file(1)
             .with_source_span(SourceSpan::new(app_start, app_end)),
     );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
-            ModuleId(1),
-            "open",
-            "10.2.0",
-            "open/index.js",
-        ));
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(ModuleId(1), "open", "10.2.0", "open/index.js")
+            .with_resolved_file(
+                "exact-hint:open@10.2.0:quality=trusted:semantic_path=modules/open.ts",
+            ),
+    );
     let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
     let model = ProgramModel::from_input(input);
     let enriched = reverts_model::EnrichedProgram::new(

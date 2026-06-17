@@ -382,8 +382,12 @@ impl PlannerAnalysis {
             .union(&closure_externalized_packages)
             .copied()
             .collect::<BTreeSet<_>>();
-        let source_module_wiring =
-            source_module_wiring(program, &externalized_packages, &source_facts);
+        let source_module_wiring = source_module_wiring(
+            program,
+            &externalized_packages,
+            &external_package_adapters,
+            &source_facts,
+        );
         let eager_safe_analysis = if should_compute_cross_module_eager_safe_analysis(program) {
             compute_eager_safe_analysis(program, &source_module_wiring)
         } else {
@@ -7329,6 +7333,7 @@ pub(crate) fn ensure_planned_module_exports(
 pub(crate) fn source_module_wiring(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
+    external_package_adapters: &BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     source_facts: &SourceModuleFacts,
 ) -> SourceModuleWiring {
     let mut wiring = SourceModuleWiring::default();
@@ -7362,7 +7367,12 @@ pub(crate) fn source_module_wiring(
         else {
             continue;
         };
-        let Some(target_bindings) = exportable_bindings_by_module.get(&target_module_id) else {
+        let adapter_bindings = external_package_adapters
+            .get(&target_module_id)
+            .map(|adapter| &adapter.bindings);
+        let Some(target_bindings) =
+            adapter_bindings.or_else(|| exportable_bindings_by_module.get(&target_module_id))
+        else {
             continue;
         };
         let imported_bindings = candidate_reads

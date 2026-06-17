@@ -137,9 +137,25 @@ pub(crate) fn external_package_adapter_analysis(
                 &program.model().input().package_attributions,
                 *module_id,
             )?;
+            if !external_adapter_attribution_allows_eager_import(attribution) {
+                return None;
+            }
             let member_proof = export_member_adapter_proof(attribution);
-            let bindings = package_adapter_export_bindings(program, *module_id, source_facts);
-            let kind = external_package_adapter_kind(program, *module_id, &bindings);
+            let raw_bindings = package_adapter_export_bindings(program, *module_id, source_facts);
+            let kind = external_package_adapter_kind(program, *module_id, &raw_bindings);
+            if kind == ExternalPackageAdapterKind::CommonJsWrapper
+                && member_proof.is_none()
+                && commonjs_wrapper_source_has_unproven_named_exports(program, *module_id)
+            {
+                return None;
+            }
+            let bindings = package_adapter_export_bindings_for_kind(
+                program,
+                *module_id,
+                raw_bindings,
+                kind,
+                member_proof.as_ref(),
+            );
             adapter_plan_is_safe(program, *module_id, &bindings, member_proof.as_ref()).then_some((
                 *module_id,
                 ExternalPackageAdapterPlan {
@@ -213,6 +229,15 @@ pub(crate) fn adapter_source_has_implicit_side_effect_exports(
         member_backed_bindings,
         requested_bindings,
     ) {
+        return false;
+    }
+    if let Some(original_name) = original_name
+        && requested_bindings.len() == 1
+        && requested_bindings
+            .iter()
+            .all(|binding| binding.as_str() == original_name)
+        && source_has_commonjs_wrapper_initializer(compact.as_str(), original_name)
+    {
         return false;
     }
     if call_identifiers_in_source(source.source)
@@ -319,6 +344,40 @@ pub(crate) fn source_has_adapter_lazy_initializer(
     ]
     .iter()
     .any(|needle| compact_source.contains(needle))
+}
+
+pub(crate) fn source_has_commonjs_wrapper_initializer(
+    compact_source: &str,
+    original_name: &str,
+) -> bool {
+    [
+        format!("var{original_name}=p("),
+        format!("let{original_name}=p("),
+        format!("const{original_name}=p("),
+        format!("var{original_name}=__commonJS("),
+        format!("let{original_name}=__commonJS("),
+        format!("const{original_name}=__commonJS("),
+        format!("var{original_name}=U(("),
+        format!("let{original_name}=U(("),
+        format!("const{original_name}=U(("),
+    ]
+    .iter()
+    .any(|needle| compact_source.contains(needle))
+        && compact_source.contains(".exports")
+}
+
+pub(crate) fn commonjs_wrapper_source_has_unproven_named_exports(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> bool {
+    let Some(source) = program.model().input().module_source_slice(module_id) else {
+        return false;
+    };
+    commonjs_wrapper_compact_source_has_named_exports(compact_js_source(source.source).as_str())
+}
+
+pub(crate) fn commonjs_wrapper_compact_source_has_named_exports(compact_source: &str) -> bool {
+    compact_source.contains("exports.") || compact_source.contains(".exports={")
 }
 
 pub(crate) fn external_adapter_non_original_binding_is_safe(
@@ -646,15 +705,12 @@ pub(crate) fn external_package_adapter_kind(
         return ExternalPackageAdapterKind::NamespaceReturn;
     };
     let compact = compact_js_source(source.source);
-    if compact.contains("let_$cached;")
-        && compact.contains("return_$module.exports;")
-        && compact.contains("export{")
-    {
+    if compact.contains("let_$cached;") && compact.contains("return_$module.exports;") {
         return ExternalPackageAdapterKind::CommonJsWrapper;
     }
     if adapter_bindings
         .iter()
-        .any(|binding| compact.contains(format!("var{}=p(", binding.as_str()).as_str()))
+        .any(|binding| source_has_commonjs_wrapper_initializer(compact.as_str(), binding.as_str()))
     {
         return ExternalPackageAdapterKind::CommonJsWrapper;
     }
@@ -939,6 +995,63 @@ pub(crate) fn package_adapter_export_bindings(
         }));
     }
     bindings
+}
+
+pub(crate) fn package_adapter_export_bindings_for_kind(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    mut bindings: BTreeSet<BindingName>,
+    adapter_kind: ExternalPackageAdapterKind,
+    member_proof: Option<&ExportMemberAdapterProof>,
+) -> BTreeSet<BindingName> {
+    if adapter_kind != ExternalPackageAdapterKind::CommonJsWrapper || member_proof.is_some() {
+        return bindings;
+    }
+    let Some(original) = program
+        .model()
+        .modules()
+        .iter()
+        .find(|module| module.id == module_id)
+        .map(|module| BindingName::new(module.original_name.clone()))
+    else {
+        return bindings;
+    };
+    if !bindings.contains(&original) {
+        return bindings;
+    }
+    bindings.retain(|binding| binding == &original);
+    bindings
+}
+
+pub(crate) fn external_adapter_attribution_allows_eager_import(
+    attribution: &PackageAttributionInput,
+) -> bool {
+    let Some(resolved_file) = attribution.resolved_file.as_deref() else {
+        return false;
+    };
+    if external_adapter_resolved_file_has_weak_source_replacement_proof(resolved_file) {
+        return false;
+    }
+    [
+        attribution.export_specifier.as_deref(),
+        attribution.resolved_file.as_deref(),
+        attribution.subpath.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .all(|value| !external_adapter_specifier_is_worker_asset(value))
+}
+
+fn external_adapter_specifier_is_worker_asset(value: &str) -> bool {
+    value.to_ascii_lowercase().contains(".worker")
+}
+
+fn external_adapter_resolved_file_has_weak_source_replacement_proof(value: &str) -> bool {
+    value.starts_with("forced-external:dependency-graph-source:")
+        || value.starts_with("forced-external:dependency-edge-path:")
+        || value.starts_with("forced-external:canonical-subpath:")
+        || value.starts_with("forced-external:semantic-source:")
+        || !value.contains(':')
 }
 
 pub(crate) fn external_package_adapter_namespace(
