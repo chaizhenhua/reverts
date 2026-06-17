@@ -8,6 +8,7 @@ use crate::{
     match_structural_bags, match_structural_bags_with_excluded_modules,
     ownership::{cascade, exact_hint},
     package_import_names_from_sources, package_module_source_quality,
+    package_source_normalized_hash, package_source_normalized_hashes,
     package_source_public_export_proofs, resolve_external_import_target,
     same_package_cross_version_source_external_import_target,
 };
@@ -60,6 +61,25 @@ fn pipeline_does_not_externalize_empty_source_scope_without_proof() {
     assert_eq!(report.package_report.attributions.len(), 0);
     assert!(report.function_attributions.is_empty());
     assert_eq!(report.function_ownership_matches, 0);
+}
+
+#[test]
+fn package_source_normalized_hashes_include_stable_pass_alternates() {
+    let source_with_boundary = "function add(a,b){return a+b;}\nexports.add = add;";
+    let source_without_boundary = "function add(a,b){return a+b;}";
+    let base_hash = package_source_normalized_hash("pkg@1.0.0/lib/add.js", source_with_boundary)
+        .expect("source with boundary should normalize");
+    let stripped_hash =
+        package_source_normalized_hash("pkg@1.0.0/lib/add.js", source_without_boundary)
+            .expect("source without boundary should normalize");
+
+    let hashes = package_source_normalized_hashes("pkg@1.0.0/lib/add.js", source_with_boundary);
+
+    assert!(hashes.contains(&base_hash));
+    assert!(
+        hashes.contains(&stripped_hash),
+        "stable normalization alternates should prove export-boundary-equivalent source"
+    );
 }
 
 #[test]

@@ -507,6 +507,164 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
 }
 
 #[test]
+fn verified_externalization_hints_promote_stable_normalization_alternates() {
+    let package_source = "function add(a,b){return a+b;}\nexports.add = add;";
+    let module_source = "function add(a,b){return a+b;}";
+    let normalized_source_hash =
+        package_source_normalized_hash("pkg@1.0.0/lib/add.js", package_source)
+            .expect("source should normalize");
+    let connection = Connection::open_in_memory().expect("open db");
+    connection
+        .execute(
+            r"
+            CREATE TABLE package_externalization_hints (
+                package_name TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                entry_path TEXT NOT NULL,
+                export_specifier TEXT NOT NULL,
+                normalized_source_hash TEXT NOT NULL
+            )
+            ",
+            [],
+        )
+        .expect("create hints");
+    connection
+        .execute(
+            r"
+            CREATE TABLE package_source_cache (
+                package_name TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                entry_path TEXT NOT NULL,
+                source_content TEXT NOT NULL
+            )
+            ",
+            [],
+        )
+        .expect("create cache");
+    connection
+        .execute(
+            r"
+            INSERT INTO package_externalization_hints
+                (package_name, package_version, entry_path, export_specifier, normalized_source_hash)
+            VALUES ('pkg', '1.0.0', 'lib/add.js', 'pkg/add', ?1)
+            ",
+            params![normalized_source_hash],
+        )
+        .expect("insert hint");
+    connection
+        .execute(
+            r"
+            INSERT INTO package_source_cache
+                (package_name, package_version, entry_path, source_content)
+            VALUES ('pkg', '1.0.0', 'lib/add.js', ?1)
+            ",
+            params![package_source],
+        )
+        .expect("insert cache source");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "module.js",
+        Some(module_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "add",
+            "modules/pkg/add.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(10),
+            "pkg",
+            "1.0.0",
+            "pkg/add",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted =
+        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
+
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        input.package_attributions[0].resolved_file.as_deref(),
+        Some("normalized-source-export:pkg@1.0.0/lib/add.js")
+    );
+}
+
+#[test]
+fn verified_externalization_hints_promote_public_member_proofs() {
+    let package_source = "exports.PublicClient = class PublicClient {};";
+    let normalized_source_hash =
+        package_source_normalized_hash("pkg@1.0.0/index.js", package_source)
+            .expect("source should normalize");
+    let connection = Connection::open_in_memory().expect("open db");
+    connection
+        .execute(
+            r"
+            CREATE TABLE package_externalization_hints (
+                package_name TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                entry_path TEXT NOT NULL,
+                export_specifier TEXT NOT NULL,
+                normalized_source_hash TEXT NOT NULL,
+                public_members_json TEXT NOT NULL
+            )
+            ",
+            [],
+        )
+        .expect("create hints");
+    connection
+        .execute(
+            r"
+            INSERT INTO package_externalization_hints
+                (package_name, package_version, entry_path, export_specifier,
+                 normalized_source_hash, public_members_json)
+            VALUES ('pkg', '1.0.0', 'index.js', 'pkg', ?1, ?2)
+            ",
+            params![normalized_source_hash, "[\"PublicClient\"]"],
+        )
+        .expect("insert hint");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "module.js",
+        Some("var packageInit = U((exports, module) => { exports.PublicClient = class LocalClient {}; });".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "packageInit",
+            "modules/pkg.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(10),
+            "pkg",
+            "1.0.0",
+            "pkg",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted =
+        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
+
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        input.package_attributions[0].resolved_file.as_deref(),
+        Some("forced-external:export-members:public-members:PublicClient:pkg@1.0.0/index.js")
+    );
+}
+
+#[test]
 fn runtime_emitted_setter_blockers_count_batched_setter_declarations() {
     let files = vec![EmittedFile {
         path: "modules/runtime/source-1-helpers.ts".to_string(),

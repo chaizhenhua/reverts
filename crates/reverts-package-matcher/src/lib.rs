@@ -11,7 +11,10 @@ mod scoring;
 mod source;
 mod strategy;
 
-pub use api::{package_source_exported_members, package_source_normalized_hash};
+pub use api::{
+    package_source_exported_members, package_source_normalized_hash,
+    package_source_normalized_hashes,
+};
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 pub(crate) use index::{module_match_fingerprint, package_source_fingerprint};

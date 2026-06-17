@@ -15,7 +15,10 @@ use reverts_input::{
     PackageEmissionMode,
 };
 use reverts_ir::ModuleId;
-use reverts_package_matcher::package_source_normalized_hash;
+use reverts_package_matcher::{
+    package_source_exported_members, package_source_normalized_hash,
+    package_source_normalized_hashes,
+};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
@@ -23,7 +26,8 @@ use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExternalizationHintProof {
     source_path: String,
-    normalized_source_hash: String,
+    normalized_source_hashes: BTreeSet<String>,
+    public_members: BTreeSet<String>,
 }
 
 type HintKey = (String, String, String);
@@ -75,7 +79,7 @@ pub(crate) fn promote_verified_externalization_hints(
 
     let mut promoted = 0usize;
     for attribution in &mut bundle.package_attributions {
-        if !attribution_is_promotable(attribution, &dependency_modules) {
+        if !attribution_is_hint_promotable(attribution) {
             continue;
         }
         let Some(package_version) = attribution.package_version.as_deref() else {
@@ -99,8 +103,8 @@ pub(crate) fn promote_verified_externalization_hints(
             continue;
         };
         for hint in candidate_hints {
-            if package_source_normalized_hash(hint.source_path.as_str(), source.as_str()).as_deref()
-                == Some(hint.normalized_source_hash.as_str())
+            if !dependency_modules.contains(&attribution.module_id)
+                && module_source_matches_hint_hashes(source.as_str(), module_path.as_str(), hint)
             {
                 attribution.resolved_file =
                     Some(format!("normalized-source-export:{}", hint.source_path));
@@ -108,11 +112,20 @@ pub(crate) fn promote_verified_externalization_hints(
                 promoted += 1;
                 break;
             }
-            if package_source_normalized_hash(module_path.as_str(), source.as_str()).as_deref()
-                == Some(hint.normalized_source_hash.as_str())
-            {
-                attribution.resolved_file =
-                    Some(format!("normalized-source-export:{}", hint.source_path));
+            if source_public_members_are_proven_by_hint(
+                source.as_str(),
+                module_path.as_str(),
+                &hint.public_members,
+            ) {
+                attribution.resolved_file = Some(format!(
+                    "forced-external:export-members:public-members:{}:{}",
+                    hint.public_members
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    hint.source_path
+                ));
                 attribution.rejection_reason = None;
                 promoted += 1;
                 break;
@@ -122,13 +135,9 @@ pub(crate) fn promote_verified_externalization_hints(
     Ok(promoted)
 }
 
-fn attribution_is_promotable(
-    attribution: &PackageAttributionInput,
-    dependency_modules: &BTreeSet<ModuleId>,
-) -> bool {
+fn attribution_is_hint_promotable(attribution: &PackageAttributionInput) -> bool {
     attribution.status == PackageAttributionStatus::Accepted
         && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        && !dependency_modules.contains(&attribution.module_id)
         && !attribution_has_worker_asset_hint(attribution)
         && !attribution_has_strong_source_proof(attribution)
 }
@@ -158,6 +167,11 @@ fn load_externalization_hint_proofs(
     if !sqlite_table_exists(connection, "package_externalization_hints")? {
         return Ok(BTreeMap::new());
     }
+    let has_public_members_json = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "public_members_json",
+    )?;
     for required in [
         "package_name",
         "package_version",
@@ -170,17 +184,25 @@ fn load_externalization_hint_proofs(
         }
     }
 
+    let public_members_expr = if has_public_members_json {
+        "public_members_json"
+    } else {
+        "'[]'"
+    };
     let mut statement = connection.prepare(
-        r"
+        format!(
+            r"
         SELECT package_name, package_version, entry_path, export_specifier,
-               normalized_source_hash
+               normalized_source_hash, {public_members_expr}
           FROM package_externalization_hints
          WHERE TRIM(COALESCE(package_name, '')) != ''
            AND TRIM(COALESCE(package_version, '')) != ''
            AND TRIM(COALESCE(entry_path, '')) != ''
            AND TRIM(COALESCE(export_specifier, '')) != ''
            AND TRIM(COALESCE(normalized_source_hash, '')) != ''
-        ",
+        "
+        )
+        .as_str(),
     )?;
     let rows = statement.query_map([], |row| {
         let package_name = row.get::<_, String>(0)?.trim().to_string();
@@ -192,6 +214,8 @@ fn load_externalization_hint_proofs(
         );
         let export_specifier = row.get::<_, String>(3)?.trim().to_string();
         let normalized_source_hash = row.get::<_, String>(4)?.trim().to_string();
+        let public_members = parse_public_members(row.get::<_, Option<String>>(5)?.as_deref());
+        let normalized_source_hashes = BTreeSet::from([normalized_source_hash]);
         Ok((
             (
                 package_name.clone(),
@@ -200,7 +224,8 @@ fn load_externalization_hint_proofs(
             ),
             ExternalizationHintProof {
                 source_path: format!("{package_name}@{package_version}/{entry_path}"),
-                normalized_source_hash,
+                normalized_source_hashes,
+                public_members,
             },
         ))
     })?;
@@ -208,7 +233,118 @@ fn load_externalization_hint_proofs(
     for (key, proof) in collect_sqlite_rows(rows)? {
         hints.entry(key).or_default().push(proof);
     }
+    enrich_hint_proofs_with_package_source_alternate_hashes(connection, &mut hints)?;
     Ok(hints)
+}
+
+fn enrich_hint_proofs_with_package_source_alternate_hashes(
+    connection: &Connection,
+    hints: &mut BTreeMap<HintKey, Vec<ExternalizationHintProof>>,
+) -> Result<(), SqliteInputError> {
+    if hints.is_empty() || !sqlite_table_exists(connection, "package_source_cache")? {
+        return Ok(());
+    }
+    for required in [
+        "package_name",
+        "package_version",
+        "entry_path",
+        "source_content",
+    ] {
+        if !sqlite_table_has_column(connection, "package_source_cache", required)? {
+            return Ok(());
+        }
+    }
+    let mut statement = connection.prepare(
+        r"
+        SELECT source_content
+          FROM package_source_cache
+         WHERE package_name = ?1
+           AND package_version = ?2
+           AND entry_path = ?3
+         LIMIT 1
+        ",
+    )?;
+    for ((package_name, package_version, _export_specifier), proofs) in hints {
+        for proof in proofs {
+            let entry_path = clean_hint_entry_path(
+                package_name.as_str(),
+                package_version.as_str(),
+                proof.source_path.as_str(),
+            );
+            let mut rows =
+                statement.query((package_name.as_str(), package_version.as_str(), entry_path))?;
+            let Some(row) = rows.next()? else {
+                continue;
+            };
+            let source_content = row.get::<_, String>(0)?;
+            let primary_hash =
+                package_source_normalized_hash(proof.source_path.as_str(), source_content.as_str());
+            if primary_hash
+                .as_deref()
+                .is_none_or(|hash| !proof.normalized_source_hashes.contains(hash))
+            {
+                continue;
+            }
+            proof
+                .normalized_source_hashes
+                .extend(package_source_normalized_hashes(
+                    proof.source_path.as_str(),
+                    source_content.as_str(),
+                ));
+        }
+    }
+    Ok(())
+}
+
+fn module_source_matches_hint_hashes(
+    source: &str,
+    module_path: &str,
+    hint: &ExternalizationHintProof,
+) -> bool {
+    let mut hashes = package_source_normalized_hashes(hint.source_path.as_str(), source);
+    hashes.extend(package_source_normalized_hashes(module_path, source));
+    !hashes.is_disjoint(&hint.normalized_source_hashes)
+}
+
+fn source_has_commonjs_named_exports(source: &str) -> bool {
+    let compact = source
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>();
+    compact.contains("exports.") || compact.contains(".exports={")
+}
+
+fn source_public_members_are_proven_by_hint(
+    source: &str,
+    module_path: &str,
+    hint_public_members: &BTreeSet<String>,
+) -> bool {
+    if hint_public_members.is_empty() || !source_has_commonjs_named_exports(source) {
+        return false;
+    }
+    let source_public_members = package_source_exported_members(module_path, source)
+        .into_iter()
+        .filter(|member| is_identifier_like(member.as_str()))
+        .collect::<BTreeSet<_>>();
+    !source_public_members.is_empty() && source_public_members.is_subset(hint_public_members)
+}
+
+fn parse_public_members(value: Option<&str>) -> BTreeSet<String> {
+    value
+        .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|member| is_identifier_like(member.as_str()))
+        .collect()
+}
+
+fn is_identifier_like(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first == '$' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
 }
 
 fn clean_hint_entry_path(package_name: &str, package_version: &str, entry_path: &str) -> String {
