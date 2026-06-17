@@ -541,11 +541,18 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             const STR_RESCUE: f64 = 0.50;
             const KW_RESCUE: f64 = 0.90;
             const PROP_RESCUE: f64 = 0.40;
+            // Consensus floors: signal must clear these to vote, and ≥2
+            // signals must agree on the same subject for a consensus pin.
+            const BAG_FLOOR: f64 = 0.10;
+            const STR_FLOOR: f64 = 0.20;
+            const KW_FLOOR: f64 = 0.70;
+            const PROP_FLOOR: f64 = 0.20;
 
             let mut pinned: Vec<Option<usize>> = Vec::with_capacity(ref_modules.len());
             let mut rescued_str = 0usize;
             let mut rescued_kw = 0usize;
             let mut rescued_prop = 0usize;
+            let mut rescued_consensus = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
                 ref_modules[ref_idx].category == sub_modules[sub_idx].category
@@ -594,11 +601,50 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_prop += 1;
                     }
                 }
+                // Consensus rescue: if ≥2 weak signals agree on the same
+                // subject, pin it. Each signal alone is noisy at low
+                // thresholds; agreement is the filter.
+                if pick.is_none() {
+                    let mut votes: BTreeMap<usize, u32> = BTreeMap::new();
+                    if bag.score >= BAG_FLOOR
+                        && let Some(sub_idx) = bag.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        *votes.entry(sub_idx).or_default() += 1;
+                    }
+                    let str_pick = str_best[ref_idx];
+                    if str_pick.score >= STR_FLOOR
+                        && let Some(sub_idx) = str_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        *votes.entry(sub_idx).or_default() += 1;
+                    }
+                    let kw_pick = kw_best[ref_idx];
+                    if kw_pick.score >= KW_FLOOR
+                        && let Some(sub_idx) = kw_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        *votes.entry(sub_idx).or_default() += 1;
+                    }
+                    let prop_pick = prop_best[ref_idx];
+                    if prop_pick.score >= PROP_FLOOR
+                        && let Some(sub_idx) = prop_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        *votes.entry(sub_idx).or_default() += 1;
+                    }
+                    if let Some((&sub_idx, &count)) = votes.iter().max_by_key(|(_, c)| *c)
+                        && count >= 2
+                    {
+                        pick = Some(sub_idx);
+                        rescued_consensus += 1;
+                    }
+                }
                 pinned.push(pick);
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
