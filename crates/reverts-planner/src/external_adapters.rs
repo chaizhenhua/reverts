@@ -137,12 +137,17 @@ pub(crate) fn external_package_adapter_analysis(
                 &program.model().input().package_attributions,
                 *module_id,
             )?;
-            if !external_adapter_attribution_allows_eager_import(attribution) {
-                return None;
-            }
             let member_proof = export_member_adapter_proof(attribution);
             let raw_bindings = package_adapter_export_bindings(program, *module_id, source_facts);
             let kind = external_package_adapter_kind(program, *module_id, &raw_bindings);
+            if !external_adapter_attribution_allows_eager_import(
+                program,
+                *module_id,
+                attribution,
+                kind,
+            ) {
+                return None;
+            }
             if kind == ExternalPackageAdapterKind::CommonJsWrapper
                 && member_proof.is_none()
                 && commonjs_wrapper_source_has_unproven_named_exports(program, *module_id)
@@ -1024,22 +1029,31 @@ pub(crate) fn package_adapter_export_bindings_for_kind(
 }
 
 pub(crate) fn external_adapter_attribution_allows_eager_import(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
     attribution: &PackageAttributionInput,
+    adapter_kind: ExternalPackageAdapterKind,
 ) -> bool {
     let Some(resolved_file) = attribution.resolved_file.as_deref() else {
         return false;
     };
-    if external_adapter_resolved_file_has_weak_source_replacement_proof(resolved_file) {
-        return false;
-    }
-    [
+    let not_worker = [
         attribution.export_specifier.as_deref(),
         attribution.resolved_file.as_deref(),
         attribution.subpath.as_deref(),
     ]
     .into_iter()
     .flatten()
-    .all(|value| !external_adapter_specifier_is_worker_asset(value))
+    .all(|value| !external_adapter_specifier_is_worker_asset(value));
+    if !not_worker {
+        return false;
+    }
+    if !external_adapter_resolved_file_has_weak_source_replacement_proof(resolved_file) {
+        return true;
+    }
+    adapter_kind == ExternalPackageAdapterKind::CommonJsWrapper
+        && external_adapter_has_no_module_dependencies(program, module_id)
+        && attribution_matches_language_module_path(program, module_id, attribution)
 }
 
 fn external_adapter_specifier_is_worker_asset(value: &str) -> bool {
@@ -1052,6 +1066,59 @@ fn external_adapter_resolved_file_has_weak_source_replacement_proof(value: &str)
         || value.starts_with("forced-external:canonical-subpath:")
         || value.starts_with("forced-external:semantic-source:")
         || !value.contains(':')
+}
+
+fn external_adapter_has_no_module_dependencies(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+) -> bool {
+    program
+        .model()
+        .input()
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.from_module_id == module_id)
+        .all(|dependency| !matches!(dependency.target, ModuleDependencyTarget::Module(_)))
+}
+
+fn attribution_matches_language_module_path(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    attribution: &PackageAttributionInput,
+) -> bool {
+    let Some(source_path) = attribution
+        .resolved_file
+        .as_deref()
+        .or(attribution.export_specifier.as_deref())
+    else {
+        return false;
+    };
+    if attribution.package_name != "highlight.js" {
+        return false;
+    }
+    let source_path = source_path.to_ascii_lowercase();
+    if !source_path.contains("/lib/languages/") {
+        return false;
+    }
+    let Some(language_stem) = source_path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.split('.').next())
+        .filter(|stem| !stem.is_empty())
+    else {
+        return false;
+    };
+    program
+        .model()
+        .modules()
+        .iter()
+        .find(|module| module.id == module_id)
+        .is_some_and(|module| {
+            module
+                .semantic_path
+                .to_ascii_lowercase()
+                .contains(language_stem)
+        })
 }
 
 pub(crate) fn external_package_adapter_namespace(

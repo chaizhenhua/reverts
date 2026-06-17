@@ -5,12 +5,12 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use reverts_input::sqlite::load_project_bundle_from_sqlite;
 use reverts_pipeline::generate_project_from_input;
 
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
 use crate::format_audit_findings;
+use crate::input_externalization::load_project_bundle_with_verified_externalization_hints;
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -37,8 +37,9 @@ impl GenerateProjectV2Args {
 }
 
 pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
-    let input = load_project_bundle_from_sqlite(&args.input, args.project_id)
-        .map_err(CliRunError::LoadInput)?;
+    let input =
+        load_project_bundle_with_verified_externalization_hints(&args.input, args.project_id)
+            .map_err(CliRunError::LoadInput)?;
     let run = generate_project_from_input(input).map_err(CliRunError::Pipeline)?;
 
     // Only errors block writing the output. Warnings (e.g. duplicate

@@ -6067,18 +6067,119 @@ fn external_adapter_preserves_plain_package_cache_source_hint() {
 
 #[test]
 fn external_adapter_preserves_canonical_subpath_hint_without_equivalence_proof() {
-    let attribution = PackageAttributionInput::accepted_external(
-        ModuleId(2),
-        "fixture-package",
-        "1.0.0",
-        "fixture-package/unsafe/internal.js",
-    )
-    .with_resolved_file("forced-external:canonical-subpath:fixture-package@1.0.0/internal.js");
+    let planner = ImportExportPlanner;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some("packageInit();".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some("var packageInit = U((exports, module) => { module.exports = 1; });".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "packageInit",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package/unsafe/internal.js",
+        )
+        .with_resolved_file("forced-external:canonical-subpath:fixture-package@1.0.0/internal.js"),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
 
     assert!(
-        !super::external_adapters::external_adapter_attribution_allows_eager_import(&attribution),
+        !super::PlannerAnalysis::from_program(&enriched)
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
         "canonical subpath hints prove a possible import path, not adapter source equivalence"
     );
+    let source = planned_source(
+        &planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize"),
+        "modules/package.ts",
+    );
+    assert!(!source.contains("external_fixture_package"));
+}
+
+#[test]
+fn external_adapter_allows_self_contained_language_module_hint() {
+    let planner = ImportExportPlanner;
+    let app_source = "var value = mathematica();\nexport { value };\n";
+    let package_source = "var mathematica = U((exports, module) => { module.exports = function() { return {}; }; });";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "app.js",
+        Some(app_source.to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "mathematica",
+            "modules/highlightjs/mathematica.ts",
+            "highlight.js",
+            Some("10.7.3".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions.push(
+        PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "highlight.js",
+            "10.7.3",
+            "highlight.js/lib/languages/mathematica.js",
+        )
+        .with_resolved_file("highlight.js@10.7.3/lib/languages/mathematica.js"),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(1),
+        target: ModuleDependencyTarget::Module(ModuleId(2)),
+    });
+    let enriched = enriched_from_rows(rows);
+
+    assert!(
+        super::PlannerAnalysis::from_program(&enriched)
+            .external_package_adapters
+            .contains_key(&ModuleId(2)),
+        "self-contained language package modules can use their matching package subpath"
+    );
+    let source = planned_source(
+        &planner
+            .plan_enriched_program(&enriched)
+            .expect("fixture should normalize"),
+        "modules/highlightjs/mathematica.ts",
+    );
+    assert!(source.contains("external_highlight_js"));
+    assert!(!source.contains("module.exports"));
 }
 
 #[test]

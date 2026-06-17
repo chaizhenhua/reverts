@@ -10,7 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use reverts_analyze::enrich_program;
-use reverts_input::sqlite::load_project_bundle_from_sqlite;
 use reverts_input::{
     InputBundle, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode,
@@ -29,6 +28,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use crate::args::RuntimeInventoryArgs;
 use crate::collect_sqlite_rows;
 use crate::errors::{CliRunError, RuntimeInventoryError};
+use crate::input_externalization::load_project_bundle_with_verified_externalization_hints;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInventoryOutcome {
@@ -465,8 +465,11 @@ pub fn runtime_inventory_from_sqlite(
             continue;
         }
 
-        let input = load_project_bundle_from_sqlite(args.input.as_path(), selection.project_id)
-            .map_err(RuntimeInventoryError::LoadInput)?;
+        let input = load_project_bundle_with_verified_externalization_hints(
+            args.input.as_path(),
+            selection.project_id,
+        )
+        .map_err(RuntimeInventoryError::LoadInput)?;
         let source_blocker_input = args.package_source_blockers.then(|| input.clone());
         let runtime_package_ownership = args
             .runtime_attribution

@@ -11,6 +11,7 @@ use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_matcher::{
     ModuleMatchStrategy, PackageMatch, PackageSource, VersionedPackageMatchReport,
+    package_source_normalized_hash,
 };
 use reverts_pipeline::{
     EmittedAsset, EmittedFile, RuntimeDependency, RuntimeSetterMigrationBlockerReason,
@@ -26,6 +27,7 @@ use super::commands::runtime_inventory::{
     runtime_module_owner_label, runtime_original_name_owners_by_binding,
     runtime_source_span_owner_label_for_range,
 };
+use super::input_externalization::promote_verified_externalization_hints;
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
     package_source_elimination_stats_for_report, source_eliminated_package_modules_for_report,
@@ -434,6 +436,73 @@ fn package_source_blocker_report_groups_preserved_package_source() {
             .get("pkg@1.0.0")
             .map(|bucket| bucket.files),
         Some(1)
+    );
+}
+
+#[test]
+fn verified_externalization_hints_promote_dependency_free_attributions() {
+    let package_source =
+        "var init = (() => { let cached; return () => cached ||= { ok: true }; })();";
+    let normalized_source_hash =
+        package_source_normalized_hash("pkg@1.0.0/index.js", package_source)
+            .expect("source should normalize");
+    let connection = Connection::open_in_memory().expect("open db");
+    connection
+        .execute(
+            r"
+            CREATE TABLE package_externalization_hints (
+                package_name TEXT NOT NULL,
+                package_version TEXT NOT NULL,
+                entry_path TEXT NOT NULL,
+                export_specifier TEXT NOT NULL,
+                normalized_source_hash TEXT NOT NULL
+            )
+            ",
+            [],
+        )
+        .expect("create hints");
+    connection
+        .execute(
+            r"
+            INSERT INTO package_externalization_hints
+                (package_name, package_version, entry_path, export_specifier, normalized_source_hash)
+            VALUES ('pkg', '1.0.0', 'index.js', 'pkg', ?1)
+            ",
+            params![normalized_source_hash],
+        )
+        .expect("insert hint");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "package.js",
+        Some(package_source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "init",
+            "modules/pkg.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(10),
+            "pkg",
+            "1.0.0",
+            "pkg",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted =
+        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
+
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        input.package_attributions[0].resolved_file.as_deref(),
+        Some("normalized-source-export:pkg@1.0.0/index.js")
     );
 }
 

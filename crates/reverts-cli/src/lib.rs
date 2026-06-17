@@ -2,6 +2,7 @@ mod args;
 mod commands;
 mod errors;
 mod help;
+mod input_externalization;
 mod package_match_usecase;
 mod package_source_workflow;
 mod persistence;
