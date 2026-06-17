@@ -111,6 +111,15 @@ pub enum MatchStrategy {
     /// it. Recovers near-miss bag-jaccard modules that the orthogonal
     /// axes (which scoring noise affects independently) still see clearly.
     BagJaccardRescued,
+    /// End-to-end composite — what production naming should run.
+    /// Step 1: `bag-jaccard-rescued` produces high-recall module pairs
+    /// (+ orthogonal-signal rescues). Step 2: feeds those pairs to
+    /// `module-pinned-function-tier` so per-function name transfer
+    /// happens inside the candidate-restricted bucket. Reports both
+    /// module-level recall and function-level naming coverage in one go.
+    /// Also enforces category-respect (cross-category pairs are
+    /// dropped before pinning).
+    Composite,
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +498,100 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                     name, above, signal_thresholds[i]
                 );
             }
+            print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
+            (best_per_ref, None)
+        }
+        MatchStrategy::Composite => {
+            // Step 1: rescued pairing. Same logic as the standalone
+            // `bag-jaccard-rescued` strategy, but with a category-respect
+            // filter so cross-category pairings (application ↔ package
+            // etc.) get dropped before we pin functions inside them.
+            let bag_context = build_scoring_context(
+                &ref_bags,
+                &sub_bags,
+                SimilarityMetric::Jaccard,
+                AxisCombiner::Mean,
+                true,
+                false,
+            );
+            let bag_best = score_best_subjects_with(&bag_context, &ref_bags, &sub_bags);
+            let str_best = score_via_string_literal(&ref_fps, &sub_fps);
+            let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
+            const BAG_ACCEPT: f64 = 0.20;
+            const STR_RESCUE: f64 = 0.50;
+            const KW_RESCUE: f64 = 0.90;
+
+            let mut pinned: Vec<Option<usize>> = Vec::with_capacity(ref_modules.len());
+            let mut rescued_str = 0usize;
+            let mut rescued_kw = 0usize;
+            let mut dropped_cross_category = 0usize;
+            let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
+                ref_modules[ref_idx].category == sub_modules[sub_idx].category
+                    || ref_modules[ref_idx].category.is_empty()
+                    || sub_modules[sub_idx].category.is_empty()
+            };
+            for ref_idx in 0..ref_modules.len() {
+                let mut pick: Option<usize> = None;
+                let bag = bag_best[ref_idx];
+                if bag.score >= BAG_ACCEPT
+                    && let Some(sub_idx) = bag.subject_idx
+                {
+                    if category_ok(ref_idx, sub_idx) {
+                        pick = Some(sub_idx);
+                    } else {
+                        dropped_cross_category += 1;
+                    }
+                }
+                if pick.is_none() {
+                    let str_pick = str_best[ref_idx];
+                    if str_pick.score >= STR_RESCUE
+                        && let Some(sub_idx) = str_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_str += 1;
+                    }
+                }
+                if pick.is_none() {
+                    let kw_pick = kw_best[ref_idx];
+                    if kw_pick.score >= KW_RESCUE
+                        && let Some(sub_idx) = kw_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_kw += 1;
+                    }
+                }
+                pinned.push(pick);
+            }
+            let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
+            println!(
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw}, cross-category-dropped={dropped_cross_category}",
+                pin_hits,
+                ref_modules.len(),
+                pct(pin_hits, ref_modules.len())
+            );
+
+            // Step 2: module-pinned function tier on the pinned set.
+            let func_report = score_via_module_pinned_function_tier(&ref_fps, &sub_fps, &pinned);
+            let best_per_ref: Vec<BestMatch> = pinned
+                .iter()
+                .map(|sub_idx| BestMatch {
+                    subject_idx: *sub_idx,
+                    score: if sub_idx.is_some() { 1.0 } else { 0.0 },
+                    axis: None,
+                })
+                .collect();
+            let recall = summarise_recall(&best_per_ref, threshold);
+            println!(
+                "[composite (rescued pairing → module-pinned function tier)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_tier_breakdown(&func_report.tier_counts);
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
             (best_per_ref, None)
         }
