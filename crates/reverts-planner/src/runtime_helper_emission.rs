@@ -229,6 +229,16 @@ pub(crate) fn emit_runtime_helper_files(
                 helper_closure.source.as_str(),
                 &adapter_owned_runtime_bindings,
             );
+            helper_closure.source = strip_runtime_snippet_sources(
+                helper_closure.source.as_str(),
+                prelude,
+                &adapter_owned_runtime_bindings,
+            );
+            helper_closure.source = strip_runtime_namespace_export_sources(
+                helper_closure.source.as_str(),
+                prelude,
+                &adapter_owned_runtime_bindings,
+            );
             for binding in &adapter_owned_runtime_bindings {
                 helper_closure.emitted_bindings.remove(binding);
             }
