@@ -1,23 +1,40 @@
 use std::collections::BTreeMap;
 
-use super::{AxisKind, Candidate, CfgKey, CorpusStats, ExactKey, FeatureKey, StructuralKey};
+use super::{
+    AxisKind, Candidate, CfgKey, CorpusStats, ExactKey, FeatureKey, PackageOwner, StructuralKey,
+};
 
-#[derive(Debug, Default)]
-pub struct FingerprintIndex {
-    exact: BTreeMap<ExactKey, Vec<Candidate>>,
-    cfg: BTreeMap<CfgKey, Vec<Candidate>>,
-    feature: BTreeMap<FeatureKey, Vec<Candidate>>,
-    structural: BTreeMap<StructuralKey, Vec<Candidate>>,
+#[derive(Debug, Clone)]
+pub struct FingerprintIndex<Owner> {
+    exact: BTreeMap<ExactKey, Vec<Candidate<Owner>>>,
+    cfg: BTreeMap<CfgKey, Vec<Candidate<Owner>>>,
+    feature: BTreeMap<FeatureKey, Vec<Candidate<Owner>>>,
+    structural: BTreeMap<StructuralKey, Vec<Candidate<Owner>>>,
     stats: CorpusStats,
 }
 
-impl FingerprintIndex {
+/// Convenience alias matching the package-matcher's historical signature.
+pub type PackageFingerprintIndex = FingerprintIndex<PackageOwner>;
+
+impl<Owner> Default for FingerprintIndex<Owner> {
+    fn default() -> Self {
+        Self {
+            exact: BTreeMap::new(),
+            cfg: BTreeMap::new(),
+            feature: BTreeMap::new(),
+            structural: BTreeMap::new(),
+            stats: CorpusStats::default(),
+        }
+    }
+}
+
+impl<Owner: Clone> FingerprintIndex<Owner> {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert_exact(&mut self, key: ExactKey, candidate: Candidate) {
+    pub fn insert_exact(&mut self, key: ExactKey, candidate: Candidate<Owner>) {
         *self
             .stats
             .axis_hash_frequencies
@@ -26,7 +43,7 @@ impl FingerprintIndex {
         self.exact.entry(key).or_default().push(candidate);
     }
 
-    pub fn insert_cfg(&mut self, key: CfgKey, candidate: Candidate) {
+    pub fn insert_cfg(&mut self, key: CfgKey, candidate: Candidate<Owner>) {
         *self
             .stats
             .axis_hash_frequencies
@@ -35,7 +52,7 @@ impl FingerprintIndex {
         self.cfg.entry(key).or_default().push(candidate);
     }
 
-    pub fn insert_feature(&mut self, key: FeatureKey, candidate: Candidate) {
+    pub fn insert_feature(&mut self, key: FeatureKey, candidate: Candidate<Owner>) {
         *self
             .stats
             .axis_hash_frequencies
@@ -44,7 +61,7 @@ impl FingerprintIndex {
         self.feature.entry(key).or_default().push(candidate);
     }
 
-    pub fn insert_structural(&mut self, key: StructuralKey, candidate: Candidate) {
+    pub fn insert_structural(&mut self, key: StructuralKey, candidate: Candidate<Owner>) {
         *self
             .stats
             .axis_hash_frequencies
@@ -54,25 +71,27 @@ impl FingerprintIndex {
     }
 
     #[must_use]
-    pub fn query_exact(&self, key: ExactKey) -> Vec<Candidate> {
+    pub fn query_exact(&self, key: ExactKey) -> Vec<Candidate<Owner>> {
         self.exact.get(&key).cloned().unwrap_or_default()
     }
 
     #[must_use]
-    pub fn query_cfg(&self, key: CfgKey) -> Vec<Candidate> {
+    pub fn query_cfg(&self, key: CfgKey) -> Vec<Candidate<Owner>> {
         self.cfg.get(&key).cloned().unwrap_or_default()
     }
 
     #[must_use]
-    pub fn query_feature(&self, key: FeatureKey) -> Vec<Candidate> {
+    pub fn query_feature(&self, key: FeatureKey) -> Vec<Candidate<Owner>> {
         self.feature.get(&key).cloned().unwrap_or_default()
     }
 
     #[must_use]
-    pub fn query_structural(&self, key: StructuralKey) -> Vec<Candidate> {
+    pub fn query_structural(&self, key: StructuralKey) -> Vec<Candidate<Owner>> {
         self.structural.get(&key).cloned().unwrap_or_default()
     }
+}
 
+impl<Owner> FingerprintIndex<Owner> {
     #[must_use]
     pub fn corpus_stats(&self) -> &CorpusStats {
         &self.stats
@@ -82,25 +101,27 @@ impl FingerprintIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PackageId;
+    use crate::{PackageCandidate, PackageId};
 
-    fn sample_candidate() -> Candidate {
-        Candidate {
-            package: PackageId {
-                name: "pkg".into(),
-                version: "1.0".into(),
+    fn sample_candidate() -> PackageCandidate {
+        PackageCandidate {
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "pkg".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "index.js".into(),
+                external_importable: true,
             },
-            variant_path: "index.js".into(),
             external_function_id: 1,
             matched_axis: AxisKind::Ast,
             matched_alternate: None,
-            external_importable: true,
         }
     }
 
     #[test]
     fn in_memory_index_inserts_and_queries_by_exact_key() {
-        let mut idx = FingerprintIndex::new();
+        let mut idx = PackageFingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -121,7 +142,7 @@ mod tests {
 
     #[test]
     fn in_memory_index_tracks_corpus_frequency() {
-        let mut idx = FingerprintIndex::new();
+        let mut idx = PackageFingerprintIndex::new();
         let key = ExactKey {
             param_count: 2,
             statement_count: 3,
@@ -135,7 +156,7 @@ mod tests {
 
     #[test]
     fn in_memory_index_returns_default_frequency_for_unseen_hash() {
-        let idx = FingerprintIndex::new();
+        let idx = PackageFingerprintIndex::new();
         assert_eq!(idx.corpus_stats().frequency(AxisKind::Ast, 999), 1);
     }
 }

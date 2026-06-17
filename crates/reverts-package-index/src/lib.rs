@@ -8,6 +8,17 @@ pub struct PackageId {
     pub version: String,
 }
 
+/// Per-package metadata carried by every candidate the package matcher
+/// stores in [`FingerprintIndex`]. Held inside `Candidate::owner` so other
+/// owners (cross-project module matching, future cross-bundle work) can
+/// share the same index machinery without inheriting package-only fields.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackageOwner {
+    pub package: PackageId,
+    pub variant_path: String,
+    pub external_importable: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ExactKey {
     pub param_count: u32,
@@ -34,15 +45,17 @@ pub struct StructuralKey {
     pub structural_anchor: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Candidate {
-    pub package: PackageId,
-    pub variant_path: String,
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Candidate<Owner> {
+    pub owner: Owner,
     pub external_function_id: u64,
     pub matched_axis: AxisKind,
     pub matched_alternate: Option<NormalizationPassId>,
-    pub external_importable: bool,
 }
+
+/// Concrete candidate type the package matcher uses everywhere; provided as
+/// an alias so existing callers do not need to thread a type parameter.
+pub type PackageCandidate = Candidate<PackageOwner>;
 
 #[derive(Debug, Default, Clone)]
 pub struct CorpusStats {
@@ -57,4 +70,4 @@ impl CorpusStats {
 }
 
 pub mod in_memory;
-pub use in_memory::FingerprintIndex;
+pub use in_memory::{FingerprintIndex, PackageFingerprintIndex};

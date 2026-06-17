@@ -20,7 +20,8 @@ use reverts_ir::{AxisHashes, AxisKind, ByteRange, FunctionFingerprint, FunctionI
 use reverts_js::parse_options_for;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_index::{
-    Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, PackageId, StructuralKey,
+    CfgKey, ExactKey, FeatureKey, PackageCandidate as Candidate,
+    PackageFingerprintIndex as FingerprintIndex, PackageId, PackageOwner, StructuralKey,
 };
 
 use crate::PackageSource;
@@ -92,7 +93,7 @@ pub fn match_with_cascade(
                         candidate,
                         confidence.clone(),
                     ));
-                    if candidate.external_importable {
+                    if candidate.owner.external_importable {
                         attributions
                             .push(build_attribution(*module_id, fn_id, candidate, confidence));
                     }
@@ -108,7 +109,7 @@ pub fn match_with_cascade(
                         cand,
                         confidence.clone(),
                     ));
-                    if cand.external_importable {
+                    if cand.owner.external_importable {
                         attributions.push(build_attribution(*module_id, fn_id, cand, confidence));
                     }
                     audit.push(
@@ -117,7 +118,7 @@ pub fn match_with_cascade(
                             "cascade function attribution accepted with low margin",
                         )
                         .with_module(module_id.0.to_string())
-                        .with_binding(cand.package.name.clone()),
+                        .with_binding(cand.owner.package.name.clone()),
                     );
                 }
                 AcceptanceDecision::Ambiguous { .. } => {
@@ -127,7 +128,7 @@ pub fn match_with_cascade(
                     let binding = assignment
                         .candidates
                         .first()
-                        .map(|m| m.candidate.package.name.clone())
+                        .map(|m| m.candidate.owner.package.name.clone())
                         .unwrap_or_default();
                     audit.push(
                         AuditFinding::error(
@@ -182,12 +183,14 @@ fn build_index(package_sources: &[PackageSource], audit: &mut AuditReport) -> Fi
         for fp in pkg_fps {
             let external_id = encode_function_id(&fp.id);
             let base_candidate = Candidate {
-                package: pkg_id.clone(),
-                variant_path: source.export_specifier.clone(),
+                owner: PackageOwner {
+                    package: pkg_id.clone(),
+                    variant_path: source.export_specifier.clone(),
+                    external_importable: source.external_importable,
+                },
                 external_function_id: external_id,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: source.external_importable,
             };
 
             // Exact key: primary AST hash.
@@ -319,12 +322,12 @@ fn build_ownership_match(
 ) -> CascadeOwnershipMatch {
     CascadeOwnershipMatch {
         module_id,
-        package_name: candidate.package.name.clone(),
-        package_version: candidate.package.version.clone(),
-        export_specifier: candidate.variant_path.clone(),
+        package_name: candidate.owner.package.name.clone(),
+        package_version: candidate.owner.package.version.clone(),
+        export_specifier: candidate.owner.variant_path.clone(),
         function_span: fn_id.span,
         confidence,
-        external_importable: candidate.external_importable,
+        external_importable: candidate.owner.external_importable,
     }
 }
 
@@ -336,9 +339,9 @@ fn build_attribution(
 ) -> PackageAttributionInput {
     PackageAttributionInput::accepted_external(
         module_id,
-        candidate.package.name.as_str(),
-        candidate.package.version.as_str(),
-        candidate.variant_path.as_str(),
+        candidate.owner.package.name.as_str(),
+        candidate.owner.package.version.as_str(),
+        candidate.owner.variant_path.as_str(),
     )
     .with_function_span(fn_id.span)
     .with_confidence(confidence)

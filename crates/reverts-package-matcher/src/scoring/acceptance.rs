@@ -92,21 +92,23 @@ mod tests {
     use reverts_ir::AxisKind;
 
     use super::*;
-    use reverts_package_index::{Candidate, PackageId};
+    use reverts_package_index::{PackageCandidate as Candidate, PackageId, PackageOwner};
 
     fn fn_match(tier: MatchTier, top_score: f64) -> FunctionMatch {
         FunctionMatch {
             tier,
             candidate: Candidate {
-                package: PackageId {
-                    name: "p".into(),
-                    version: "1.0".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "p".into(),
+                        version: "1.0".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "i.js".into(),
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
             margin: 1.0,
             top_score,

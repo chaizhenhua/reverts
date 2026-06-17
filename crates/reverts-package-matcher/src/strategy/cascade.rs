@@ -1,5 +1,5 @@
 use reverts_ir::{FunctionFingerprint, FunctionId};
-use reverts_package_index::FingerprintIndex;
+use reverts_package_index::PackageFingerprintIndex as FingerprintIndex;
 
 use crate::scoring::{
     FunctionMatch, assign_max_weight, try_exact, try_exact_alternate, try_feature_similarity,
@@ -72,14 +72,14 @@ pub struct GlobalAssignment {
 
 impl GlobalAssignment {
     /// The package name of the Hungarian-chosen candidate, if any. Equivalent
-    /// to `self.chosen.as_ref().map(|m| m.candidate.package.name.as_str())`
+    /// to `self.chosen.as_ref().map(|m| m.candidate.owner.package.name.as_str())`
     /// but reads as a fact rather than a chain — call sites use this to
     /// filter assignments by package.
     #[must_use]
     pub fn chosen_package_name(&self) -> Option<&str> {
         self.chosen
             .as_ref()
-            .map(|m| m.candidate.package.name.as_str())
+            .map(|m| m.candidate.owner.package.name.as_str())
     }
 }
 
@@ -117,7 +117,7 @@ pub fn assign_globally(
     for assignment in &out {
         for cand in &assignment.candidates {
             let key = (
-                cand.candidate.package.clone(),
+                cand.candidate.owner.package.clone(),
                 cand.candidate.external_function_id,
             );
             col_index.entry(key.clone()).or_insert_with(|| {
@@ -144,7 +144,7 @@ pub fn assign_globally(
         let mut row_best_by_col = std::collections::BTreeMap::<usize, f64>::new();
         for (rank, cand) in assignment.candidates.iter().enumerate() {
             let key = (
-                cand.candidate.package.clone(),
+                cand.candidate.owner.package.clone(),
                 cand.candidate.external_function_id,
             );
             if let Some(&col) = col_index.get(&key) {
@@ -243,7 +243,8 @@ fn choose_global_assignment(
         .candidates
         .iter()
         .find(|m| {
-            m.candidate.package == key_pair.0 && m.candidate.external_function_id == key_pair.1
+            m.candidate.owner.package == key_pair.0
+                && m.candidate.external_function_id == key_pair.1
         })
         .cloned();
     out[row].chosen = chosen;
@@ -257,7 +258,8 @@ mod tests {
         NormalizationPassId,
     };
     use reverts_package_index::{
-        Candidate, ExactKey, FeatureKey, FingerprintIndex, PackageId, StructuralKey,
+        ExactKey, FeatureKey, PackageCandidate as Candidate,
+        PackageFingerprintIndex as FingerprintIndex, PackageId, PackageOwner, StructuralKey,
     };
 
     use crate::scoring::{
@@ -292,15 +294,17 @@ mod tests {
         idx.insert_exact(
             key,
             Candidate {
-                package: PackageId {
-                    name: "lodash".into(),
-                    version: "4.17.21".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "lodash".into(),
+                        version: "4.17.21".into(),
+                    },
+                    variant_path: "index.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "index.js".into(),
                 external_function_id: 7,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 
@@ -314,7 +318,7 @@ mod tests {
 
         let m = match_function(&fp, &idx).expect("match");
         assert_eq!(m.tier, MatchTier::Exact);
-        assert_eq!(m.candidate.package.name, "lodash");
+        assert_eq!(m.candidate.owner.package.name, "lodash");
     }
 
     #[test]
@@ -329,15 +333,17 @@ mod tests {
             idx.insert_exact(
                 key,
                 Candidate {
-                    package: PackageId {
-                        name: pkg.into(),
-                        version: "1".into(),
+                    owner: PackageOwner {
+                        package: PackageId {
+                            name: pkg.into(),
+                            version: "1".into(),
+                        },
+                        variant_path: "i.js".into(),
+                        external_importable: true,
                     },
-                    variant_path: "i.js".into(),
                     external_function_id: fid,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
         }
@@ -365,15 +371,17 @@ mod tests {
                 ast_hash: 222,
             },
             Candidate {
-                package: PackageId {
-                    name: "p".into(),
-                    version: "1".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "p".into(),
+                        version: "1".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "i.js".into(),
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 
@@ -407,15 +415,17 @@ mod tests {
     fn structural_anchored_requires_cfg_and_anchor_overlap() {
         let mut idx = FingerprintIndex::new();
         let candidate = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
-            external_importable: true,
         };
         idx.insert_cfg(
             reverts_package_index::CfgKey {
@@ -458,15 +468,17 @@ mod tests {
                 cfg_hash: 7,
             },
             Candidate {
-                package: PackageId {
-                    name: "p".into(),
-                    version: "1".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "p".into(),
+                        version: "1".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "i.js".into(),
                 external_function_id: 1,
                 matched_axis: AxisKind::Cfg,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
         // No insert_feature — anchor side empty in index
@@ -489,15 +501,17 @@ mod tests {
     fn feature_similarity_accepts_high_jaccard_candidate() {
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "lodash".into(),
-                version: "4.17".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "lodash".into(),
+                    version: "4.17".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 9,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
-            external_importable: true,
         };
         // Insert under callee_set (the primary distinctive axis)
         idx.insert_feature(
@@ -572,15 +586,17 @@ mod tests {
     fn feature_similarity_rejects_low_jaccard() {
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 1,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
-            external_importable: true,
         };
         idx.insert_feature(
             FeatureKey {
@@ -626,15 +642,17 @@ mod tests {
                 structural_anchor: 77,
             },
             Candidate {
-                package: PackageId {
-                    name: "p".into(),
-                    version: "1".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "p".into(),
+                        version: "1".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "i.js".into(),
                 external_function_id: 1,
                 matched_axis: AxisKind::StructuralAnchor,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 
@@ -663,15 +681,17 @@ mod tests {
                     structural_anchor: 77,
                 },
                 Candidate {
-                    package: PackageId {
-                        name: format!("p{i}"),
-                        version: "1".into(),
+                    owner: PackageOwner {
+                        package: PackageId {
+                            name: format!("p{i}"),
+                            version: "1".into(),
+                        },
+                        variant_path: "i.js".into(),
+                        external_importable: true,
                     },
-                    variant_path: "i.js".into(),
                     external_function_id: i,
                     matched_axis: AxisKind::StructuralAnchor,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
         }
@@ -714,12 +734,14 @@ mod tests {
                 ast_hash: 123,
             },
             Candidate {
-                package: pkg_top.clone(),
-                variant_path: "i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_top.clone(),
+                    variant_path: "i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
         idx.insert_cfg(
@@ -728,12 +750,14 @@ mod tests {
                 cfg_hash: 456,
             },
             Candidate {
-                package: pkg_runner.clone(),
-                variant_path: "i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_runner.clone(),
+                    variant_path: "i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: 2,
                 matched_axis: AxisKind::Cfg,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
         idx.insert_feature(
@@ -743,12 +767,14 @@ mod tests {
                 hash: 789,
             },
             Candidate {
-                package: pkg_runner.clone(),
-                variant_path: "i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_runner.clone(),
+                    variant_path: "i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: 2,
                 matched_axis: AxisKind::LiteralAnchor,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 
@@ -771,7 +797,7 @@ mod tests {
             .as_ref()
             .expect("Hungarian must pick a winner");
         assert_eq!(chosen.tier, MatchTier::Exact);
-        assert_eq!(chosen.candidate.package.name, "exactpkg");
+        assert_eq!(chosen.candidate.owner.package.name, "exactpkg");
         assert_eq!(
             out[0].candidates.len(),
             1,
@@ -809,12 +835,14 @@ mod tests {
                     ast_hash: 1000 + slot,
                 },
                 Candidate {
-                    package: pkg.clone(),
-                    variant_path: "i.js".into(),
+                    owner: PackageOwner {
+                        package: pkg.clone(),
+                        variant_path: "i.js".into(),
+                        external_importable: true,
+                    },
                     external_function_id: fid,
                     matched_axis: AxisKind::Ast,
                     matched_alternate: None,
-                    external_importable: true,
                 },
             );
         }
@@ -881,12 +909,14 @@ mod tests {
                 ast_hash: 100,
             },
             Candidate {
-                package: pkg_a.clone(),
-                variant_path: "i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_a.clone(),
+                    variant_path: "i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: 0,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
         // fp[1] matches pkg_b at ast=200
@@ -897,12 +927,14 @@ mod tests {
                 ast_hash: 200,
             },
             Candidate {
-                package: pkg_b.clone(),
-                variant_path: "i.js".into(),
+                owner: PackageOwner {
+                    package: pkg_b.clone(),
+                    variant_path: "i.js".into(),
+                    external_importable: true,
+                },
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 

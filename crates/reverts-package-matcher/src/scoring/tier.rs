@@ -1,12 +1,12 @@
 use reverts_ir::{AxisHashes, AxisKind, FunctionFingerprint, MatchTier, NormalizationPassId};
 use reverts_package_index::{
-    Candidate, CfgKey, ExactKey, FeatureKey, FingerprintIndex, StructuralKey,
+    CfgKey, ExactKey, FeatureKey, PackageCandidate, PackageFingerprintIndex, StructuralKey,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionMatch {
     pub tier: MatchTier,
-    pub candidate: Candidate,
+    pub candidate: PackageCandidate,
     pub margin: f64,
     pub top_score: f64,
     pub runner_up_score: f64,
@@ -27,7 +27,10 @@ pub struct FunctionMatch {
 }
 
 #[must_use]
-pub fn try_exact(fp: &FunctionFingerprint, index: &FingerprintIndex) -> Option<FunctionMatch> {
+pub fn try_exact(
+    fp: &FunctionFingerprint,
+    index: &PackageFingerprintIndex,
+) -> Option<FunctionMatch> {
     exact_for_axes(
         fp.param_count,
         fp.statement_count,
@@ -42,7 +45,7 @@ fn exact_for_axes(
     param_count: u32,
     statement_count: u32,
     ast_hash: u64,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -70,7 +73,7 @@ fn first_alternate_match(
 #[must_use]
 pub fn try_exact_alternate(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |statement_count, axes, pass| {
         exact_for_axes(
@@ -87,7 +90,7 @@ pub fn try_exact_alternate(
 #[must_use]
 pub fn try_structural_anchored(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     structural_anchored_for_axes(
         fp.param_count,
@@ -108,7 +111,7 @@ pub fn try_structural_anchored(
 #[must_use]
 pub fn try_structural_anchored_alternate(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_anchored_for_axes(
@@ -124,7 +127,7 @@ pub fn try_structural_anchored_alternate(
 fn structural_anchored_for_axes(
     param_count: u32,
     axes: &AxisHashes,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -155,7 +158,7 @@ fn structural_anchored_for_axes(
         return None;
     }
 
-    let surviving: Vec<(Candidate, Vec<AxisKind>)> = cfg_candidates
+    let surviving: Vec<(PackageCandidate, Vec<AxisKind>)> = cfg_candidates
         .into_iter()
         .filter_map(|c| {
             let overlap_axes: Vec<AxisKind> = fp_anchors
@@ -169,7 +172,7 @@ fn structural_anchored_for_axes(
                         })
                         .iter()
                         .any(|cand| {
-                            cand.package == c.package
+                            cand.owner.package == c.owner.package
                                 && cand.external_function_id == c.external_function_id
                         })
                 })
@@ -185,7 +188,8 @@ fn structural_anchored_for_axes(
 
     let mut unique = surviving;
     unique.dedup_by(|a, b| {
-        a.0.package == b.0.package && a.0.external_function_id == b.0.external_function_id
+        a.0.owner.package == b.0.owner.package
+            && a.0.external_function_id == b.0.external_function_id
     });
     if unique.len() != 1 {
         return None;
@@ -212,7 +216,7 @@ fn structural_anchored_for_axes(
 #[must_use]
 pub fn try_feature_similarity(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     feature_similarity_for_axes(
         fp.param_count,
@@ -232,7 +236,7 @@ pub fn try_feature_similarity(
 #[must_use]
 pub fn try_feature_similarity_alternate(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         feature_similarity_for_axes(
@@ -248,7 +252,7 @@ pub fn try_feature_similarity_alternate(
 fn feature_similarity_for_axes(
     param_count: u32,
     axes: &AxisHashes,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -269,7 +273,7 @@ fn feature_similarity_for_axes(
 
     let remaining = collect_remaining_axes(axes, primary_axis);
 
-    let mut scored: Vec<(Candidate, f64, Vec<AxisKind>)> = cands
+    let mut scored: Vec<(PackageCandidate, f64, Vec<AxisKind>)> = cands
         .into_iter()
         .map(|cand| {
             let mut overlap_axes = Vec::new();
@@ -280,7 +284,8 @@ fn feature_similarity_for_axes(
                     hash: *hash,
                 });
                 if cand_hits.iter().any(|c| {
-                    c.package == cand.package && c.external_function_id == cand.external_function_id
+                    c.owner.package == cand.owner.package
+                        && c.external_function_id == cand.external_function_id
                 }) {
                     overlap_axes.push(*axis);
                 }
@@ -417,7 +422,7 @@ const STRUCTURAL_FREQUENCY_LIMIT_ALT: u32 = 75;
 #[must_use]
 pub fn try_structural_only(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     structural_only_for_anchor(
         fp.param_count,
@@ -438,7 +443,7 @@ pub fn try_structural_only(
 #[must_use]
 pub fn try_structural_only_alternate(
     fp: &FunctionFingerprint,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
 ) -> Option<FunctionMatch> {
     first_alternate_match(fp, |_statement_count, axes, pass| {
         structural_only_for_anchor(
@@ -454,7 +459,7 @@ pub fn try_structural_only_alternate(
 fn structural_only_for_anchor(
     param_count: u32,
     structural_anchor: u64,
-    index: &FingerprintIndex,
+    index: &PackageFingerprintIndex,
     tier: MatchTier,
     matched_alternate: Option<NormalizationPassId>,
 ) -> Option<FunctionMatch> {
@@ -480,7 +485,7 @@ fn structural_only_for_anchor(
 
     let mut distinct = cands.clone();
     distinct.dedup_by(|a, b| {
-        a.package == b.package && a.external_function_id == b.external_function_id
+        a.owner.package == b.owner.package && a.external_function_id == b.external_function_id
     });
 
     if distinct.len() == 1 {
@@ -500,7 +505,7 @@ fn structural_only_for_anchor(
 }
 
 pub(crate) fn pick_unique(
-    mut candidates: Vec<Candidate>,
+    mut candidates: Vec<PackageCandidate>,
     tier: MatchTier,
     alt: Option<NormalizationPassId>,
     matched_axes: Vec<AxisKind>,
@@ -510,10 +515,11 @@ pub(crate) fn pick_unique(
     }
     // Sort by (package name, version) so duplicates are adjacent.
     candidates.sort_by(|a, b| {
-        a.package
+        a.owner
+            .package
             .name
-            .cmp(&b.package.name)
-            .then_with(|| a.package.version.cmp(&b.package.version))
+            .cmp(&b.owner.package.name)
+            .then_with(|| a.owner.package.version.cmp(&b.owner.package.version))
             .then_with(|| a.external_function_id.cmp(&b.external_function_id))
     });
     // Dedupe by (package NAME, external_function_id) — different versions
@@ -524,7 +530,8 @@ pub(crate) fn pick_unique(
     // wins, so the cascade tier should treat the package as uniquely
     // identified.
     candidates.dedup_by(|a, b| {
-        a.package.name == b.package.name && a.external_function_id == b.external_function_id
+        a.owner.package.name == b.owner.package.name
+            && a.external_function_id == b.external_function_id
     });
     if candidates.len() != 1 {
         return None;
@@ -545,7 +552,10 @@ pub(crate) fn pick_unique(
 mod tests {
     use super::*;
     use reverts_ir::{ByteRange, FunctionId, ModuleId};
-    use reverts_package_index::{FingerprintIndex, PackageId};
+    use reverts_package_index::{
+        PackageCandidate as Candidate, PackageFingerprintIndex as FingerprintIndex, PackageId,
+        PackageOwner,
+    };
 
     fn sample_axes() -> AxisHashes {
         AxisHashes {
@@ -568,15 +578,17 @@ mod tests {
     fn structural_anchored_records_all_overlapping_axes() {
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1.0".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
-            external_importable: true,
         };
         idx.insert_cfg(
             CfgKey {
@@ -633,15 +645,17 @@ mod tests {
         //     alternate fingerprint.
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1.0".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 33,
             matched_axis: AxisKind::CalleeSet,
             matched_alternate: None,
-            external_importable: true,
         };
         // Index the primary-axis (CalleeSet=99) and exactly one of the
         // remaining axes (LiteralAnchor=10) — half of the two-axis
@@ -747,15 +761,17 @@ mod tests {
         // Index a candidate keyed on a specific structural_anchor hash.
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1.0".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 9,
             matched_axis: AxisKind::StructuralAnchor,
             matched_alternate: None,
-            external_importable: true,
         };
         let alt_anchor: u64 = 4242;
         idx.insert_structural(
@@ -808,15 +824,17 @@ mod tests {
     fn structural_anchored_alternate_uses_alt_axes_when_primary_misses() {
         let mut idx = FingerprintIndex::new();
         let cand = Candidate {
-            package: PackageId {
-                name: "p".into(),
-                version: "1.0".into(),
+            owner: PackageOwner {
+                package: PackageId {
+                    name: "p".into(),
+                    version: "1.0".into(),
+                },
+                variant_path: "i.js".into(),
+                external_importable: true,
             },
-            variant_path: "i.js".into(),
             external_function_id: 1,
             matched_axis: AxisKind::Cfg,
             matched_alternate: None,
-            external_importable: true,
         };
         idx.insert_cfg(
             CfgKey {
@@ -888,15 +906,17 @@ mod tests {
                 ast_hash: 99,
             },
             Candidate {
-                package: PackageId {
-                    name: "p".into(),
-                    version: "1.0".into(),
+                owner: PackageOwner {
+                    package: PackageId {
+                        name: "p".into(),
+                        version: "1.0".into(),
+                    },
+                    variant_path: "i.js".into(),
+                    external_importable: true,
                 },
-                variant_path: "i.js".into(),
                 external_function_id: 1,
                 matched_axis: AxisKind::Ast,
                 matched_alternate: None,
-                external_importable: true,
             },
         );
 
