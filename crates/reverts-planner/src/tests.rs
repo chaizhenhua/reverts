@@ -5463,6 +5463,39 @@ fn strip_runtime_snippet_sources_preserves_template_blank_lines() {
 }
 
 #[test]
+fn migrated_entrypoint_callee_imports_owner_directly() {
+    let prelude = "var main;\n";
+    let body = "main = () => 'ok';\nexport { main };\n";
+    let tail = "main();\n";
+    let source = format!("{prelude}{body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + body.len()) as u32,
+            )),
+    );
+
+    let plan = plan_from_rows(rows);
+    let entry_source = planned_source(&plan, "modules/entry.ts");
+    let cli_source = planned_source(&plan, "cli.ts");
+
+    assert!(entry_source.contains("var main;"), "{entry_source}");
+    assert!(entry_source.contains("main = () => 'ok';"));
+    assert!(entry_source.contains("export { main };"));
+    assert!(cli_source.contains("import { main } from './modules/entry.js';"));
+    assert!(cli_source.contains("await main();"));
+    assert!(
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "entrypoint-only migrated callees should not keep a runtime helper barrel"
+    );
+}
+
+#[test]
 fn entrypoint_runtime_imports_adapter_required_package_bindings() {
     let planner = ImportExportPlanner;
     let prelude = "function main() { return packageInit(); }\n";

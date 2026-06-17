@@ -9,20 +9,29 @@
 
 use std::collections::BTreeSet;
 
+use reverts_ir::BindingName;
 use reverts_model::EnrichedProgram;
 
 use crate::relative_paths::relative_import_specifier;
+use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::statements::{named_import_statement, runtime_helpers_path};
-use crate::{EmitPlan, PlannedFile, runtime_entrypoint};
+use crate::{
+    EmitPlan, PlannedFile, module_output_path, runtime_entrypoint, runtime_entrypoint_side_effects,
+};
 
-pub(crate) fn emit_cli_entrypoint(program: &EnrichedProgram, plan: &mut EmitPlan) {
+pub(crate) fn emit_cli_entrypoint(
+    program: &EnrichedProgram,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+    plan: &mut EmitPlan,
+) {
     let Some((_prelude, entrypoint)) = runtime_entrypoint(program) else {
         return;
     };
     let mut file = PlannedFile::new("cli.ts");
     file.push_source("#!/usr/bin/env node");
-    let helper_path = runtime_helpers_path(entrypoint.source_file_id);
-    let specifier = relative_import_specifier("cli.ts", helper_path.as_str());
+    let import_path = entrypoint_direct_owner_path(program, runtime_var_migrations)
+        .unwrap_or_else(|| runtime_helpers_path(entrypoint.source_file_id));
+    let specifier = relative_import_specifier("cli.ts", import_path.as_str());
     let entrypoint_imports = BTreeSet::from([entrypoint.callee.clone()]);
     file.push_source(named_import_statement(
         entrypoint_imports.iter(),
@@ -31,4 +40,34 @@ pub(crate) fn emit_cli_entrypoint(program: &EnrichedProgram, plan: &mut EmitPlan
     file.push_source(format!("await {}();", entrypoint.callee.as_str()));
     crate::finalize_planned_file(&mut file);
     plan.push_file(file);
+}
+
+pub(crate) fn entrypoint_direct_owner_path(
+    program: &EnrichedProgram,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+) -> Option<String> {
+    let (prelude, entrypoint) = runtime_entrypoint(program)?;
+    if !runtime_entrypoint_side_effects(prelude, entrypoint).is_empty() {
+        return None;
+    }
+    let owner =
+        runtime_var_migrations.migrated_owner(entrypoint.source_file_id, &entrypoint.callee)?;
+    module_output_path(program, owner)
+}
+
+pub(crate) fn entrypoint_can_import_owner_directly(
+    program: &EnrichedProgram,
+    runtime_var_migrations: &RuntimeVarMigrationPlan,
+    source_file_id: u32,
+    callee: &BindingName,
+) -> bool {
+    let Some((prelude, entrypoint)) = runtime_entrypoint(program) else {
+        return false;
+    };
+    entrypoint.source_file_id == source_file_id
+        && entrypoint.callee == *callee
+        && runtime_entrypoint_side_effects(prelude, entrypoint).is_empty()
+        && runtime_var_migrations
+            .migrated_owner(source_file_id, callee)
+            .is_some()
 }

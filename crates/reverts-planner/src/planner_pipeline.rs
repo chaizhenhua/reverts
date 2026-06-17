@@ -87,7 +87,14 @@ impl PlanningPass for MarkEntrypointRuntimePass {
         context: &PlannerContext<'_>,
         state: &mut PlanningState,
     ) -> Result<(), PlanError> {
-        if let Some((_prelude, entrypoint)) = runtime_entrypoint(context.program()) {
+        if let Some((_prelude, entrypoint)) = runtime_entrypoint(context.program())
+            && !cli_entrypoint::entrypoint_can_import_owner_directly(
+                context.program(),
+                &state.runtime.runtime_var_migrations,
+                entrypoint.source_file_id,
+                &entrypoint.callee,
+            )
+        {
             state
                 .runtime_helpers
                 .mark_entrypoint(entrypoint.source_file_id, &entrypoint.callee);
@@ -135,7 +142,11 @@ impl PlanningPass for EmitCliEntrypointPass {
         context: &PlannerContext<'_>,
         state: &mut PlanningState,
     ) -> Result<(), PlanError> {
-        cli_entrypoint::emit_cli_entrypoint(context.program(), &mut state.plan);
+        cli_entrypoint::emit_cli_entrypoint(
+            context.program(),
+            &state.runtime.runtime_var_migrations,
+            &mut state.plan,
+        );
         Ok(())
     }
 }
