@@ -77,6 +77,13 @@ pub enum MatchStrategy {
     /// recall, so direct name transfer ratios jump (estimate from
     /// `print_function_naming_coverage` analysis: 3.5 % → ~40 %).
     ModulePinnedFunctionTier,
+    /// String-literal corpus overlap. Each module's source is scanned for
+    /// non-trivial string literals (>= 4 chars) and hashed into a per-
+    /// module corpus; pairs are scored by Jaccard over those corpora. The
+    /// signal is orthogonal to function fingerprints — bundlers very
+    /// rarely rewrite string contents — so it covers many modules that
+    /// AST/CFG-based scoring misses.
+    StringLiteral,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -338,6 +345,20 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             print_histogram(&recall.score_histogram, ref_modules.len());
             (best, None)
         }
+        MatchStrategy::StringLiteral => {
+            let best = score_via_string_literal(&ref_fps, &sub_fps);
+            let recall = summarise_recall(&best, threshold);
+            println!(
+                "[string_literal (orthogonal corpus)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                recall.matched,
+                ref_modules.len(),
+                pct(recall.matched, ref_modules.len()),
+                scoring_started.elapsed().as_secs_f64(),
+            );
+            print_histogram(&recall.score_histogram, ref_modules.len());
+            print_string_corpus_stats(&ref_fps, &sub_fps);
+            (best, None)
+        }
         MatchStrategy::ModulePinnedFunctionTier => {
             // Pass 1: bag-jaccard with the precision-friendly defaults to
             // pair ref modules with subject modules.
@@ -479,13 +500,15 @@ fn load_modules(
     Ok(out)
 }
 
-/// Per-module fingerprint payload: both the per-axis bag (used by the
-/// bag-Jaccard strategy) and the raw `FunctionFingerprint` list (used by
-/// the function-tier strategy that talks to [`FingerprintIndex`]). One
-/// pass over the source so both strategies see the same fingerprints.
+/// Per-module fingerprint payload: per-axis bag (bag-Jaccard strategy),
+/// raw `FunctionFingerprint` list (function-tier strategies via
+/// [`FingerprintIndex`]), and the per-module string-literal corpus
+/// (orthogonal axis: bundlers very rarely rewrite string contents).
+/// One pass over the source so every strategy sees the same inputs.
 struct ModuleFingerprints {
     bag: ModuleBag,
     raw: Vec<FunctionFingerprint>,
+    string_corpus: BTreeSet<u64>,
 }
 
 fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
@@ -499,6 +522,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
             out.push(ModuleFingerprints {
                 bag: ModuleBag::default(),
                 raw: Vec::new(),
+                string_corpus: BTreeSet::new(),
             });
             continue;
         };
@@ -511,13 +535,106 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleFingerprints> {
             out.push(ModuleFingerprints {
                 bag: ModuleBag::default(),
                 raw: Vec::new(),
+                string_corpus: BTreeSet::new(),
             });
             continue;
         };
         let module_id = ModuleId(u32::try_from(module.id).unwrap_or(u32::MAX));
         let raw = FunctionExtractor::fingerprint(module_id, slice);
         let bag = bag_from_fingerprints(&raw);
-        out.push(ModuleFingerprints { bag, raw });
+        let string_corpus = extract_string_corpus(slice);
+        out.push(ModuleFingerprints {
+            bag,
+            raw,
+            string_corpus,
+        });
+    }
+    out
+}
+
+/// Pull non-trivial string literals out of a JS/TS source slice. Bundler
+/// passes touch identifiers and AST shape but almost never rewrite the
+/// contents of `"…"`, `'…'`, or `` `…` `` — so the set of distinct
+/// `>=` 4-character strings is an orthogonal identity signal that
+/// survives minification, helper inlining, and CJS/ESM wrapping.
+///
+/// Cheap byte-walk implementation:
+/// * track which quote (if any) we are inside;
+/// * skip `\\` and `\"` style escapes;
+/// * skip template-literal interpolations (`${…}`) so we do not slurp
+///   expression text into the corpus;
+/// * emit each closed literal whose decoded byte length is >= 4 as a
+///   stable 64-bit hash via `reverts_ir::hash::fnv1a_hex`.
+fn extract_string_corpus(source: &str) -> BTreeSet<u64> {
+    let mut out = BTreeSet::new();
+    let bytes = source.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'/' && i + 1 < bytes.len() {
+            // Skip block / line comments — keeps the corpus from
+            // accidentally picking up comment-internal "strings".
+            match bytes[i + 1] {
+                b'/' => {
+                    i += 2;
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'*' => {
+                    i += 2;
+                    while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if b == b'"' || b == b'\'' || b == b'`' {
+            let quote = b;
+            let start = i + 1;
+            let mut j = start;
+            while j < bytes.len() {
+                let c = bytes[j];
+                if c == b'\\' {
+                    j += 2;
+                    continue;
+                }
+                if quote == b'`' && c == b'$' && j + 1 < bytes.len() && bytes[j + 1] == b'{' {
+                    // Skip template-literal expression block.
+                    let mut depth = 1usize;
+                    j += 2;
+                    while j < bytes.len() && depth > 0 {
+                        match bytes[j] {
+                            b'{' => depth += 1,
+                            b'}' => depth -= 1,
+                            _ => {}
+                        }
+                        j += 1;
+                    }
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == quote {
+                let literal = &source[start..j];
+                if literal.len() >= 4 {
+                    out.insert(reverts_ir::hash::fnv1a(literal.as_bytes()));
+                }
+                i = j + 1;
+                continue;
+            } else {
+                // Unterminated literal (truncated source slice) — bail.
+                break;
+            }
+        }
+        i += 1;
     }
     out
 }
@@ -918,6 +1035,89 @@ fn score_via_structural_bag(
             axis: None,
         })
         .collect()
+}
+
+/// Pair ref modules with subject modules by string-literal Jaccard. For
+/// each ref module, builds an inverted index over subject string corpora
+/// (string_hash → subject indexes), looks up each ref string, scores by
+/// `|A ∩ B| / |A ∪ B|`, picks max. O(ref_strings + ref × candidates)
+/// instead of O(ref × sub).
+fn score_via_string_literal(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    let mut by_string: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for &h in &m.string_corpus {
+            by_string.entry(h).or_default().push(sub_idx);
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.string_corpus.is_empty() {
+            continue;
+        }
+        let mut intersect_count: HashMap<usize, usize> = HashMap::new();
+        for &h in &m.string_corpus {
+            if let Some(subs) = by_string.get(&h) {
+                for &sub_idx in subs {
+                    *intersect_count.entry(sub_idx).or_default() += 1;
+                }
+            }
+        }
+        let mut best_score = 0.0_f64;
+        let mut best_sub = None;
+        for (&sub_idx, &intersect) in &intersect_count {
+            let union = m.string_corpus.len() + sub_fps[sub_idx].string_corpus.len() - intersect;
+            if union == 0 {
+                continue;
+            }
+            let score = intersect as f64 / union as f64;
+            if score > best_score {
+                best_score = score;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_score,
+            axis: None,
+        };
+    }
+    out
+}
+
+fn print_string_corpus_stats(ref_fps: &[ModuleFingerprints], sub_fps: &[ModuleFingerprints]) {
+    let ref_total: usize = ref_fps.iter().map(|m| m.string_corpus.len()).sum();
+    let ref_nonempty = ref_fps
+        .iter()
+        .filter(|m| !m.string_corpus.is_empty())
+        .count();
+    let sub_total: usize = sub_fps.iter().map(|m| m.string_corpus.len()).sum();
+    let sub_nonempty = sub_fps
+        .iter()
+        .filter(|m| !m.string_corpus.is_empty())
+        .count();
+    let ref_distinct: BTreeSet<u64> = ref_fps
+        .iter()
+        .flat_map(|m| m.string_corpus.iter().copied())
+        .collect();
+    let sub_distinct: BTreeSet<u64> = sub_fps
+        .iter()
+        .flat_map(|m| m.string_corpus.iter().copied())
+        .collect();
+    let shared = ref_distinct.intersection(&sub_distinct).count();
+    println!(
+        "  string-corpus stats: ref {} strings / {} modules ({} distinct); subject {} strings / {} modules ({} distinct); {} hashes shared across sides",
+        ref_total,
+        ref_nonempty,
+        ref_distinct.len(),
+        sub_total,
+        sub_nonempty,
+        sub_distinct.len(),
+        shared,
+    );
 }
 
 /// Module-pinned function-tier scoring. For each ref module that has a
