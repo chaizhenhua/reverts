@@ -537,10 +537,13 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let str_best = score_via_string_literal(&ref_fps, &sub_fps);
             let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
             let prop_best = score_via_property_name(&ref_fps, &sub_fps);
+            let rare_best = score_via_rare_ast_anchor(&ref_bags, &sub_bags);
             const BAG_ACCEPT: f64 = 0.20;
             const STR_RESCUE: f64 = 0.50;
             const KW_RESCUE: f64 = 0.90;
             const PROP_RESCUE: f64 = 0.40;
+            // ≥2 rare-AST hash hits on the same subject is a smoking gun.
+            const RARE_RESCUE: f64 = 2.0;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -552,6 +555,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_str = 0usize;
             let mut rescued_kw = 0usize;
             let mut rescued_prop = 0usize;
+            let mut rescued_rare = 0usize;
             let mut rescued_consensus = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
@@ -601,6 +605,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_prop += 1;
                     }
                 }
+                if pick.is_none() {
+                    let rare_pick = rare_best[ref_idx];
+                    if rare_pick.score >= RARE_RESCUE
+                        && let Some(sub_idx) = rare_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_rare += 1;
+                    }
+                }
                 // Consensus rescue: if ≥2 weak signals agree on the same
                 // subject, pin it. Each signal alone is noisy at low
                 // thresholds; agreement is the filter.
@@ -644,7 +658,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -2046,6 +2060,59 @@ fn score_via_property_name(
         out[ref_idx] = BestMatch {
             subject_idx: best_sub,
             score: best_score,
+            axis: None,
+        };
+    }
+    out
+}
+
+/// Rare-AST-anchor pin: walk each ref module's AST hashes, drop hashes
+/// shared by many subject modules (vendor/duplicate noise), and pin to
+/// the subject module that holds the most distinct rare hashes. Encodes
+/// "if you have a smoking-gun function, that pins the module".
+///
+/// Score is the count of rare-hash hits (not a Jaccard fraction) — the
+/// caller compares against a small absolute threshold.
+fn score_via_rare_ast_anchor(ref_bags: &[ModuleBag], sub_bags: &[ModuleBag]) -> Vec<BestMatch> {
+    // Subject-side inverted index: hash -> list of modules containing it.
+    let mut by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (sub_idx, bag) in sub_bags.iter().enumerate() {
+        if let Some(hashes) = bag.by_axis.get(&AxisKind::Ast) {
+            for &h in hashes {
+                by_hash.entry(h).or_default().push(sub_idx);
+            }
+        }
+    }
+    // A hash is "rare" when ≤ MAX_HOLDERS subject modules contain it.
+    // Tuned conservatively: this is the anchor threshold, not a Jaccard.
+    const MAX_HOLDERS: usize = 4;
+
+    let mut out = vec![BestMatch::default(); ref_bags.len()];
+    for (ref_idx, bag) in ref_bags.iter().enumerate() {
+        let Some(hashes) = bag.by_axis.get(&AxisKind::Ast) else {
+            continue;
+        };
+        let mut hits: HashMap<usize, usize> = HashMap::new();
+        for &h in hashes {
+            if let Some(holders) = by_hash.get(&h)
+                && holders.len() <= MAX_HOLDERS
+            {
+                for &sub_idx in holders {
+                    *hits.entry(sub_idx).or_default() += 1;
+                }
+            }
+        }
+        let mut best_count = 0usize;
+        let mut best_sub: Option<usize> = None;
+        for (&sub_idx, &c) in &hits {
+            if c > best_count {
+                best_count = c;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_count as f64,
             axis: None,
         };
     }
