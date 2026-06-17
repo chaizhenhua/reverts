@@ -540,6 +540,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let rare_best = score_via_rare_ast_anchor(&ref_bags, &sub_bags);
             let rare_struct_best =
                 score_via_rare_axis_anchor(&ref_bags, &sub_bags, AxisKind::StructuralAnchor);
+            let fn_first_best = score_via_function_first_pin(&ref_fps, &sub_fps);
             const BAG_ACCEPT: f64 = 0.20;
             // Tighter category check (no 'unknown' wildcard) allows a
             // lower bag-jaccard floor without absorbing cross-category
@@ -555,6 +556,9 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // to fake even across categories (vendored packages re-
             // classified between versions).
             const RARE_CROSS_CAT: f64 = 3.0;
+            // ≥2 function-tier exact votes from the same subject module
+            // is rock-solid module evidence (two distinct fns agreeing).
+            const FN_FIRST_RESCUE: f64 = 2.0;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -568,6 +572,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let mut rescued_prop = 0usize;
             let mut rescued_rare = 0usize;
             let mut rescued_band = 0usize;
+            let mut rescued_fn_first = 0usize;
             let mut rescued_consensus = 0usize;
             let mut rescued_cross_cat = 0usize;
             let mut dropped_cross_category = 0usize;
@@ -653,6 +658,19 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         rescued_rare += 1;
                     }
                 }
+                // Function-first pin: ≥2 function-tier votes converging on
+                // one subject module — direct body-level evidence, even
+                // when bag/string/keyword signals all failed.
+                if pick.is_none() {
+                    let fn_pick = fn_first_best[ref_idx];
+                    if fn_pick.score >= FN_FIRST_RESCUE
+                        && let Some(sub_idx) = fn_pick.subject_idx
+                        && category_ok(ref_idx, sub_idx)
+                    {
+                        pick = Some(sub_idx);
+                        rescued_fn_first += 1;
+                    }
+                }
                 // Cross-cat bypass: very strong rare-anchor evidence
                 // overrides the category-respect filter.
                 if pick.is_none() {
@@ -707,7 +725,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -2239,6 +2257,64 @@ fn print_string_corpus_stats(ref_fps: &[ModuleFingerprints], sub_fps: &[ModuleFi
         sub_distinct.len(),
         shared,
     );
+}
+
+/// Global function-tier pinning: build a single FingerprintIndex over
+/// every subject function (owner = subject module idx), run the
+/// match-cascade per ref function, and let unique winners cast a vote
+/// for their subject module. The ref module pins to the subject module
+/// with the most function-tier votes.
+///
+/// Captures the case where module-level signals (bag, str, prop, rare)
+/// are all weak yet individual function bodies still pair exactly.
+fn score_via_function_first_pin(
+    ref_fps: &[ModuleFingerprints],
+    sub_fps: &[ModuleFingerprints],
+) -> Vec<BestMatch> {
+    use reverts_package_matcher::{
+        try_exact, try_exact_alternate, try_structural_anchored, try_structural_anchored_alternate,
+        try_structural_only, try_structural_only_alternate,
+    };
+
+    let mut index: FingerprintIndex<ModuleOwner> = FingerprintIndex::new();
+    for (sub_idx, m) in sub_fps.iter().enumerate() {
+        for fp in &m.raw {
+            insert_function_into_index(&mut index, sub_idx, fp);
+        }
+    }
+
+    let mut out = vec![BestMatch::default(); ref_fps.len()];
+    for (ref_idx, m) in ref_fps.iter().enumerate() {
+        if m.raw.is_empty() {
+            continue;
+        }
+        let mut votes: HashMap<usize, usize> = HashMap::new();
+        for fp in &m.raw {
+            let top = try_exact(fp, &index)
+                .or_else(|| try_exact_alternate(fp, &index))
+                .or_else(|| try_structural_anchored(fp, &index))
+                .or_else(|| try_structural_anchored_alternate(fp, &index))
+                .or_else(|| try_structural_only(fp, &index))
+                .or_else(|| try_structural_only_alternate(fp, &index));
+            if let Some(top) = top {
+                *votes.entry(top.candidate.owner).or_default() += 1;
+            }
+        }
+        let mut best_sub = None;
+        let mut best_count = 0usize;
+        for (&sub_idx, &c) in &votes {
+            if c > best_count {
+                best_count = c;
+                best_sub = Some(sub_idx);
+            }
+        }
+        out[ref_idx] = BestMatch {
+            subject_idx: best_sub,
+            score: best_count as f64,
+            axis: None,
+        };
+    }
+    out
 }
 
 /// Module-pinned function-tier scoring. For each ref module that has a
