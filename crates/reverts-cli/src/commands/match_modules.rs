@@ -11,14 +11,41 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use reverts_graph::FunctionExtractor;
-use reverts_ir::{AxisKind, ModuleId, NormalizationPassId};
+use reverts_ir::{AxisKind, FunctionFingerprint, ModuleId};
 use rusqlite::{Connection, OpenFlags, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
 use crate::help;
+
+/// Axes scored when comparing two modules. Mirrors the cascade matcher's
+/// `StructuralAnchored` tier: AST is the headline shape; Cfg and the anchor
+/// axes (LiteralAnchor, CalleeSet, ThrowSet, StructuralAnchor) survive
+/// bundler-induced refactoring; the pattern axes round out coverage.
+pub(crate) const SCORING_AXES: &[AxisKind] = &[
+    AxisKind::Ast,
+    AxisKind::Cfg,
+    AxisKind::StructuralAnchor,
+    AxisKind::LiteralAnchor,
+    AxisKind::CalleeSet,
+    AxisKind::ThrowSet,
+    AxisKind::ReturnPattern,
+    AxisKind::EffectPattern,
+    AxisKind::BindingPattern,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SimilarityMetric {
+    /// `|A ∩ B| / |A ∪ B|`. Penalises modules whose fingerprint bags differ
+    /// in size — e.g. a bundle module that inlines extra helpers.
+    Jaccard,
+    /// `|A ∩ B| / min(|A|, |B|)`. Forgiving of size asymmetry: hits whenever
+    /// the smaller bag is largely covered by the larger one. Better for the
+    /// "source-truth (small) vs bundle (large) inlined" case.
+    Overlap,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -30,10 +57,16 @@ pub struct MatchModulesRecallArgs {
     pub ground_truth_project_id: u32,
     #[arg(long, value_parser = parse_project_id)]
     pub subject_project_id: u32,
-    /// Jaccard threshold to count a (ref, subject) pair as a match, expressed
-    /// as a percent (0-100). Default 40 = Jaccard >= 0.40.
-    #[arg(long, default_value_t = 40)]
+    /// Similarity threshold percent (0-100) above which a (ref, subject) pair
+    /// counts as a match. Default 70 — the Jaccard knee point for clean
+    /// matches on CC 2.1.89 src-ref vs bundle.
+    #[arg(long, default_value_t = 70)]
     pub threshold_percent: u32,
+    /// Similarity metric used to combine per-axis fingerprint overlap. Jaccard
+    /// is the principled default; overlap is more forgiving but easily fires
+    /// on subset coincidences and should be reserved for diagnostic sweeps.
+    #[arg(long, value_enum, default_value_t = SimilarityMetric::Jaccard)]
+    pub metric: SimilarityMetric,
     /// Restrict to modules of this category (e.g. "application", "package").
     /// Repeatable. Empty = all categories.
     #[arg(long = "category")]
@@ -66,11 +99,15 @@ struct ModuleRecord {
     byte_end: u32,
 }
 
+/// Per-axis bag of hashes for one module. Each axis bag is the union of the
+/// primary fingerprint axis hash plus every alternate normalization pass
+/// hash, taken over every function in the module. Unioning across passes
+/// means a function only has to land its canonical form on one side for the
+/// hash to align — the alternate-pass machinery exists precisely to bridge
+/// bundler-induced AST drift.
 #[derive(Debug, Default, Clone)]
-struct FingerprintBag {
-    /// Primary AST hashes from every function in the module.
-    ast: BTreeSet<u64>,
-    /// Number of functions extracted (zero = unfingerprinted).
+struct ModuleBag {
+    by_axis: BTreeMap<AxisKind, BTreeSet<u64>>,
     function_count: usize,
 }
 
@@ -109,7 +146,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
         started.elapsed().as_secs_f64()
     );
 
-    // Strategy: baseline semantic_name overlap.
+    // Baseline strategy: existing semantic_name overlap.
     let sub_names: BTreeSet<&str> = sub_modules
         .iter()
         .filter_map(|m| m.semantic_name.as_deref())
@@ -129,7 +166,6 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
         pct(baseline_hits, ref_modules.len())
     );
 
-    // Strategy: function-fingerprint Jaccard.
     let fp_started = Instant::now();
     let ref_bags = fingerprint_modules(&ref_modules);
     let sub_bags = fingerprint_modules(&sub_modules);
@@ -144,9 +180,10 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
     let scoring_started = Instant::now();
     let threshold = f64::from(args.threshold_percent) / 100.0;
-    let recall = ast_jaccard_recall(&ref_bags, &sub_bags, threshold);
+    let recall = multi_axis_recall(&ref_bags, &sub_bags, args.metric, threshold);
     println!(
-        "[ast_jaccard >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        "[multi_axis_{} >= {:.2}]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+        metric_label(args.metric),
         threshold,
         recall.matched,
         ref_modules.len(),
@@ -154,8 +191,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
         scoring_started.elapsed().as_secs_f64(),
     );
     print_histogram(&recall.score_histogram, ref_modules.len());
+    print_axis_winners(&recall.winning_axis_counts);
 
     Ok(())
+}
+
+const fn metric_label(metric: SimilarityMetric) -> &'static str {
+    match metric {
+        SimilarityMetric::Jaccard => "jaccard",
+        SimilarityMetric::Overlap => "overlap",
+    }
 }
 
 fn pct(numerator: usize, denominator: usize) -> f64 {
@@ -210,7 +255,7 @@ fn load_modules(
     Ok(out)
 }
 
-fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<FingerprintBag> {
+fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<ModuleBag> {
     let mut source_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut out = Vec::with_capacity(modules.len());
     for module in modules {
@@ -218,7 +263,7 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<FingerprintBag> {
             .entry(module.file_path.clone())
             .or_insert_with(|| fs::read_to_string(&module.file_path).ok());
         let Some(source_text) = source.as_deref() else {
-            out.push(FingerprintBag::default());
+            out.push(ModuleBag::default());
             continue;
         };
         let start = module.byte_start as usize;
@@ -227,100 +272,157 @@ fn fingerprint_modules(modules: &[ModuleRecord]) -> Vec<FingerprintBag> {
             .get(start..end.min(source_text.len()))
             .filter(|slice| !slice.is_empty());
         let Some(slice) = slice else {
-            out.push(FingerprintBag::default());
+            out.push(ModuleBag::default());
             continue;
         };
         let module_id = ModuleId(u32::try_from(module.id).unwrap_or(u32::MAX));
         let fingerprints = FunctionExtractor::fingerprint(module_id, slice);
-        let mut bag = FingerprintBag {
-            function_count: fingerprints.len(),
-            ast: BTreeSet::new(),
-        };
-        for fingerprint in &fingerprints {
-            // Use the post-normalization AST hash where available (it
-            // strips bundler artifacts like TS-runtime helpers and JSX
-            // factory rewrites). Otherwise fall back to primary.
-            let alt = fingerprint
-                .alternates
-                .iter()
-                .find(|alt| alt.pass == NormalizationPassId::TsRuntimeErased)
-                .or_else(|| fingerprint.alternates.first());
-            let hash = alt
-                .and_then(|alt| alt.axes.get(AxisKind::Ast))
-                .unwrap_or(fingerprint.primary.ast);
-            bag.ast.insert(hash);
-        }
-        out.push(bag);
+        out.push(bag_from_fingerprints(&fingerprints));
     }
     out
+}
+
+fn bag_from_fingerprints(fingerprints: &[FunctionFingerprint]) -> ModuleBag {
+    let mut bag = ModuleBag {
+        by_axis: BTreeMap::new(),
+        function_count: fingerprints.len(),
+    };
+    for &axis in SCORING_AXES {
+        bag.by_axis.insert(axis, BTreeSet::new());
+    }
+    for fingerprint in fingerprints {
+        for &axis in SCORING_AXES {
+            let axis_bag = bag.by_axis.get_mut(&axis).expect("axis pre-inserted above");
+            if let Some(hash) = fingerprint.primary.get(axis) {
+                axis_bag.insert(hash);
+            }
+            for alt in &fingerprint.alternates {
+                if let Some(hash) = alt.axes.get(axis) {
+                    axis_bag.insert(hash);
+                }
+            }
+        }
+    }
+    bag
 }
 
 #[derive(Debug, Default)]
 struct RecallReport {
     matched: usize,
-    /// Bucket counts at score thresholds {0.1, 0.3, 0.5, 0.7, 0.9}.
     score_histogram: BTreeMap<&'static str, usize>,
+    winning_axis_counts: BTreeMap<AxisKind, usize>,
 }
 
-fn ast_jaccard_recall(
-    ref_bags: &[FingerprintBag],
-    sub_bags: &[FingerprintBag],
+/// Recall under a per-axis overlap metric, taking the max axis score per
+/// (ref, subject) pair. An inverted index keyed by (axis, hash) prunes
+/// candidates so we do not pay O(R · S) per scoring round.
+fn multi_axis_recall(
+    ref_bags: &[ModuleBag],
+    sub_bags: &[ModuleBag],
+    metric: SimilarityMetric,
     threshold: f64,
 ) -> RecallReport {
-    // Inverted index: AST hash → list of subject bag indexes that contain it.
-    let mut by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
-    for (idx, bag) in sub_bags.iter().enumerate() {
-        for &hash in &bag.ast {
-            by_hash.entry(hash).or_default().push(idx);
+    // Inverted index: (axis, hash) -> Vec<subject_index>.
+    let mut by_axis_hash: BTreeMap<(AxisKind, u64), Vec<usize>> = BTreeMap::new();
+    for (sub_idx, bag) in sub_bags.iter().enumerate() {
+        for (axis, hashes) in &bag.by_axis {
+            for &hash in hashes {
+                by_axis_hash.entry((*axis, hash)).or_default().push(sub_idx);
+            }
         }
     }
 
     let mut report = RecallReport::default();
-    for label in ["≥0.1", "≥0.3", "≥0.5", "≥0.7", "≥0.9"] {
+    for label in HISTOGRAM_LABELS {
         report.score_histogram.insert(label, 0);
     }
 
     for ref_bag in ref_bags {
-        if ref_bag.ast.is_empty() {
+        if ref_bag.function_count == 0 {
             continue;
         }
-        let mut candidates: HashMap<usize, usize> = HashMap::new();
-        for &hash in &ref_bag.ast {
-            if let Some(subject_indexes) = by_hash.get(&hash) {
-                for &subject_idx in subject_indexes {
-                    *candidates.entry(subject_idx).or_default() += 1;
+        // Per-axis: (subject_index -> shared hash count). We tally on the
+        // axis where we observed the hash, so each pair's per-axis intersect
+        // count is correct without re-walking subject bags.
+        let mut axis_overlap: BTreeMap<AxisKind, HashMap<usize, usize>> = BTreeMap::new();
+        for &axis in SCORING_AXES {
+            axis_overlap.insert(axis, HashMap::new());
+        }
+        for (axis, hashes) in &ref_bag.by_axis {
+            let axis_table = axis_overlap.get_mut(axis).expect("axis pre-inserted above");
+            for &hash in hashes {
+                if let Some(subject_indexes) = by_axis_hash.get(&(*axis, hash)) {
+                    for &subject_idx in subject_indexes {
+                        *axis_table.entry(subject_idx).or_default() += 1;
+                    }
                 }
             }
         }
-        let mut best: f64 = 0.0;
-        for (&subject_idx, &intersect) in &candidates {
-            let union = ref_bag.ast.len() + sub_bags[subject_idx].ast.len() - intersect;
-            if union == 0 {
-                continue;
-            }
-            let score = intersect as f64 / union as f64;
-            if score > best {
-                best = score;
+
+        let mut best_score: f64 = 0.0;
+        let mut best_axis: Option<AxisKind> = None;
+        // Union of all subject indexes with any axis-level overlap, dedup'd.
+        let mut candidate_indexes: BTreeSet<usize> = BTreeSet::new();
+        for (_, table) in &axis_overlap {
+            candidate_indexes.extend(table.keys().copied());
+        }
+        for sub_idx in candidate_indexes {
+            for &axis in SCORING_AXES {
+                let ref_size = ref_bag.by_axis.get(&axis).map_or(0, BTreeSet::len);
+                let sub_size = sub_bags[sub_idx]
+                    .by_axis
+                    .get(&axis)
+                    .map_or(0, BTreeSet::len);
+                if ref_size == 0 || sub_size == 0 {
+                    continue;
+                }
+                let intersect = axis_overlap
+                    .get(&axis)
+                    .and_then(|table| table.get(&sub_idx).copied())
+                    .unwrap_or(0);
+                if intersect == 0 {
+                    continue;
+                }
+                let score = match metric {
+                    SimilarityMetric::Jaccard => {
+                        let union = ref_size + sub_size - intersect;
+                        intersect as f64 / union as f64
+                    }
+                    SimilarityMetric::Overlap => intersect as f64 / ref_size.min(sub_size) as f64,
+                };
+                if score > best_score {
+                    best_score = score;
+                    best_axis = Some(axis);
+                }
             }
         }
-        for (label, count) in report.score_histogram.iter_mut() {
-            let bound = match *label {
-                "≥0.1" => 0.1,
-                "≥0.3" => 0.3,
-                "≥0.5" => 0.5,
-                "≥0.7" => 0.7,
-                "≥0.9" => 0.9,
-                _ => continue,
-            };
-            if best >= bound {
-                *count += 1;
+        for &label in HISTOGRAM_LABELS {
+            let bound = histogram_bound(label);
+            if best_score >= bound {
+                *report.score_histogram.entry(label).or_default() += 1;
             }
         }
-        if best >= threshold {
+        if best_score >= threshold {
             report.matched += 1;
+            if let Some(axis) = best_axis {
+                *report.winning_axis_counts.entry(axis).or_default() += 1;
+            }
         }
     }
     report
+}
+
+const HISTOGRAM_LABELS: &[&str] = &["≥0.1", "≥0.3", "≥0.5", "≥0.7", "≥0.9"];
+
+fn histogram_bound(label: &str) -> f64 {
+    match label {
+        "≥0.1" => 0.1,
+        "≥0.3" => 0.3,
+        "≥0.5" => 0.5,
+        "≥0.7" => 0.7,
+        "≥0.9" => 0.9,
+        _ => f64::INFINITY,
+    }
 }
 
 fn print_histogram(histogram: &BTreeMap<&'static str, usize>, total: usize) {
@@ -328,8 +430,22 @@ fn print_histogram(histogram: &BTreeMap<&'static str, usize>, total: usize) {
     entries.sort_by_key(|(label, _)| *label);
     let line = entries
         .iter()
-        .map(|(label, count)| format!("{label}: {} ({:.1}%)", count, pct(**count, total)))
+        .map(|(label, count)| format!("{label}: {count} ({:.1}%)", pct(**count, total)))
         .collect::<Vec<_>>()
         .join("  ");
-    println!("  jaccard histogram: {line}");
+    println!("  similarity histogram: {line}");
+}
+
+fn print_axis_winners(counts: &BTreeMap<AxisKind, usize>) {
+    if counts.is_empty() {
+        return;
+    }
+    let mut entries: Vec<_> = counts.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+    let line = entries
+        .iter()
+        .map(|(axis, count)| format!("{}: {count}", axis.as_str()))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("  winning axis: {line}");
 }
