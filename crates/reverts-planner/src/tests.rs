@@ -11580,7 +11580,7 @@ fn namespace_getter_runtime_var_migration_moves_same_writer_export_targets() {
 }
 
 #[test]
-fn namespace_getter_runtime_var_migration_rejects_cross_writer_export_target() {
+fn namespace_getter_runtime_var_migration_moves_cross_writer_export_targets() {
     let prelude = concat!(
         "var left;\n",
         "var right;\n",
@@ -11624,27 +11624,28 @@ fn namespace_getter_runtime_var_migration_rejects_cross_writer_export_target() {
     let left_source = planned_source(&plan, "modules/left-writer.ts");
     let right_source = planned_source(&plan, "modules/right-writer.ts");
     let consumer_source = planned_source(&plan, "modules/consumer.ts");
-    let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
-    assert!(left_source.contains("__reverts_set_left"), "{left_source}");
+    assert!(!left_source.contains("__reverts_set_left"), "{left_source}");
     assert!(
-        right_source.contains("__reverts_set_right"),
+        !right_source.contains("__reverts_set_right"),
         "{right_source}"
     );
+    assert!(left_source.contains("import { right } from './right-writer.js';"));
+    assert!(left_source.contains("var left;"));
+    assert!(left_source.contains("var ns = {};"));
+    assert!(left_source.contains(
+        "Object.defineProperties(ns, { left: { enumerable: true, get: () => left }, right: { enumerable: true, get: () => right } });"
+    ));
+    assert!(right_source.contains("var right;"));
     assert!(
-        consumer_source.contains("import { left } from './runtime/source-1-helpers.js';"),
+        consumer_source.contains("import { left } from './left-writer.js';"),
         "{consumer_source}"
     );
     assert!(consumer_source.contains("var value = left;"));
     assert!(!consumer_source.contains("ns.left"));
-    assert!(!helper_source.contains("var ns = {};"), "{helper_source}");
     assert!(
-        !helper_source.contains("Object.defineProperties(ns"),
-        "{helper_source}"
-    );
-    assert!(helper_source.contains("function __reverts_set_left(value) { return left = value; }"));
-    assert!(
-        helper_source.contains("function __reverts_set_right(value) { return right = value; }")
+        planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none(),
+        "cross-writer namespace targets should no longer force a runtime helper"
     );
 }
 

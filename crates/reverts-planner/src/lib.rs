@@ -4228,7 +4228,6 @@ pub(crate) enum RuntimeReaderClusterBlocker {
     MissingFreeBindingIndex,
     ReadsOtherMovableBinding,
     ReadsNonRuntimeBinding,
-    NamespaceTargetDifferentWriter,
     OwnerSourceMissing,
     OwnerNameConflict,
 }
@@ -5178,9 +5177,6 @@ impl From<RuntimeReaderClusterBlocker> for RuntimeSetterMigrationBlockerReason {
             RuntimeReaderClusterBlocker::ReadsNonRuntimeBinding => {
                 Self::ReaderReadsNonRuntimeBinding
             }
-            RuntimeReaderClusterBlocker::NamespaceTargetDifferentWriter => {
-                Self::NamespaceTargetDifferentWriter
-            }
             RuntimeReaderClusterBlocker::OwnerSourceMissing => Self::OwnerSourceMissing,
             RuntimeReaderClusterBlocker::OwnerNameConflict => Self::OwnerNameConflict,
         }
@@ -5493,7 +5489,24 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
             }
             if let Some(dep_owner) = ctx.candidate_owners.get(dep) {
                 if *dep_owner != owner_module {
-                    return Err(RuntimeReaderClusterBlocker::NamespaceTargetDifferentWriter);
+                    // The namespace object can still move to this cluster's
+                    // owner when one of its getter targets belongs to a
+                    // different writer. Keep that target as a runtime dep for
+                    // now; if a later primary-only migration moves the target
+                    // to its writer, `migrated_extra_runtime_deps_for_owner`
+                    // rewires this owner to import it directly. When that
+                    // would create an owner -> dep-owner -> owner cycle, pin
+                    // the target in runtime instead of allowing the later
+                    // primary-only migration.
+                    extra_runtime_deps.insert(dep.clone());
+                    if module_dependency_path_exists(
+                        ctx.module_dependencies_by_owner,
+                        *dep_owner,
+                        owner_module,
+                    ) {
+                        pinned_runtime_deps.insert(dep.clone());
+                    }
+                    continue;
                 }
                 extra_runtime_deps.insert(dep.clone());
                 continue;
