@@ -4,10 +4,10 @@
 //! externalization. Data records such as [`PackageMatch`] and index structures
 //! stay policy-free; resolver/proof code asks these functions explicitly.
 
-use crate::{
-    DependencyGraphSourceProof, ExportMemberSourceProof, ModuleMatchStrategy, PackageMatch,
-    SemanticExternalSourceProof, SemanticPathHintMode,
-};
+use super::dependency_graph::DependencyGraphSourceProof;
+use super::export_member::ExportMemberSourceProof;
+use super::semantic::SemanticExternalSourceProof;
+use crate::{ModuleMatchStrategy, PackageMatch, SemanticPathHintMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticExternalTargetPolicy {

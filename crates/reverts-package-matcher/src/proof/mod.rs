@@ -1,1 +1,8 @@
+pub(crate) mod concrete_source;
+pub(crate) mod cross_source;
+pub(crate) mod dependency_graph;
+pub(crate) mod export_member;
 pub(crate) mod policy;
+pub(crate) mod public_exports;
+pub(crate) mod scratch;
+pub(crate) mod semantic;

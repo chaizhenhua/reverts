@@ -7,10 +7,11 @@ use reverts_ir::hash::fnv1a_hex as stable_hash;
 use super::{SourceFingerprint, fingerprint_source, package_source_fingerprint_from_source};
 use crate::package_helpers::{package_source_entry_path, package_source_external_import_rank};
 use crate::source::exported_members::exported_members_from_source;
-use crate::{
-    PackageSource, PackageSourceFingerprint, normalize_source, package_source_dependency_entries,
-    package_source_entry_path_from_source_path, source_entry_paths_match,
+use crate::source::package_refs::{
+    package_source_dependency_entries, package_source_entry_path_from_source_path,
+    source_entry_paths_match,
 };
+use crate::{PackageSource, PackageSourceFingerprint, normalize_source};
 
 #[derive(Debug, Default)]
 pub(crate) struct ExternalImportSourceIndex<'a> {
@@ -251,6 +252,33 @@ impl<'a> ExternalImportSourceIndex<'a> {
                     source_entry.as_str(),
                 )
             })
+            .collect()
+    }
+
+    pub(crate) fn sources_matching_entry(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        entry: &str,
+    ) -> Vec<&'a PackageSource> {
+        self.all_sources(package_name, package_version)
+            .iter()
+            .copied()
+            .filter(|source| {
+                source_entry_paths_match(package_source_entry_path(source).as_str(), entry)
+            })
+            .collect()
+    }
+
+    pub(crate) fn external_importable_sources_matching_entry(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        entry: &str,
+    ) -> Vec<&'a PackageSource> {
+        self.sources_matching_entry(package_name, package_version, entry)
+            .into_iter()
+            .filter(|source| source.external_importable)
             .collect()
     }
 }
