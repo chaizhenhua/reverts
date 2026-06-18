@@ -214,6 +214,26 @@ pub(crate) fn split_top_level_properties(source: &str) -> Vec<&str> {
     properties
 }
 
+/// Local binding names introduced by an object destructuring pattern whose
+/// interior (the text between `{` and `}`) is `pattern_interior`. Renamed
+/// properties bind the alias (`{ key: local }` -> `local`); shorthand and rest
+/// bind their own name.
+pub(crate) fn object_pattern_binding_names(pattern_interior: &str) -> Vec<BindingName> {
+    parse_object_pattern_bindings(pattern_interior)
+        .into_iter()
+        .map(|(_, binding)| binding)
+        .collect()
+}
+
+/// Local binding names introduced by an array destructuring pattern whose
+/// interior (the text between `[` and `]`) is `pattern_interior`.
+pub(crate) fn array_pattern_binding_names(pattern_interior: &str) -> Vec<BindingName> {
+    parse_array_pattern_bindings(pattern_interior)
+        .into_iter()
+        .map(|(_, binding)| binding)
+        .collect()
+}
+
 fn parse_object_pattern_bindings(source: &str) -> Vec<(String, BindingName)> {
     split_top_level_properties(source)
         .into_iter()
