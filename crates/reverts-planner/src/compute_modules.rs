@@ -25,9 +25,15 @@ use crate::runtime_singleton_inline::{
 };
 use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::{
-    EmitPlan, ExternalPackageAdapterPlan, LoweredRuntimeModuleSource, OwnerMigrationState,
-    PlanError, PlannedFile, RuntimeLazyFoldPlan, RuntimePreludeDirectImport, SourceModuleWiring,
-    add_migrated_local_binding_declarations, adjust_remaining_runtime_helpers,
+    EmitPlan, ExternalPackageAdapterPlan, FoldedNoopAndMigratedExportsArgs,
+    LazyValueLocalizationArgs, LocalizedNoopRuntimeHelperArgs, LoweredPackageRuntimeImportArgs,
+    LoweredRuntimeHelperImportArgs, LoweredRuntimeHelperUsageArgs, LoweredRuntimeModuleSource,
+    MigratedExtraOwnerImportArgs, MigratedExtraRuntimeReexportImportArgs,
+    MigratedRuntimeExtraAliasImportArgs, OwnerMigrationState, PlanError, PlannedFile,
+    PostInlineLazyValueLocalizationArgs, RemainingHelpersWriteRewriteArgs,
+    RuntimeExtraDepsImportArgs, RuntimeImportPartitionArgs, RuntimeImportPartitionEmitArgs,
+    RuntimeLazyFoldPlan, RuntimePreludeDirectImport, SourceModuleImportEmitArgs,
+    SourceModuleWiring, add_migrated_local_binding_declarations, adjust_remaining_runtime_helpers,
     adjust_written_runtime_helpers, build_lowered_module_source, build_runtime_import_partitions,
     compute_localized_noop_runtime_helpers, compute_namespace_member_rewrite,
     compute_node_builtin_require_helpers, compute_node_builtin_require_rewrite,
@@ -188,20 +194,21 @@ pub(crate) fn plan_one_module(
 
     push_package_imports(program, module.id, &mut file);
 
-    let has_runtime_edge_before_lazy_helpers = emit_source_module_imports(
-        program,
-        module.id,
-        path,
-        source_module_wiring,
-        pure_reexport_bypasses,
-        runtime_lazy_folds,
-        omitted_folded_stub_modules,
-        binding_owners,
-        &mut file,
-        &mut planned_bindings,
-        used_runtime_helper_files,
-        exported_runtime_helper_bindings,
-    );
+    let has_runtime_edge_before_lazy_helpers =
+        emit_source_module_imports(SourceModuleImportEmitArgs {
+            program,
+            module_id: module.id,
+            path,
+            source_module_wiring,
+            pure_reexport_bypasses,
+            runtime_lazy_folds,
+            omitted_folded_stub_modules,
+            binding_owners,
+            file: &mut file,
+            planned_bindings: &mut planned_bindings,
+            used_runtime_helper_files,
+            exported_runtime_helper_bindings,
+        });
 
     let migration = OwnerMigrationState::from_plan(runtime_var_migrations, module.id);
     let runtime_output = NormalRuntimePass {
@@ -379,17 +386,17 @@ impl FoldedModulePass<'_> {
             self.exported_runtime_helper_bindings,
             self.required_runtime_helper_bindings,
         );
-        emit_runtime_extra_deps_imports(
-            self.program,
-            self.module.id,
-            self.path,
-            &migrated_extra_runtime_deps_by_source,
-            file,
-            planned_bindings,
-            self.used_runtime_helper_files,
-            self.exported_runtime_helper_bindings,
-            self.required_runtime_helper_bindings,
-        );
+        emit_runtime_extra_deps_imports(RuntimeExtraDepsImportArgs {
+            program: self.program,
+            module_id: self.module.id,
+            path: self.path,
+            deps_by_source: &migrated_extra_runtime_deps_by_source,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+            used_runtime_helper_files: &mut *self.used_runtime_helper_files,
+            exported_runtime_helper_bindings: &mut *self.exported_runtime_helper_bindings,
+            required_runtime_helper_bindings: &mut *self.required_runtime_helper_bindings,
+        });
         let retained_noop_deps = push_migrated_runtime_snippets_and_namespaces(
             self.program,
             &migrated_extra_snippets,
@@ -398,16 +405,16 @@ impl FoldedModulePass<'_> {
             &migrated_extra_noop_deps,
             file,
         );
-        push_folded_noop_and_migrated_exports(
+        push_folded_noop_and_migrated_exports(FoldedNoopAndMigratedExportsArgs {
             folded,
-            &runtime_stub_exports,
-            &direct_stub_exports,
-            &retained_noop_deps,
-            &migrated_local_bindings,
-            &migrated_extra_namespace_bindings,
-            file,
-            planned_bindings,
-        );
+            runtime_stub_exports: &runtime_stub_exports,
+            direct_stub_exports: &direct_stub_exports,
+            migrated_extra_noop_deps: &retained_noop_deps,
+            migrated_local_bindings: &migrated_local_bindings,
+            migrated_extra_namespace_bindings: &migrated_extra_namespace_bindings,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+        });
         crate::finalize_planned_file(file);
         let pushed_file = std::mem::replace(file, PlannedFile::new(self.path));
         plan.push_file(pushed_file);
@@ -526,17 +533,18 @@ impl<'a> NormalRuntimePass<'a> {
             namespace_member_rewrite.as_ref(),
             node_builtin_require_rewrite.as_ref(),
         );
-        let remaining_runtime_helpers = filter_remaining_helpers_by_write_rewrite(
-            self.program,
-            self.module.id,
-            self.source_module_wiring,
-            lowered_source,
-            namespace_member_rewrite.as_ref(),
-            node_builtin_require_rewrite.as_ref(),
-            &written_runtime_helpers,
-            &self.migration.migrated_extra_runtime_deps,
-            remaining_runtime_helpers,
-        );
+        let remaining_runtime_helpers =
+            filter_remaining_helpers_by_write_rewrite(RemainingHelpersWriteRewriteArgs {
+                program: self.program,
+                module_id: self.module.id,
+                source_module_wiring: self.source_module_wiring,
+                lowered_source,
+                namespace_member_rewrite: namespace_member_rewrite.as_ref(),
+                node_builtin_require_rewrite: node_builtin_require_rewrite.as_ref(),
+                written_runtime_helpers: &written_runtime_helpers,
+                migrated_extra_runtime_deps: &self.migration.migrated_extra_runtime_deps,
+                remaining_runtime_helpers,
+            });
         let namespace_export_helpers_for_source =
             namespace_export_helpers_for_source(self.program, lowered_source);
         let remaining_runtime_helpers = filter_unreferenced_namespace_helpers(
@@ -551,15 +559,16 @@ impl<'a> NormalRuntimePass<'a> {
                 namespace_member_rewrite.as_ref(),
                 node_builtin_require_rewrite.as_ref(),
             );
-        let localized_noop_runtime_helpers = compute_localized_noop_runtime_helpers(
-            self.program,
-            self.module.id,
-            self.source_module_wiring,
-            lowered_source,
-            namespace_member_rewrite.as_ref(),
-            node_builtin_require_rewrite.as_ref(),
-            &remaining_runtime_helpers,
-        );
+        let localized_noop_runtime_helpers =
+            compute_localized_noop_runtime_helpers(LocalizedNoopRuntimeHelperArgs {
+                program: self.program,
+                module_id: self.module.id,
+                source_module_wiring: self.source_module_wiring,
+                lowered_source,
+                namespace_member_rewrite: namespace_member_rewrite.as_ref(),
+                node_builtin_require_rewrite: node_builtin_require_rewrite.as_ref(),
+                remaining_runtime_helpers: &remaining_runtime_helpers,
+            });
         let mut localized_noop_runtime_helpers = localized_noop_runtime_helpers;
         localized_noop_runtime_helpers.extend(
             rewritable_externalized_package_init_shims_for_source(
@@ -573,22 +582,23 @@ impl<'a> NormalRuntimePass<'a> {
             .difference(&localized_noop_runtime_helpers)
             .cloned()
             .collect();
-        let mut runtime_import_partitions = build_runtime_import_partitions(
-            self.program,
-            self.module.id,
-            runtime_import_groups,
-            self.binding_owners,
-            namespace_member_rewrite.as_ref(),
-            &source_runtime_refs,
-            &lowered_helpers,
-            &written_runtime_helpers,
-            &consumed_node_builtin_require_helpers,
-            &localized_noop_runtime_helpers,
-            &remaining_runtime_helpers,
-            planned_bindings,
-            &local_source_definitions,
-            &local_source_writes,
-        );
+        let mut runtime_import_partitions =
+            build_runtime_import_partitions(RuntimeImportPartitionArgs {
+                program: self.program,
+                module_id: self.module.id,
+                runtime_import_groups,
+                binding_owners: self.binding_owners,
+                namespace_member_rewrite: namespace_member_rewrite.as_ref(),
+                source_runtime_refs: &source_runtime_refs,
+                lowered_helpers: &lowered_helpers,
+                written_runtime_helpers: &written_runtime_helpers,
+                consumed_node_builtin_require_helpers: &consumed_node_builtin_require_helpers,
+                localized_noop_runtime_helpers: &localized_noop_runtime_helpers,
+                remaining_runtime_helpers: &remaining_runtime_helpers,
+                planned_bindings,
+                local_source_definitions: &local_source_definitions,
+                local_source_writes: &local_source_writes,
+            });
         let has_runtime_group_imports = runtime_import_partitions
             .iter()
             .any(|(_, partition)| !partition.runtime_bindings.is_empty());
@@ -605,16 +615,16 @@ impl<'a> NormalRuntimePass<'a> {
         let mut lazy_helper_names = lowered_source
             .map(lazy_helper_import_names_for_source)
             .unwrap_or_default();
-        let mut localized_lazy_value_source = try_localize_lazy_value(
+        let mut localized_lazy_value_source = try_localize_lazy_value(LazyValueLocalizationArgs {
             lowered_source,
-            namespace_member_rewrite.as_ref(),
-            self.has_runtime_edge_before_lazy_helpers,
-            &written_runtime_helpers,
+            namespace_member_rewrite: namespace_member_rewrite.as_ref(),
+            has_runtime_edge_before_lazy_helpers: self.has_runtime_edge_before_lazy_helpers,
+            written_runtime_helpers: &written_runtime_helpers,
             has_runtime_group_imports,
-            self.runtime_singleton_inlines,
-            self.module.id,
-            &lowered_import_partition.runtime_bindings,
-        );
+            runtime_singleton_inlines: self.runtime_singleton_inlines,
+            module_id: self.module.id,
+            lowered_runtime_bindings: &lowered_import_partition.runtime_bindings,
+        });
         if localized_lazy_value_source.is_some() {
             lazy_helper_names.retain(|name| *name != "lazyValue");
         }
@@ -634,35 +644,41 @@ impl<'a> NormalRuntimePass<'a> {
             &runtime_sources_for_module,
             self.runtime_edge_direct_prelude_imports,
         );
-        emit_migrated_extra_owner_imports(
-            self.program,
-            self.module.id,
-            self.path,
-            file,
-            planned_bindings,
-            &self.migration.migrated_extra_source_deps,
-            &self.migration.migrated_extra_runtime_owner_deps,
-            &self.migration.migrated_extra_runtime_owner_dep_aliases,
-        );
-        emit_migrated_runtime_extra_alias_imports(
-            self.path,
-            file,
-            planned_bindings,
-            self.used_runtime_helper_files,
-            self.exported_runtime_helper_bindings,
-            self.required_runtime_helper_bindings,
-            &self.migration.migrated_runtime_extra_runtime_dep_aliases,
-        );
-        emit_migrated_extra_runtime_reexport_imports(
-            self.program,
-            self.module.id,
-            self.path,
-            file,
-            planned_bindings,
-            self.used_runtime_helper_files,
-            self.exported_runtime_helper_bindings,
-            &self.migration.migrated_extra_runtime_reexport_deps,
-        );
+        emit_migrated_extra_owner_imports(MigratedExtraOwnerImportArgs {
+            program: self.program,
+            module_id: self.module.id,
+            module_path: self.path,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+            migrated_extra_source_deps: &self.migration.migrated_extra_source_deps,
+            migrated_extra_runtime_owner_deps: &self.migration.migrated_extra_runtime_owner_deps,
+            migrated_extra_runtime_owner_dep_aliases: &self
+                .migration
+                .migrated_extra_runtime_owner_dep_aliases,
+        });
+        emit_migrated_runtime_extra_alias_imports(MigratedRuntimeExtraAliasImportArgs {
+            module_path: self.path,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+            used_runtime_helper_files: &mut *self.used_runtime_helper_files,
+            exported_runtime_helper_bindings: &mut *self.exported_runtime_helper_bindings,
+            required_runtime_helper_bindings: &mut *self.required_runtime_helper_bindings,
+            migrated_runtime_extra_runtime_dep_aliases: &self
+                .migration
+                .migrated_runtime_extra_runtime_dep_aliases,
+        });
+        emit_migrated_extra_runtime_reexport_imports(MigratedExtraRuntimeReexportImportArgs {
+            program: self.program,
+            module_id: self.module.id,
+            module_path: self.path,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+            used_runtime_helper_files: &mut *self.used_runtime_helper_files,
+            exported_runtime_helper_bindings: &mut *self.exported_runtime_helper_bindings,
+            migrated_extra_runtime_reexport_deps: &self
+                .migration
+                .migrated_extra_runtime_reexport_deps,
+        });
         if let Some(lowered_source) = lowered_source
             && (!remaining_runtime_helpers.is_empty()
                 || !written_runtime_helpers.is_empty()
@@ -706,81 +722,83 @@ impl<'a> NormalRuntimePass<'a> {
                 remaining_runtime_helpers,
                 package_written_helpers,
                 written_runtime_helpers,
-            ) = emit_lowered_package_runtime_imports(
-                self.program,
-                self.module.id,
-                self.path,
-                file,
-                planned_bindings,
-                self.used_package_runtime_helper_files,
-                lowered_source.source_file_id,
-                self.binding_owners,
-                self.package_runtime_owner,
-                &remaining_runtime_helpers,
-                &written_runtime_helpers,
-            );
-            if let Some(localized) = try_post_inline_localize_lazy_value(
-                lowered_source,
-                namespace_member_rewrite.as_ref(),
-                localized_lazy_value_source.as_ref(),
-                self.has_runtime_edge_before_lazy_helpers,
-                &remaining_runtime_helpers,
-                &written_runtime_helpers,
-                &package_remaining_helpers,
-                &package_written_helpers,
-                &lazy_helper_names,
-                &runtime_import_partitions,
-                self.runtime_singleton_inlines,
-                self.binding_owners,
-                self.package_runtime_owner,
-                self.module.id,
-            ) {
+            ) = emit_lowered_package_runtime_imports(LoweredPackageRuntimeImportArgs {
+                program: self.program,
+                module_id: self.module.id,
+                module_path: self.path,
+                file: &mut *file,
+                planned_bindings: &mut *planned_bindings,
+                used_package_runtime_helper_files: &mut *self.used_package_runtime_helper_files,
+                source_file_id: lowered_source.source_file_id,
+                binding_owners: self.binding_owners,
+                package_runtime_owner: self.package_runtime_owner,
+                remaining_runtime_helpers: &remaining_runtime_helpers,
+                written_runtime_helpers: &written_runtime_helpers,
+            });
+            if let Some(localized) =
+                try_post_inline_localize_lazy_value(PostInlineLazyValueLocalizationArgs {
+                    lowered_source,
+                    namespace_member_rewrite: namespace_member_rewrite.as_ref(),
+                    already_localized: localized_lazy_value_source.as_ref(),
+                    has_runtime_edge_before_lazy_helpers: self.has_runtime_edge_before_lazy_helpers,
+                    remaining_runtime_helpers: &remaining_runtime_helpers,
+                    written_runtime_helpers: &written_runtime_helpers,
+                    package_remaining_helpers: &package_remaining_helpers,
+                    package_written_helpers: &package_written_helpers,
+                    lazy_helper_names: &lazy_helper_names,
+                    runtime_import_partitions: &runtime_import_partitions,
+                    runtime_singleton_inlines: self.runtime_singleton_inlines,
+                    binding_owners: self.binding_owners,
+                    package_runtime_owner: self.package_runtime_owner,
+                    module_id: self.module.id,
+                })
+            {
                 localized_lazy_value_source = Some(localized);
                 lazy_helper_names.retain(|name| *name != "lazyValue");
             }
-            record_lowered_runtime_helper_usage(
+            record_lowered_runtime_helper_usage(LoweredRuntimeHelperUsageArgs {
                 lowered_source,
-                &remaining_runtime_helpers,
-                &written_runtime_helpers,
-                &lazy_helper_names,
-                self.used_runtime_helper_files,
-                self.exported_runtime_helper_bindings,
-                self.required_runtime_helper_bindings,
-                self.used_runtime_helper_setters,
-                self.used_lazy_module,
-                self.used_lazy_value,
-                self.exported_lazy_module,
-                self.exported_lazy_value,
-            );
-            emit_lowered_runtime_helper_import(
-                self.program,
-                self.module.id,
-                self.path,
-                file,
-                planned_bindings,
-                lowered_source.source_file_id,
-                &remaining_runtime_helpers,
-                &written_runtime_helpers,
-                &lazy_helper_names,
-            );
+                remaining_runtime_helpers: &remaining_runtime_helpers,
+                written_runtime_helpers: &written_runtime_helpers,
+                lazy_helper_names: &lazy_helper_names,
+                used_runtime_helper_files: &mut *self.used_runtime_helper_files,
+                exported_runtime_helper_bindings: &mut *self.exported_runtime_helper_bindings,
+                required_runtime_helper_bindings: &mut *self.required_runtime_helper_bindings,
+                used_runtime_helper_setters: &mut *self.used_runtime_helper_setters,
+                used_lazy_module: &mut *self.used_lazy_module,
+                used_lazy_value: &mut *self.used_lazy_value,
+                exported_lazy_module: &mut *self.exported_lazy_module,
+                exported_lazy_value: &mut *self.exported_lazy_value,
+            });
+            emit_lowered_runtime_helper_import(LoweredRuntimeHelperImportArgs {
+                program: self.program,
+                module_id: self.module.id,
+                module_path: self.path,
+                file: &mut *file,
+                planned_bindings: &mut *planned_bindings,
+                source_file_id: lowered_source.source_file_id,
+                remaining_runtime_helpers: &remaining_runtime_helpers,
+                written_runtime_helpers: &written_runtime_helpers,
+                lazy_helper_names: &lazy_helper_names,
+            });
         }
 
-        emit_runtime_import_partitions(
-            self.program,
-            self.module.id,
-            self.path,
-            file,
-            planned_bindings,
-            self.used_runtime_helper_files,
-            self.exported_runtime_helper_bindings,
-            self.required_runtime_helper_bindings,
-            self.used_package_runtime_helper_files,
-            emitted_inline_runtime_helpers,
+        emit_runtime_import_partitions(RuntimeImportPartitionEmitArgs {
+            program: self.program,
+            module_id: self.module.id,
+            module_path: self.path,
+            file: &mut *file,
+            planned_bindings: &mut *planned_bindings,
+            used_runtime_helper_files: &mut *self.used_runtime_helper_files,
+            exported_runtime_helper_bindings: &mut *self.exported_runtime_helper_bindings,
+            required_runtime_helper_bindings: &mut *self.required_runtime_helper_bindings,
+            used_package_runtime_helper_files: &mut *self.used_package_runtime_helper_files,
+            emitted_inline_runtime_helpers: &mut *emitted_inline_runtime_helpers,
             runtime_import_partitions,
-            self.runtime_singleton_inlines,
-            self.binding_owners,
-            self.package_runtime_owner,
-        );
+            runtime_singleton_inlines: self.runtime_singleton_inlines,
+            binding_owners: self.binding_owners,
+            package_runtime_owner: self.package_runtime_owner,
+        });
 
         if let Some(rewrite) = &node_builtin_require_rewrite
             && !rewrite.imports.is_empty()

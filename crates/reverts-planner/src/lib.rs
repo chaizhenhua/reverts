@@ -463,6 +463,225 @@ pub(crate) fn emit_folded_runtime_stub_reexports(
     ));
 }
 
+/// Argument bundle for source-module import emission.
+pub(crate) struct SourceModuleImportEmitArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) path: &'a str,
+    pub(crate) source_module_wiring: &'a SourceModuleWiring,
+    pub(crate) pure_reexport_bypasses: &'a PureReexportBypassPlan,
+    pub(crate) runtime_lazy_folds: &'a RuntimeLazyFoldPlan,
+    pub(crate) omitted_folded_stub_modules: &'a BTreeSet<ModuleId>,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+}
+
+/// Argument bundle for localized no-op runtime-helper analysis.
+pub(crate) struct LocalizedNoopRuntimeHelperArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) source_module_wiring: &'a SourceModuleWiring,
+    pub(crate) lowered_source: Option<&'a LoweredRuntimeModuleSource>,
+    pub(crate) namespace_member_rewrite:
+        Option<&'a runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite>,
+    pub(crate) node_builtin_require_rewrite: Option<&'a NodeBuiltinRequireRewrite>,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+}
+
+/// Argument bundle for runtime-import partition analysis.
+pub(crate) struct RuntimeImportPartitionArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) runtime_import_groups: BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+    pub(crate) namespace_member_rewrite:
+        Option<&'a runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite>,
+    pub(crate) source_runtime_refs: &'a BTreeSet<BindingName>,
+    pub(crate) lowered_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) consumed_node_builtin_require_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) localized_noop_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) planned_bindings: &'a BTreeSet<BindingName>,
+    pub(crate) local_source_definitions: &'a BTreeSet<BindingName>,
+    pub(crate) local_source_writes: &'a BTreeSet<BindingName>,
+}
+
+/// Argument bundle for first-pass lazyValue localization.
+pub(crate) struct LazyValueLocalizationArgs<'a> {
+    pub(crate) lowered_source: Option<&'a LoweredRuntimeModuleSource>,
+    pub(crate) namespace_member_rewrite:
+        Option<&'a runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite>,
+    pub(crate) has_runtime_edge_before_lazy_helpers: bool,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) has_runtime_group_imports: bool,
+    pub(crate) runtime_singleton_inlines: &'a RuntimeSingletonInlinePlan,
+    pub(crate) module_id: ModuleId,
+    pub(crate) lowered_runtime_bindings: &'a BTreeSet<BindingName>,
+}
+
+/// Argument bundle for package-runtime import emission from lowered sources.
+pub(crate) struct LoweredPackageRuntimeImportArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_package_runtime_helper_files:
+        &'a mut BTreeMap<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>,
+    pub(crate) source_file_id: u32,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+    pub(crate) package_runtime_owner: Option<&'a PackageRuntimeOwner>,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+}
+
+/// Argument bundle for second-pass lazyValue localization.
+pub(crate) struct PostInlineLazyValueLocalizationArgs<'a> {
+    pub(crate) lowered_source: &'a LoweredRuntimeModuleSource,
+    pub(crate) namespace_member_rewrite:
+        Option<&'a runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite>,
+    pub(crate) already_localized: Option<&'a String>,
+    pub(crate) has_runtime_edge_before_lazy_helpers: bool,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) package_remaining_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) package_written_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) lazy_helper_names: &'a [&'static str],
+    pub(crate) runtime_import_partitions: &'a [(u32, RuntimeOwnerImportPartition)],
+    pub(crate) runtime_singleton_inlines: &'a RuntimeSingletonInlinePlan,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+    pub(crate) package_runtime_owner: Option<&'a PackageRuntimeOwner>,
+    pub(crate) module_id: ModuleId,
+}
+
+/// Argument bundle for runtime-import partition emission.
+pub(crate) struct RuntimeImportPartitionEmitArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) required_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) used_package_runtime_helper_files:
+        &'a mut BTreeMap<PackageRuntimeHelperKey, PackageRuntimeHelperUsage>,
+    pub(crate) emitted_inline_runtime_helpers: &'a mut BTreeSet<(u32, BindingName)>,
+    pub(crate) runtime_import_partitions: Vec<(u32, RuntimeOwnerImportPartition)>,
+    pub(crate) runtime_singleton_inlines: &'a RuntimeSingletonInlinePlan,
+    pub(crate) binding_owners: &'a BindingOwnerPlan,
+    pub(crate) package_runtime_owner: Option<&'a PackageRuntimeOwner>,
+}
+
+/// Argument bundle for lowered runtime-helper import emission.
+pub(crate) struct LoweredRuntimeHelperImportArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) source_file_id: u32,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) lazy_helper_names: &'a [&'static str],
+}
+
+/// Argument bundle for lowered runtime-helper usage recording.
+pub(crate) struct LoweredRuntimeHelperUsageArgs<'a> {
+    pub(crate) lowered_source: &'a LoweredRuntimeModuleSource,
+    pub(crate) remaining_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) lazy_helper_names: &'a [&'static str],
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) required_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) used_runtime_helper_setters: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) used_lazy_module: &'a mut BTreeSet<u32>,
+    pub(crate) used_lazy_value: &'a mut BTreeSet<u32>,
+    pub(crate) exported_lazy_module: &'a mut BTreeSet<u32>,
+    pub(crate) exported_lazy_value: &'a mut BTreeSet<u32>,
+}
+
+/// Argument bundle for migrated runtime-extra alias import emission.
+pub(crate) struct MigratedRuntimeExtraAliasImportArgs<'a> {
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) required_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) migrated_runtime_extra_runtime_dep_aliases:
+        &'a BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+}
+
+/// Argument bundle for migrated runtime re-export import emission.
+pub(crate) struct MigratedExtraRuntimeReexportImportArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) migrated_extra_runtime_reexport_deps: &'a BTreeMap<u32, BTreeSet<BindingName>>,
+}
+
+/// Argument bundle for migrated owner import emission.
+pub(crate) struct MigratedExtraOwnerImportArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) module_path: &'a str,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) migrated_extra_source_deps: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) migrated_extra_runtime_owner_deps: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) migrated_extra_runtime_owner_dep_aliases:
+        &'a BTreeMap<ModuleId, BTreeMap<BindingName, BindingName>>,
+}
+
+/// Argument bundle for write-rewrite remaining-helper filtering.
+pub(crate) struct RemainingHelpersWriteRewriteArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) source_module_wiring: &'a SourceModuleWiring,
+    pub(crate) lowered_source: Option<&'a LoweredRuntimeModuleSource>,
+    pub(crate) namespace_member_rewrite:
+        Option<&'a runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite>,
+    pub(crate) node_builtin_require_rewrite: Option<&'a NodeBuiltinRequireRewrite>,
+    pub(crate) written_runtime_helpers: &'a BTreeSet<BindingName>,
+    pub(crate) migrated_extra_runtime_deps: &'a BTreeSet<BindingName>,
+    pub(crate) remaining_runtime_helpers: BTreeSet<BindingName>,
+}
+
+/// Argument bundle for folded-stub migrated export emission.
+pub(crate) struct FoldedNoopAndMigratedExportsArgs<'a> {
+    pub(crate) folded: &'a RuntimeLazyFoldModule,
+    pub(crate) runtime_stub_exports: &'a BTreeSet<BindingName>,
+    pub(crate) direct_stub_exports: &'a BTreeMap<ModuleId, BTreeSet<BindingName>>,
+    pub(crate) migrated_extra_noop_deps: &'a BTreeSet<BindingName>,
+    pub(crate) migrated_local_bindings: &'a BTreeSet<BindingName>,
+    pub(crate) migrated_extra_namespace_bindings: &'a BTreeSet<BindingName>,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+}
+
+/// Argument bundle for runtime-extra dependency import emission.
+pub(crate) struct RuntimeExtraDepsImportArgs<'a> {
+    pub(crate) program: &'a EnrichedProgram,
+    pub(crate) module_id: ModuleId,
+    pub(crate) path: &'a str,
+    pub(crate) deps_by_source: &'a BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) file: &'a mut PlannedFile,
+    pub(crate) planned_bindings: &'a mut BTreeSet<BindingName>,
+    pub(crate) used_runtime_helper_files: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) exported_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+    pub(crate) required_runtime_helper_bindings: &'a mut BTreeMap<u32, BTreeSet<BindingName>>,
+}
+
 /// Emit the consumer-side `import { … } from './target.ts'` /
 /// `import { … } from runtime` lines for every binding this module
 /// reads from another source module (per
@@ -480,21 +699,21 @@ pub(crate) fn emit_folded_runtime_stub_reexports(
 /// Returns `true` if at least one binding routed through a folded
 /// module's runtime helper file — the caller uses that to decide
 /// whether the lazy helper imports must precede the rest.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_source_module_imports(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    path: &str,
-    source_module_wiring: &SourceModuleWiring,
-    pure_reexport_bypasses: &PureReexportBypassPlan,
-    runtime_lazy_folds: &RuntimeLazyFoldPlan,
-    omitted_folded_stub_modules: &BTreeSet<ModuleId>,
-    binding_owners: &BindingOwnerPlan,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-) -> bool {
+pub(crate) fn emit_source_module_imports(args: SourceModuleImportEmitArgs<'_>) -> bool {
+    let SourceModuleImportEmitArgs {
+        program,
+        module_id,
+        path,
+        source_module_wiring,
+        pure_reexport_bypasses,
+        runtime_lazy_folds,
+        omitted_folded_stub_modules,
+        binding_owners,
+        file,
+        planned_bindings,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+    } = args;
     let mut has_runtime_edge_before_lazy_helpers = false;
     let Some(module_imports) = source_module_wiring.imports_by_module.get(&module_id) else {
         return has_runtime_edge_before_lazy_helpers;
@@ -603,18 +822,18 @@ pub(crate) fn emit_source_module_imports(
 /// (declared inline in the consuming module) because the prelude
 /// shows them safe to copy and the rewritten source still references
 /// them.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_localized_noop_runtime_helpers(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    source_module_wiring: &SourceModuleWiring,
-    lowered_source: Option<&LoweredRuntimeModuleSource>,
-    namespace_member_rewrite: Option<
-        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
-    >,
-    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
+    args: LocalizedNoopRuntimeHelperArgs<'_>,
 ) -> BTreeSet<BindingName> {
+    let LocalizedNoopRuntimeHelperArgs {
+        program,
+        module_id,
+        source_module_wiring,
+        lowered_source,
+        namespace_member_rewrite,
+        node_builtin_require_rewrite,
+        remaining_runtime_helpers,
+    } = args;
     let Some(source) = lowered_source else {
         return BTreeSet::new();
     };
@@ -690,25 +909,25 @@ pub(crate) fn filter_remaining_helpers_namespace_and_require(
 /// imports folded in, and the result split into runtime-helper vs.
 /// direct-import buckets via `partition_runtime_owner_bindings`.
 /// Empty partitions are dropped.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_runtime_import_partitions(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    runtime_import_groups: BTreeMap<u32, BTreeSet<BindingName>>,
-    binding_owners: &BindingOwnerPlan,
-    namespace_member_rewrite: Option<
-        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
-    >,
-    source_runtime_refs: &BTreeSet<BindingName>,
-    lowered_helpers: &BTreeSet<BindingName>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    consumed_node_builtin_require_helpers: &BTreeSet<BindingName>,
-    localized_noop_runtime_helpers: &BTreeSet<BindingName>,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
-    planned_bindings: &BTreeSet<BindingName>,
-    local_source_definitions: &BTreeSet<BindingName>,
-    local_source_writes: &BTreeSet<BindingName>,
+    args: RuntimeImportPartitionArgs<'_>,
 ) -> Vec<(u32, RuntimeOwnerImportPartition)> {
+    let RuntimeImportPartitionArgs {
+        program,
+        module_id,
+        runtime_import_groups,
+        binding_owners,
+        namespace_member_rewrite,
+        source_runtime_refs,
+        lowered_helpers,
+        written_runtime_helpers,
+        consumed_node_builtin_require_helpers,
+        localized_noop_runtime_helpers,
+        remaining_runtime_helpers,
+        planned_bindings,
+        local_source_definitions,
+        local_source_writes,
+    } = args;
     let mut runtime_import_partitions = Vec::<(u32, RuntimeOwnerImportPartition)>::new();
     for (source_file_id, bindings) in runtime_import_groups {
         let dropped_runtime_namespaces = namespace_member_rewrite
@@ -780,19 +999,17 @@ pub(crate) fn build_runtime_import_partitions(
 /// local `lazyValue` shim instead of importing it. Returns the
 /// localized rewritten source on success; `None` if any precondition
 /// fails or the rewrite isn't applicable.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn try_localize_lazy_value(
-    lowered_source: Option<&LoweredRuntimeModuleSource>,
-    namespace_member_rewrite: Option<
-        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
-    >,
-    has_runtime_edge_before_lazy_helpers: bool,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    has_runtime_group_imports: bool,
-    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
-    module_id: ModuleId,
-    lowered_runtime_bindings: &BTreeSet<BindingName>,
-) -> Option<String> {
+pub(crate) fn try_localize_lazy_value(args: LazyValueLocalizationArgs<'_>) -> Option<String> {
+    let LazyValueLocalizationArgs {
+        lowered_source,
+        namespace_member_rewrite,
+        has_runtime_edge_before_lazy_helpers,
+        written_runtime_helpers,
+        has_runtime_group_imports,
+        runtime_singleton_inlines,
+        module_id,
+        lowered_runtime_bindings,
+    } = args;
     let lowered_source = lowered_source?;
     if !lowered_source.uses_lazy_value
         || lowered_source.uses_lazy_module
@@ -1165,28 +1382,27 @@ pub(crate) fn emit_source_import_bindings(
 /// remain after the split). Returns `(package_remaining, remaining,
 /// package_written, written)` — the post-split sets needed by the
 /// follow-up lazyValue localization and helper-usage recording.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_lowered_package_runtime_imports(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_package_runtime_helper_files: &mut BTreeMap<
-        PackageRuntimeHelperKey,
-        PackageRuntimeHelperUsage,
-    >,
-    source_file_id: u32,
-    binding_owners: &BindingOwnerPlan,
-    package_runtime_owner: Option<&PackageRuntimeOwner>,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
+    args: LoweredPackageRuntimeImportArgs<'_>,
 ) -> (
     BTreeSet<BindingName>,
     BTreeSet<BindingName>,
     BTreeSet<BindingName>,
     BTreeSet<BindingName>,
 ) {
+    let LoweredPackageRuntimeImportArgs {
+        program,
+        module_id,
+        module_path,
+        file,
+        planned_bindings,
+        used_package_runtime_helper_files,
+        source_file_id,
+        binding_owners,
+        package_runtime_owner,
+        remaining_runtime_helpers,
+        written_runtime_helpers,
+    } = args;
     let (package_remaining_helpers, remaining_runtime_helpers) = partition_package_runtime_bindings(
         binding_owners,
         package_runtime_owner,
@@ -1231,25 +1447,25 @@ pub(crate) fn emit_lowered_package_runtime_imports(
 /// peeled off, if the shared `lazyValue` import is the only remaining
 /// runtime edge, we localize it too and avoid materializing the
 /// runtime-helper file just for the memoizer.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn try_post_inline_localize_lazy_value(
-    lowered_source: &LoweredRuntimeModuleSource,
-    namespace_member_rewrite: Option<
-        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
-    >,
-    already_localized: Option<&String>,
-    has_runtime_edge_before_lazy_helpers: bool,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    package_remaining_helpers: &BTreeSet<BindingName>,
-    package_written_helpers: &BTreeSet<BindingName>,
-    lazy_helper_names: &[&'static str],
-    runtime_import_partitions: &[(u32, RuntimeOwnerImportPartition)],
-    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
-    binding_owners: &BindingOwnerPlan,
-    package_runtime_owner: Option<&PackageRuntimeOwner>,
-    module_id: ModuleId,
+    args: PostInlineLazyValueLocalizationArgs<'_>,
 ) -> Option<String> {
+    let PostInlineLazyValueLocalizationArgs {
+        lowered_source,
+        namespace_member_rewrite,
+        already_localized,
+        has_runtime_edge_before_lazy_helpers,
+        remaining_runtime_helpers,
+        written_runtime_helpers,
+        package_remaining_helpers,
+        package_written_helpers,
+        lazy_helper_names,
+        runtime_import_partitions,
+        runtime_singleton_inlines,
+        binding_owners,
+        package_runtime_owner,
+        module_id,
+    } = args;
     if already_localized.is_some()
         || !lowered_source.uses_lazy_value
         || lowered_source.uses_lazy_module
@@ -1296,26 +1512,23 @@ pub(crate) fn try_post_inline_localize_lazy_value(
 /// owned bindings, and finally the standard runtime-helper import for
 /// the remaining bindings — updating usage/export accumulators along
 /// the way.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_runtime_import_partitions(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    used_package_runtime_helper_files: &mut BTreeMap<
-        PackageRuntimeHelperKey,
-        PackageRuntimeHelperUsage,
-    >,
-    emitted_inline_runtime_helpers: &mut BTreeSet<(u32, BindingName)>,
-    runtime_import_partitions: Vec<(u32, RuntimeOwnerImportPartition)>,
-    runtime_singleton_inlines: &RuntimeSingletonInlinePlan,
-    binding_owners: &BindingOwnerPlan,
-    package_runtime_owner: Option<&PackageRuntimeOwner>,
-) {
+pub(crate) fn emit_runtime_import_partitions(args: RuntimeImportPartitionEmitArgs<'_>) {
+    let RuntimeImportPartitionEmitArgs {
+        program,
+        module_id,
+        module_path,
+        file,
+        planned_bindings,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        required_runtime_helper_bindings,
+        used_package_runtime_helper_files,
+        emitted_inline_runtime_helpers,
+        runtime_import_partitions,
+        runtime_singleton_inlines,
+        binding_owners,
+        package_runtime_owner,
+    } = args;
     for (source_file_id, import_partition) in runtime_import_partitions {
         emit_direct_owner_imports(
             program,
@@ -1418,18 +1631,18 @@ pub(crate) fn emit_runtime_import_partitions(
 /// memoizers come from the shared `runtime/lazy.ts` file so lazy-only
 /// consumers do not depend on a large per-source helper island. Skipped
 /// entirely when every category is empty.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_lowered_runtime_helper_import(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    source_file_id: u32,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    lazy_helper_names: &[&'static str],
-) {
+pub(crate) fn emit_lowered_runtime_helper_import(args: LoweredRuntimeHelperImportArgs<'_>) {
+    let LoweredRuntimeHelperImportArgs {
+        program,
+        module_id,
+        module_path,
+        file,
+        planned_bindings,
+        source_file_id,
+        remaining_runtime_helpers,
+        written_runtime_helpers,
+        lazy_helper_names,
+    } = args;
     if remaining_runtime_helpers.is_empty()
         && written_runtime_helpers.is_empty()
         && lazy_helper_names.is_empty()
@@ -1476,21 +1689,21 @@ pub(crate) fn emit_lowered_runtime_helper_import(
 /// files are read, which bindings are re-exported, which writers/
 /// setters target this source, and which lazy helpers are imported or
 /// re-exported by lazy form.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn record_lowered_runtime_helper_usage(
-    lowered_source: &LoweredRuntimeModuleSource,
-    remaining_runtime_helpers: &BTreeSet<BindingName>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    lazy_helper_names: &[&'static str],
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    used_runtime_helper_setters: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    used_lazy_module: &mut BTreeSet<u32>,
-    used_lazy_value: &mut BTreeSet<u32>,
-    exported_lazy_module: &mut BTreeSet<u32>,
-    exported_lazy_value: &mut BTreeSet<u32>,
-) {
+pub(crate) fn record_lowered_runtime_helper_usage(args: LoweredRuntimeHelperUsageArgs<'_>) {
+    let LoweredRuntimeHelperUsageArgs {
+        lowered_source,
+        remaining_runtime_helpers,
+        written_runtime_helpers,
+        lazy_helper_names,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        required_runtime_helper_bindings,
+        used_runtime_helper_setters,
+        used_lazy_module,
+        used_lazy_value,
+        exported_lazy_module,
+        exported_lazy_value,
+    } = args;
     let source_file_id = lowered_source.source_file_id;
     if !remaining_runtime_helpers.is_empty() || !written_runtime_helpers.is_empty() {
         used_runtime_helper_files.entry(source_file_id).or_default();
@@ -1534,16 +1747,18 @@ pub(crate) fn record_lowered_runtime_helper_usage(
 /// {original -> alias})` produces one `import { original as alias, ...
 /// } from "runtime-helpers/..."` statement and updates the helper-
 /// tracking maps so audits know this module reads from that source.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_migrated_runtime_extra_alias_imports(
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    migrated_runtime_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    args: MigratedRuntimeExtraAliasImportArgs<'_>,
 ) {
+    let MigratedRuntimeExtraAliasImportArgs {
+        module_path,
+        file,
+        planned_bindings,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        required_runtime_helper_bindings,
+        migrated_runtime_extra_runtime_dep_aliases,
+    } = args;
     for (source_file_id, aliases) in migrated_runtime_extra_runtime_dep_aliases {
         if aliases.is_empty() {
             continue;
@@ -1588,17 +1803,19 @@ pub(crate) fn emit_migrated_runtime_extra_alias_imports(
 /// migrated from another owner's runtime file into this module so it
 /// can re-export them. Each `(source_file_id -> {bindings})` emits
 /// one helper-import statement and records the surface for audit.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_migrated_extra_runtime_reexport_imports(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    migrated_extra_runtime_reexport_deps: &BTreeMap<u32, BTreeSet<BindingName>>,
+    args: MigratedExtraRuntimeReexportImportArgs<'_>,
 ) {
+    let MigratedExtraRuntimeReexportImportArgs {
+        program,
+        module_id,
+        module_path,
+        file,
+        planned_bindings,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        migrated_extra_runtime_reexport_deps,
+    } = args;
     for (source_file_id, bindings) in migrated_extra_runtime_reexport_deps {
         used_runtime_helper_files
             .entry(*source_file_id)
@@ -1637,20 +1854,17 @@ pub(crate) fn emit_migrated_extra_runtime_reexport_imports(
 /// have already been moved out of their original module: a plain
 /// direct owner re-import for source/runtime-owner deps and an
 /// aliased import for the alias-renamed bindings.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_migrated_extra_owner_imports(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    module_path: &str,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    migrated_extra_source_deps: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    migrated_extra_runtime_owner_deps: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    migrated_extra_runtime_owner_dep_aliases: &BTreeMap<
-        ModuleId,
-        BTreeMap<BindingName, BindingName>,
-    >,
-) {
+pub(crate) fn emit_migrated_extra_owner_imports(args: MigratedExtraOwnerImportArgs<'_>) {
+    let MigratedExtraOwnerImportArgs {
+        program,
+        module_id,
+        module_path,
+        file,
+        planned_bindings,
+        migrated_extra_source_deps,
+        migrated_extra_runtime_owner_deps,
+        migrated_extra_runtime_owner_dep_aliases,
+    } = args;
     if !migrated_extra_source_deps.is_empty() {
         emit_direct_owner_imports(
             program,
@@ -1756,20 +1970,20 @@ pub(crate) fn filter_unreferenced_namespace_helpers(
 /// `__reverts_set_X(value)`) can introduce new identifier references
 /// and erase others; this pass keeps only helpers that are still
 /// referenced or still pulled in via migration.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn filter_remaining_helpers_by_write_rewrite(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    source_module_wiring: &SourceModuleWiring,
-    lowered_source: Option<&LoweredRuntimeModuleSource>,
-    namespace_member_rewrite: Option<
-        &runtime_namespace_rewrite::RuntimeNamespaceMemberAccessRewrite,
-    >,
-    node_builtin_require_rewrite: Option<&NodeBuiltinRequireRewrite>,
-    written_runtime_helpers: &BTreeSet<BindingName>,
-    migrated_extra_runtime_deps: &BTreeSet<BindingName>,
-    remaining_runtime_helpers: BTreeSet<BindingName>,
+    args: RemainingHelpersWriteRewriteArgs<'_>,
 ) -> BTreeSet<BindingName> {
+    let RemainingHelpersWriteRewriteArgs {
+        program,
+        module_id,
+        source_module_wiring,
+        lowered_source,
+        namespace_member_rewrite,
+        node_builtin_require_rewrite,
+        written_runtime_helpers,
+        migrated_extra_runtime_deps,
+        remaining_runtime_helpers,
+    } = args;
     let Some(lowered_source) = lowered_source else {
         return remaining_runtime_helpers;
     };
@@ -2058,17 +2272,17 @@ pub(crate) fn push_package_imports(
 /// local bindings. Namespace-component bindings get `Unknown` shape
 /// because their shape was rewritten by namespace decomposition;
 /// other migrated bindings are callable.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn push_folded_noop_and_migrated_exports(
-    folded: &RuntimeLazyFoldModule,
-    runtime_stub_exports: &BTreeSet<BindingName>,
-    direct_stub_exports: &BTreeMap<ModuleId, BTreeSet<BindingName>>,
-    migrated_extra_noop_deps: &BTreeSet<BindingName>,
-    migrated_local_bindings: &BTreeSet<BindingName>,
-    migrated_extra_namespace_bindings: &BTreeSet<BindingName>,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-) {
+pub(crate) fn push_folded_noop_and_migrated_exports(args: FoldedNoopAndMigratedExportsArgs<'_>) {
+    let FoldedNoopAndMigratedExportsArgs {
+        folded,
+        runtime_stub_exports,
+        direct_stub_exports,
+        migrated_extra_noop_deps,
+        migrated_local_bindings,
+        migrated_extra_namespace_bindings,
+        file,
+        planned_bindings,
+    } = args;
     for binding in migrated_extra_noop_deps {
         file.push_source(noop_function_statement(binding));
     }
@@ -2189,18 +2403,18 @@ pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
 /// after its lazy fold. Each binding is registered in the helper-file /
 /// exported / required indexes and turned into a `PlannedBinding`
 /// derived from the program's shape/known-members data.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_runtime_extra_deps_imports(
-    program: &EnrichedProgram,
-    module_id: ModuleId,
-    path: &str,
-    deps_by_source: &BTreeMap<u32, BTreeSet<BindingName>>,
-    file: &mut PlannedFile,
-    planned_bindings: &mut BTreeSet<BindingName>,
-    used_runtime_helper_files: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    exported_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-    required_runtime_helper_bindings: &mut BTreeMap<u32, BTreeSet<BindingName>>,
-) {
+pub(crate) fn emit_runtime_extra_deps_imports(args: RuntimeExtraDepsImportArgs<'_>) {
+    let RuntimeExtraDepsImportArgs {
+        program,
+        module_id,
+        path,
+        deps_by_source,
+        file,
+        planned_bindings,
+        used_runtime_helper_files,
+        exported_runtime_helper_bindings,
+        required_runtime_helper_bindings,
+    } = args;
     for (source_file_id, bindings) in deps_by_source {
         if bindings.is_empty() {
             continue;

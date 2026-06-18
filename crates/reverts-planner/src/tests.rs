@@ -365,17 +365,17 @@ fn lazy_helper_imports_use_shared_runtime_lazy_file() {
     let mut file = PlannedFile::new("modules/entry.ts");
     let mut planned_bindings = BTreeSet::new();
 
-    super::emit_lowered_runtime_helper_import(
-        &program,
-        ModuleId(1),
-        "modules/entry.ts",
-        &mut file,
-        &mut planned_bindings,
-        1,
-        &BTreeSet::new(),
-        &BTreeSet::new(),
-        &["lazyValue"],
-    );
+    super::emit_lowered_runtime_helper_import(super::LoweredRuntimeHelperImportArgs {
+        program: &program,
+        module_id: ModuleId(1),
+        module_path: "modules/entry.ts",
+        file: &mut file,
+        planned_bindings: &mut planned_bindings,
+        source_file_id: 1,
+        remaining_runtime_helpers: &BTreeSet::new(),
+        written_runtime_helpers: &BTreeSet::new(),
+        lazy_helper_names: &["lazyValue"],
+    });
     finalize_planned_file(&mut file);
 
     let source = file.body.join("\n");
