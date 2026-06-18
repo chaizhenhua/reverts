@@ -165,18 +165,27 @@ impl HintIndex {
 
 fn build_hint_index(rows: &[HintRow]) -> HintIndex {
     let mut top_level: BTreeMap<(String, String), TopLevel> = BTreeMap::new();
+    // A package+version may carry several top-level hint rows (e.g. re-persisted
+    // across runs), and some can be defectively empty. Last-insert-wins would let
+    // an empty duplicate shadow the real public-member enumeration, wrongly
+    // flipping the verdict to NotExternalizable. Union the members across all
+    // rows so the richest enumeration always wins; a genuinely member-less
+    // package (single default export, e.g. lodash) still resolves to empty.
     for row in rows {
-        let is_top = row.export_specifier == row.package_name;
-        if !is_top {
+        if row.export_specifier != row.package_name {
             continue;
         }
-        top_level.insert(
-            (row.package_name.clone(), row.package_version.clone()),
-            TopLevel {
+        let entry = top_level
+            .entry((row.package_name.clone(), row.package_version.clone()))
+            .or_insert_with(|| TopLevel {
                 top_specifier: row.export_specifier.clone(),
-                public_members: row.public_members.clone(),
-            },
-        );
+                public_members: Vec::new(),
+            });
+        for member in &row.public_members {
+            if !entry.public_members.contains(member) {
+                entry.public_members.push(member.clone());
+            }
+        }
     }
     HintIndex { top_level }
 }
@@ -262,6 +271,33 @@ mod tests {
                 );
             }
             other => panic!("expected Externalizable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_duplicate_hint_does_not_shadow_the_real_public_members() {
+        // A package+version can carry duplicate top-level hint rows where one is
+        // defectively empty. The empty row must not shadow the real enumeration
+        // (otherwise the package is wrongly judged NotExternalizable and its
+        // already-rolled-up internals get revoked, breaking their consumers).
+        let snapshot = Snapshot {
+            modules: vec![package_module(1, "@smithy/util-utf8", "3.0.0")],
+            attributions: vec![accepted_external(1, "@smithy/util-utf8", "3.0.0")],
+            hints: vec![
+                top_hint("@smithy/util-utf8", "3.0.0", &["fromUtf8", "toUtf8"]),
+                top_hint("@smithy/util-utf8", "3.0.0", &[]),
+            ],
+        };
+        let oracle = build_oracle(&snapshot, OracleConfig::default());
+        match oracle.lookup("@smithy/util-utf8", "3.0.0") {
+            Some(OracleVerdict::Externalizable { public_members, .. }) => {
+                assert!(
+                    public_members.contains(&"fromUtf8".to_string())
+                        && public_members.contains(&"toUtf8".to_string()),
+                    "the non-empty hint must win over the empty duplicate: {public_members:?}",
+                );
+            }
+            other => panic!("expected Externalizable despite the empty duplicate, got {other:?}"),
         }
     }
 }
