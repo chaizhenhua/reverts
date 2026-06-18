@@ -896,6 +896,90 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_loader_vendors_external_import_with_typescript_source_specifier() {
+        // A package that ships its TypeScript source (e.g. ajv@7 ships `lib/*.ts`
+        // beside compiled `dist/*.js`) can be externalized to a `.ts` specifier.
+        // Node cannot load a `.ts` at runtime, and tsc would recompile the
+        // dependency's own source into the output (failing the build with the
+        // dependency's type errors). The loader must downgrade such an accepted
+        // external import to rejected/vendored — even when it carries the current
+        // import-safety policy version.
+        let connection = Connection::open_in_memory().expect("in-memory database should open");
+        create_schema(&connection);
+        let tempdir = tempdir().expect("tempdir should be created");
+        let source_path = tempdir.path().join("bundle.js");
+        fs::write(&source_path, "export const activate = 42;")
+            .expect("fixture source should be written");
+        insert_fixture_project(&connection, source_path.to_string_lossy().as_ref());
+
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_attributions
+                    ADD COLUMN external_import_policy_version INTEGER NOT NULL DEFAULT 0;
+                ",
+            )
+            .expect("add policy column");
+        connection
+            .execute(
+                "UPDATE package_attributions
+                   SET export_specifier = 'ajv/lib/compile/codegen/code.ts',
+                       package_subpath = 'lib/compile/codegen/code.ts',
+                       external_import_policy_version = ?1
+                 WHERE module_id = 11",
+                [PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION],
+            )
+            .expect("stamp current policy version with a .ts specifier");
+
+        let rows =
+            load_project_rows_from_connection(&connection, 7).expect("fixture rows should load");
+        let attribution = rows
+            .package_attributions
+            .iter()
+            .find(|attribution| attribution.module_id == ModuleId(11))
+            .expect("module 11 attribution should be present");
+        assert_eq!(
+            attribution.status,
+            PackageAttributionStatus::Rejected,
+            "a `.ts` external import specifier must downgrade to rejected/vendored",
+        );
+        assert_eq!(
+            attribution.emission_mode,
+            PackageEmissionMode::ApplicationSource,
+        );
+        assert!(attribution.export_specifier.is_none());
+        assert!(
+            attribution
+                .rejection_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("TypeScript source file")),
+            "rejection reason must explain the `.ts` downgrade: {:?}",
+            attribution.rejection_reason,
+        );
+    }
+
+    #[test]
+    fn typescript_source_specifier_detection() {
+        for ts in [
+            "ajv/lib/compile/codegen/code.ts",
+            "pkg/component.tsx",
+            "pkg/mod.mts",
+            "pkg/legacy.cts",
+        ] {
+            assert!(
+                super::specifier_is_typescript_source(ts),
+                "{ts} should be detected as a TypeScript source specifier",
+            );
+        }
+        for runtime in ["ajv/dist/code.js", "lodash/map.js", "react", "pkg/x.json"] {
+            assert!(
+                !super::specifier_is_typescript_source(runtime),
+                "{runtime} is a valid runtime specifier and must not be downgraded",
+            );
+        }
+    }
+
+    #[test]
     fn sqlite_project_loader_treats_missing_project_assets_table_as_empty() {
         let connection = Connection::open_in_memory().expect("in-memory database should open");
         create_schema_without_project_assets(&connection);
