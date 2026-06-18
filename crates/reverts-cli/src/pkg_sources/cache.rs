@@ -5,11 +5,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::GzDecoder;
 use tar::Archive;
 
 use crate::errors::MatchPackagesError;
+use crate::pkg_sources::registry::{self, PackumentVersion};
 
 /// Resolve the cache root: `REVERTS_PACKAGE_CACHE_DIR` if set, else
 /// `$HOME/.reverts/package-cache`.
@@ -106,6 +108,162 @@ pub(crate) fn extract_tarball_gz(
             .map_err(|source| make_err(format!("unpack {}: {source}", path.display())))?;
     }
     Ok(())
+}
+
+const META_FILE: &str = "meta.json";
+const TARBALL_FILE: &str = "package.tgz";
+const PACKAGE_DIR: &str = "package";
+
+fn write_meta(
+    entry: &Path,
+    package_name: &str,
+    version: &str,
+    integrity: &str,
+    tarball_url: &str,
+) -> Result<(), MatchPackagesError> {
+    let fetched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|source| MatchPackagesError::ExtractPackageSource {
+            package_name: package_name.to_string(),
+            package_version: version.to_string(),
+            message: format!("system clock is before the Unix epoch: {source}"),
+        })?;
+    let meta = serde_json::json!({
+        "name": package_name,
+        "version": version,
+        "integrity": integrity,
+        "tarball_url": tarball_url,
+        "fetched_at": fetched_at,
+    });
+    let body = serde_json::to_vec_pretty(&meta).map_err(|source| {
+        MatchPackagesError::ExtractPackageSource {
+            package_name: package_name.to_string(),
+            package_version: version.to_string(),
+            message: format!("serialize meta: {source}"),
+        }
+    })?;
+    fs::write(entry.join(META_FILE), body).map_err(|source| {
+        MatchPackagesError::ExtractPackageSource {
+            package_name: package_name.to_string(),
+            package_version: version.to_string(),
+            message: format!("write meta: {source}"),
+        }
+    })
+}
+
+fn meta_integrity_matches(entry: &Path, integrity: &str) -> bool {
+    let Ok(body) = fs::read(entry.join(META_FILE)) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return false;
+    };
+    value.get("integrity").and_then(serde_json::Value::as_str) == Some(integrity)
+}
+
+/// Ensure `<root>/<host>/<pkg>/<version>/package/` exists and is integrity-clean,
+/// returning the path to that `package/` directory. `download` fetches tarball
+/// bytes for a URL (injected for testing).
+pub(crate) fn ensure_package_source(
+    root: &Path,
+    registry_host: &str,
+    package_name: &str,
+    version: &str,
+    dist: &PackumentVersion,
+    download: impl Fn(&str) -> Result<Vec<u8>, MatchPackagesError>,
+) -> Result<PathBuf, MatchPackagesError> {
+    let make_err = |message: String| MatchPackagesError::ExtractPackageSource {
+        package_name: package_name.to_string(),
+        package_version: version.to_string(),
+        message,
+    };
+    let integrity =
+        dist.integrity
+            .as_deref()
+            .ok_or_else(|| MatchPackagesError::PackageSourceIntegrity {
+                package_name: package_name.to_string(),
+                package_version: version.to_string(),
+                message: "registry provided no integrity hash".to_string(),
+            })?;
+    let entry = entry_dir(root, registry_host, package_name, version);
+    let package_dir = entry.join(PACKAGE_DIR);
+
+    // Case 1: extracted tree present and integrity recorded matches → hit.
+    if package_dir.is_dir() && meta_integrity_matches(&entry, integrity) {
+        return Ok(package_dir);
+    }
+
+    // Case 2: tarball already on disk and verifies → re-extract locally, no
+    // network and no re-write of the tarball.
+    let tarball_path = entry.join(TARBALL_FILE);
+    if let Ok(bytes) = fs::read(&tarball_path) {
+        if registry::verify_integrity(package_name, version, &bytes, Some(integrity)).is_ok() {
+            return commit_entry(
+                &entry,
+                package_name,
+                version,
+                integrity,
+                &dist.tarball,
+                &bytes,
+            );
+        }
+    }
+
+    // Case 3: miss → download, verify, commit.
+    let bytes = download(&dist.tarball)?;
+    registry::verify_integrity(package_name, version, &bytes, Some(integrity))?;
+    fs::create_dir_all(&entry).map_err(|source| make_err(format!("create entry dir: {source}")))?;
+    fs::write(&tarball_path, &bytes)
+        .map_err(|source| make_err(format!("write tarball: {source}")))?;
+    commit_entry(
+        &entry,
+        package_name,
+        version,
+        integrity,
+        &dist.tarball,
+        &bytes,
+    )
+}
+
+/// Extract into a temp sibling dir, atomically swap into `package/`, then write
+/// `meta.json` last as the commit marker.
+fn commit_entry(
+    entry: &Path,
+    package_name: &str,
+    version: &str,
+    integrity: &str,
+    tarball_url: &str,
+    tarball: &[u8],
+) -> Result<PathBuf, MatchPackagesError> {
+    let make_err = |message: String| MatchPackagesError::ExtractPackageSource {
+        package_name: package_name.to_string(),
+        package_version: version.to_string(),
+        message,
+    };
+    fs::create_dir_all(entry).map_err(|source| make_err(format!("create entry dir: {source}")))?;
+    let staging = entry.join(format!(".staging-{}", std::process::id()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging)
+            .map_err(|source| make_err(format!("clear staging: {source}")))?;
+    }
+    extract_tarball_gz(package_name, version, tarball, &staging)?;
+    let extracted_package = staging.join(PACKAGE_DIR);
+    if !extracted_package.is_dir() {
+        return Err(make_err(
+            "tarball did not contain a package/ root".to_string(),
+        ));
+    }
+    let final_package = entry.join(PACKAGE_DIR);
+    if final_package.exists() {
+        fs::remove_dir_all(&final_package)
+            .map_err(|source| make_err(format!("clear old package: {source}")))?;
+    }
+    fs::rename(&extracted_package, &final_package)
+        .map_err(|source| make_err(format!("commit package dir: {source}")))?;
+    let _ = fs::remove_dir_all(&staging);
+    write_meta(entry, package_name, version, integrity, tarball_url)?;
+    Ok(final_package)
 }
 
 #[cfg(test)]
@@ -248,5 +406,146 @@ mod tests {
                 .join("evil.txt")
                 .exists()
         );
+    }
+
+    fn sample_tarball_gz() -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let body = r#"{"name":"x","version":"1.0.0"}"#;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(body.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "package/package.json", body.as_bytes())
+                .expect("append");
+            builder.finish().expect("finish");
+        }
+        let mut gz = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            encoder.write_all(&tar_bytes).expect("gz");
+            encoder.finish().expect("gz finish");
+        }
+        gz
+    }
+
+    fn dist_for(gz: &[u8]) -> PackumentVersion {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha512};
+        let integrity = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha512::digest(gz))
+        );
+        PackumentVersion {
+            tarball: "https://r/x-1.0.0.tgz".to_string(),
+            integrity: Some(integrity),
+        }
+    }
+
+    #[test]
+    fn ensure_downloads_then_hits_cache() {
+        let gz = sample_tarball_gz();
+        let dist = dist_for(&gz);
+        let root = tempfile::tempdir().expect("tempdir");
+        let calls = std::cell::Cell::new(0u32);
+        let download = |_url: &str| {
+            calls.set(calls.get() + 1);
+            Ok(gz.clone())
+        };
+        // Miss → downloads once.
+        let pkg = ensure_package_source(
+            root.path(),
+            "registry.npmjs.org",
+            "x",
+            "1.0.0",
+            &dist,
+            &download,
+        )
+        .expect("first ensure");
+        assert!(pkg.join("package.json").is_file());
+        assert_eq!(calls.get(), 1);
+        // Hit → no further download.
+        let pkg2 = ensure_package_source(
+            root.path(),
+            "registry.npmjs.org",
+            "x",
+            "1.0.0",
+            &dist,
+            &download,
+        )
+        .expect("second ensure");
+        assert_eq!(pkg, pkg2);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn ensure_rejects_corrupt_download() {
+        let gz = sample_tarball_gz();
+        let dist = dist_for(&gz);
+        let root = tempfile::tempdir().expect("tempdir");
+        let download = |_url: &str| Ok(b"not the real tarball".to_vec());
+        let err = ensure_package_source(
+            root.path(),
+            "registry.npmjs.org",
+            "x",
+            "1.0.0",
+            &dist,
+            &download,
+        )
+        .expect_err("integrity must fail");
+        assert!(matches!(
+            err,
+            MatchPackagesError::PackageSourceIntegrity { .. }
+        ));
+        assert!(
+            !root
+                .path()
+                .join("registry.npmjs.org/x/1.0.0/package")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn ensure_reextracts_from_tarball_without_download() {
+        let gz = sample_tarball_gz();
+        let dist = dist_for(&gz);
+        let root = tempfile::tempdir().expect("tempdir");
+        let calls = std::cell::Cell::new(0u32);
+        let download = |_url: &str| {
+            calls.set(calls.get() + 1);
+            Ok(gz.clone())
+        };
+        // Miss → downloads once and commits.
+        let pkg = ensure_package_source(
+            root.path(),
+            "registry.npmjs.org",
+            "x",
+            "1.0.0",
+            &dist,
+            &download,
+        )
+        .expect("first ensure");
+        assert_eq!(calls.get(), 1);
+        // Simulate an interrupted prior commit: drop meta.json and the package dir,
+        // leaving only the verified package.tgz on disk.
+        let entry = pkg.parent().expect("entry dir").to_path_buf();
+        std::fs::remove_file(entry.join("meta.json")).expect("rm meta");
+        std::fs::remove_dir_all(&pkg).expect("rm package dir");
+        // Case 2: re-extract from the cached tarball, no new download.
+        let pkg2 = ensure_package_source(
+            root.path(),
+            "registry.npmjs.org",
+            "x",
+            "1.0.0",
+            &dist,
+            &download,
+        )
+        .expect("re-extract");
+        assert!(pkg2.join("package.json").is_file());
+        assert_eq!(calls.get(), 1);
     }
 }
