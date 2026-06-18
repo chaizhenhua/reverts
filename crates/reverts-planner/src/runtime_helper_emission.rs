@@ -45,11 +45,11 @@ use crate::{
     coalesce_runtime_lazy_initializer_call_runs, compact_bare_void_zero_expression_statements,
     compact_pure_static_runtime_literals, drop_bare_void_zero_top_level_statements,
     identifiers_in_source, inline_single_use_runtime_proxy_functions,
-    noop_runtime_helpers_in_source, private_noop_runtime_helpers_in_source,
-    prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
-    rewrite_noop_runtime_helper_calls, runtime_entrypoint_root_bindings,
-    runtime_module_owner_imports_for_source, scan_runtime_externalized_bindings,
-    source_contains_top_level_call, strip_runtime_noop_declarations,
+    noop_runtime_helpers_in_source, prune_orphan_runtime_bindings,
+    purify_private_runtime_lazy_initializers, rewrite_noop_runtime_helper_calls,
+    runtime_entrypoint_root_bindings, runtime_module_owner_imports_for_source,
+    scan_runtime_externalized_bindings, source_contains_top_level_call,
+    source_reads_bindings_only_as_erasable_noop_calls, strip_runtime_noop_declarations,
     unresolved_runtime_helper_references,
 };
 use crate::{
@@ -257,10 +257,31 @@ pub(crate) fn emit_runtime_helper_files(
             helper_closure.source.as_str(),
             &helper_closure.emitted_bindings,
         );
-        let noop_runtime_helpers = noop_runtime_helpers_in_source(helper_closure.source.as_str());
-        let erased_private_noops = private_noop_runtime_helpers_in_source(
+        let mut noop_runtime_helpers = helper_closure
+            .emitted_bindings
+            .iter()
+            .filter(|binding| {
+                prelude.snippets.get(*binding).is_some_and(|snippet| {
+                    crate::runtime_prelude_snippet_is_noop(
+                        binding.as_str(),
+                        snippet.source.as_str(),
+                    )
+                })
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        noop_runtime_helpers.extend(
+            noop_runtime_helpers_in_source(helper_closure.source.as_str())
+                .into_iter()
+                .filter(|binding| helper_closure.emitted_bindings.contains(binding)),
+        );
+        let private_noop_candidates = noop_runtime_helpers
+            .difference(&public_helper_bindings)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let erased_private_noops = source_reads_bindings_only_as_erasable_noop_calls(
             helper_closure.source.as_str(),
-            &public_helper_bindings,
+            &private_noop_candidates,
         );
         if !noop_runtime_helpers.is_empty() {
             helper_closure.source = rewrite_noop_runtime_helper_calls(

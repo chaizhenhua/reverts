@@ -39,6 +39,7 @@ pub(crate) struct RuntimeSourceReadIndex {
     pub(crate) namespace_exports_by_namespace: BTreeMap<BindingName, RuntimeNamespaceExport>,
     pub(crate) namespace_export_helpers: BTreeSet<BindingName>,
     pub(crate) free_bindings_by_snippet: BTreeMap<BindingName, BTreeSet<BindingName>>,
+    pub(crate) runtime_writes_by_snippet: BTreeMap<BindingName, BTreeSet<BindingName>>,
     pub(crate) non_snippet_runtime_reads: BTreeSet<BindingName>,
     pub(crate) folded_non_snippet_runtime_reads: BTreeSet<BindingName>,
     pub(crate) folded_lazy_safe_runtime_reads: BTreeSet<BindingName>,
@@ -75,11 +76,15 @@ pub(crate) fn runtime_source_read_index(
         index
             .free_bindings_by_snippet
             .insert(key.clone(), free_bindings);
-        for write in implicit_global_writes_in_source(snippet.source.as_str())
+        let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
             .into_iter()
             .filter(|write| !local_bindings.contains(write.as_str()))
             .filter(|write| prelude.defines(write))
-        {
+            .collect::<BTreeSet<_>>();
+        index
+            .runtime_writes_by_snippet
+            .insert(key.clone(), runtime_writes.clone());
+        for write in runtime_writes {
             index
                 .snippet_writers_by_binding
                 .entry(write)

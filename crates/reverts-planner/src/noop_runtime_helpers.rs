@@ -29,7 +29,7 @@ pub(crate) fn localizable_noop_runtime_helpers(
     exported_bindings: &BTreeSet<BindingName>,
     uses_lazy_value: bool,
 ) -> BTreeSet<BindingName> {
-    let localizable = candidates
+    let noop_candidates = candidates
         .iter()
         .filter(|binding| !exported_bindings.contains(*binding))
         .filter(|binding| {
@@ -37,9 +37,9 @@ pub(crate) fn localizable_noop_runtime_helpers(
                 runtime_prelude_snippet_is_noop(binding.as_str(), snippet.source.as_str())
             })
         })
-        .filter(|binding| source_reads_binding_only_as_erasable_noop_calls(source, binding))
         .cloned()
         .collect::<BTreeSet<_>>();
+    let localizable = source_reads_bindings_only_as_erasable_noop_calls(source, &noop_candidates);
     if localizable.is_empty() {
         return localizable;
     }
@@ -62,17 +62,6 @@ pub(crate) fn source_contains_top_level_lazy_value_call_referencing_binding(
         .into_iter()
         .filter(|statement| lowered_lazy_initializer_statement_binding(statement).is_some())
         .any(|statement| contains_identifier_reference(statement, binding.as_str()))
-}
-
-pub(crate) fn private_noop_runtime_helpers_in_source(
-    source: &str,
-    public_bindings: &BTreeSet<BindingName>,
-) -> BTreeSet<BindingName> {
-    noop_runtime_helpers_in_source(source)
-        .into_iter()
-        .filter(|binding| !public_bindings.contains(binding))
-        .filter(|binding| source_reads_binding_only_as_erasable_noop_calls(source, binding))
-        .collect()
 }
 
 pub(crate) fn noop_runtime_helpers_in_source(source: &str) -> BTreeSet<BindingName> {
@@ -149,21 +138,37 @@ pub(crate) fn compact_bare_void_zero_expression_statements(source: &str) -> Stri
     apply_text_edits(source, &expand_line_removal_edits(source, &edits))
 }
 
-pub(crate) fn source_reads_binding_only_as_erasable_noop_calls(
+pub(crate) fn source_reads_bindings_only_as_erasable_noop_calls(
     source: &str,
-    binding: &BindingName,
-) -> bool {
-    if implicit_global_writes_in_source(source).contains(binding) {
-        return false;
+    bindings: &BTreeSet<BindingName>,
+) -> BTreeSet<BindingName> {
+    if bindings.is_empty() {
+        return BTreeSet::new();
     }
-    let reads = identifier_read_facts_in_source(source)
-        .into_iter()
-        .filter(|fact| fact.name == binding.as_str())
-        .collect::<Vec<_>>();
-    !reads.is_empty()
-        && reads
-            .iter()
-            .all(|fact| noop_call_replacement_span(source, fact).is_some())
+    let runtime_writes = implicit_global_writes_in_source(source);
+    let candidates = bindings
+        .difference(&runtime_writes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if candidates.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut has_read = BTreeSet::<BindingName>::new();
+    let mut has_non_erasable_read = BTreeSet::<BindingName>::new();
+    for fact in identifier_read_facts_in_source(source) {
+        let binding = BindingName::new(fact.name.as_str());
+        if !candidates.contains(&binding) {
+            continue;
+        }
+        has_read.insert(binding.clone());
+        if noop_call_replacement_span(source, &fact).is_none() {
+            has_non_erasable_read.insert(binding);
+        }
+    }
+    has_read
+        .difference(&has_non_erasable_read)
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn rewrite_noop_runtime_helper_calls(

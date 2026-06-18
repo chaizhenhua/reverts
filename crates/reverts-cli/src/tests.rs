@@ -507,6 +507,24 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
 }
 
 #[test]
+fn verified_externalization_hints_skip_loading_when_no_promotable_attributions() {
+    let connection = Connection::open_in_memory().expect("open db");
+    connection
+        .execute(
+            "CREATE TABLE package_externalization_hints (unexpected TEXT NOT NULL)",
+            [],
+        )
+        .expect("create irrelevant malformed hints table");
+    let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted =
+        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
+
+    assert_eq!(promoted, 0);
+}
+
+#[test]
 fn verified_externalization_hints_promote_stable_normalization_alternates() {
     let package_source = "function add(a,b){return a+b;}\nexports.add = add;";
     let module_source = "function add(a,b){return a+b;}";

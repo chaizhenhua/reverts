@@ -238,6 +238,17 @@ pub(crate) fn package_runtime_island_plan(
     }
 
     let mut plan = PackageRuntimeIslandPlan::default();
+    let total_roots = roots_by_key.values().map(BTreeSet::len).sum::<usize>();
+    let total_root_budget = program
+        .model()
+        .graph()
+        .runtime_preludes()
+        .values()
+        .map(|prelude| prelude.snippets.len().isqrt())
+        .sum::<usize>();
+    if total_roots > total_root_budget {
+        return plan;
+    }
     for (key, mut root_bindings) in roots_by_key {
         let Some(prelude) = program.model().graph().runtime_prelude(key.source_file_id) else {
             continue;
@@ -250,6 +261,9 @@ pub(crate) fn package_runtime_island_plan(
                 && prelude.defines(binding)
         });
         if root_bindings.is_empty() {
+            continue;
+        }
+        if root_bindings.len() > prelude.snippets.len().isqrt() {
             continue;
         }
         let folded_chunks = runtime_lazy_folds

@@ -41,8 +41,9 @@ use crate::runtime_source_read::{
     runtime_source_read_index,
 };
 use crate::{
-    LoweredRuntimeModuleSource, RuntimeLazyFoldPlan, RuntimeReaderClusterContext,
-    RuntimeReaderClusterMigration, RuntimeReaderClusterMigrationProposal, SourceModuleWiring,
+    LoweredRuntimeModuleSource, ReaderNonSnippetUseKind, RuntimeLazyFoldPlan,
+    RuntimeReaderClusterBlocker, RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
+    RuntimeReaderClusterMigrationProposal, SourceModuleWiring,
     add_global_owned_runtime_snippet_migrations, folded_runtime_chunk_definitions,
     localize_reader_runtime_setter_deps, merge_same_owner_overlapping_reader_migrations,
     migratable_folded_non_snippet_runtime_read_result,
@@ -887,6 +888,11 @@ pub(crate) fn compute_runtime_var_migration_plan(
                         readers,
                     ) {
                         Ok(migration) => migration,
+                        Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                            ReaderNonSnippetUseKind::UnfoldableEntrypointNonSnippetRead,
+                        )) => {
+                            continue;
+                        }
                         Err(_) => {
                             let Some(migration) =
                                 migratable_runtime_primary_with_retained_readers_result(
@@ -943,6 +949,11 @@ pub(crate) fn compute_runtime_var_migration_plan(
                                 readers,
                             ) {
                                 Ok(migration) => migration,
+                                Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+                                    ReaderNonSnippetUseKind::UnfoldableEntrypointNonSnippetRead,
+                                )) => {
+                                    continue;
+                                }
                                 Err(_) => {
                                     let Some(migration) =
                                         migratable_runtime_primary_with_retained_readers_result(

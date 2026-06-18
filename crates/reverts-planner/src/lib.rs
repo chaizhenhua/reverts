@@ -185,7 +185,7 @@ use node_builtin_require::{
 use noop_runtime_helpers::{
     compact_bare_void_zero_expression_statements, drop_bare_void_zero_top_level_statements,
     localizable_noop_runtime_helpers, noop_runtime_helpers_in_source,
-    private_noop_runtime_helpers_in_source, rewrite_noop_runtime_helper_calls,
+    rewrite_noop_runtime_helper_calls, source_reads_bindings_only_as_erasable_noop_calls,
     strip_runtime_noop_declarations,
 };
 use pure_expression::{
@@ -3385,70 +3385,87 @@ pub(crate) fn closed_global_owned_runtime_snippets(
     owner_runtime_state: &BTreeMap<ModuleId, RuntimeReaderOwnerRuntimeState>,
 ) -> BTreeMap<BindingName, RuntimeOwnedSnippetMigration> {
     let mut selected = candidate_owners.clone();
+    // Reachability through selected owner-to-owner runtime dependencies is
+    // monotonic as candidates are removed: deleting candidates can only remove
+    // paths, never create new ones. Use the initial graph as an over-approximate
+    // cycle proof for the pruning loop so large cyclic regions are discarded in
+    // batches instead of re-solving transitive closure after every small change.
+    // This is conservative: a candidate may stay in runtime after a later
+    // removal would have broken its cycle, but emitted code never gains an
+    // unsafe owner import.
+    let selected_owner_paths = selected_owner_dependency_reachability(&selected, read_index);
     loop {
-        let mut removed = Vec::<BindingName>::new();
+        let mut removed = BTreeSet::<BindingName>::new();
         for (binding, owner_module) in &selected {
             let Some(snippet) = prelude.snippets.get(binding) else {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             };
             if read_index.entrypoint_callee.as_ref() == Some(binding)
                 || read_index.namespace_export_helpers.contains(binding)
             {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             }
 
-            let local_bindings = local_bindings_in_source(snippet.source.as_str());
-            let runtime_reads = runtime_import_identifiers_in_source(snippet.source.as_str())
+            let runtime_reads = read_index
+                .free_bindings_by_snippet
+                .get(binding)
+                .cloned()
+                .unwrap_or_default()
                 .into_iter()
-                .map(BindingName::new)
                 .filter(|dep| prelude.defines(dep))
                 .collect::<BTreeSet<_>>();
-            let blocking_cross_owner_dep = runtime_reads.iter().find(|dep| {
-                let Some(dep_owner) = selected.get(dep) else {
-                    return false;
-                };
-                dep_owner != owner_module
-                    && selected_owner_dependency_creates_cycle(
-                        &selected,
-                        read_index,
-                        module_dependencies_by_owner,
-                        *owner_module,
-                        *dep_owner,
-                    )
-            });
-            if let Some(dep) = blocking_cross_owner_dep {
+            let blocking_cross_owner_deps = runtime_reads
+                .iter()
+                .filter(|dep| {
+                    let Some(dep_owner) = selected.get(*dep) else {
+                        return false;
+                    };
+                    dep_owner != owner_module
+                        && (module_dependency_path_exists(
+                            module_dependencies_by_owner,
+                            *dep_owner,
+                            *owner_module,
+                        ) || selected_owner_paths
+                            .get(dep_owner)
+                            .is_some_and(|reachable| reachable.contains(owner_module)))
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if !blocking_cross_owner_deps.is_empty() {
                 let binding_lines = snippet.source.lines().count().max(1);
-                let dep_lines = prelude
-                    .snippets
-                    .get(dep)
-                    .map(|dep_snippet| dep_snippet.source.lines().count().max(1))
-                    .unwrap_or(usize::MAX);
-                if dep_lines < binding_lines {
-                    // Break owner<->owner cycles by pinning the smaller
-                    // dependency in runtime. The larger recovered owner
-                    // snippet can then import it as a stable runtime dep
-                    // instead of discarding the whole recovered component.
-                    removed.push(dep.clone());
-                } else {
-                    removed.push(binding.clone());
+                for dep in blocking_cross_owner_deps {
+                    let dep_lines = prelude
+                        .snippets
+                        .get(&dep)
+                        .map(|dep_snippet| dep_snippet.source.lines().count().max(1))
+                        .unwrap_or(usize::MAX);
+                    if dep_lines < binding_lines {
+                        // Break owner<->owner cycles by pinning the smaller
+                        // dependency in runtime. The larger recovered owner
+                        // snippet can then import it as a stable runtime dep
+                        // instead of discarding the whole recovered component.
+                        removed.insert(dep);
+                    } else {
+                        removed.insert(binding.clone());
+                    }
                 }
                 continue;
             }
 
-            let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
-                .into_iter()
-                .filter(|write| !local_bindings.contains(write.as_str()))
-                .filter(|write| prelude.defines(write))
-                .collect::<BTreeSet<_>>();
+            let runtime_writes = read_index
+                .runtime_writes_by_snippet
+                .get(binding)
+                .cloned()
+                .unwrap_or_default();
             let blocking_write = runtime_writes.iter().find(|dep| {
                 selected
                     .get(dep)
                     .is_none_or(|dep_owner| dep_owner != owner_module)
             });
             if blocking_write.is_some() {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             }
 
@@ -3465,7 +3482,7 @@ pub(crate) fn closed_global_owned_runtime_snippets(
                     &runtime_reads,
                 )
             {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             }
 
@@ -3489,7 +3506,7 @@ pub(crate) fn closed_global_owned_runtime_snippets(
                     &runtime_reads,
                 )
             {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             }
 
@@ -3504,7 +3521,7 @@ pub(crate) fn closed_global_owned_runtime_snippets(
                     .is_none_or(|writer_owner| writer_owner != owner_module)
             });
             if blocking_writer.is_some() {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
                 continue;
             }
 
@@ -3514,16 +3531,16 @@ pub(crate) fn closed_global_owned_runtime_snippets(
                         return false;
                     };
                     target_owner != owner_module
-                        && selected_owner_dependency_creates_cycle(
-                            &selected,
-                            read_index,
+                        && (module_dependency_path_exists(
                             module_dependencies_by_owner,
-                            *owner_module,
                             *target_owner,
-                        )
+                            *owner_module,
+                        ) || selected_owner_paths
+                            .get(target_owner)
+                            .is_some_and(|reachable| reachable.contains(owner_module)))
                 })
             {
-                removed.push(binding.clone());
+                removed.insert(binding.clone());
             }
         }
         if removed.is_empty() {
@@ -3538,13 +3555,15 @@ pub(crate) fn closed_global_owned_runtime_snippets(
     final_selected
         .into_iter()
         .filter_map(|(binding, owner_module)| {
-            let snippet = prelude.snippets.get(&binding)?;
-            let local_bindings = local_bindings_in_source(snippet.source.as_str());
+            let _snippet = prelude.snippets.get(&binding)?;
             let mut extra_runtime_deps = BTreeSet::<BindingName>::new();
             let mut extra_noop_deps = BTreeSet::<BindingName>::new();
-            for dep in runtime_import_identifiers_in_source(snippet.source.as_str())
+            for dep in read_index
+                .free_bindings_by_snippet
+                .get(&binding)
+                .cloned()
+                .unwrap_or_default()
                 .into_iter()
-                .map(BindingName::new)
                 .filter(|dep| prelude.defines(dep))
                 .filter(|dep| {
                     selected
@@ -3560,11 +3579,11 @@ pub(crate) fn closed_global_owned_runtime_snippets(
                     extra_runtime_deps.insert(dep);
                 }
             }
-            let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
-                .into_iter()
-                .filter(|write| !local_bindings.contains(write.as_str()))
-                .filter(|write| prelude.defines(write))
-                .collect::<BTreeSet<_>>();
+            let runtime_writes = read_index
+                .runtime_writes_by_snippet
+                .get(&binding)
+                .cloned()
+                .unwrap_or_default();
             if runtime_writes.iter().any(|dep| {
                 selected
                     .get(dep)
@@ -3830,51 +3849,48 @@ pub(crate) fn global_owned_runtime_dep_aliases_for_owner_conflicts(
     aliases
 }
 
-pub(crate) fn selected_owner_dependency_creates_cycle(
+pub(crate) fn selected_owner_dependency_reachability(
     selected: &BTreeMap<BindingName, ModuleId>,
     read_index: &RuntimeSourceReadIndex,
-    module_dependencies_by_owner: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
-    owner_module: ModuleId,
-    dep_owner: ModuleId,
-) -> bool {
-    module_dependency_path_exists(module_dependencies_by_owner, dep_owner, owner_module)
-        || selected_owner_path_exists(selected, read_index, dep_owner, owner_module)
-}
-
-pub(crate) fn selected_owner_path_exists(
-    selected: &BTreeMap<BindingName, ModuleId>,
-    read_index: &RuntimeSourceReadIndex,
-    from_owner: ModuleId,
-    target_owner: ModuleId,
-) -> bool {
-    if from_owner == target_owner {
-        return true;
-    }
-    let mut visited = BTreeSet::<ModuleId>::new();
-    let mut stack = vec![from_owner];
-    while let Some(owner) = stack.pop() {
-        if !visited.insert(owner) {
-            continue;
-        }
-        for (binding, _) in selected
-            .iter()
-            .filter(|(_, binding_owner)| **binding_owner == owner)
-        {
-            for dep in selected_runtime_dependencies_for_binding(read_index, binding) {
-                let Some(dep_owner) = selected.get(&dep) else {
-                    continue;
-                };
-                if *dep_owner == owner {
-                    continue;
-                }
-                if *dep_owner == target_owner {
-                    return true;
-                }
-                stack.push(*dep_owner);
+) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
+    let mut direct = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+    for (binding, owner) in selected {
+        for dep in selected_runtime_dependencies_for_binding(read_index, binding) {
+            let Some(dep_owner) = selected.get(&dep) else {
+                continue;
+            };
+            if dep_owner != owner {
+                direct.entry(*owner).or_default().insert(*dep_owner);
             }
         }
     }
-    false
+    let owners = direct
+        .keys()
+        .copied()
+        .chain(direct.values().flatten().copied())
+        .collect::<BTreeSet<_>>();
+    let mut reachability = BTreeMap::<ModuleId, BTreeSet<ModuleId>>::new();
+    for owner in owners {
+        let mut reachable = BTreeSet::<ModuleId>::new();
+        let mut stack = direct
+            .get(&owner)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        while let Some(next) = stack.pop() {
+            if !reachable.insert(next) {
+                continue;
+            }
+            if let Some(next_owners) = direct.get(&next) {
+                stack.extend(next_owners.iter().copied());
+            }
+        }
+        if !reachable.is_empty() {
+            reachability.insert(owner, reachable);
+        }
+    }
+    reachability
 }
 
 pub(crate) fn selected_runtime_dependencies_for_binding(
@@ -5138,28 +5154,15 @@ pub(crate) fn runtime_setter_dep_can_localize_with_reader_owner(
     {
         return false;
     }
-    let runtime_writers = runtime_snippet_writers_for_binding(ctx.prelude, binding);
+    let runtime_writers = ctx
+        .read_index
+        .snippet_writers_by_binding
+        .get(binding)
+        .cloned()
+        .unwrap_or_default();
     !runtime_writers
         .iter()
         .any(|writer| !moved_readers.contains(writer))
-}
-
-pub(crate) fn runtime_snippet_writers_for_binding(
-    prelude: &RuntimePrelude,
-    binding: &BindingName,
-) -> BTreeSet<BindingName> {
-    prelude
-        .snippets
-        .iter()
-        .filter_map(|(snippet_binding, snippet)| {
-            let local_bindings = local_bindings_in_source(snippet.source.as_str());
-            implicit_global_writes_in_source(snippet.source.as_str())
-                .into_iter()
-                .filter(|write| !local_bindings.contains(write.as_str()))
-                .any(|write| write == *binding)
-                .then(|| snippet_binding.clone())
-        })
-        .collect()
 }
 
 pub(crate) fn reader_migration_local_bindings(
@@ -5329,6 +5332,23 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
             ReaderNonSnippetUseKind::SeedClusterSizeCap,
         ));
     }
+    if let Some(entrypoint_callee) = &ctx.read_index.entrypoint_callee
+        && initial_readers.contains(entrypoint_callee)
+        && !can_co_migrate_entrypoint_callee(ctx, owner_module, entrypoint_callee)
+    {
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+            ReaderNonSnippetUseKind::UnfoldableEntrypointCallee,
+        ));
+    }
+    if initial_readers.iter().any(|reader| {
+        ctx.read_index
+            .entrypoint_non_snippet_runtime_reads
+            .contains(reader)
+    }) {
+        return Err(RuntimeReaderClusterBlocker::NonSnippetUse(
+            ReaderNonSnippetUseKind::UnfoldableEntrypointNonSnippetRead,
+        ));
+    }
 
     let owner_available_bindings = owner_declared_or_imported_bindings(ctx, owner_module)?;
     let mut moved_snippets = BTreeSet::<BindingName>::new();
@@ -5414,12 +5434,13 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
         // the helper file, keep the reader movable only when the write can be
         // lowered to a setter call; direct assignment to an ESM import would be
         // illegal after migration.
-        let local_bindings = local_bindings_in_source(snippet.source.as_str());
-        let runtime_writes = implicit_global_writes_in_source(snippet.source.as_str())
-            .into_iter()
-            .filter(|write| !local_bindings.contains(write.as_str()))
-            .filter(|write| ctx.prelude.defines(write))
-            .collect::<BTreeSet<_>>();
+        let runtime_writes = ctx
+            .read_index
+            .runtime_writes_by_snippet
+            .get(&reader)
+            .cloned()
+            .unwrap_or_default();
+        let mut local_bindings = None;
         for write in runtime_writes {
             if primary_bindings.contains(&write) {
                 continue;
@@ -5448,7 +5469,9 @@ pub(crate) fn migratable_runtime_reader_cluster_result(
                     Ok(RuntimeBindingReadProfile::Rejected) | Err(_) => {}
                 }
             }
-            if runtime_reader_write_can_use_setter(snippet.source.as_str(), &local_bindings, &write)
+            let local_bindings = local_bindings
+                .get_or_insert_with(|| local_bindings_in_source(snippet.source.as_str()));
+            if runtime_reader_write_can_use_setter(snippet.source.as_str(), local_bindings, &write)
             {
                 extra_runtime_setter_deps.insert(write.clone());
                 if ctx.movable_bindings.contains(&write) {
@@ -6602,11 +6625,10 @@ pub(crate) fn runtime_private_function_dependency_can_move(
     if !is_migratable_private_runtime_function_dependency(binding, snippet.source.as_str()) {
         return false;
     }
-    let local_bindings = local_bindings_in_source(snippet.source.as_str());
-    !implicit_global_writes_in_source(snippet.source.as_str())
-        .into_iter()
-        .filter(|write| !local_bindings.contains(write.as_str()))
-        .any(|write| ctx.prelude.defines(&write))
+    ctx.read_index
+        .runtime_writes_by_snippet
+        .get(binding)
+        .is_none_or(BTreeSet::is_empty)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7064,12 +7086,13 @@ pub(crate) fn runtime_lazy_fold_can_stay_local(
                 {
                     return false;
                 }
-                let Ok(migration) = migratable_runtime_reader_cluster_result(
+                let migration_result = migratable_runtime_reader_cluster_result(
                     &reader_cluster_context,
                     module_id,
                     binding,
                     readers,
-                ) else {
+                );
+                let Ok(migration) = migration_result else {
                     return false;
                 };
                 // Keeping a foldable writer as a normal module is only a

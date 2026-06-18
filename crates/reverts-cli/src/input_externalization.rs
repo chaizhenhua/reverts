@@ -53,8 +53,12 @@ pub(crate) fn promote_verified_externalization_hints(
     connection: &Connection,
     bundle: &mut InputBundle,
 ) -> Result<usize, SqliteInputError> {
-    let hints = load_externalization_hint_proofs(connection)?;
-    if hints.is_empty() || bundle.package_attributions.is_empty() {
+    let relevant_hint_keys = promotable_hint_keys(bundle);
+    if relevant_hint_keys.is_empty() {
+        return Ok(0);
+    }
+    let hints = load_externalization_hint_proofs(connection, &relevant_hint_keys)?;
+    if hints.is_empty() {
         return Ok(0);
     }
     let dependency_modules = bundle
@@ -135,6 +139,23 @@ pub(crate) fn promote_verified_externalization_hints(
     Ok(promoted)
 }
 
+fn promotable_hint_keys(bundle: &InputBundle) -> BTreeSet<HintKey> {
+    bundle
+        .package_attributions
+        .iter()
+        .filter(|attribution| attribution_is_hint_promotable(attribution))
+        .filter_map(|attribution| {
+            let package_version = attribution.package_version.as_deref()?;
+            let export_specifier = attribution.export_specifier.as_deref()?;
+            Some((
+                attribution.package_name.clone(),
+                package_version.to_string(),
+                export_specifier.to_string(),
+            ))
+        })
+        .collect()
+}
+
 fn attribution_is_hint_promotable(attribution: &PackageAttributionInput) -> bool {
     attribution.status == PackageAttributionStatus::Accepted
         && attribution.emission_mode == PackageEmissionMode::ExternalImport
@@ -163,7 +184,11 @@ fn attribution_has_strong_source_proof(attribution: &PackageAttributionInput) ->
 
 fn load_externalization_hint_proofs(
     connection: &Connection,
+    relevant_hint_keys: &BTreeSet<HintKey>,
 ) -> Result<BTreeMap<HintKey, Vec<ExternalizationHintProof>>, SqliteInputError> {
+    if relevant_hint_keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
     if !sqlite_table_exists(connection, "package_externalization_hints")? {
         return Ok(BTreeMap::new());
     }
@@ -231,6 +256,9 @@ fn load_externalization_hint_proofs(
     })?;
     let mut hints = BTreeMap::<HintKey, Vec<ExternalizationHintProof>>::new();
     for (key, proof) in collect_sqlite_rows(rows)? {
+        if !relevant_hint_keys.contains(&key) {
+            continue;
+        }
         hints.entry(key).or_default().push(proof);
     }
     enrich_hint_proofs_with_package_source_alternate_hashes(connection, &mut hints)?;
