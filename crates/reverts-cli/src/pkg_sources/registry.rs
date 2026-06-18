@@ -72,6 +72,31 @@ pub(crate) fn parse_packument(
     Ok(Packument { versions })
 }
 
+const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
+
+/// Registry base URL: `REVERTS_NPM_REGISTRY` or the public default. Trailing
+/// slash trimmed so URL joins are predictable.
+pub(crate) fn registry_base_url() -> String {
+    let raw = std::env::var("REVERTS_NPM_REGISTRY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_REGISTRY.to_string());
+    raw.trim_end_matches('/').to_string()
+}
+
+/// Build the packument URL. Scoped names (`@scope/name`) keep the `@scope/`
+/// segment but URL-encode the internal `/` of the name per the registry API
+/// (`@scope%2fname`).
+pub(crate) fn packument_url(base: &str, package_name: &str) -> String {
+    let base = base.trim_end_matches('/');
+    if let Some(rest) = package_name.strip_prefix('@') {
+        if let Some((scope, name)) = rest.split_once('/') {
+            return format!("{base}/@{scope}%2f{name}");
+        }
+    }
+    format!("{base}/{package_name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +127,21 @@ mod tests {
     fn parse_packument_without_versions_errors() {
         let err = parse_packument("x", br#"{"name":"x"}"#).expect_err("should error");
         assert!(matches!(err, MatchPackagesError::ParsePackument { .. }));
+    }
+
+    #[test]
+    fn packument_url_for_unscoped_package() {
+        assert_eq!(
+            packument_url("https://registry.npmjs.org", "left-pad"),
+            "https://registry.npmjs.org/left-pad"
+        );
+    }
+
+    #[test]
+    fn packument_url_encodes_scoped_package() {
+        assert_eq!(
+            packument_url("https://registry.npmjs.org/", "@scope/name"),
+            "https://registry.npmjs.org/@scope%2fname"
+        );
     }
 }
