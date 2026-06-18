@@ -96,6 +96,24 @@ pub(crate) fn erase_rewritable_package_init_shim_calls(
     rewritten
 }
 
+pub(crate) fn retain_runtime_imports_referenced_in_source(
+    source: &str,
+    imports: &mut BTreeMap<ModuleId, BTreeSet<BindingName>>,
+) {
+    if imports.is_empty() {
+        return;
+    }
+    let local_bindings = local_bindings_in_source(source);
+    let mut referenced = runtime_import_identifiers_in_source(source);
+    referenced.extend(call_identifiers_in_source(source));
+    imports.retain(|_, bindings| {
+        bindings.retain(|binding| {
+            referenced.contains(binding.as_str()) && !local_bindings.contains(binding.as_str())
+        });
+        !bindings.is_empty()
+    });
+}
+
 pub(crate) fn runtime_module_owner_imports_for_source(
     source: &str,
     satisfied_runtime_bindings: &BTreeSet<BindingName>,

@@ -28,7 +28,8 @@ use crate::runtime_var_migration::RuntimeVarMigrationPlan;
 use crate::statements::{named_export_statement, named_import_statement, runtime_helpers_path};
 use crate::{
     EmitPlan, PlannedBinding, PlannedFile, emit_direct_owner_imports, emit_direct_prelude_imports,
-    module_output_path, partition_runtime_owner_bindings, runtime_entrypoint,
+    erase_rewritable_package_init_shim_calls, module_output_path, partition_runtime_owner_bindings,
+    retain_runtime_imports_referenced_in_source, runtime_entrypoint,
     runtime_entrypoint_side_effects, scan_runtime_externalized_bindings,
 };
 
@@ -128,7 +129,7 @@ pub(crate) fn entrypoint_island_plan(
     }
 
     let mut local_runtime_roots = BTreeSet::from([entrypoint.callee.clone()]);
-    let source = loop {
+    let mut source = loop {
         let helper_closure = close_runtime_helper_source_excluding(
             prelude,
             &local_runtime_roots,
@@ -215,8 +216,12 @@ pub(crate) fn entrypoint_island_plan(
         &satisfied_runtime_bindings,
         externalized_packages,
     );
+    let mut source_module_imports = externalized_scan.source_module_imports;
+    let mut package_init_shims = externalized_scan.package_init_shims;
+    source = erase_rewritable_package_init_shim_calls(source.as_str(), &mut package_init_shims);
+    retain_runtime_imports_referenced_in_source(source.as_str(), &mut source_module_imports);
     let (source_module_imports, missing_source_imports) =
-        split_planned_source_module_imports(program, plan, externalized_scan.source_module_imports);
+        split_planned_source_module_imports(program, plan, source_module_imports);
     if !missing_source_imports.is_empty() {
         return minimal_entrypoint_island_plan(
             program,
@@ -336,7 +341,8 @@ fn minimal_entrypoint_island_plan(
 ) -> Option<EntrypointIslandPlan> {
     let (prelude, entrypoint) = runtime_entrypoint(program)?;
     let local_runtime_roots = BTreeSet::from([entrypoint.callee.clone()]);
-    let source = runtime_helper_source(prelude, &local_runtime_roots, &[], Some(entrypoint), &[]);
+    let mut source =
+        runtime_helper_source(prelude, &local_runtime_roots, &[], Some(entrypoint), &[]);
     let local_bindings = local_bindings_in_source(source.as_str());
     let mut referenced = runtime_import_identifiers_in_source(source.as_str());
     referenced.extend(call_identifiers_in_source(source.as_str()));
@@ -382,8 +388,12 @@ fn minimal_entrypoint_island_plan(
         &satisfied_runtime_bindings,
         externalized_packages,
     );
+    let mut source_module_imports = externalized_scan.source_module_imports;
+    let mut package_init_shims = externalized_scan.package_init_shims;
+    source = erase_rewritable_package_init_shim_calls(source.as_str(), &mut package_init_shims);
+    retain_runtime_imports_referenced_in_source(source.as_str(), &mut source_module_imports);
     let (source_module_imports, missing_source_imports) =
-        split_planned_source_module_imports(program, plan, externalized_scan.source_module_imports);
+        split_planned_source_module_imports(program, plan, source_module_imports);
     if !missing_source_imports.is_empty() {
         return None;
     }

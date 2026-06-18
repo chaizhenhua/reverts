@@ -39,7 +39,6 @@ use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
-use crate::erase_rewritable_package_init_shim_calls;
 use crate::identifiers::is_planner_synthetic_binding;
 use crate::import_coalesce::coalesce_top_level_import_declarations;
 use crate::relative_paths::relative_import_specifier;
@@ -63,6 +62,9 @@ use crate::{
     plan_binding_from_program, prune_orphan_runtime_bindings,
     purify_private_runtime_lazy_initializers, runtime_binding_has_blocking_non_snippet_use,
     scan_runtime_externalized_bindings, unresolved_runtime_helper_references,
+};
+use crate::{
+    erase_rewritable_package_init_shim_calls, retain_runtime_imports_referenced_in_source,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -635,11 +637,15 @@ pub(crate) fn emit_package_runtime_helper_files(
             &helper_closure.emitted_bindings,
             externalized_packages,
         );
-        let helper_imports = runtime_externalized_binding_scan.source_module_imports;
+        let mut helper_imports = runtime_externalized_binding_scan.source_module_imports;
         let mut package_init_shims = runtime_externalized_binding_scan.package_init_shims;
         helper_closure.source = erase_rewritable_package_init_shim_calls(
             helper_closure.source.as_str(),
             &mut package_init_shims,
+        );
+        retain_runtime_imports_referenced_in_source(
+            helper_closure.source.as_str(),
+            &mut helper_imports,
         );
         let mut emitted_runtime_bindings = helper_closure.emitted_bindings.clone();
         emitted_runtime_bindings.extend(package_init_shims.iter().cloned());

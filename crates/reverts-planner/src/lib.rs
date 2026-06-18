@@ -87,8 +87,9 @@ use runtime_source_scan::{
 #[allow(unused_imports)]
 use runtime_externalized_scan::{
     RuntimeExternalizedBindingScan, erase_rewritable_package_init_shim_calls,
-    runtime_module_owner_imports_for_source, runtime_namespace_exports_for_helpers,
-    scan_runtime_externalized_bindings, unresolved_runtime_helper_references,
+    retain_runtime_imports_referenced_in_source, runtime_module_owner_imports_for_source,
+    runtime_namespace_exports_for_helpers, scan_runtime_externalized_bindings,
+    unresolved_runtime_helper_references,
 };
 use runtime_globals::is_runtime_global_identifier;
 

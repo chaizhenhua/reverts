@@ -5567,6 +5567,64 @@ fn entrypoint_runtime_imports_adapter_required_package_bindings() {
 }
 
 #[test]
+fn entrypoint_island_erases_unreferenced_externalized_package_init_imports() {
+    let prelude = "function main() { packageInit(); return 1; }\n";
+    let body = "export const value = 1;\n";
+    let tail = "main();\n";
+    let source = format!("{prelude}{body}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "package.js",
+        Some("function packageInit() { return 1; }".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + body.len()) as u32,
+            )),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "package",
+            "modules/package.ts",
+            "fixture-package",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "fixture-package",
+            "1.0.0",
+            "fixture-package",
+        ));
+
+    let plan = plan_from_rows(rows);
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+
+    assert!(
+        entrypoint_source.contains("function main()"),
+        "{entrypoint_source}"
+    );
+    assert!(
+        !entrypoint_source.contains("packageInit"),
+        "{entrypoint_source}"
+    );
+    assert!(
+        !entrypoint_source.contains("./package.js"),
+        "{entrypoint_source}"
+    );
+    assert!(entrypoint_source.contains("void 0"), "{entrypoint_source}");
+}
+
+#[test]
 fn adapter_required_commonjs_package_module_uses_external_adapter() {
     let planner = ImportExportPlanner;
     let app_source = "var value = packageInit().answer;\nexport { value };\n";

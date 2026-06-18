@@ -26,7 +26,6 @@ use reverts_ir::{BindingName, BindingShape, ModuleId};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
-use crate::erase_rewritable_package_init_shim_calls;
 use crate::import_coalesce::coalesce_top_level_import_declarations;
 use crate::package_runtime::push_packed_runtime_helper_imports;
 use crate::runtime_helper_strip::{
@@ -51,6 +50,9 @@ use crate::{
     runtime_entrypoint_root_bindings, runtime_module_owner_imports_for_source,
     scan_runtime_externalized_bindings, source_contains_top_level_call,
     strip_runtime_noop_declarations, unresolved_runtime_helper_references,
+};
+use crate::{
+    erase_rewritable_package_init_shim_calls, retain_runtime_imports_referenced_in_source,
 };
 
 pub(crate) struct RuntimeHelperEmissionContext<'a> {
@@ -311,11 +313,21 @@ pub(crate) fn emit_runtime_helper_files(
             &helper_closure.emitted_bindings,
             externalized_packages,
         );
+        let mut helper_imports = runtime_externalized_binding_scan.source_module_imports;
+        let mut package_init_shims = runtime_externalized_binding_scan.package_init_shims;
+        helper_closure.source = erase_rewritable_package_init_shim_calls(
+            helper_closure.source.as_str(),
+            &mut package_init_shims,
+        );
+        retain_runtime_imports_referenced_in_source(
+            helper_closure.source.as_str(),
+            &mut helper_imports,
+        );
         let mut helper_imports = runtime_module_owner_imports_for_source(
             helper_closure.source.as_str(),
             &helper_closure.emitted_bindings,
             &module_owned_bindings_for_source,
-            runtime_externalized_binding_scan.source_module_imports,
+            helper_imports,
         );
         for binding in &public_helper_bindings {
             if helper_closure.emitted_bindings.contains(binding) {
@@ -337,11 +349,6 @@ pub(crate) fn emit_runtime_helper_files(
                 .or_default()
                 .extend(bindings);
         }
-        let mut package_init_shims = runtime_externalized_binding_scan.package_init_shims;
-        helper_closure.source = erase_rewritable_package_init_shim_calls(
-            helper_closure.source.as_str(),
-            &mut package_init_shims,
-        );
         let helper_path = runtime_helpers_path(*source_file_id);
         let helper_imported_bindings = helper_imports
             .values()
