@@ -9,6 +9,7 @@
 //! Everything in this module is pure I/O + path manipulation against
 //! the file system. No matcher / connection state required.
 
+pub(crate) mod cache;
 pub(crate) mod filtering;
 pub(crate) mod registry;
 pub(crate) mod version_resolution;
