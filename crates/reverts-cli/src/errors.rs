@@ -63,6 +63,27 @@ pub enum MatchPackagesError {
         package_version: String,
         message: String,
     },
+    RegistryRequest {
+        url: String,
+        message: String,
+    },
+    ParsePackument {
+        package_name: String,
+        message: String,
+    },
+    PackageSourceIntegrity {
+        package_name: String,
+        package_version: String,
+        message: String,
+    },
+    ExtractPackageSource {
+        package_name: String,
+        package_version: String,
+        message: String,
+    },
+    ResolveCacheDir {
+        message: String,
+    },
     InvalidPackageSourceVersion {
         package_name: String,
         package_version: String,
@@ -131,6 +152,35 @@ impl fmt::Display for MatchPackagesError {
                     formatter,
                     "failed to materialize {package_name}@{package_version}: {message}"
                 )
+            }
+            Self::RegistryRequest { url, message } => {
+                write!(formatter, "registry request to {url} failed: {message}")
+            }
+            Self::ParsePackument {
+                package_name,
+                message,
+            } => write!(
+                formatter,
+                "failed to parse packument for {package_name}: {message}"
+            ),
+            Self::PackageSourceIntegrity {
+                package_name,
+                package_version,
+                message,
+            } => write!(
+                formatter,
+                "integrity check failed for {package_name}@{package_version}: {message}"
+            ),
+            Self::ExtractPackageSource {
+                package_name,
+                package_version,
+                message,
+            } => write!(
+                formatter,
+                "failed to extract {package_name}@{package_version}: {message}"
+            ),
+            Self::ResolveCacheDir { message } => {
+                write!(formatter, "failed to resolve package cache dir: {message}")
             }
             Self::InvalidPackageSourceVersion {
                 package_name,
@@ -228,6 +278,11 @@ impl Error for MatchPackagesError {
             Self::LoadInput(source) => Some(source),
             Self::MissingTable(_)
             | Self::MaterializePackageSource { .. }
+            | Self::RegistryRequest { .. }
+            | Self::ParsePackument { .. }
+            | Self::PackageSourceIntegrity { .. }
+            | Self::ExtractPackageSource { .. }
+            | Self::ResolveCacheDir { .. }
             | Self::InvalidPackageSourceVersion { .. }
             | Self::MissingMatchEvidence { .. }
             | Self::MissingModuleForAttribution { .. }
