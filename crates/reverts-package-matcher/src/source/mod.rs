@@ -1,4 +1,5 @@
 pub(crate) mod ast_export_helpers;
+pub(crate) mod cache_surfaces;
 pub(crate) mod commonjs_exports;
 pub(crate) mod exported_members;
 pub(crate) mod import_targets;
