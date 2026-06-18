@@ -108,7 +108,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
     // raw-body emission:
     //   1. `should_preserve_raw_source_body` — template-literal preservation:
     //      OXC codegen would normalize whitespace inside quasis. No finding;
-    //      this is deliberate preservation, not a fallback.
+    //      this is deliberate preservation, not an implicit repair path.
     //   2. `format_source_with_module_items_and_renames` returns Err — the
     //      injection pass refused the body (e.g. `const X;`, JSX comma
     //      patterns). The raw body ships without the planned imports /
@@ -136,7 +136,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             Ok(formatted) => (formatted, None),
             Err(error) => {
                 let finding = AuditFinding::warning(
-                    FindingCode::EmitterFallbackToRawBody,
+                    FindingCode::EmitterRawBodyPreservedAfterInjectionFailure,
                     format!(
                         "dropped {} import / {} export / {} rename injection(s); raw body retained ({error})",
                         generated_imports.len(),
@@ -414,7 +414,10 @@ mod tests {
         // Audit finding tells the consumer one export injection was dropped.
         assert_eq!(outcome.findings.len(), 1, "{:?}", outcome.findings);
         let finding = &outcome.findings[0];
-        assert_eq!(finding.code, FindingCode::EmitterFallbackToRawBody);
+        assert_eq!(
+            finding.code,
+            FindingCode::EmitterRawBodyPreservedAfterInjectionFailure
+        );
         assert_eq!(finding.severity, Severity::Warning);
         assert_eq!(finding.module.as_deref(), Some("src/broken.ts"));
         assert!(finding.message.contains("1 export"), "{}", finding.message);
