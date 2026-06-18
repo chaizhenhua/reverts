@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use base64::Engine as _;
 use semver::Version;
+use sha2::{Digest, Sha512};
 
 use crate::errors::MatchPackagesError;
 
@@ -97,6 +99,39 @@ pub(crate) fn packument_url(base: &str, package_name: &str) -> String {
     format!("{base}/{package_name}")
 }
 
+/// Verify a tarball against a `dist.integrity` string. Only `sha512-<base64>`
+/// is supported (the registry's current default). A missing/empty integrity
+/// is rejected — we never trust unverifiable bytes.
+pub(crate) fn verify_integrity(
+    package_name: &str,
+    package_version: &str,
+    tarball: &[u8],
+    integrity: Option<&str>,
+) -> Result<(), MatchPackagesError> {
+    let make_err = |message: String| MatchPackagesError::PackageSourceIntegrity {
+        package_name: package_name.to_string(),
+        package_version: package_version.to_string(),
+        message,
+    };
+    let integrity = integrity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| make_err("registry provided no integrity hash".to_string()))?;
+    let Some(b64) = integrity.strip_prefix("sha512-") else {
+        return Err(make_err(format!(
+            "unsupported integrity algorithm: {integrity}"
+        )));
+    };
+    let expected = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|source| make_err(format!("invalid base64 integrity: {source}")))?;
+    let actual = Sha512::digest(tarball);
+    if actual.as_slice() != expected.as_slice() {
+        return Err(make_err("sha512 mismatch".to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,5 +178,30 @@ mod tests {
             packument_url("https://registry.npmjs.org/", "@scope/name"),
             "https://registry.npmjs.org/@scope%2fname"
         );
+    }
+
+    #[test]
+    fn verify_integrity_accepts_matching_sha512() {
+        let data = b"hello tarball";
+        let digest = Sha512::digest(data);
+        let integrity = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        );
+        assert!(verify_integrity("p", "1.0.0", data, Some(&integrity)).is_ok());
+    }
+
+    #[test]
+    fn verify_integrity_rejects_mismatch_and_missing() {
+        let integrity = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(Sha512::digest(b"other"))
+        );
+        assert!(matches!(
+            verify_integrity("p", "1.0.0", b"hello", Some(&integrity)),
+            Err(MatchPackagesError::PackageSourceIntegrity { .. })
+        ));
+        assert!(verify_integrity("p", "1.0.0", b"hello", None).is_err());
+        assert!(verify_integrity("p", "1.0.0", b"hello", Some("sha1-abc")).is_err());
     }
 }
