@@ -17,7 +17,7 @@ use crate::{
     IdentifierReadUsage, apply_text_edits, contains_identifier_reference,
     expand_line_removal_edits, identifier_read_facts_in_source,
     identifier_read_rename_site_is_safe, implicit_global_writes_in_source,
-    localize_lazy_value_source, lowered_lazy_initializer_statement_binding,
+    localize_lazy_value_source, lowered_lazy_initializer_statement_binding, previous_non_ws,
     previous_token_is_keyword, runtime_prelude_snippet_is_noop, top_level_definitions_in_source,
     top_level_statement_slices, top_level_statement_spans,
 };
@@ -223,11 +223,93 @@ pub(crate) fn noop_call_replacement_span(
     // (e.g. `helper().fetch`), its value is consumed, so the helper is not a
     // genuine no-op — replacing it with `void 0` would both break semantics and
     // emit invalid syntax (`void 0.fetch` lexes `0.` as a number). Keep it.
-    let after = skip_ws(bytes, close + 1);
-    if matches!(bytes.get(after), Some(b'.' | b'[' | b'(' | b'`' | b'?')) {
+    let after_close = skip_ws(bytes, close + 1);
+    if matches!(
+        bytes.get(after_close),
+        Some(b'.' | b'[' | b'(' | b'`' | b'?')
+    ) {
+        return None;
+    }
+    // Do not erase when the call is assigned to a binding that is later used as
+    // an object (`X = helper(); … X.prop`). A pure init shim returns `undefined`,
+    // so discarding or returning its result is fine — but a CommonJS-style init
+    // whose *exports* are captured and member-accessed is not a no-op; erasing it
+    // makes `X` undefined and crashes at `X.prop` (e.g. `OCA = sentryInit()` then
+    // `OCA.SEMANTIC_ATTRIBUTE_PROFILE_ID`).
+    if let Some(equals) = previous_non_ws(bytes, fact.byte_start).filter(|index| {
+        bytes[*index] == b'='
+            && !matches!(bytes.get(*index + 1), Some(b'=' | b'>'))
+            && previous_non_ws(bytes, *index)
+                .is_none_or(|prev| !is_assignment_operator_lead(bytes[prev]))
+    }) && let Some(target) = simple_assignment_target_before(source, equals)
+        && binding_used_as_object(source, target.as_str())
+    {
         return None;
     }
     Some((fact.byte_start, close + 1))
+}
+
+/// Whether `byte` immediately before an `=` makes it a compound-assignment or
+/// comparison operator (`+=`, `==`, `<=`, `!=`, …) rather than a plain `=`.
+fn is_assignment_operator_lead(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'=' | b'!' | b'<' | b'>' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^'
+    )
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte == b'_' || byte == b'$' || byte.is_ascii_alphanumeric()
+}
+
+/// The simple identifier assignment target immediately before `equals_index`
+/// (the `X` in `X = …`). Returns `None` for member targets (`X.y = …`) or
+/// non-identifier left-hand sides.
+fn simple_assignment_target_before(source: &str, equals_index: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let end = previous_non_ws(bytes, equals_index)? + 1;
+    let mut start = end;
+    while start > 0 && is_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    // A member target (`X.y = …`) or property-of (`a.X = …`) is not a plain
+    // binding write, so leave it to normal handling.
+    if start
+        .checked_sub(1)
+        .and_then(|index| bytes.get(index))
+        .is_some_and(|byte| matches!(*byte, b'.' | b'?'))
+    {
+        return None;
+    }
+    Some(source[start..end].to_string())
+}
+
+/// Whether `binding` appears anywhere in `source` as the object of a member or
+/// index access (`binding.x`, `binding[...]`, `binding?.x`) — i.e. its value is
+/// consumed as an object, not merely held.
+fn binding_used_as_object(source: &str, binding: &str) -> bool {
+    if binding.is_empty() {
+        return false;
+    }
+    let bytes = source.as_bytes();
+    let mut from = 0;
+    while let Some(found) = source[from..].find(binding) {
+        let start = from + found;
+        let end = start + binding.len();
+        let before_ok = start
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_none_or(|byte| !is_identifier_byte(*byte));
+        let word_end = bytes.get(end).is_none_or(|byte| !is_identifier_byte(*byte));
+        if before_ok && word_end && matches!(bytes.get(end), Some(b'.' | b'[' | b'?')) {
+            return true;
+        }
+        from = end;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -264,5 +346,25 @@ mod tests {
                 "consumed call must be preserved: {source}"
             );
         }
+    }
+
+    #[test]
+    fn keeps_noop_call_assigned_to_a_member_accessed_binding() {
+        // `OCA = sentryInit(); … OCA.PROP` — the init's exports are captured and
+        // member-accessed, so folding the call to `void 0` makes `OCA` undefined
+        // and crashes at `OCA.PROP`. The assignment must be preserved.
+        let source = "OCA = sentryInit();\nx.PROFILE = OCA.SEMANTIC_ATTRIBUTE_PROFILE_ID;\n";
+        let rewritten = rewrite_noop_runtime_helper_calls(source, &helpers(&["sentryInit"]));
+        assert_eq!(rewritten, source, "{rewritten}");
+    }
+
+    #[test]
+    fn still_erases_noop_call_assigned_to_an_unused_or_value_only_binding() {
+        // No member access on the target -> the result is effectively discarded,
+        // so the pure-init no-op still folds.
+        let source = "flag = sideEffectOnlyInit();\nuse(flag);\n";
+        let rewritten =
+            rewrite_noop_runtime_helper_calls(source, &helpers(&["sideEffectOnlyInit"]));
+        assert!(rewritten.contains("flag = void 0;"), "{rewritten}");
     }
 }
