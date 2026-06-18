@@ -425,6 +425,30 @@ impl Error for RuntimeInventoryError {
 }
 
 #[derive(Debug)]
+pub enum NamingProgressError {
+    LoadInput(SqliteInputError),
+    Pipeline(PipelineError),
+}
+
+impl fmt::Display for NamingProgressError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LoadInput(source) => write!(formatter, "{source}"),
+            Self::Pipeline(source) => write!(formatter, "{source}"),
+        }
+    }
+}
+
+impl Error for NamingProgressError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::LoadInput(source) => Some(source),
+            Self::Pipeline(source) => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum SymbolNamesError {
     OpenDatabase {
         path: PathBuf,
@@ -562,6 +586,7 @@ pub enum CliRunError {
     MatchPackages(MatchPackagesError),
     ExtractAssets(ExtractAssetsError),
     RuntimeInventory(RuntimeInventoryError),
+    NamingProgress(NamingProgressError),
     SymbolNames(SymbolNamesError),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
@@ -578,6 +603,7 @@ impl fmt::Display for CliRunError {
             Self::MatchPackages(source) => write!(formatter, "{source}"),
             Self::ExtractAssets(source) => write!(formatter, "{source}"),
             Self::RuntimeInventory(source) => write!(formatter, "{source}"),
+            Self::NamingProgress(source) => write!(formatter, "{source}"),
             Self::SymbolNames(source) => write!(formatter, "{source}"),
             Self::AuditRejected(summary) => {
                 write!(
@@ -611,6 +637,7 @@ impl Error for CliRunError {
             Self::MatchPackages(source) => Some(source),
             Self::ExtractAssets(source) => Some(source),
             Self::RuntimeInventory(source) => Some(source),
+            Self::NamingProgress(source) => Some(source),
             Self::SymbolNames(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
             Self::AuditRejected(_) | Self::UnsafeOutputPath(_) | Self::MatchModulesRecall(_) => {

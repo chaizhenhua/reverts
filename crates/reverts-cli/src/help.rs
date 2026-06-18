@@ -15,6 +15,7 @@ pub enum HelpTopic {
     ExtractAssets,
     RuntimeInventory,
     SymbolNames,
+    NamingProgress,
     MatchModulesRecall,
 }
 
@@ -35,6 +36,7 @@ pub const PACKAGE_EXTERNALIZATION_HINTS_COMMAND: &str = "package-externalization
 pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
+pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
@@ -89,6 +91,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "List or manually set symbol semantic names in SQLite",
     },
     CommandSpec {
+        name: NAMING_PROGRESS_COMMAND,
+        topic: HelpTopic::NamingProgress,
+        summary: "Report semantic-naming completion across public-surface/declarations/full tiers",
+    },
+    CommandSpec {
         name: MATCH_MODULES_RECALL_COMMAND,
         topic: HelpTopic::MatchModulesRecall,
         summary: "Measure cross-project module match recall against a ground-truth project",
@@ -112,7 +119,7 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
         }
         HelpTopic::GenerateProjectV2 => {
             "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
@@ -143,6 +150,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::SymbolNames => {
             "reverts-cli symbol-names\n\nUSAGE:\n    reverts-cli symbol-names --input <DB> --project-id <ID> --list [--all-proposals]\n    reverts-cli symbol-names --input <DB> --project-id <ID> [--propose <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--accept <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--clear-active <MODULE_ID:ORIGINAL> ...] [--origin <SOURCE>] [--evidence <TEXT>] [--batch <TSV|->] [--apply]\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --list                Print active module/global symbols as TSV\n    --all-proposals       With --list, print recorded name proposals instead of active symbols\n    --propose <SPEC>      Record a naming proposal without changing emitted output; repeatable\n    --accept <SPEC>       Record and activate a semantic name for the next emit; repeatable (--set alias)\n    --clear-active <SPEC> Clear the active semantic name; repeatable (--clear alias)\n    --origin <SOURCE>     Proposal source label, default: agent\n    --evidence <TEXT>     Optional evidence stored with proposals from this invocation\n    --batch <TSV|->       Read tab-separated propose/accept/clear-active operations from a file or stdin\n    --apply               Persist changes; without --apply, only validates and prints a dry-run summary\n\nBATCH TSV:\n    propose<TAB>module_id<TAB>original_name<TAB>semantic_name\n    accept<TAB>module_id<TAB>original_name<TAB>semantic_name\n    clear-active<TAB>module_id<TAB>original_name"
+        }
+        HelpTopic::NamingProgress => {
+            "reverts-cli naming-progress\n\nUSAGE:\n    reverts-cli naming-progress --input <DB> --project-id <ID> [--target-level <LEVEL>]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   Headline tier: public-surface | declarations | full (default: full)\n\nTIERS (cumulative, first-party modules only):\n    public-surface   Exported symbols\n    declarations     + non-exported function/class declarations\n    full             + remaining module-level value/const symbols"
         }
         HelpTopic::MatchModulesRecall => {
             "reverts-cli match-modules-recall\n\nUSAGE:\n    reverts-cli match-modules-recall --input <DB> --ground-truth-project-id <ID> --subject-project-id <ID> [--threshold-percent <N>] [--metric jaccard|overlap] [--category <NAME> ...] [--limit <N>]\n\nOPTIONS:\n    --input <DB>                      SQLite input database (opened read-only)\n    --ground-truth-project-id <ID>    Project whose semantic_names are treated as truth\n    --subject-project-id <ID>         Project whose modules are being matched\n    --threshold-percent <N>           Similarity threshold for a (ref, subject) pair to count (default 70)\n    --metric <NAME>                   jaccard (default, principled) or overlap (more forgiving subset rule)\n    --category <NAME>                 Restrict to this module_category (e.g. application, package); repeatable\n    --limit <N>                       Cap modules per project for fast iteration\n\nDIAGNOSTIC:\n    Reports recall under each available matching strategy:\n      baseline / semantic_name exact   exact equality on the existing semantic_name field\n      multi_axis_<metric>              per-axis function-fingerprint similarity (Ast, Cfg, anchors, ...) combined by max\n    Writes nothing to the database."

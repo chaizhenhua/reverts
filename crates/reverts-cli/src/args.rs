@@ -170,6 +170,41 @@ impl RuntimeInventoryArgs {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamingProgressTier {
+    PublicSurface,
+    Declarations,
+    Full,
+}
+
+fn parse_target_level(value: &str) -> Result<NamingProgressTier, String> {
+    match value {
+        "public-surface" => Ok(NamingProgressTier::PublicSurface),
+        "declarations" => Ok(NamingProgressTier::Declarations),
+        "full" => Ok(NamingProgressTier::Full),
+        other => Err(format!(
+            "invalid --target-level {other}; expected public-surface | declarations | full"
+        )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct NamingProgressArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long = "target-level", value_parser = parse_target_level, default_value = "full")]
+    pub target_level: NamingProgressTier,
+}
+
+impl NamingProgressArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::NAMING_PROGRESS_COMMAND)
+    }
+}
+
 pub(crate) fn parse_subcommand_args<T>(
     args: impl IntoIterator<Item = String>,
     command: &'static str,
@@ -302,5 +337,40 @@ fn validate_runtime_inventory_args(
         (Some(_), true) => Err(CliError::UnknownArgument("--all-projects".to_string())),
         (None, false) => Err(CliError::MissingArgument("--project-id")),
         _ => Ok(args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NamingProgressArgs, NamingProgressTier};
+
+    #[test]
+    fn naming_progress_parses_target_level() {
+        let args = NamingProgressArgs::parse(
+            [
+                "--input",
+                "in.db",
+                "--project-id",
+                "1",
+                "--target-level",
+                "public-surface",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .expect("should parse");
+        assert_eq!(args.project_id, 1);
+        assert_eq!(args.target_level, NamingProgressTier::PublicSurface);
+    }
+
+    #[test]
+    fn naming_progress_defaults_target_level_to_full() {
+        let args = NamingProgressArgs::parse(
+            ["--input", "in.db", "--project-id", "1"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .expect("should parse");
+        assert_eq!(args.target_level, NamingProgressTier::Full);
     }
 }

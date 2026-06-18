@@ -13,14 +13,19 @@ mod runtime_dependency_coherence;
 mod tests;
 
 pub use args::{
-    ExtractAssetsArgs, MatchPackagesArgs, MatchPackagesReportArgs, PackageCacheArgs,
-    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
+    ExtractAssetsArgs, MatchPackagesArgs, MatchPackagesReportArgs, NamingProgressArgs,
+    PackageCacheArgs, PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs,
+    RuntimeInventoryArgs,
 };
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
 };
 pub use commands::generate_project::GenerateProjectV2Args;
 pub use commands::match_modules::MatchModulesRecallArgs;
+pub use commands::naming_progress::{
+    ModuleNamingProgress, NamingKind, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
+    compute_naming_progress, naming_progress_from_sqlite,
+};
 pub use commands::package_cache::{PackageCacheAuditOutcome, package_cache_audit_from_sqlite};
 pub use commands::runtime_inventory::{
     RuntimeInventoryCounts, RuntimeInventoryOutcome, RuntimeInventoryProject,
@@ -29,8 +34,8 @@ pub use commands::runtime_inventory::{
 };
 pub use commands::symbol_names::SymbolNamesArgs;
 pub use errors::{
-    CliError, CliRunError, ExtractAssetsError, MatchPackagesError, RuntimeInventoryError,
-    SymbolNamesError,
+    CliError, CliRunError, ExtractAssetsError, MatchPackagesError, NamingProgressError,
+    RuntimeInventoryError, SymbolNamesError,
 };
 pub use help::{HelpTopic, help_text, version_text};
 
@@ -97,6 +102,7 @@ pub enum CliCommand {
     ExtractAssets(ExtractAssetsArgs),
     RuntimeInventory(RuntimeInventoryArgs),
     SymbolNames(SymbolNamesArgs),
+    NamingProgress(NamingProgressArgs),
     MatchModulesRecall(MatchModulesRecallArgs),
 }
 
@@ -180,6 +186,8 @@ enum ClapCommand {
     RuntimeInventory(RuntimeInventoryArgs),
     #[command(name = "symbol-names", disable_help_flag = true)]
     SymbolNames(SymbolNamesArgs),
+    #[command(name = "naming-progress", disable_help_flag = true)]
+    NamingProgress(NamingProgressArgs),
     #[command(name = "match-modules-recall", disable_help_flag = true)]
     MatchModulesRecall(MatchModulesRecallArgs),
 }
@@ -209,6 +217,7 @@ impl ClapCli {
             Some(ClapCommand::SymbolNames(args)) => {
                 CliCommand::SymbolNames(validate_symbol_names_for_cli(args)?)
             }
+            Some(ClapCommand::NamingProgress(args)) => CliCommand::NamingProgress(args),
             Some(ClapCommand::MatchModulesRecall(args)) => CliCommand::MatchModulesRecall(args),
             None => CliCommand::Help(HelpTopic::TopLevel),
         })
@@ -331,6 +340,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
+        CliCommand::NamingProgress(args) => commands::naming_progress::run(args),
         CliCommand::MatchModulesRecall(args) => commands::match_modules::run(args),
     }
 }
