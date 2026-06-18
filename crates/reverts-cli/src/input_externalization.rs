@@ -15,7 +15,7 @@ use reverts_input::{
     PackageAttributionStatus, PackageEmissionMode,
 };
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
-use reverts_package::package_specifier_is_public;
+use reverts_package::{package_specifier_is_public, resolve_package_deep_import_specifier};
 use reverts_package_matcher::{
     package_source_exported_members, package_source_normalized_hash,
     package_source_normalized_hashes,
@@ -82,7 +82,9 @@ impl MaterializedPackageManifest {
     }
 }
 
-pub(crate) type MaterializedPackageManifests = BTreeMap<String, MaterializedPackageManifest>;
+pub(crate) type MaterializedPackageKey = (String, String);
+pub(crate) type MaterializedPackageManifests =
+    BTreeMap<MaterializedPackageKey, MaterializedPackageManifest>;
 
 fn materialized_package_manifests(
     connection: &Connection,
@@ -130,46 +132,70 @@ impl MaterializedPackageManifestRepository<'_> {
         if !sqlite_table_exists(self.connection, "package_source_cache")? {
             return Ok(BTreeMap::new());
         }
-        let mut manifests = BTreeMap::<String, String>::new();
-        let mut statement = self.connection.prepare(
-            "SELECT package_name, source_content FROM package_source_cache \
-             WHERE entry_path = 'package.json' AND TRIM(COALESCE(package_name, '')) != ''",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        for (name, manifest) in collect_sqlite_rows(rows)? {
-            let name = name.trim();
-            if !name.is_empty() {
-                manifests.insert(name.to_string(), manifest);
+        for required in [
+            "package_name",
+            "package_version",
+            "entry_path",
+            "source_content",
+        ] {
+            if !sqlite_table_has_column(self.connection, "package_source_cache", required)? {
+                return Ok(BTreeMap::new());
             }
         }
-        let mut entry_paths = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut manifests = BTreeMap::<MaterializedPackageKey, String>::new();
+        let mut statement = self.connection.prepare(
+            "SELECT package_name, package_version, source_content FROM package_source_cache \
+             WHERE entry_path = 'package.json' \
+               AND TRIM(COALESCE(package_name, '')) != '' \
+               AND TRIM(COALESCE(package_version, '')) != ''",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for (name, version, manifest) in collect_sqlite_rows(rows)? {
+            let name = name.trim();
+            let version = version.trim();
+            if !name.is_empty() && !version.is_empty() {
+                manifests.insert((name.to_string(), version.to_string()), manifest);
+            }
+        }
+        let mut entry_paths = BTreeMap::<MaterializedPackageKey, BTreeSet<String>>::new();
         let mut paths_statement = self.connection.prepare(
-            "SELECT package_name, entry_path FROM package_source_cache \
-             WHERE TRIM(COALESCE(package_name, '')) != '' AND TRIM(COALESCE(entry_path, '')) != ''",
+            "SELECT package_name, package_version, entry_path FROM package_source_cache \
+             WHERE TRIM(COALESCE(package_name, '')) != '' \
+               AND TRIM(COALESCE(package_version, '')) != '' \
+               AND TRIM(COALESCE(entry_path, '')) != ''",
         )?;
         let rows = paths_statement.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
-        for (name, entry_path) in collect_sqlite_rows(rows)? {
+        for (name, version, entry_path) in collect_sqlite_rows(rows)? {
             let name = name.trim();
-            if !name.is_empty() {
+            let version = version.trim();
+            if !name.is_empty() && !version.is_empty() {
                 entry_paths
-                    .entry(name.to_string())
+                    .entry((name.to_string(), version.to_string()))
                     .or_default()
                     .insert(entry_path.trim().to_string());
             }
         }
         Ok(manifests
             .into_iter()
-            .map(|(name, manifest)| {
-                let paths = entry_paths.remove(&name).unwrap_or_default();
+            .map(|(key, manifest)| {
+                let paths = entry_paths.remove(&key).unwrap_or_default();
                 let has_index = ["index.js", "index.json", "index.node"]
                     .iter()
                     .any(|index| paths.contains(*index));
                 (
-                    name,
+                    key,
                     MaterializedPackageManifest::new(manifest, has_index, paths),
                 )
             })
@@ -202,11 +228,6 @@ impl DetectedPackageExternalizationPolicy<'_> {
         if module_package_name.is_empty() || module_package_name != attribution.package_name {
             return None;
         }
-        // Existence gate: only externalize a package that was actually
-        // materialized (fetched). Promoting an unresolved package — e.g. a 404
-        // version baked into the recovered bundle — would emit a bare import and
-        // an uninstallable `package.json` dependency. Keep it vendored instead.
-        let manifest = self.materialized_packages.get(module_package_name)?;
         let package_version = module
             .package_version
             .as_deref()
@@ -217,6 +238,14 @@ impl DetectedPackageExternalizationPolicy<'_> {
                     .get(module_package_name)
                     .map(String::as_str)
             })?;
+        // Existence gate: only externalize a package version that was actually
+        // materialized (fetched). Promoting an unresolved package/version — e.g.
+        // a 404 version baked into the input bundle — would emit a bare
+        // import and an uninstallable `package.json` dependency. Keep it
+        // vendored instead.
+        let manifest = self
+            .materialized_packages
+            .get(&(module_package_name.to_string(), package_version.to_string()))?;
         let export_specifier = detected_package_export_specifier(
             module_package_name,
             module.semantic_path.as_str(),
@@ -239,7 +268,7 @@ impl DetectedPackageExternalizationPolicy<'_> {
         // the real extension from the cache (`lodash/_baseUnary` ->
         // `lodash/_baseUnary.js`); if no real file backs it, it is not safely
         // externalizable, so keep it vendored.
-        let export_specifier = resolve_cjs_deep_import_specifier(
+        let export_specifier = resolve_package_deep_import_specifier(
             manifest.package_json_source.as_str(),
             module_package_name,
             export_specifier.as_str(),
@@ -256,53 +285,6 @@ impl DetectedPackageExternalizationPolicy<'_> {
             export_specifier,
         })
     }
-}
-
-/// Correct a detected external specifier to one Node can actually resolve.
-///
-/// Packages with an `exports` map are imported by export key (no file
-/// extension) and the bare root resolves via `main`/`index`, so those are left
-/// as-is. For a *deep subpath of a no-`exports` (CJS) package* the specifier
-/// must name the exact file: Node ESM does not auto-append extensions or resolve
-/// directory `index`. The real file is looked up in the package's cached file
-/// list and its extension appended. Returns `None` when nothing backs the
-/// subpath, so the caller keeps the module vendored instead of emitting a bare
-/// import that would fail with `ERR_MODULE_NOT_FOUND`.
-fn resolve_cjs_deep_import_specifier(
-    package_json_source: &str,
-    package_name: &str,
-    specifier: &str,
-    entry_paths: &BTreeSet<String>,
-) -> Option<String> {
-    if package_has_exports_field(package_json_source) {
-        return Some(specifier.to_string());
-    }
-    let Some(subpath) = specifier.strip_prefix(format!("{package_name}/").as_str()) else {
-        // Bare-root import resolves via `main`/`index`.
-        return Some(specifier.to_string());
-    };
-    if entry_paths.contains(subpath) {
-        return Some(specifier.to_string());
-    }
-    const EXTENSIONS: [&str; 5] = [".js", ".json", ".cjs", ".mjs", ".node"];
-    for extension in EXTENSIONS {
-        let file = format!("{subpath}{extension}");
-        if entry_paths.contains(file.as_str()) {
-            return Some(format!("{package_name}/{file}"));
-        }
-    }
-    for extension in EXTENSIONS {
-        let file = format!("{subpath}/index{extension}");
-        if entry_paths.contains(file.as_str()) {
-            return Some(format!("{package_name}/{file}"));
-        }
-    }
-    None
-}
-
-fn package_has_exports_field(package_json_source: &str) -> bool {
-    reverts_package::parse_package_json_source(package_json_source)
-        .is_some_and(|manifest| manifest.get("exports").is_some())
 }
 
 fn detected_package_attribution_is_already_externalized(

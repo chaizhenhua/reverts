@@ -58,7 +58,12 @@ pub fn match_packages_with_pipeline(
     run_package_match_pass(DependencyClusterPass, &context, &mut state, &mut timing);
     run_package_match_pass(PackageFileGraphPass, &context, &mut state, &mut timing);
     run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
-    run_package_match_pass(ForceExternalizePass, &context, &mut state, &mut timing);
+    run_package_match_pass(
+        ProvenExternalImportTargetsPass,
+        &context,
+        &mut state,
+        &mut timing,
+    );
     run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
 
     PackageMatchingPipelineReport {
@@ -366,11 +371,11 @@ impl PackageMatchPass for ImportablePass {
     }
 }
 
-struct ForceExternalizePass;
+struct ProvenExternalImportTargetsPass;
 
-impl PackageMatchPass for ForceExternalizePass {
+impl PackageMatchPass for ProvenExternalImportTargetsPass {
     fn name(&self) -> &'static str {
-        "force_externalize"
+        "proven_external_import_targets"
     }
 
     fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
@@ -378,7 +383,7 @@ impl PackageMatchPass for ForceExternalizePass {
             .package_filter
             .cloned()
             .unwrap_or_else(|| unmatched_package_scope(context.rows));
-        ownership::force_externalize::force_externalize_remaining_package_modules(
+        ownership::force_externalize::promote_proven_external_import_targets(
             context.rows,
             context.package_sources,
             &matched_package_names,
@@ -395,7 +400,7 @@ impl PackageMatchPass for CacheAnchoredSurfacesPass {
     }
 
     fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
-        // Ownership / force-externalize passes can append accepted
+        // Ownership / proven-external-import passes can append accepted
         // external-import attributions after the versioned matcher resolved
         // surfaces from the initial concrete matches. Re-resolve
         // cache-anchored surfaces over the now-complete attribution set so

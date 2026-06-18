@@ -21,25 +21,33 @@ fn source_rel_path(source: &PackageSource) -> Option<&str> {
     source.source_path.strip_prefix(prefix.as_str())
 }
 
-/// The cached root `package.json` value for `package_name`, if present in the
-/// loaded sources (its rel path is exactly `package.json`).
+/// The cached root `package.json` value for one concrete package version, if
+/// present in the loaded sources (its rel path is exactly `package.json`).
 pub(crate) fn cached_root_package_json(
     package_name: &str,
+    package_version: &str,
     package_sources: &[PackageSource],
 ) -> Option<serde_json::Value> {
     package_sources
         .iter()
         .find(|src| {
-            src.package_name == package_name && source_rel_path(src) == Some("package.json")
+            src.package_name == package_name
+                && src.package_version == package_version
+                && source_rel_path(src) == Some("package.json")
         })
         .and_then(|src| reverts_package::parse_package_json_source(src.source.as_str()))
 }
 
 /// Whether the package ships a root default-entry file (`index.{js,json,node}`),
 /// which Node resolves for a bare import when `main`/`module` is absent.
-fn package_has_root_index(package_name: &str, package_sources: &[PackageSource]) -> bool {
+fn package_has_root_index(
+    package_name: &str,
+    package_version: &str,
+    package_sources: &[PackageSource],
+) -> bool {
     package_sources.iter().any(|src| {
         src.package_name == package_name
+            && src.package_version == package_version
             && matches!(
                 source_rel_path(src),
                 Some("index.js" | "index.json" | "index.node")
@@ -56,7 +64,8 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> Vec<PackageSurfaceInput> {
-    let mut package_meta_by_name = BTreeMap::<String, (Option<serde_json::Value>, bool)>::new();
+    let mut package_meta_by_version =
+        BTreeMap::<(String, String), (Option<serde_json::Value>, bool)>::new();
     let mut emitted = BTreeSet::<String>::new();
     let mut surfaces = Vec::new();
 
@@ -80,12 +89,20 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
         if emitted.contains(specifier) {
             continue;
         }
-        let (package_json, has_index) = package_meta_by_name
-            .entry(attribution.package_name.clone())
+        let (package_json, has_index) = package_meta_by_version
+            .entry((attribution.package_name.clone(), version.to_string()))
             .or_insert_with(|| {
                 (
-                    cached_root_package_json(attribution.package_name.as_str(), package_sources),
-                    package_has_root_index(attribution.package_name.as_str(), package_sources),
+                    cached_root_package_json(
+                        attribution.package_name.as_str(),
+                        version,
+                        package_sources,
+                    ),
+                    package_has_root_index(
+                        attribution.package_name.as_str(),
+                        version,
+                        package_sources,
+                    ),
                 )
             });
         let Some(package_json) = package_json.as_ref() else {
@@ -197,5 +214,31 @@ mod tests {
     fn no_surface_when_package_json_absent() {
         let attrs = vec![accepted(1, "zod", "3.0.0", "zod")];
         assert!(resolve_cache_anchored_package_surfaces(&attrs, &[], None).is_empty());
+    }
+
+    #[test]
+    fn cache_anchored_surfaces_use_the_attribution_package_version() {
+        let sources = vec![
+            pkg_json_source(
+                "pkg",
+                "1.0.0",
+                r#"{"name":"pkg","exports":{".":"./index.js","./internal":"./internal.js"}}"#,
+            ),
+            pkg_json_source(
+                "pkg",
+                "2.0.0",
+                r#"{"name":"pkg","exports":{".":"./index.js"}}"#,
+            ),
+        ];
+        let attrs = vec![
+            accepted(1, "pkg", "2.0.0", "pkg/internal"),
+            accepted(2, "pkg", "1.0.0", "pkg/internal"),
+        ];
+
+        let surfaces = resolve_cache_anchored_package_surfaces(&attrs, &sources, None);
+
+        assert_eq!(surfaces.len(), 1);
+        assert_eq!(surfaces[0].package_version.as_deref(), Some("1.0.0"));
+        assert_eq!(surfaces[0].export_specifier, "pkg/internal");
     }
 }

@@ -64,8 +64,8 @@ pub(crate) use proof::dependency_graph::{
 #[cfg(test)]
 pub(crate) use proof::import_target::resolve_external_import_target;
 pub(crate) use proof::import_target::{
-    forced_external_import_target, forced_external_package_version,
-    importable_package_source_for_module,
+    importable_package_source_for_module, proven_external_import_target,
+    proven_external_package_version,
 };
 pub(crate) use proof::policy::source_only_match_can_be_promoted_to_import;
 pub use proof::public_exports::package_source_public_export_proofs;

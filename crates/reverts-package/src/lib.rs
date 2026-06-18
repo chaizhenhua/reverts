@@ -143,6 +143,51 @@ pub fn parse_package_json_source(source: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(body).ok()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageSpecifierPublicProof {
+    Public(PackageSpecifierPublicReason),
+    NotPublic(PackageSpecifierNotPublicReason),
+}
+
+impl PackageSpecifierPublicProof {
+    #[must_use]
+    pub const fn is_public(&self) -> bool {
+        matches!(self, Self::Public(_))
+    }
+
+    #[must_use]
+    pub const fn not_public_reason(&self) -> Option<&PackageSpecifierNotPublicReason> {
+        match self {
+            Self::Public(_) => None,
+            Self::NotPublic(reason) => Some(reason),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageSpecifierPublicReason {
+    ExportsSubpath,
+    RootConditionalExports,
+    RootStringExports,
+    RootMain,
+    RootModule,
+    RootIndex,
+    UnrestrictedDeepImport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageSpecifierNotPublicReason {
+    InvalidPackageJson,
+    SpecifierOutsidePackage,
+    EmptySubpath,
+    ExportsSubpathNotExported,
+    ExportsSubpathBlocked,
+    ExportsSubpathHasNoRuntimeTarget,
+    RootOnlyExports,
+    RootExportsHasNoRuntimeTarget,
+    MissingRootEntry,
+}
+
 /// Whether `specifier` is publicly importable from `package_name`, using the
 /// package's cached `package.json` source and whether the package ships a root
 /// `index.{js,json,node}` default entry. Invalid metadata is conservative:
@@ -154,14 +199,28 @@ pub fn package_specifier_is_public(
     specifier: &str,
     has_root_index: bool,
 ) -> bool {
-    parse_package_json_source(package_json_source).is_some_and(|package_json| {
-        package_specifier_is_public_from_manifest(
+    package_specifier_public_proof(package_json_source, package_name, specifier, has_root_index)
+        .is_public()
+}
+
+#[must_use]
+pub fn package_specifier_public_proof(
+    package_json_source: &str,
+    package_name: &str,
+    specifier: &str,
+    has_root_index: bool,
+) -> PackageSpecifierPublicProof {
+    match parse_package_json_source(package_json_source) {
+        Some(package_json) => package_specifier_public_proof_from_manifest(
             package_name,
             &package_json,
             specifier,
             has_root_index,
-        )
-    })
+        ),
+        None => PackageSpecifierPublicProof::NotPublic(
+            PackageSpecifierNotPublicReason::InvalidPackageJson,
+        ),
+    }
 }
 
 /// Whether `specifier` is publicly importable from `package_name`, using an
@@ -177,54 +236,210 @@ pub fn package_specifier_is_public_from_manifest(
     specifier: &str,
     has_root_index: bool,
 ) -> bool {
+    package_specifier_public_proof_from_manifest(
+        package_name,
+        package_json,
+        specifier,
+        has_root_index,
+    )
+    .is_public()
+}
+
+#[must_use]
+pub fn package_specifier_public_proof_from_manifest(
+    package_name: &str,
+    package_json: &serde_json::Value,
+    specifier: &str,
+    has_root_index: bool,
+) -> PackageSpecifierPublicProof {
     let subpath = if specifier == package_name {
         ".".to_string()
     } else if let Some(rest) = specifier.strip_prefix(package_name) {
         match rest.strip_prefix('/') {
             Some(sub) if !sub.is_empty() => format!("./{sub}"),
-            _ => return false,
+            Some(_) => {
+                return PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::EmptySubpath,
+                );
+            }
+            None => {
+                return PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::SpecifierOutsidePackage,
+                );
+            }
         }
     } else {
-        return false;
+        return PackageSpecifierPublicProof::NotPublic(
+            PackageSpecifierNotPublicReason::SpecifierOutsidePackage,
+        );
     };
 
     match package_json.get("exports") {
-        Some(serde_json::Value::Object(map)) => {
+        Some(exports @ serde_json::Value::Object(map)) => {
             if map.keys().any(|key| key == "." || key.starts_with("./")) {
-                exports_subpath_is_public(map, &subpath)
+                exports_subpath_public_proof(map, &subpath)
+            } else if subpath == "." {
+                if exports_target_has_runtime_resolution(exports) {
+                    PackageSpecifierPublicProof::Public(
+                        PackageSpecifierPublicReason::RootConditionalExports,
+                    )
+                } else {
+                    PackageSpecifierPublicProof::NotPublic(
+                        PackageSpecifierNotPublicReason::RootExportsHasNoRuntimeTarget,
+                    )
+                }
             } else {
                 // Root-only conditions object (e.g. { import, require }).
-                subpath == "."
+                PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::RootOnlyExports,
+                )
             }
         }
-        Some(serde_json::Value::String(_)) => subpath == ".",
+        Some(serde_json::Value::String(_)) => {
+            if subpath == "." {
+                PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::RootStringExports)
+            } else {
+                PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::RootOnlyExports,
+                )
+            }
+        }
+        Some(value) => {
+            if subpath == "." && exports_target_has_runtime_resolution(value) {
+                PackageSpecifierPublicProof::Public(
+                    PackageSpecifierPublicReason::RootConditionalExports,
+                )
+            } else if subpath == "." {
+                PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::RootExportsHasNoRuntimeTarget,
+                )
+            } else {
+                PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::RootOnlyExports,
+                )
+            }
+        }
         _ => {
             if subpath == "." {
-                package_json.get("main").is_some()
-                    || package_json.get("module").is_some()
-                    || has_root_index
+                if package_json.get("main").is_some() {
+                    PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::RootMain)
+                } else if package_json.get("module").is_some() {
+                    PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::RootModule)
+                } else if has_root_index {
+                    PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::RootIndex)
+                } else {
+                    PackageSpecifierPublicProof::NotPublic(
+                        PackageSpecifierNotPublicReason::MissingRootEntry,
+                    )
+                }
             } else {
                 // No `exports` allowlist: existing files are importable by
                 // Node resolution. The caller is responsible for proving the
                 // file/specifier exists.
-                true
+                PackageSpecifierPublicProof::Public(
+                    PackageSpecifierPublicReason::UnrestrictedDeepImport,
+                )
             }
         }
     }
 }
 
-fn exports_subpath_is_public(
+fn exports_subpath_public_proof(
     map: &serde_json::Map<String, serde_json::Value>,
     subpath: &str,
-) -> bool {
+) -> PackageSpecifierPublicProof {
     if let Some(target) = map.get(subpath) {
-        return !target.is_null();
+        if target.is_null() {
+            return PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::ExportsSubpathBlocked,
+            );
+        }
+        return if exports_target_has_runtime_resolution(target) {
+            PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::ExportsSubpath)
+        } else {
+            PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::ExportsSubpathHasNoRuntimeTarget,
+            )
+        };
     }
-    map.iter().any(|(key, target)| {
-        key.strip_suffix('*').is_some_and(|prefix| {
-            subpath.len() > prefix.len() && subpath.starts_with(prefix) && !target.is_null()
-        })
-    })
+    for (key, target) in map {
+        if exports_pattern_matches(key, subpath) {
+            if target.is_null() {
+                return PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::ExportsSubpathBlocked,
+                );
+            }
+            return if exports_target_has_runtime_resolution(target) {
+                PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::ExportsSubpath)
+            } else {
+                PackageSpecifierPublicProof::NotPublic(
+                    PackageSpecifierNotPublicReason::ExportsSubpathHasNoRuntimeTarget,
+                )
+            };
+        }
+    }
+    PackageSpecifierPublicProof::NotPublic(
+        PackageSpecifierNotPublicReason::ExportsSubpathNotExported,
+    )
+}
+
+fn exports_pattern_matches(pattern: &str, subpath: &str) -> bool {
+    let Some((prefix, suffix)) = pattern.split_once('*') else {
+        return false;
+    };
+    subpath.starts_with(prefix)
+        && subpath.ends_with(suffix)
+        && subpath.len() > prefix.len() + suffix.len()
+}
+
+fn exports_target_has_runtime_resolution(target: &serde_json::Value) -> bool {
+    match target {
+        serde_json::Value::String(_) => true,
+        serde_json::Value::Array(items) => items.iter().any(exports_target_has_runtime_resolution),
+        serde_json::Value::Object(map) => map.iter().any(|(condition, value)| {
+            condition != "types"
+                && condition != "typings"
+                && exports_target_has_runtime_resolution(value)
+        }),
+        _ => false,
+    }
+}
+
+#[must_use]
+pub fn resolve_package_deep_import_specifier(
+    package_json_source: &str,
+    package_name: &str,
+    specifier: &str,
+    entry_paths: &BTreeSet<String>,
+) -> Option<String> {
+    if package_has_exports_field(package_json_source) {
+        return Some(specifier.to_string());
+    }
+    let Some(subpath) = specifier.strip_prefix(format!("{package_name}/").as_str()) else {
+        return Some(specifier.to_string());
+    };
+    if entry_paths.contains(subpath) {
+        return Some(specifier.to_string());
+    }
+    const EXTENSIONS: [&str; 5] = [".js", ".json", ".cjs", ".mjs", ".node"];
+    for extension in EXTENSIONS {
+        let file = format!("{subpath}{extension}");
+        if entry_paths.contains(file.as_str()) {
+            return Some(format!("{package_name}/{file}"));
+        }
+    }
+    for extension in EXTENSIONS {
+        let file = format!("{subpath}/index{extension}");
+        if entry_paths.contains(file.as_str()) {
+            return Some(format!("{package_name}/{file}"));
+        }
+    }
+    None
+}
+
+fn package_has_exports_field(package_json_source: &str) -> bool {
+    parse_package_json_source(package_json_source)
+        .is_some_and(|manifest| manifest.get("exports").is_some())
 }
 
 #[must_use]
@@ -687,11 +902,14 @@ mod tests {
     use reverts_ir::{ModuleId, PackageSurface};
 
     use super::{
-        ExternalImportProofKind, PackageResolution, PackageSurfaceIndex,
+        ExternalImportProofKind, PackageResolution, PackageSpecifierNotPublicReason,
+        PackageSpecifierPublicProof, PackageSpecifierPublicReason, PackageSurfaceIndex,
         accepted_external_attribution_for_module, accepted_external_module_ids,
         external_import_concrete_source_path, external_import_proof_kind,
         external_import_proof_label, is_accepted_external_attribution, is_node_builtin,
-        package_specifier_is_public, parse_export_members_import_proof, parse_package_json_source,
+        package_specifier_is_public, package_specifier_public_proof,
+        parse_export_members_import_proof, parse_package_json_source,
+        resolve_package_deep_import_specifier,
     };
 
     #[test]
@@ -847,6 +1065,12 @@ mod tests {
     #[test]
     fn package_public_surface_is_conservative_for_invalid_manifest() {
         assert!(!package_specifier_is_public("not json", "pkg", "pkg", true));
+        assert_eq!(
+            package_specifier_public_proof("not json", "pkg", "pkg", true),
+            PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::InvalidPackageJson
+            )
+        );
     }
 
     #[test]
@@ -919,6 +1143,98 @@ mod tests {
                 .and_then(|value| value.get("name").cloned())
                 .and_then(|value| value.as_str().map(str::to_string)),
             Some("x".to_string())
+        );
+    }
+
+    #[test]
+    fn package_public_surface_reports_proof_reasons() {
+        assert_eq!(
+            package_specifier_public_proof(
+                r#"{"name":"pkg","exports":{"./feature":["./feature.mjs",null]}}"#,
+                "pkg",
+                "pkg/feature",
+                false,
+            ),
+            PackageSpecifierPublicProof::Public(PackageSpecifierPublicReason::ExportsSubpath)
+        );
+        assert_eq!(
+            package_specifier_public_proof(
+                r#"{"name":"pkg","exports":{"types":"./index.d.ts"}}"#,
+                "pkg",
+                "pkg",
+                false,
+            ),
+            PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::RootExportsHasNoRuntimeTarget
+            )
+        );
+        assert_eq!(
+            package_specifier_public_proof(
+                r#"{"name":"pkg","exports":{"./private":null}}"#,
+                "pkg",
+                "pkg/private",
+                false,
+            ),
+            PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::ExportsSubpathBlocked
+            )
+        );
+        assert_eq!(
+            package_specifier_public_proof(
+                r#"{"name":"pkg","exports":{"./types":{"types":"./types.d.ts"}}}"#,
+                "pkg",
+                "pkg/types",
+                false,
+            ),
+            PackageSpecifierPublicProof::NotPublic(
+                PackageSpecifierNotPublicReason::ExportsSubpathHasNoRuntimeTarget
+            )
+        );
+    }
+
+    #[test]
+    fn package_deep_import_resolution_uses_cached_files_for_no_exports_packages() {
+        let entry_paths = BTreeSet::from([
+            "_baseUnary.js".to_string(),
+            "collection/index.cjs".to_string(),
+            "lodash.js".to_string(),
+        ]);
+
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                r#"{"name":"lodash","main":"./lodash.js"}"#,
+                "lodash",
+                "lodash/_baseUnary",
+                &entry_paths,
+            ),
+            Some("lodash/_baseUnary.js".to_string())
+        );
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                r#"{"name":"lodash","main":"./lodash.js"}"#,
+                "lodash",
+                "lodash/collection",
+                &entry_paths,
+            ),
+            Some("lodash/collection/index.cjs".to_string())
+        );
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                r#"{"name":"lodash","main":"./lodash.js"}"#,
+                "lodash",
+                "lodash/missing",
+                &entry_paths,
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                r#"{"name":"pkg","exports":{"./feature":"./feature.js"}}"#,
+                "pkg",
+                "pkg/feature",
+                &BTreeSet::new(),
+            ),
+            Some("pkg/feature".to_string())
         );
     }
 

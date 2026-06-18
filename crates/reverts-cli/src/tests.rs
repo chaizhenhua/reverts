@@ -28,7 +28,7 @@ use super::commands::runtime_inventory::{
     runtime_source_span_owner_label_for_range,
 };
 use super::input_externalization::{
-    MaterializedPackageManifest, promote_detected_package_modules,
+    MaterializedPackageKey, MaterializedPackageManifest, promote_detected_package_modules,
     promote_verified_externalization_hints,
 };
 use super::persistence::attributions::{
@@ -509,16 +509,18 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
     );
 }
 
-/// Materialized-manifest map for the given package names, each with a permissive
+/// Materialized-manifest map for the given package versions, each with a permissive
 /// `package.json` (a `main`, no `exports`) so every detected specifier — bare
 /// root or subpath — counts as public. Tests needing a restrictive exports map
 /// build their own map.
-fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, MaterializedPackageManifest> {
-    names
+fn materialized(
+    packages: &[(&str, &str)],
+) -> std::collections::BTreeMap<MaterializedPackageKey, MaterializedPackageManifest> {
+    packages
         .iter()
-        .map(|name| {
+        .map(|(name, version)| {
             (
-                (*name).to_string(),
+                ((*name).to_string(), (*version).to_string()),
                 // A wildcard `exports` map makes both the bare root and every
                 // subpath public, and (having an exports field) skips file-based
                 // specifier resolution — so detected specifiers are accepted
@@ -536,7 +538,7 @@ fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, Materializ
 #[test]
 fn detected_package_modules_skip_unmaterialized_packages() {
     // A package the matcher never materialized (e.g. a 404 version baked into
-    // the recovered bundle) must NOT be promoted to an external import: that
+    // the input bundle) must NOT be promoted to an external import: that
     // would emit a bare import plus an uninstallable `package.json` dependency.
     // It stays a rejected source attribution and is vendored instead.
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -556,7 +558,8 @@ fn detected_package_modules_skip_unmaterialized_packages() {
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
     // Only `other-pkg` was materialized; @smithy/sha256-js was never fetched.
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&["other-pkg"]));
+    let promoted =
+        promote_detected_package_modules(&mut input, &materialized(&[("other-pkg", "1.0.0")]));
 
     assert_eq!(promoted, 0, "unmaterialized package must not be promoted");
     assert_eq!(
@@ -589,7 +592,7 @@ fn detected_package_modules_skip_non_public_specifier() {
 
     // pkg is materialized but its exports map only exposes the bare root.
     let manifests = std::collections::BTreeMap::from([(
-        "pkg".to_string(),
+        ("pkg".to_string(), "1.0.0".to_string()),
         MaterializedPackageManifest::new(
             r#"{"name":"pkg","exports":{".":"./index.js"}}"#.to_string(),
             false,
@@ -629,7 +632,7 @@ fn detected_cjs_deep_import_resolves_real_file_extension() {
 
     // lodash: no exports map; ships `_baseUnary.js` (and a root index).
     let manifests = std::collections::BTreeMap::from([(
-        "lodash".to_string(),
+        ("lodash".to_string(), "4.17.20".to_string()),
         MaterializedPackageManifest::new(
             r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
             false,
@@ -671,7 +674,7 @@ fn detected_cjs_deep_import_without_backing_file_is_not_externalized() {
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
     let manifests = std::collections::BTreeMap::from([(
-        "lodash".to_string(),
+        ("lodash".to_string(), "4.17.20".to_string()),
         MaterializedPackageManifest::new(
             r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
             false,
@@ -681,6 +684,49 @@ fn detected_cjs_deep_import_without_backing_file_is_not_externalized() {
     let promoted = promote_detected_package_modules(&mut input, &manifests);
 
     assert_eq!(promoted, 0, "unresolvable deep import must stay vendored");
+}
+
+#[test]
+fn detected_package_manifest_lookup_is_version_scoped() {
+    // pkg@1 exposes ./internal, pkg@2 does not. The module is pkg@2, so the
+    // pkg@1 manifest must not leak into the decision.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "internal",
+        "pkg/internal",
+        "pkg",
+        Some("2.0.0".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "pkg",
+            "package matcher did not produce an accepted attribution for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let manifests = std::collections::BTreeMap::from([
+        (
+            ("pkg".to_string(), "1.0.0".to_string()),
+            MaterializedPackageManifest::new(
+                r#"{"name":"pkg","exports":{".":"./index.js","./internal":"./internal.js"}}"#,
+                false,
+                std::collections::BTreeSet::new(),
+            ),
+        ),
+        (
+            ("pkg".to_string(), "2.0.0".to_string()),
+            MaterializedPackageManifest::new(
+                r#"{"name":"pkg","exports":{".":"./index.js"}}"#,
+                false,
+                std::collections::BTreeSet::new(),
+            ),
+        ),
+    ]);
+    let promoted = promote_detected_package_modules(&mut input, &manifests);
+
+    assert_eq!(promoted, 0, "manifest proof must use the module version");
 }
 
 #[test]
@@ -701,7 +747,7 @@ fn detected_package_modules_promote_rejected_source_attributions() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&["pkg"]));
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&[("pkg", "1.2.3")]));
 
     let attribution = &input.package_attributions[0];
     assert_eq!(promoted, 1);
@@ -744,7 +790,8 @@ fn detected_package_modules_use_scoped_package_alias_subpaths() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&["@scope/sdk"]));
+    let promoted =
+        promote_detected_package_modules(&mut input, &materialized(&[("@scope/sdk", "2.0.0")]));
 
     assert_eq!(promoted, 1);
     assert_eq!(
@@ -784,7 +831,7 @@ fn detected_package_modules_infer_missing_version_from_package_group() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&["pkg"]));
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&[("pkg", "1.2.3")]));
 
     assert_eq!(promoted, 2);
     assert_eq!(

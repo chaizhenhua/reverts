@@ -34,8 +34,8 @@ choose which mechanisms to run.
   transformations over explicit input data.
 - **Strategies**: package matching, ownership promotion, externalization
   decisions, and CLI workflows decide which mechanisms run and in what order.
-  Strategy code should be explicit about context and state rather than relying on
-  fallback recovery paths.
+  Strategy code should be explicit about context and state and must not promote
+  unproven import or source-suppression decisions.
 
 ## Package matching pipeline
 
@@ -48,8 +48,8 @@ three explicit objects:
   per-module function fingerprints, function-level diagnostics).
 - `PackageMatchPass`: individual passes such as versioned matching, function
   fingerprinting, cascade matching, structural bag ownership, dependency
-  ownership, importable promotion, forced externalization, and cache-anchored
-  surface finalization.
+  ownership, importable promotion, proven external-import target promotion, and
+  cache-anchored surface finalization.
 
 This makes pass order, shared state, and timing boundaries visible while keeping
 matcher strategies separate from package public-surface policy.
@@ -58,6 +58,9 @@ matcher strategies separate from package public-surface policy.
 
 - Domain policy that answers “is this package specifier public/importable?” lives
   in `reverts-package`, not `reverts-package-matcher` or CLI.
+- Package-cache evidence is version scoped. Manifest, entry-path, and root-index
+  proofs must be keyed by `(package_name, package_version)` before any
+  external-import decision uses them.
 - CLI use cases may load SQLite/cache evidence and apply policies, but should
   isolate repository loading, policy decisions, and mutation/application.
 - Lower crates must not depend on higher orchestration crates. Architecture
@@ -72,4 +75,4 @@ matcher strategies separate from package public-surface policy.
 - Hexagonal boundaries: package cache, SQLite, network materialization, and CLI
   arguments are adapters around core mechanisms.
 - Strategy / chain-of-responsibility: matching and ownership promotion are
-  explicit passes rather than hidden fallback branches.
+  explicit passes rather than hidden unproven promotion branches.

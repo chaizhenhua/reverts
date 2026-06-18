@@ -3,10 +3,10 @@
 //! Two passes live here. `prune_dead_exports` (whole-program tree-shaking) and
 //! `prune_invalid_exports` (a correctness invariant): a local `export { X }`
 //! whose `X` is neither defined nor imported in the module is invalid ESM that
-//! crashes at load (`SyntaxError: Export 'X' is not defined`). Recovery /
-//! adapter emission can leave such dangling exports (e.g. an externalized
-//! package adapter that binds only some of a module's original export names);
-//! this pass removes them so the emitted program loads.
+//! crashes at load (`SyntaxError: Export 'X' is not defined`). Adapter emission
+//! can leave such dangling exports (e.g. an externalized package adapter that
+//! binds only some of a module's original export names); this pass removes them
+//! so the emitted program loads.
 //!
 //! `plan_reachability` drops whole files unreachable from `cli.ts`;
 //! `runtime_orphan_prune` drops dead *private* bindings inside a module. The gap
@@ -54,21 +54,21 @@ pub(crate) fn prune_invalid_exports(plan: &mut EmitPlan) {
         let mut edits = Vec::<(usize, usize, String)>::new();
         for (start, end) in top_level_statement_spans(joined.as_str()) {
             let statement = joined[start..end].trim();
-            let Some(ModuleItem::NamedExport { names }) = module_item(statement) else {
+            let Some(ModuleItem::NamedExport { specifiers }) = module_item(statement) else {
                 continue;
             };
-            let kept = names
+            let kept = specifiers
                 .iter()
-                .filter(|name| is_backed(name.as_str()))
+                .filter(|specifier| is_backed(specifier.local.as_str()))
                 .cloned()
                 .collect::<Vec<_>>();
-            if kept.len() == names.len() {
+            if kept.len() == specifiers.len() {
                 continue;
             }
             let replacement = if kept.is_empty() {
                 String::new()
             } else {
-                format!("export {{ {} }};", kept.join(", "))
+                format!("export {{ {} }};", render_export_specifiers(&kept))
             };
             edits.push((start, end, replacement));
         }
@@ -81,12 +81,17 @@ pub(crate) fn prune_invalid_exports(plan: &mut EmitPlan) {
 }
 
 /// Names a module legitimately backs: every top-level definition in its body,
-/// every local binding introduced by an import (named/namespace/default), and
-/// the structured planner namespace imports the emitter injects.
+/// every local binding introduced by an import (named/namespace/default), the
+/// structured planner namespace imports the emitter injects, and every
+/// readability-rename *target* (a defined binding is emitted under its renamed
+/// name, so e.g. `export { a as createClient }` is backed by `a` -> `createClient`).
 fn module_backed_names(file: &PlannedFile) -> BTreeSet<String> {
     let mut backed = BTreeSet::<String>::new();
     for import in &file.imports {
         backed.insert(import.namespace.as_str().to_string());
+    }
+    for rename in &file.readability_renames {
+        backed.insert(rename.renamed.as_str().to_string());
     }
     let joined = file.body.join("\n");
     for (start, end) in top_level_statement_spans(joined.as_str()) {
@@ -263,21 +268,22 @@ fn prune_file_dead_exports(file: &mut PlannedFile, live: Option<&BTreeSet<String
     let mut newly_unexported = BTreeSet::<BindingName>::new();
     for (start, end) in top_level_statement_spans(joined.as_str()) {
         let statement = joined[start..end].trim();
-        let Some(ModuleItem::NamedExport { names }) = module_item(statement) else {
+        let Some(ModuleItem::NamedExport { specifiers }) = module_item(statement) else {
             continue;
         };
-        let (kept, dropped): (Vec<String>, Vec<String>) =
-            names.into_iter().partition(|name| is_live(name.as_str()));
+        let (kept, dropped): (Vec<LocalExportSpecifier>, Vec<LocalExportSpecifier>) = specifiers
+            .into_iter()
+            .partition(|specifier| is_live(specifier.exported.as_str()));
         if dropped.is_empty() {
             continue;
         }
-        for name in dropped {
-            newly_unexported.insert(BindingName::new(name));
+        for specifier in dropped {
+            newly_unexported.insert(BindingName::new(specifier.local));
         }
         let replacement = if kept.is_empty() {
             String::new()
         } else {
-            format!("export {{ {} }};", kept.join(", "))
+            format!("export {{ {} }};", render_export_specifiers(&kept))
         };
         edits.push((start, end, replacement));
     }
@@ -313,13 +319,31 @@ fn surviving_export_roots(file: &PlannedFile) -> BTreeSet<BindingName> {
         .map(|export| export.binding.clone())
         .collect::<BTreeSet<_>>();
     for statement in body_statements(&file.body) {
-        if let Some(ModuleItem::NamedExport { names })
-        | Some(ModuleItem::NamedReexport { names, .. }) = module_item(statement.as_str())
-        {
-            roots.extend(names.into_iter().map(BindingName::new));
+        if let Some(ModuleItem::NamedExport { specifiers }) = module_item(statement.as_str()) {
+            roots.extend(
+                specifiers
+                    .into_iter()
+                    .map(|specifier| BindingName::new(specifier.local)),
+            );
         }
     }
     roots
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LocalExportSpecifier {
+    local: String,
+    exported: String,
+}
+
+impl LocalExportSpecifier {
+    fn render(&self) -> String {
+        if self.local == self.exported {
+            self.local.clone()
+        } else {
+            format!("{} as {}", self.local, self.exported)
+        }
+    }
 }
 
 enum ModuleItem {
@@ -332,7 +356,7 @@ enum ModuleItem {
         names: Vec<String>,
     },
     NamedExport {
-        names: Vec<String>,
+        specifiers: Vec<LocalExportSpecifier>,
     },
     OpaqueImport {
         specifier: String,
@@ -356,7 +380,8 @@ fn module_item(statement: &str) -> Option<ModuleItem> {
     }
     // `export { a, b };` (local export)
     if statement.starts_with("export {") {
-        return brace_names(statement, false).map(|names| ModuleItem::NamedExport { names });
+        return local_export_specifiers(statement)
+            .map(|specifiers| ModuleItem::NamedExport { specifiers });
     }
     // `import { a, b } from '...'`  /  `import def, { a } from '...'`
     if statement.starts_with("import ")
@@ -386,29 +411,49 @@ fn specifier_suffix(statement: &str) -> Option<String> {
 /// export clauses the *exported* (right of `as`, or bare) name is what the file
 /// exposes. `import_side` selects which.
 fn brace_names(statement: &str, import_side: bool) -> Option<Vec<String>> {
+    Some(
+        local_export_specifiers(statement)?
+            .into_iter()
+            .map(|specifier| {
+                if import_side {
+                    specifier.local
+                } else {
+                    specifier.exported
+                }
+            })
+            .collect(),
+    )
+}
+
+fn local_export_specifiers(statement: &str) -> Option<Vec<LocalExportSpecifier>> {
     let open = statement.find('{')?;
     let close = statement[open..].find('}')? + open;
-    let names = statement[open + 1..close]
+    let specifiers = statement[open + 1..close]
         .split(',')
         .filter_map(|part| {
             let part = part.trim();
             if part.is_empty() {
                 return None;
             }
-            let name = match part.split_once(" as ") {
-                Some((left, right)) => {
-                    if import_side {
-                        left.trim()
-                    } else {
-                        right.trim()
-                    }
-                }
-                None => part,
+            let (local, exported) = match part.split_once(" as ") {
+                Some((left, right)) => (left.trim(), right.trim()),
+                None => (part, part),
             };
-            (is_identifier(name)).then(|| name.to_string())
+            (is_identifier(local) && is_identifier(exported)).then(|| LocalExportSpecifier {
+                local: local.to_string(),
+                exported: exported.to_string(),
+            })
         })
         .collect::<Vec<_>>();
-    Some(names)
+    Some(specifiers)
+}
+
+fn render_export_specifiers(specifiers: &[LocalExportSpecifier]) -> String {
+    specifiers
+        .iter()
+        .map(LocalExportSpecifier::render)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -642,6 +687,42 @@ mod tests {
             a.contains("keep") && a.contains("aliased"),
             "valid exports kept: {a}"
         );
+    }
+
+    #[test]
+    fn keeps_local_export_alias_when_local_binding_is_defined() {
+        let mut plan = EmitPlan::default();
+        plan.push_file(file(
+            "modules/a.ts",
+            "const a = 1;\nexport { a as createClient };",
+        ));
+
+        prune_invalid_exports(&mut plan);
+
+        let a = body_of(&plan, "modules/a.ts");
+        assert!(
+            a.contains("export { a as createClient }"),
+            "local alias validity is decided by the local binding: {a}"
+        );
+    }
+
+    #[test]
+    fn dead_export_prune_preserves_live_local_alias_clause() {
+        let mut plan = EmitPlan::default();
+        plan.push_file(file(
+            "cli.ts",
+            "import { createClient } from './modules/a.js';",
+        ));
+        plan.push_file(file(
+            "modules/a.ts",
+            "const a = 1;\nconst dead = 2;\nexport { a as createClient, dead as unused };",
+        ));
+
+        prune_dead_exports(&mut plan);
+
+        let a = body_of(&plan, "modules/a.ts");
+        assert!(a.contains("export { a as createClient }"), "{a}");
+        assert!(!a.contains("unused"), "dead alias export is dropped: {a}");
     }
 
     #[test]

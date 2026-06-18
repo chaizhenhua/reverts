@@ -1,12 +1,12 @@
-//! Last-resort externalization pass for package modules that no
-//! stronger strategy could attribute.
+//! Proof-driven external import promotion for package modules that no stronger
+//! strategy externalized yet.
 //!
 //! Modules whose bundle hints already name a known matched package are
-//! pushed across the external-import boundary using the best resolution
-//! we can produce — direct standard-target lookup, then dependency-
-//! graph fingerprint evidence, then dependency-edge path evidence, then
-//! same-package cross-version source equivalence, finally cross-package
-//! exact source equivalence. Iterates to a fixed point so newly forced
+//! promoted across the external-import boundary only when a concrete proof can
+//! resolve both package version and import target: direct standard-target
+//! lookup, dependency-graph fingerprint evidence, dependency-edge path
+//! evidence, same-package cross-version source equivalence, or cross-package
+//! exact source equivalence. Iterates to a fixed point so newly proven
 //! attributions can feed the next round.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,12 +19,12 @@ use crate::{
     PackageSource, VersionedPackageMatchReport, accepted_external_modules,
     concrete_package_source_from_parts, concrete_package_sources_by_module,
     cross_package_exact_source_external_import_target, dependency_edge_path_external_import_target,
-    dependency_graph_source_fingerprint_external_import_target, forced_external_import_target,
-    forced_external_package_version, package_version_from_proof_path,
+    dependency_graph_source_fingerprint_external_import_target, package_version_from_proof_path,
+    proven_external_import_target, proven_external_package_version,
     same_package_cross_version_source_external_import_target,
 };
 
-pub(crate) fn force_externalize_remaining_package_modules(
+pub(crate) fn promote_proven_external_import_targets(
     rows: &InputRows,
     package_sources: &[PackageSource],
     matched_package_names: &BTreeSet<String>,
@@ -47,10 +47,10 @@ pub(crate) fn force_externalize_remaining_package_modules(
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
     let cache = ExternalImportProofScratch::default();
     let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
-    let mut forced = 0usize;
+    let mut promoted = 0usize;
 
     loop {
-        let mut round_forced = 0usize;
+        let mut round_promoted = 0usize;
         for module in &rows.modules {
             if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
                 continue;
@@ -70,14 +70,15 @@ pub(crate) fn force_externalize_remaining_package_modules(
                 continue;
             }
             let source_only_match = source_only_matches.get(&module.id);
-            let package_version =
-                forced_external_package_version(module, source_only_match, package_sources)
-                    .unwrap_or_else(|| "*".to_string());
+            let Some(package_version) = proven_external_package_version(module, source_only_match)
+            else {
+                continue;
+            };
             let module_source = rows
                 .module_source_slice(module.id)
                 .map(|slice| slice.source)
                 .unwrap_or_default();
-            let standard_target = forced_external_import_target(
+            let standard_target = proven_external_import_target(
                 rows,
                 module,
                 package_name,
@@ -213,12 +214,12 @@ pub(crate) fn force_externalize_remaining_package_modules(
             ) {
                 concrete_sources_by_module.insert(module.id, concrete);
             }
-            forced += 1;
-            round_forced += 1;
+            promoted += 1;
+            round_promoted += 1;
         }
-        if round_forced == 0 {
+        if round_promoted == 0 {
             break;
         }
     }
-    forced
+    promoted
 }

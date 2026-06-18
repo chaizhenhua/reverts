@@ -2,12 +2,13 @@ use std::collections::BTreeSet;
 
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
-use semver::Version;
 
 use crate::index::ExternalImportSourceIndex;
+#[cfg(test)]
+use crate::model::PackageSource;
 use crate::model::{
-    ExternalImportTarget, ModuleMatchStrategy, PackageMatch, PackageSource,
-    PackageVersionCandidate, VersionedPackageMatcherConfig,
+    ExternalImportTarget, ModuleMatchStrategy, PackageMatch, PackageVersionCandidate,
+    VersionedPackageMatcherConfig,
 };
 use crate::package_helpers::{
     SemanticPathHintMode, module_package_semantic_path_hints, package_source_external_import_rank,
@@ -586,10 +587,9 @@ fn normalized_source_external_package_source(
     })
 }
 
-pub(crate) fn forced_external_package_version(
+pub(crate) fn proven_external_package_version(
     module: &ModuleInput,
     source_only_match: Option<&PackageMatch>,
-    package_sources: &[PackageSource],
 ) -> Option<String> {
     module
         .package_version
@@ -598,28 +598,9 @@ pub(crate) fn forced_external_package_version(
         .filter(|version| !version.is_empty())
         .map(ToOwned::to_owned)
         .or_else(|| source_only_match.map(|package_match| package_match.package_version.clone()))
-        .or_else(|| {
-            latest_package_source_version(package_sources, module.package_name.as_deref()?.trim())
-        })
 }
 
-fn latest_package_source_version(
-    package_sources: &[PackageSource],
-    package_name: &str,
-) -> Option<String> {
-    package_sources
-        .iter()
-        .filter(|source| source.package_name == package_name)
-        .filter_map(|source| {
-            Version::parse(source.package_version.as_str())
-                .ok()
-                .map(|version| (version, source.package_version.as_str()))
-        })
-        .max_by(|left, right| left.0.cmp(&right.0))
-        .map(|(_version, text)| text.to_string())
-}
-
-pub(crate) fn forced_external_import_target(
+pub(crate) fn proven_external_import_target(
     rows: &InputRows,
     module: &ModuleInput,
     package_name: &str,
