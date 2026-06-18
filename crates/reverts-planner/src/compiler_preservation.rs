@@ -1,4 +1,4 @@
-//! Compiler-recovery decision types.
+//! Compiler-preservation decision types.
 //!
 //! Every module carries a `ModuleCompilerProfile` from `reverts-model`
 //! identifying which compiler shaped its source (webpack runtime,
@@ -7,12 +7,13 @@
 //!
 //! - `SourceCompilerStrategy` decides how to *parse* the module — the
 //!   parse goal and an optional path hint.
-//! - `CompilerRecoveryAction` decides how to *emit* the module — either
+//! - `CompilerPreservationAction` decides how to *emit* the module — either
 //!   pass-through `DirectModuleSource` or one of the `Preserve…`
-//!   actions that stamps a `// reverts-recovery: <compiler>` banner so
-//!   the consumer can see the planner punted on full recovery.
+//!   actions that stamps a `// reverts-compiler-preserved: <compiler>` banner so
+//!   the consumer can see that a compiler-shaped source boundary was preserved
+//!   explicitly instead of being silently rewritten.
 //!
-//! `CompilerRecoveryDecision` bundles both decisions plus the evidence
+//! `CompilerPreservationDecision` bundles both decisions plus the evidence
 //! the model collected, so audit consumers can see *why* the planner
 //! made the call without recomputing it.
 
@@ -31,7 +32,7 @@ pub enum SourceCompilerStrategy {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum CompilerRecoveryAction {
+pub enum CompilerPreservationAction {
     #[default]
     DirectModuleSource,
     PreserveWebpackRuntime,
@@ -41,7 +42,7 @@ pub enum CompilerRecoveryAction {
     PreserveTerserMinifiedOutput,
 }
 
-impl CompilerRecoveryAction {
+impl CompilerPreservationAction {
     #[must_use]
     pub const fn from_compiler(compiler: CompilerKind) -> Self {
         match compiler {
@@ -54,36 +55,36 @@ impl CompilerRecoveryAction {
         }
     }
 
-    /// Short banner text that surfaces the recovery decision in the emitted
+    /// Short banner text that surfaces the preservation decision in the emitted
     /// source. Returns `None` for `DirectModuleSource` so untransformed user
     /// code stays banner-free.
     #[must_use]
-    pub const fn recovery_banner(self) -> Option<&'static str> {
+    pub const fn preservation_banner(self) -> Option<&'static str> {
         match self {
             Self::DirectModuleSource => None,
-            Self::PreserveWebpackRuntime => Some("reverts-recovery: webpack"),
-            Self::PreserveEsbuildHelpers => Some("reverts-recovery: esbuild"),
-            Self::PreserveRollupFacade => Some("reverts-recovery: rollup"),
-            Self::PreserveBabelTranspiledOutput => Some("reverts-recovery: babel"),
-            Self::PreserveTerserMinifiedOutput => Some("reverts-recovery: terser"),
+            Self::PreserveWebpackRuntime => Some("reverts-compiler-preserved: webpack"),
+            Self::PreserveEsbuildHelpers => Some("reverts-compiler-preserved: esbuild"),
+            Self::PreserveRollupFacade => Some("reverts-compiler-preserved: rollup"),
+            Self::PreserveBabelTranspiledOutput => Some("reverts-compiler-preserved: babel"),
+            Self::PreserveTerserMinifiedOutput => Some("reverts-compiler-preserved: terser"),
         }
     }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct CompilerRecoveryDecision {
+pub struct CompilerPreservationDecision {
     pub strategy: SourceCompilerStrategy,
-    pub action: CompilerRecoveryAction,
+    pub action: CompilerPreservationAction,
     pub minified: bool,
     pub evidence: Vec<CompilerEvidence>,
 }
 
-impl CompilerRecoveryDecision {
+impl CompilerPreservationDecision {
     #[must_use]
     pub fn from_profile(profile: &ModuleCompilerProfile) -> Self {
         Self {
             strategy: SourceCompilerStrategy::from_profile(profile),
-            action: CompilerRecoveryAction::from_compiler(profile.compiler),
+            action: CompilerPreservationAction::from_compiler(profile.compiler),
             minified: profile.minified,
             evidence: profile.evidence.clone(),
         }

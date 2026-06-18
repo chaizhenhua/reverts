@@ -12,7 +12,7 @@ use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
 
 use crate::binding_owner::BindingOwnerPlan;
-use crate::compiler_recovery::CompilerRecoveryDecision;
+use crate::compiler_preservation::CompilerPreservationDecision;
 use crate::node_builtin_require::NodeBuiltinRequireRewrite;
 use crate::package_runtime::{
     PackageRuntimeHelperKey, PackageRuntimeHelperUsage, package_runtime_owner_for_module,
@@ -148,9 +148,9 @@ pub(crate) fn plan_one_module(
     let package_runtime_owner =
         package_runtime_owner_for_module(module, source_suppressed_packages);
     let compiler_profile = program.compiler_profile().module(module.id);
-    let compiler_recovery = CompilerRecoveryDecision::from_profile(&compiler_profile);
+    let compiler_preservation = CompilerPreservationDecision::from_profile(&compiler_profile);
     let mut adapter_file = PlannedFile::new(path);
-    adapter_file.set_compiler_recovery(compiler_recovery.clone());
+    adapter_file.set_compiler_preservation(compiler_preservation.clone());
     if external_package_adapter_emit::try_emit_external_package_adapter(
         program,
         module,
@@ -161,7 +161,7 @@ pub(crate) fn plan_one_module(
         return Ok(());
     }
     let mut file = PlannedFile::new(path);
-    file.set_compiler_recovery(compiler_recovery);
+    file.set_compiler_preservation(compiler_preservation);
     let mut planned_bindings = BTreeSet::<BindingName>::new();
     let mut emitted_inline_runtime_helpers = BTreeSet::<(u32, BindingName)>::new();
 

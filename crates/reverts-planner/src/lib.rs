@@ -2,7 +2,7 @@ mod binding_owner;
 mod byte_lexer;
 mod class_field_bindings;
 mod cli_entrypoint;
-mod compiler_recovery;
+mod compiler_preservation;
 mod compute_modules;
 mod destructure_writes;
 mod eager_safe_analysis;
@@ -254,8 +254,8 @@ pub use plan::{
 pub use plan_error::PlanError;
 use relative_paths::relative_import_specifier;
 
-pub use compiler_recovery::{
-    CompilerRecoveryAction, CompilerRecoveryDecision, SourceCompilerStrategy,
+pub use compiler_preservation::{
+    CompilerPreservationAction, CompilerPreservationDecision, SourceCompilerStrategy,
 };
 pub use runtime_setter_migration_blocker::{
     RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,

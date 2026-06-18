@@ -298,15 +298,15 @@ fn augment_with_synthesized_surfaces(rows: &mut InputRows) -> Option<()> {
 
 fn banner_compiler(run: &reverts_pipeline::OutputRun) -> Option<CompilerKind> {
     let emitted = run.project.files.first()?.source.as_str();
-    if emitted.contains("// reverts-recovery: webpack") {
+    if emitted.contains("// reverts-compiler-preserved: webpack") {
         Some(CompilerKind::Webpack)
-    } else if emitted.contains("// reverts-recovery: esbuild") {
+    } else if emitted.contains("// reverts-compiler-preserved: esbuild") {
         Some(CompilerKind::Esbuild)
-    } else if emitted.contains("// reverts-recovery: rollup") {
+    } else if emitted.contains("// reverts-compiler-preserved: rollup") {
         Some(CompilerKind::Rollup)
-    } else if emitted.contains("// reverts-recovery: babel") {
+    } else if emitted.contains("// reverts-compiler-preserved: babel") {
         Some(CompilerKind::Babel)
-    } else if emitted.contains("// reverts-recovery: terser") {
+    } else if emitted.contains("// reverts-compiler-preserved: terser") {
         Some(CompilerKind::Terser)
     } else {
         None

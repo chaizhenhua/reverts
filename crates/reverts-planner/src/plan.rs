@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use reverts_ir::{BindingName, BindingShape};
 use reverts_package::PackageResolution;
 
-use crate::compiler_recovery::{CompilerRecoveryDecision, SourceCompilerStrategy};
+use crate::compiler_preservation::{CompilerPreservationDecision, SourceCompilerStrategy};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmitPlan {
@@ -168,7 +168,7 @@ pub struct PlannedFile {
     /// original recovered names.
     pub readability_renames: Vec<PlannedRename>,
     pub body: Vec<String>,
-    pub compiler_recovery: CompilerRecoveryDecision,
+    pub compiler_preservation: CompilerPreservationDecision,
 }
 
 impl PlannedFile {
@@ -181,7 +181,7 @@ impl PlannedFile {
             exports: Vec::new(),
             readability_renames: Vec::new(),
             body: Vec::new(),
-            compiler_recovery: CompilerRecoveryDecision::default(),
+            compiler_preservation: CompilerPreservationDecision::default(),
         }
     }
 
@@ -212,13 +212,16 @@ impl PlannedFile {
         self.readability_renames.push(rename);
     }
 
-    pub fn set_compiler_recovery(&mut self, compiler_recovery: CompilerRecoveryDecision) {
-        self.compiler_recovery = compiler_recovery;
+    pub fn set_compiler_preservation(
+        &mut self,
+        compiler_preservation: CompilerPreservationDecision,
+    ) {
+        self.compiler_preservation = compiler_preservation;
     }
 
     #[must_use]
     pub const fn source_strategy(&self) -> SourceCompilerStrategy {
-        self.compiler_recovery.strategy
+        self.compiler_preservation.strategy
     }
 }
 

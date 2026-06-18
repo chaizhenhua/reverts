@@ -2079,10 +2079,10 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
     }
 
     #[test]
-    fn webpack_bundle_emits_compiler_specific_recovery_banner() {
+    fn webpack_bundle_emits_compiler_specific_preservation_banner() {
         // The fixture has the canonical __webpack_require__ identifier at module
         // scope, so compiler detection classifies the module as Webpack and the
-        // pipeline must surface that decision via a recovery banner.
+        // pipeline must surface that decision via a preservation banner.
         let source = "var __webpack_require__ = function (id) { return id; };\n\
                       var entry = __webpack_require__(1);\n";
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -2107,8 +2107,8 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         );
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
-            "emitted source must carry a webpack recovery banner, got:\n{emitted}",
+            emitted.contains("// reverts-compiler-preserved: webpack"),
+            "emitted source must carry a webpack preservation banner, got:\n{emitted}",
         );
     }
 
@@ -2138,15 +2138,15 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         );
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: webpack"),
+            !emitted.contains("// reverts-compiler-preserved: webpack"),
             "in-function webpack runtime identifier must not trigger webpack banner, got:\n{emitted}",
         );
     }
 
     #[test]
-    fn unknown_compiler_does_not_emit_recovery_banner() {
+    fn unknown_compiler_does_not_emit_preservation_banner() {
         // Plain TypeScript source with no bundler signals must NOT carry a
-        // recovery banner; the banner is reserved for non-Unknown compilers.
+        // preservation banner; the banner is reserved for non-Unknown compilers.
         let source = "export function add(a: number, b: number) {\n  return a + b;\n}\n";
         let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
         rows.source_files.push(SourceFileInput::new(
@@ -2162,8 +2162,8 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         let run = generate_project_from_input(input).expect("fixture should emit");
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("reverts-recovery"),
-            "unknown-compiler module must not include a recovery banner, got:\n{emitted}",
+            !emitted.contains("reverts-compiler-preserved"),
+            "unknown-compiler module must not include a preservation banner, got:\n{emitted}",
         );
     }
 
@@ -2191,7 +2191,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: esbuild"),
+            !emitted.contains("// reverts-compiler-preserved: esbuild"),
             "function-local esbuild identifier must not trigger esbuild banner, got:\n{emitted}",
         );
     }
@@ -2203,7 +2203,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: rollup"),
+            !emitted.contains("// reverts-compiler-preserved: rollup"),
             "Object.freeze alone must not trigger rollup banner, got:\n{emitted}",
         );
     }
@@ -2215,7 +2215,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: babel"),
+            !emitted.contains("// reverts-compiler-preserved: babel"),
             "function-local babel identifier must not trigger babel banner, got:\n{emitted}",
         );
     }
@@ -2232,7 +2232,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: babel"),
+            emitted.contains("// reverts-compiler-preserved: babel"),
             "babel fixture must keep its banner, got:\n{emitted}",
         );
         assert!(
@@ -2261,7 +2261,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: babel"),
+            emitted.contains("// reverts-compiler-preserved: babel"),
             "babel fixture must keep its banner; got:\n{emitted}",
         );
         assert!(
@@ -2389,7 +2389,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: esbuild"),
+            emitted.contains("// reverts-compiler-preserved: esbuild"),
             "esbuild fixture must carry esbuild banner; got:\n{emitted}",
         );
         for helper in ["__commonJS", "__toCommonJS", "__defProp", "__export"] {
@@ -2420,7 +2420,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: esbuild"),
+            emitted.contains("// reverts-compiler-preserved: esbuild"),
             "esbuild fixture must carry esbuild banner; got:\n{emitted}",
         );
         assert!(
@@ -2459,7 +2459,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
+            emitted.contains("// reverts-compiler-preserved: webpack"),
             "webpack fixture must carry webpack banner; got:\n{emitted}",
         );
         for helper in [
@@ -2492,7 +2492,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: webpack"),
+            emitted.contains("// reverts-compiler-preserved: webpack"),
             "webpack fixture must carry webpack banner; got:\n{emitted}",
         );
         assert!(
@@ -2635,8 +2635,8 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("reverts-recovery"),
-            "Unknown compiler must not emit any recovery banner; got:\n{emitted}",
+            !emitted.contains("reverts-compiler-preserved"),
+            "Unknown compiler must not emit any preservation banner; got:\n{emitted}",
         );
         assert!(
             emitted.contains("function compute"),
@@ -2674,7 +2674,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: esbuild"),
+            emitted.contains("// reverts-compiler-preserved: esbuild"),
             "esbuild must be the active detection; got:\n{emitted}",
         );
         assert!(
@@ -2702,7 +2702,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: esbuild"),
+            !emitted.contains("// reverts-compiler-preserved: esbuild"),
             "IIFE shape alone must not carry esbuild banner; got:\n{emitted}",
         );
         for helper in ["__commonJS", "__defProp", "__export"] {
@@ -2729,7 +2729,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: webpack"),
+            !emitted.contains("// reverts-compiler-preserved: webpack"),
             "IIFE-local webpack identifiers must not trigger webpack banner; got:\n{emitted}",
         );
         assert!(
@@ -2764,7 +2764,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            !emitted.contains("// reverts-recovery: webpack"),
+            !emitted.contains("// reverts-compiler-preserved: webpack"),
             "IIFE-local webpack identifiers must not trigger webpack banner; got:\n{emitted}",
         );
         assert!(
@@ -2790,7 +2790,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("// reverts-recovery: terser"),
+            emitted.contains("// reverts-compiler-preserved: terser"),
             "terser fixture must carry terser banner, got:\n{emitted}",
         );
     }

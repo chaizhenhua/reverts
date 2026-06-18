@@ -7,7 +7,7 @@ use reverts_js::{
     format_source_with_module_items_and_renames, sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
-use reverts_planner::{CompilerRecoveryAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
+use reverts_planner::{CompilerPreservationAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmittedProject {
@@ -102,7 +102,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             )
         })
         .collect::<Vec<_>>();
-    let lowering = compiler_lowering(file.compiler_recovery.action);
+    let lowering = compiler_lowering(file.compiler_preservation.action);
 
     // Per ADR 0002 the emitter is faithful, not corrective. Two paths reach
     // raw-body emission:
@@ -155,7 +155,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             path: file.path.clone(),
             source: add_typescript_compat_header(
                 formatted,
-                file.compiler_recovery.action.recovery_banner(),
+                file.compiler_preservation.action.preservation_banner(),
             ),
         },
         finding,
@@ -186,19 +186,19 @@ fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
 }
 
-const fn compiler_lowering(action: CompilerRecoveryAction) -> CompilerLowering {
+const fn compiler_lowering(action: CompilerPreservationAction) -> CompilerLowering {
     match action {
-        CompilerRecoveryAction::PreserveBabelTranspiledOutput => CompilerLowering::Babel,
-        CompilerRecoveryAction::PreserveEsbuildHelpers => CompilerLowering::Esbuild,
-        CompilerRecoveryAction::PreserveWebpackRuntime => CompilerLowering::Webpack,
-        CompilerRecoveryAction::DirectModuleSource
-        | CompilerRecoveryAction::PreserveRollupFacade
-        | CompilerRecoveryAction::PreserveTerserMinifiedOutput => CompilerLowering::None,
+        CompilerPreservationAction::PreserveBabelTranspiledOutput => CompilerLowering::Babel,
+        CompilerPreservationAction::PreserveEsbuildHelpers => CompilerLowering::Esbuild,
+        CompilerPreservationAction::PreserveWebpackRuntime => CompilerLowering::Webpack,
+        CompilerPreservationAction::DirectModuleSource
+        | CompilerPreservationAction::PreserveRollupFacade
+        | CompilerPreservationAction::PreserveTerserMinifiedOutput => CompilerLowering::None,
     }
 }
 
-fn add_typescript_compat_header(source: String, recovery_banner: Option<&str>) -> String {
-    let banner_line = recovery_banner
+fn add_typescript_compat_header(source: String, preservation_banner: Option<&str>) -> String {
+    let banner_line = preservation_banner
         .map(|banner| format!("// {banner}\n"))
         .unwrap_or_default();
 

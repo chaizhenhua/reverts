@@ -21,7 +21,7 @@ use super::external_adapters::{
 };
 use super::statement_parsers::parse_generated_named_export_statement;
 use super::{
-    CompilerRecoveryAction, EmitPlan, ImportExportPlanner, PlannedFile, PlannerAnalysis,
+    CompilerPreservationAction, EmitPlan, ImportExportPlanner, PlannedFile, PlannerAnalysis,
     RuntimeReaderClusterContext, RuntimeReaderClusterMigration,
     RuntimeReaderClusterMigrationProposal, RuntimeSetterMigrationBlockerReason,
     RuntimeSourceReadIndex, SourceCompilerStrategy, coalesce_runtime_lazy_initializer_call_runs,
@@ -4548,7 +4548,7 @@ fn enriched_program_plans_real_source_slice_from_bundle_span() {
 }
 
 #[test]
-fn compiler_profile_selects_webpack_recovery_decision() {
+fn compiler_profile_selects_webpack_preservation_decision() {
     let planner = ImportExportPlanner;
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
     rows.source_files.push(SourceFileInput::new(
@@ -4584,15 +4584,15 @@ fn compiler_profile_selects_webpack_recovery_decision() {
         .expect("fixture should normalize");
 
     assert_eq!(
-        plan.files[0].compiler_recovery.strategy,
+        plan.files[0].compiler_preservation.strategy,
         SourceCompilerStrategy::WebpackRuntime
     );
     assert_eq!(
-        plan.files[0].compiler_recovery.action,
-        CompilerRecoveryAction::PreserveWebpackRuntime
+        plan.files[0].compiler_preservation.action,
+        CompilerPreservationAction::PreserveWebpackRuntime
     );
     assert_eq!(
-        plan.files[0].compiler_recovery.evidence,
+        plan.files[0].compiler_preservation.evidence,
         vec![CompilerEvidence::Identifier(
             "__webpack_require__".to_string()
         )]
@@ -4601,30 +4601,30 @@ fn compiler_profile_selects_webpack_recovery_decision() {
 }
 
 #[test]
-fn compiler_recovery_actions_cover_known_compilers() {
+fn compiler_preservation_actions_cover_known_compilers() {
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Webpack),
-        CompilerRecoveryAction::PreserveWebpackRuntime
+        CompilerPreservationAction::from_compiler(CompilerKind::Webpack),
+        CompilerPreservationAction::PreserveWebpackRuntime
     );
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Esbuild),
-        CompilerRecoveryAction::PreserveEsbuildHelpers
+        CompilerPreservationAction::from_compiler(CompilerKind::Esbuild),
+        CompilerPreservationAction::PreserveEsbuildHelpers
     );
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Rollup),
-        CompilerRecoveryAction::PreserveRollupFacade
+        CompilerPreservationAction::from_compiler(CompilerKind::Rollup),
+        CompilerPreservationAction::PreserveRollupFacade
     );
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Babel),
-        CompilerRecoveryAction::PreserveBabelTranspiledOutput
+        CompilerPreservationAction::from_compiler(CompilerKind::Babel),
+        CompilerPreservationAction::PreserveBabelTranspiledOutput
     );
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Terser),
-        CompilerRecoveryAction::PreserveTerserMinifiedOutput
+        CompilerPreservationAction::from_compiler(CompilerKind::Terser),
+        CompilerPreservationAction::PreserveTerserMinifiedOutput
     );
     assert_eq!(
-        CompilerRecoveryAction::from_compiler(CompilerKind::Unknown),
-        CompilerRecoveryAction::DirectModuleSource
+        CompilerPreservationAction::from_compiler(CompilerKind::Unknown),
+        CompilerPreservationAction::DirectModuleSource
     );
 }
 
