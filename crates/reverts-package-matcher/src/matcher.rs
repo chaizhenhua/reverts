@@ -13,6 +13,7 @@ use crate::model::{
 };
 use crate::package_helpers::is_exact_package_version_hint;
 use crate::scoring::accepted_attribution_from_match;
+use crate::source::cache_surfaces::resolve_cache_anchored_package_surfaces;
 use crate::source::source_imports::resolve_source_package_surfaces;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -85,13 +86,24 @@ impl VersionedPackageMatcher {
                 decisions.push(decision);
             }
         }
-        let surfaces = resolve_source_package_surfaces(
+        let mut surfaces = resolve_source_package_surfaces(
             rows,
             &attributions,
             package_sources,
             package_filter,
             &mut audit,
         );
+        let existing_specifiers = surfaces
+            .iter()
+            .map(|surface| surface.export_specifier.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for surface in
+            resolve_cache_anchored_package_surfaces(&attributions, package_sources, package_filter)
+        {
+            if !existing_specifiers.contains(&surface.export_specifier) {
+                surfaces.push(surface);
+            }
+        }
 
         VersionedPackageMatchReport {
             attributions,
