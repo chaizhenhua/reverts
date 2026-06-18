@@ -5238,6 +5238,61 @@ fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
 }
 
 #[test]
+fn entrypoint_island_does_not_inline_phantom_of_module_owned_var() {
+    // A runtime var written in a *separate* module and read by the entrypoint is
+    // migrated to that writer (which owns the real, assigned declaration). The
+    // entrypoint island must obtain it by import, never by inlining its own
+    // unassigned `var X;` — that local would shadow the owner's assigned copy
+    // and read as `undefined` (the React `__toESM` `b5` phantom that crashed
+    // `doctor`). The island's snippet closure must exclude module-owned bindings,
+    // matching its root-selection which already refuses to seed them.
+    let planner = ImportExportPlanner;
+    let prelude = "var rt;\n";
+    let writer = "function initRt() { rt = { value: () => 'ok' }; }\nexport { initRt };\n";
+    let tail = "function main() { initRt(); return rt.value(); }\nmain();\n";
+    let source = format!("{prelude}{writer}{tail}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "writer", "modules/writer.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(
+                prelude.len() as u32,
+                (prelude.len() + writer.len()) as u32,
+            )),
+    );
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        reverts_model::SemanticNameMap::default(),
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+    let entrypoint_source = planned_source(&plan, "modules/entrypoint.ts");
+
+    // The entrypoint reads the var...
+    assert!(
+        entrypoint_source.contains("rt.value()"),
+        "entrypoint should still read the migrated var",
+    );
+    // ...but must not re-declare it as an unassigned local phantom...
+    assert!(
+        !entrypoint_source.contains("var rt;"),
+        "entrypoint must not inline an unassigned local of a module-owned var",
+    );
+    // ...it must import it from the writer module that owns the assignment.
+    assert!(
+        entrypoint_source.contains("rt") && entrypoint_source.contains("from './writer.js'"),
+        "entrypoint must import the migrated var from its owner module",
+    );
+}
+
+#[test]
 fn entrypoint_runtime_preserves_side_effect_order_before_later_runtime_declarations() {
     let planner = ImportExportPlanner;
     let prelude = concat!(

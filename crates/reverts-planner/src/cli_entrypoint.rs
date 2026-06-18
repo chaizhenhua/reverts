@@ -128,6 +128,21 @@ pub(crate) fn entrypoint_island_plan(
         return None;
     }
 
+    // Bindings migrated to a concrete owner module must be IMPORTED from that
+    // owner, never inlined into the island. The root-selection loop below
+    // already refuses to seed them as roots; the snippet closure must exclude
+    // them too, otherwise a read dependency of an inlined root drags the
+    // owner's `var X;` declaration back into the island as an unassigned local,
+    // shadowing the owner's real, assigned copy (the React `__toESM` `b5`
+    // phantom: written in `main-entry-init`, read here, but left undefined).
+    let module_owned_bindings = binding_owners
+        .module_owners_for_source(entrypoint.source_file_id)
+        .into_keys()
+        .collect::<BTreeSet<_>>();
+    let closure_excluded = occupied_runtime_bindings
+        .union(&module_owned_bindings)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut local_runtime_roots = BTreeSet::from([entrypoint.callee.clone()]);
     let mut source = loop {
         let helper_closure = close_runtime_helper_source_excluding(
@@ -135,7 +150,7 @@ pub(crate) fn entrypoint_island_plan(
             &local_runtime_roots,
             Some(entrypoint),
             &[],
-            occupied_runtime_bindings,
+            &closure_excluded,
         );
         let source = helper_closure.source;
         let local_bindings = local_bindings_in_source(source.as_str());
