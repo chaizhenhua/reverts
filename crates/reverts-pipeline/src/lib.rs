@@ -255,6 +255,80 @@ pub fn generate_project_from_prepared(
     })
 }
 
+/// Generate the pre-accept project needed by diagnostic inventory commands
+/// without running the expensive post-emit acceptance audits. The normal
+/// project generation path remains the authority for accepted output; this
+/// diagnostic path only needs emitted files plus pre-planning/emit findings so
+/// it can measure runtime inventory on large projects without timing out.
+pub fn generate_project_inventory_from_prepared(
+    prepared: PreparedProgram,
+) -> Result<OutputRun, PipelineError> {
+    let PreparedProgram {
+        program,
+        bundle_audit,
+        enrichment_audit,
+    } = prepared;
+    let mut audit = bundle_audit;
+    audit.extend(enrichment_audit);
+    let input = program.model().input();
+    let runtime_dependencies = collect_runtime_dependencies(input);
+    let asset_references = collect_required_asset_references(input);
+    let assets = collect_emitted_assets(input, &asset_references);
+    audit.extend(audit_required_sources(&program));
+    audit.extend(audit_required_assets(input, &asset_references));
+    if audit.has_errors() {
+        return Ok(OutputRun {
+            project: PreAcceptProject::empty(),
+            accepted_project: None,
+            pre_accept_report: None,
+            audit,
+            runtime_dependencies,
+            assets,
+        });
+    }
+
+    let planner = ImportExportPlanner;
+    let plan = planner
+        .plan_enriched_program(&program)
+        .map_err(PipelineError::Plan)?;
+    audit.extend(audit_emit_plan_synthesis(&plan));
+    if audit.has_errors() {
+        return Ok(OutputRun {
+            project: PreAcceptProject::empty(),
+            accepted_project: None,
+            pre_accept_report: None,
+            audit,
+            runtime_dependencies,
+            assets,
+        });
+    }
+
+    let module_output_paths = module_output_paths(&program);
+    let validated_plan = plan.clone().validate().map_err(PipelineError::Plan)?;
+    let outcome = emit_validated_project(&validated_plan).map_err(PipelineError::Emit)?;
+    for finding in outcome.findings {
+        audit.push(finding);
+    }
+    let pre_accept = pre_accept::apply_pre_accept_transforms(
+        outcome.project,
+        &pre_accept::PreAcceptContext {
+            input,
+            asset_references: &asset_references,
+            module_output_paths: &module_output_paths,
+        },
+    );
+    let pre_accept_report = pre_accept.report.clone();
+
+    Ok(OutputRun {
+        project: pre_accept,
+        accepted_project: None,
+        pre_accept_report: Some(pre_accept_report),
+        audit,
+        runtime_dependencies,
+        assets,
+    })
+}
+
 fn missing_module_source_file_ids(input: &InputBundle) -> HashSet<u32> {
     let attached: HashSet<u32> = input
         .modules

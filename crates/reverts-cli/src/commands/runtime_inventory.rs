@@ -9,18 +9,19 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use reverts_analyze::enrich_program;
 use reverts_input::{
     InputBundle, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode,
 };
 use reverts_ir::{BindingName, ModuleKind};
-use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
-use reverts_model::ProgramModel;
+use reverts_js::{
+    ParseGoal, TopLevelStatementFact, TopLevelStatementKind, collect_top_level_statement_facts,
+};
+use reverts_model::EnrichedProgram;
 use reverts_pipeline::{
     EmittedFile, RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
-    generate_project_from_prepared, prepare_and_enrich,
+    generate_project_inventory_from_prepared, prepare_and_enrich,
     runtime_setter_migration_blocker_report_from_prepared,
 };
 use rusqlite::{Connection, OpenFlags, params};
@@ -226,16 +227,17 @@ pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
         outcome.audit_findings,
         outcome.skipped_source_bytes,
     );
-    if let Some(report) = &outcome.setter_blockers {
+    let print_total_details = outcome.projects.len() != 1;
+    if print_total_details && let Some(report) = &outcome.setter_blockers {
         print_runtime_setter_blocker_report("total setter_blockers", report);
     }
-    if let Some(report) = &outcome.emitted_setter_blockers {
+    if print_total_details && let Some(report) = &outcome.emitted_setter_blockers {
         print_runtime_setter_blocker_report("total emitted_setter_blockers", report);
     }
-    if let Some(report) = &outcome.runtime_attribution {
+    if print_total_details && let Some(report) = &outcome.runtime_attribution {
         print_runtime_line_attribution_report("total runtime_line_attribution", report);
     }
-    if let Some(report) = &outcome.package_source_blockers {
+    if print_total_details && let Some(report) = &outcome.package_source_blockers {
         print_package_source_blocker_report("total package_source_blockers", report);
     }
     Ok(())
@@ -440,8 +442,26 @@ pub fn runtime_inventory_from_sqlite(
     let mut package_source_blockers = args
         .package_source_blockers
         .then(PackageSourceBlockerReport::default);
+    let timing_enabled = std::env::var_os("REVERTS_RUNTIME_INVENTORY_TIMING").is_some();
 
     for selection in selections {
+        let timing_started = std::time::Instant::now();
+        let mut timing_last = timing_started;
+        macro_rules! mark_timing {
+            ($label:literal) => {
+                if timing_enabled {
+                    let now = std::time::Instant::now();
+                    eprintln!(
+                        "runtime-inventory timing: project={} {} stage={:.3}s total={:.3}s",
+                        selection.project_id,
+                        $label,
+                        now.duration_since(timing_last).as_secs_f64(),
+                        now.duration_since(timing_started).as_secs_f64()
+                    );
+                    timing_last = now;
+                }
+            };
+        }
         if args
             .max_source_bytes
             .is_some_and(|max_source_bytes| selection.source_bytes > max_source_bytes)
@@ -471,24 +491,47 @@ pub fn runtime_inventory_from_sqlite(
         )
         .map_err(RuntimeInventoryError::LoadInput)?;
         let source_blocker_input = args.package_source_blockers.then(|| input.clone());
+        mark_timing!("load_input");
+        let prepared = prepare_and_enrich(input).map_err(RuntimeInventoryError::Pipeline)?;
+        mark_timing!("prepare_and_enrich");
         let runtime_package_ownership = args
             .runtime_attribution
-            .then(|| runtime_package_ownership_by_binding(&input));
-        let prepared = prepare_and_enrich(input).map_err(RuntimeInventoryError::Pipeline)?;
+            .then(|| runtime_package_ownership_by_binding(&prepared.program));
+        mark_timing!("runtime_package_ownership");
         let project_setter_blockers = args
             .setter_blockers
             .then(|| runtime_setter_migration_blocker_report_from_prepared(&prepared));
+        mark_timing!("setter_blockers");
         if let (Some(total), Some(project_report)) =
             (setter_blockers.as_mut(), project_setter_blockers.as_ref())
         {
             total.add(project_report);
         }
-        let run =
-            generate_project_from_prepared(prepared).map_err(RuntimeInventoryError::Pipeline)?;
-        let counts = runtime_inventory_counts_from_files(&run.project.files);
-        let project_runtime_attribution = runtime_package_ownership
-            .as_ref()
-            .map(|ownership| runtime_line_attribution_from_files(&run.project.files, ownership));
+        let run = generate_project_inventory_from_prepared(prepared)
+            .map_err(RuntimeInventoryError::Pipeline)?;
+        mark_timing!("generate_project_inventory");
+        let runtime_facts_by_path = args
+            .runtime_attribution
+            .then(|| runtime_top_level_statement_facts_by_path(&run.project.files));
+        mark_timing!("runtime_facts");
+        let counts = runtime_facts_by_path.as_ref().map_or_else(
+            || runtime_inventory_counts_from_files(&run.project.files),
+            |facts_by_path| {
+                runtime_inventory_counts_from_files_with_runtime_facts(
+                    &run.project.files,
+                    facts_by_path,
+                )
+            },
+        );
+        mark_timing!("counts");
+        let project_runtime_attribution = runtime_package_ownership.as_ref().map(|ownership| {
+            runtime_line_attribution_from_files_with_facts(
+                &run.project.files,
+                ownership,
+                runtime_facts_by_path.as_ref(),
+            )
+        });
+        mark_timing!("runtime_attribution");
         if let (Some(total), Some(project_report)) = (
             runtime_attribution.as_mut(),
             project_runtime_attribution.as_ref(),
@@ -498,6 +541,7 @@ pub fn runtime_inventory_from_sqlite(
         let project_package_source_blockers = source_blocker_input
             .as_ref()
             .map(|input| package_source_blocker_report_from_files(input, &run.project.files));
+        mark_timing!("package_source_blockers");
         if let (Some(total), Some(project_report)) = (
             package_source_blockers.as_mut(),
             project_package_source_blockers.as_ref(),
@@ -507,6 +551,10 @@ pub fn runtime_inventory_from_sqlite(
         let project_emitted_setter_blockers = project_setter_blockers
             .as_ref()
             .map(|report| runtime_emitted_setter_blockers_from_files(&run.project.files, report));
+        mark_timing!("emitted_setter_blockers");
+        if timing_enabled {
+            let _ = timing_last;
+        }
         if let (Some(total), Some(project_report)) = (
             emitted_setter_blockers.as_mut(),
             project_emitted_setter_blockers.as_ref(),
@@ -525,7 +573,10 @@ pub fn runtime_inventory_from_sqlite(
         let mut audit_finding_codes: Vec<(String, usize)> =
             finding_code_counts.into_iter().collect();
         audit_finding_codes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        if project_audit_findings > 0 && project_audit_findings <= 20 {
+        if project_audit_findings > 0
+            && project_audit_findings <= 20
+            && std::env::var_os("REVERTS_RUNTIME_INVENTORY_FINDINGS").is_some()
+        {
             for finding in run.audit.findings() {
                 eprintln!(
                     "  finding {:?} [{:?}] module={:?} binding={:?} :: {}",
@@ -896,6 +947,13 @@ fn runtime_inventory_project_selection_from_row(
 }
 
 pub(crate) fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> RuntimeInventoryCounts {
+    runtime_inventory_counts_from_files_with_runtime_facts(files, &BTreeMap::new())
+}
+
+fn runtime_inventory_counts_from_files_with_runtime_facts(
+    files: &[EmittedFile],
+    runtime_facts_by_path: &BTreeMap<String, Vec<TopLevelStatementFact>>,
+) -> RuntimeInventoryCounts {
     let mut counts = RuntimeInventoryCounts {
         files: files.len(),
         ..Default::default()
@@ -930,15 +988,29 @@ pub(crate) fn runtime_inventory_counts_from_files(files: &[EmittedFile]) -> Runt
                 counts.runtime_reexport_statements += 1;
             }
         }
-        counts.setter_function_definitions +=
-            runtime_setter_targets_in_source(file.source.as_str()).len();
+        if is_runtime_file {
+            counts.setter_function_definitions +=
+                runtime_facts_by_path.get(file.path.as_str()).map_or_else(
+                    || runtime_setter_targets_in_source(file.source.as_str()).len(),
+                    |facts| runtime_setter_targets_in_facts(facts).len(),
+                );
+        }
     }
     counts
 }
 
+#[cfg(test)]
 pub(crate) fn runtime_line_attribution_from_files(
     files: &[EmittedFile],
     package_ownership: &BTreeMap<(u32, String), String>,
+) -> RuntimeLineAttributionReport {
+    runtime_line_attribution_from_files_with_facts(files, package_ownership, None)
+}
+
+fn runtime_line_attribution_from_files_with_facts(
+    files: &[EmittedFile],
+    package_ownership: &BTreeMap<(u32, String), String>,
+    runtime_facts_by_path: Option<&BTreeMap<String, Vec<TopLevelStatementFact>>>,
 ) -> RuntimeLineAttributionReport {
     let mut report = RuntimeLineAttributionReport::default();
     for file in files {
@@ -949,12 +1021,16 @@ pub(crate) fn runtime_line_attribution_from_files(
         report.total_runtime_lines += runtime_lines;
         let mut covered_lines = BTreeSet::<usize>::new();
         let line_starts = line_start_offsets(file.source.as_str());
-        let facts = collect_top_level_statement_facts(
-            file.source.as_str(),
-            Some(Path::new(file.path.as_str())),
-            ParseGoal::TypeScript,
-        )
-        .expect("runtime line attribution requires parseable generated TypeScript source");
+        let facts = runtime_facts_by_path
+            .and_then(|facts_by_path| facts_by_path.get(file.path.as_str()).cloned())
+            .unwrap_or_else(|| {
+                collect_top_level_statement_facts(
+                    file.source.as_str(),
+                    Some(Path::new(file.path.as_str())),
+                    ParseGoal::TypeScript,
+                )
+                .expect("runtime line attribution requires parseable generated TypeScript source")
+            });
         for fact in facts {
             let line_start = line_number_for_offset(&line_starts, fact.byte_start as usize);
             let line_end = line_number_for_statement_end(&line_starts, fact.byte_end as usize);
@@ -994,6 +1070,33 @@ pub(crate) fn runtime_line_attribution_from_files(
     report
 }
 
+fn runtime_top_level_statement_facts_by_path(
+    files: &[EmittedFile],
+) -> BTreeMap<String, Vec<TopLevelStatementFact>> {
+    files
+        .iter()
+        .filter(|file| file.path.starts_with("modules/runtime/"))
+        .map(|file| {
+            let facts = collect_top_level_statement_facts(
+                file.source.as_str(),
+                Some(Path::new(file.path.as_str())),
+                ParseGoal::TypeScript,
+            )
+            .expect("runtime inventory attribution requires parseable generated TypeScript source");
+            (file.path.clone(), facts)
+        })
+        .collect()
+}
+
+fn runtime_setter_targets_in_facts(facts: &[TopLevelStatementFact]) -> Vec<BindingName> {
+    facts
+        .iter()
+        .filter(|fact| fact.kind == TopLevelStatementKind::Setter)
+        .flat_map(|fact| fact.bindings.iter())
+        .filter_map(|binding| runtime_setter_target_from_binding(binding.as_str()))
+        .collect()
+}
+
 fn runtime_attribution_package_label(
     source_file_id: Option<u32>,
     bindings: &[String],
@@ -1014,19 +1117,16 @@ fn runtime_attribution_package_label(
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
-fn runtime_package_ownership_by_binding(input: &InputBundle) -> BTreeMap<(u32, String), String> {
+fn runtime_package_ownership_by_binding(
+    program: &EnrichedProgram,
+) -> BTreeMap<(u32, String), String> {
+    let input = program.model().input();
     let source_owners = runtime_source_span_owners(input);
     let original_name_owners = runtime_original_name_owners_by_binding(&input.modules);
-    let enrichment = enrich_program(ProgramModel::from_input(input.clone()));
     let mut consumer_owners = BTreeMap::<(u32, String), BTreeSet<String>>::new();
-    for module in enrichment.program.model().modules() {
+    for module in program.model().modules() {
         let owner = runtime_module_owner_label(module);
-        for import in enrichment
-            .program
-            .model()
-            .graph()
-            .runtime_imports_for(module.id)
-        {
+        for import in program.model().graph().runtime_imports_for(module.id) {
             consumer_owners
                 .entry((import.source_file_id, import.binding.as_str().to_string()))
                 .or_default()
@@ -1037,7 +1137,7 @@ fn runtime_package_ownership_by_binding(input: &InputBundle) -> BTreeMap<(u32, S
     for (key, owners) in &original_name_owners {
         ownership.insert(key.clone(), runtime_consumer_owner_label(owners));
     }
-    for (source_file_id, prelude) in enrichment.program.model().graph().runtime_preludes() {
+    for (source_file_id, prelude) in program.model().graph().runtime_preludes() {
         let Some(owners) = source_owners.get(source_file_id) else {
             for binding in prelude.snippets.keys() {
                 let key = (*source_file_id, binding.as_str().to_string());
