@@ -218,5 +218,51 @@ pub(crate) fn noop_call_replacement_span(
     if !source[open + 1..close].trim().is_empty() {
         return None;
     }
+    // Only erase a helper call whose *result* is discarded. If the call is the
+    // object of a member/index access, a further call, or a tagged template
+    // (e.g. `helper().fetch`), its value is consumed, so the helper is not a
+    // genuine no-op — replacing it with `void 0` would both break semantics and
+    // emit invalid syntax (`void 0.fetch` lexes `0.` as a number). Keep it.
+    let after = skip_ws(bytes, close + 1);
+    if matches!(bytes.get(after), Some(b'.' | b'[' | b'(' | b'`' | b'?')) {
+        return None;
+    }
     Some((fact.byte_start, close + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn helpers(names: &[&str]) -> BTreeSet<BindingName> {
+        names.iter().map(|name| BindingName::new(*name)).collect()
+    }
+
+    #[test]
+    fn erases_discarded_noop_call_but_keeps_consumed_result() {
+        // A bare statement call is a discardable no-op and folds to `void 0`.
+        // A call whose result is member-accessed is consumed, so it must stay:
+        // folding it would emit `void 0.fetch` (invalid syntax, broken meaning).
+        let source = "h();\nconst a = h().fetch;\n";
+        let rewritten = rewrite_noop_runtime_helper_calls(source, &helpers(&["h"]));
+        assert!(rewritten.contains("void 0"), "{rewritten}");
+        assert!(!rewritten.contains("void 0.fetch"), "{rewritten}");
+        assert!(rewritten.contains("h().fetch"), "{rewritten}");
+    }
+
+    #[test]
+    fn keeps_noop_call_used_as_index_call_or_template_object() {
+        for source in [
+            "const a = h()[k];\n",
+            "const a = h()(x);\n",
+            "const a = h()`tpl`;\n",
+            "const a = h()?.fetch;\n",
+        ] {
+            let rewritten = rewrite_noop_runtime_helper_calls(source, &helpers(&["h"]));
+            assert_eq!(
+                rewritten, source,
+                "consumed call must be preserved: {source}"
+            );
+        }
+    }
 }
