@@ -74,10 +74,8 @@ pub fn merge_classification(
                 if inter_end <= inter_start {
                     return None;
                 }
-                #[allow(clippy::cast_precision_loss)]
-                let inter = (inter_end - inter_start) as f64;
-                #[allow(clippy::cast_precision_loss)]
-                let width = (upstream_range.end - upstream_range.start) as f64;
+                let inter = f64::from(inter_end - inter_start);
+                let width = f64::from(upstream_range.end - upstream_range.start);
                 let share = if width > 0.0 { inter / width } else { 0.0 };
                 Some((i, share))
             })
