@@ -32,13 +32,36 @@ pub(crate) fn adapter_owned_runtime_bindings(
         return BTreeSet::new();
     }
     let definition_modules = unique_source_definition_modules(program, externalized_packages);
+    // The bindings each adapter actually re-provides: its export bindings plus
+    // the members its proof maps from the package surface. A binding whose
+    // definition module is an externalized package but which the adapter does
+    // NOT re-provide is a package *internal* (e.g. a lazily-assigned default
+    // object). It cannot be re-sourced from the bare import, so stripping it
+    // from the barrel leaves consumers importing a name nothing exports. Keep
+    // such internals inlined; only strip what the adapter genuinely provides.
+    let provided_by_module = external_package_adapters
+        .iter()
+        .map(|(module_id, adapter)| {
+            let mut provided = adapter.bindings.clone();
+            provided.extend(
+                export_member_adapter_binding_map(
+                    program,
+                    *module_id,
+                    adapter.member_proof.as_ref(),
+                )
+                .into_keys(),
+            );
+            (*module_id, provided)
+        })
+        .collect::<BTreeMap<ModuleId, BTreeSet<BindingName>>>();
     emitted_bindings
         .iter()
         .filter(|binding| {
             definition_modules
                 .get(*binding)
                 .and_then(|module_id| *module_id)
-                .is_some_and(|module_id| external_package_adapters.contains_key(&module_id))
+                .and_then(|module_id| provided_by_module.get(&module_id))
+                .is_some_and(|provided| provided.contains(*binding))
         })
         .cloned()
         .collect()
