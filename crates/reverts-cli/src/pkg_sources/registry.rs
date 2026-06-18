@@ -3,6 +3,8 @@
 //! logic is unit-tested with fixtures; only `http_get` touches the network.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read as _;
+use std::time::Duration;
 
 use base64::Engine as _;
 use semver::Version;
@@ -130,6 +132,45 @@ pub(crate) fn verify_integrity(
         return Err(make_err("sha512 mismatch".to_string()));
     }
     Ok(())
+}
+
+/// GET raw bytes from `url`, attaching `Authorization: Bearer` when
+/// `REVERTS_NPM_TOKEN` is set.
+pub(crate) fn http_get(url: &str) -> Result<Vec<u8>, MatchPackagesError> {
+    let make_err = |message: String| MatchPackagesError::RegistryRequest {
+        url: url.to_string(),
+        message,
+    };
+    let mut request = ureq::get(url).timeout(Duration::from_secs(http_timeout_secs()));
+    if let Ok(token) = std::env::var("REVERTS_NPM_TOKEN") {
+        if !token.trim().is_empty() {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+    }
+    let response = request
+        .call()
+        .map_err(|source| make_err(source.to_string()))?;
+    let mut buffer = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut buffer)
+        .map_err(|source| make_err(format!("failed to read response body: {source}")))?;
+    Ok(buffer)
+}
+
+fn http_timeout_secs() -> u64 {
+    std::env::var("REVERTS_NPM_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(120)
+}
+
+/// Fetch and parse the packument for `package_name` from the configured registry.
+pub(crate) fn fetch_packument(package_name: &str) -> Result<Packument, MatchPackagesError> {
+    let url = packument_url(&registry_base_url(), package_name);
+    let bytes = http_get(&url)?;
+    parse_packument(package_name, &bytes)
 }
 
 #[cfg(test)]
