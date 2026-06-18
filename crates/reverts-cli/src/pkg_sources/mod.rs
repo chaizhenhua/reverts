@@ -10,6 +10,7 @@
 //! the file system. No matcher / connection state required.
 
 pub(crate) mod filtering;
+pub(crate) mod registry;
 pub(crate) mod version_resolution;
 
 use std::collections::{BTreeMap, BTreeSet};
