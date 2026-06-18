@@ -5,11 +5,7 @@
 //! the matcher only sees concrete `(name, version)` keys.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
 
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
@@ -348,43 +344,15 @@ pub(crate) fn materialize_package_sources_from_hints(
     }
 
     let mut sources = Vec::new();
-    for (idx, (package_name, package_version)) in hints.into_iter().enumerate() {
-        let temp_root = std::env::temp_dir().join(format!(
-            "reverts-package-source-{}-{idx}",
-            std::process::id()
-        ));
-        if temp_root.exists() {
-            fs::remove_dir_all(temp_root.as_path()).map_err(|source| {
-                MatchPackagesError::ReadPackageSourceRoot {
-                    path: temp_root.clone(),
-                    source,
-                }
-            })?;
-        }
-        fs::create_dir_all(temp_root.as_path()).map_err(|source| {
-            MatchPackagesError::ReadPackageSourceRoot {
-                path: temp_root.clone(),
-                source,
-            }
-        })?;
-
-        let result = materialize_one_package_source(
-            temp_root.as_path(),
+    for (package_name, package_version) in hints {
+        if let Err(error) = materialize_one_package_source(
             package_name.as_str(),
             package_version.as_str(),
             &mut sources,
-        );
-        let cleanup = fs::remove_dir_all(temp_root.as_path());
-        if let Err(error) = result {
+        ) {
             eprintln!(
                 "skipping package source materialization for {package_name}@{package_version}: {error}"
             );
-        }
-        if let Err(source) = cleanup {
-            return Err(MatchPackagesError::ReadPackageSourceRoot {
-                path: temp_root,
-                source,
-            });
         }
     }
     Ok(sources)
@@ -403,101 +371,46 @@ pub(crate) fn stale_cache_version_hints_for_materialization(
 }
 
 fn materialize_one_package_source(
-    temp_root: &Path,
     package_name: &str,
     package_version: &str,
     sources: &mut Vec<PackageSource>,
 ) -> Result<(), MatchPackagesError> {
-    let package_spec = format!("{package_name}@{package_version}");
-    let mut command = Command::new("npm");
-    command
-        .arg("install")
-        .arg(package_spec.as_str())
-        .arg("--prefix")
-        .arg(temp_root)
-        .arg("--ignore-scripts")
-        .arg("--package-lock=false")
-        .arg("--no-audit")
-        .arg("--no-fund");
-    let output =
-        run_command_with_timeout(&mut command, npm_install_timeout()).map_err(|message| {
-            MatchPackagesError::MaterializePackageSource {
-                package_name: package_name.to_string(),
-                package_version: package_version.to_string(),
-                message,
-            }
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = if stderr.is_empty() { stdout } else { stderr };
+    let packument = pkg_sources::registry::fetch_packument(package_name)?;
+    let Some(dist) = packument.versions.get(package_version) else {
         return Err(MatchPackagesError::MaterializePackageSource {
             package_name: package_name.to_string(),
             package_version: package_version.to_string(),
-            message,
+            message: "version not present in registry packument".to_string(),
         });
-    }
-
-    let mut matched = false;
-    for package_dir in pkg_sources::package_dir_candidates(temp_root, package_name) {
-        let Some(metadata) = pkg_sources::local_package_metadata(package_dir.as_path())? else {
-            continue;
-        };
-        if metadata.name == package_name && metadata.version == package_version {
-            pkg_sources::collect_local_package_sources(package_dir.as_path(), &metadata, sources)?;
-            matched = true;
-            break;
-        }
-    }
-    if !matched {
+    };
+    let root = pkg_sources::cache::cache_root()?;
+    let host = pkg_sources::cache::registry_host(&pkg_sources::registry::registry_base_url());
+    let package_dir = pkg_sources::cache::ensure_package_source(
+        &root,
+        &host,
+        package_name,
+        package_version,
+        dist,
+        pkg_sources::registry::http_get,
+    )?;
+    let Some(metadata) = pkg_sources::local_package_metadata(package_dir.as_path())? else {
         return Err(MatchPackagesError::MaterializePackageSource {
             package_name: package_name.to_string(),
             package_version: package_version.to_string(),
-            message: "npm install succeeded but the expected package directory was not found"
-                .to_string(),
+            message: "cached package had no package.json".to_string(),
+        });
+    };
+    if metadata.name != package_name || metadata.version != package_version {
+        return Err(MatchPackagesError::MaterializePackageSource {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            message: format!(
+                "cached package identity {}@{} did not match",
+                metadata.name, metadata.version
+            ),
         });
     }
-    Ok(())
-}
-
-fn npm_install_timeout() -> Duration {
-    std::env::var("REVERTS_NPM_INSTALL_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|seconds| *seconds > 0)
-        .map(Duration::from_secs)
-        .unwrap_or_else(|| Duration::from_secs(120))
-}
-
-fn run_command_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|source| format!("failed to run command: {source}"))?;
-    let started = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_status)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|source| format!("failed to collect command output: {source}"));
-            }
-            Ok(None) => {
-                if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("command timed out after {}s", timeout.as_secs()));
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-            Err(source) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("failed to wait for command: {source}"));
-            }
-        }
-    }
+    pkg_sources::collect_local_package_sources(package_dir.as_path(), &metadata, sources)
 }
 
 #[cfg(test)]
@@ -913,7 +826,8 @@ fn resolve_package_version_hint_from_network(
     package_name: &str,
     requested_version: &str,
 ) -> Result<Option<String>, MatchPackagesError> {
-    let versions = npm_package_versions(package_name, requested_version)?;
+    let packument = pkg_sources::registry::fetch_packument(package_name)?;
+    let versions = packument.available_versions();
     Ok(
         resolve_package_version_hint_from_versions(requested_version, &versions)
             .map(|version| version.to_string()),
@@ -925,95 +839,6 @@ pub(crate) fn resolve_package_version_hint_from_versions(
     versions: &BTreeSet<Version>,
 ) -> Option<Version> {
     best_matching_package_version_by_binary_search(requested_version, versions)
-}
-
-fn npm_package_versions(
-    package_name: &str,
-    requested_version: &str,
-) -> Result<BTreeSet<Version>, MatchPackagesError> {
-    let output = Command::new("npm")
-        .arg("view")
-        .arg(package_name)
-        .arg("versions")
-        .arg("--json")
-        .output()
-        .map_err(|source| MatchPackagesError::MaterializePackageSource {
-            package_name: package_name.to_string(),
-            package_version: requested_version.to_string(),
-            message: format!("failed to run npm view: {source}"),
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let message = if stderr.is_empty() { stdout } else { stderr };
-        return Err(MatchPackagesError::MaterializePackageSource {
-            package_name: package_name.to_string(),
-            package_version: requested_version.to_string(),
-            message,
-        });
-    }
-    parse_npm_versions_json(package_name, requested_version, output.stdout.as_slice())
-}
-
-pub(crate) fn parse_npm_versions_json(
-    package_name: &str,
-    requested_version: &str,
-    stdout: &[u8],
-) -> Result<BTreeSet<Version>, MatchPackagesError> {
-    let value = serde_json::from_slice::<serde_json::Value>(stdout).map_err(|source| {
-        MatchPackagesError::MaterializePackageSource {
-            package_name: package_name.to_string(),
-            package_version: requested_version.to_string(),
-            message: format!("failed to parse npm versions JSON: {source}"),
-        }
-    })?;
-    let mut versions = BTreeSet::new();
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                let Some(version_text) = item.as_str() else {
-                    return Err(MatchPackagesError::MaterializePackageSource {
-                        package_name: package_name.to_string(),
-                        package_version: requested_version.to_string(),
-                        message: "npm versions JSON contained a non-string version entry"
-                            .to_string(),
-                    });
-                };
-                versions.insert(parse_npm_version_entry(
-                    package_name,
-                    requested_version,
-                    version_text,
-                )?);
-            }
-        }
-        serde_json::Value::String(version) => {
-            versions.insert(parse_npm_version_entry(
-                package_name,
-                requested_version,
-                version.as_str(),
-            )?);
-        }
-        _ => {
-            return Err(MatchPackagesError::MaterializePackageSource {
-                package_name: package_name.to_string(),
-                package_version: requested_version.to_string(),
-                message: "npm versions JSON must be a string or an array of strings".to_string(),
-            });
-        }
-    }
-    Ok(versions)
-}
-
-fn parse_npm_version_entry(
-    package_name: &str,
-    requested_version: &str,
-    version: &str,
-) -> Result<Version, MatchPackagesError> {
-    Version::parse(version).map_err(|source| MatchPackagesError::MaterializePackageSource {
-        package_name: package_name.to_string(),
-        package_version: requested_version.to_string(),
-        message: format!("npm versions JSON contained invalid semver {version}: {source}"),
-    })
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PackageVersionResolutionEvidence {

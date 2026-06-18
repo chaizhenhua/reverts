@@ -47,7 +47,7 @@ use super::{
     network_package_version_resolution_hints, package_export_specifier,
     package_externalization_hints_from_connection, package_graph_component_scope,
     package_version_hints_for_materialization, package_version_resolution_evidence,
-    package_versions_by_module, parse_npm_versions_json, persist_package_source_cache,
+    package_versions_by_module, persist_package_source_cache,
     promote_package_sources_with_externalization_hints,
     remove_package_attributions_for_revalidation,
     resolve_package_version_hints_to_available_sources, run, stable_hash,
@@ -1662,38 +1662,6 @@ fn revalidation_removes_external_attributions_for_expanded_component() {
         "delta",
         "external imports outside the expanded package component stay as existing proof"
     );
-}
-
-#[test]
-fn npm_versions_json_parser_accepts_arrays_and_single_versions() {
-    let array_versions = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","1.2.3"]"#)
-        .expect("array versions should parse");
-    let single_version = parse_npm_versions_json("pkg", "latest", br#""2.0.0""#)
-        .expect("single version should parse");
-
-    assert!(
-        array_versions
-            .contains(&semver::Version::parse("1.2.3").expect("fixture version should parse"))
-    );
-    assert_eq!(
-        single_version
-            .iter()
-            .next()
-            .map(ToString::to_string)
-            .as_deref(),
-        Some("2.0.0")
-    );
-}
-
-#[test]
-fn npm_versions_json_parser_rejects_invalid_version_entries() {
-    let error = parse_npm_versions_json("pkg", "1.x", br#"["1.0.0","bad"]"#)
-        .expect_err("invalid semver entry should fail");
-
-    assert!(matches!(
-        error,
-        MatchPackagesError::MaterializePackageSource { .. }
-    ));
 }
 
 #[test]

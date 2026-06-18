@@ -65,8 +65,7 @@ pub(crate) use pkg_sources::version_resolution::{
 pub(crate) use pkg_sources::version_resolution::{
     PackageVersionResolutionPlan, best_matching_package_version_by_binary_search,
     network_package_version_resolution_hints, package_version_hints_for_materialization,
-    parse_npm_versions_json, resolve_package_version_hint_from_versions,
-    stale_cache_version_hints_for_materialization,
+    resolve_package_version_hint_from_versions, stale_cache_version_hints_for_materialization,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
