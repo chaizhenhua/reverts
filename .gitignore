@@ -1,6 +1,6 @@
 /target/
 /.reverts-runs/
 /.worktrees/
+/.claude/
 *.log
 /docs/superpowers/
-
