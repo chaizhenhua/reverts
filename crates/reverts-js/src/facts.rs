@@ -5,14 +5,16 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     Visit,
     ast::{
-        Argument, BindingPatternKind, CallExpression, Declaration, ExportAllDeclaration,
-        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, IdentifierReference,
-        ImportDeclaration, ImportExpression, NewExpression, Statement, StringLiteral,
+        Argument, BindingPatternKind, BlockStatement, CallExpression, Declaration,
+        ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
+        FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression, NewExpression,
+        Program, Statement, StringLiteral,
     },
     visit::walk::{
-        walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
-        walk_expression, walk_import_declaration, walk_import_expression, walk_new_expression,
-        walk_statement, walk_string_literal,
+        walk_block_statement, walk_call_expression, walk_export_all_declaration,
+        walk_export_named_declaration, walk_expression, walk_function_body,
+        walk_import_declaration, walk_import_expression, walk_new_expression, walk_program,
+        walk_string_literal,
     },
 };
 use oxc_parser::Parser;
@@ -462,18 +464,41 @@ struct VoidZeroExpressionStatementCollector {
 }
 
 impl<'a> Visit<'a> for VoidZeroExpressionStatementCollector {
-    fn visit_statement(&mut self, statement: &Statement<'a>) {
-        if let Statement::ExpressionStatement(expression_statement) = statement
-            && matches_void_numeric_expression(&expression_statement.expression)
-        {
-            let span = statement.span();
-            self.statements.push(StatementSpanFact {
-                byte_start: span.start,
-                byte_end: span.end,
-            });
-        }
-        walk_statement(self, statement);
+    fn visit_program(&mut self, program: &Program<'a>) {
+        self.collect_statement_list(&program.body);
+        walk_program(self, program);
     }
+
+    fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
+        self.collect_statement_list(&body.statements);
+        walk_function_body(self, body);
+    }
+
+    fn visit_block_statement(&mut self, block: &BlockStatement<'a>) {
+        self.collect_statement_list(&block.body);
+        walk_block_statement(self, block);
+    }
+}
+
+impl VoidZeroExpressionStatementCollector {
+    fn collect_statement_list<'a>(&mut self, statements: &[Statement<'a>]) {
+        self.statements
+            .extend(statements.iter().filter_map(void_zero_statement_span));
+    }
+}
+
+fn void_zero_statement_span(statement: &Statement<'_>) -> Option<StatementSpanFact> {
+    let Statement::ExpressionStatement(expression_statement) = statement else {
+        return None;
+    };
+    if !matches_void_numeric_expression(&expression_statement.expression) {
+        return None;
+    }
+    let span = statement.span();
+    Some(StatementSpanFact {
+        byte_start: span.start,
+        byte_end: span.end,
+    })
 }
 
 fn matches_void_numeric_expression(expression: &Expression<'_>) -> bool {

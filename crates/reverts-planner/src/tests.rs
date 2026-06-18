@@ -3770,10 +3770,7 @@ fn runtime_private_noop_initializer_calls_are_erased_inside_helper() {
     let helper_source = planned_source(&plan, "modules/runtime/source-1-helpers.ts");
 
     assert!(helper_source.contains("cached = 42;"), "{helper_source}");
-    assert!(
-        helper_source.contains("function readCached() { ; return cached; }"),
-        "{helper_source}"
-    );
+    assert!(helper_source.contains("return cached;"), "{helper_source}");
     assert!(!helper_source.contains("initCached"), "{helper_source}");
     assert!(helper_source.contains("export { readCached };"));
 }
@@ -3814,10 +3811,7 @@ fn runtime_public_noop_internal_calls_are_erased_but_export_stays() {
         helper_source.contains("var publicNoop = () => {};"),
         "{helper_source}"
     );
-    assert!(
-        helper_source.contains("function callPublicNoop() { ; return 1; }"),
-        "{helper_source}"
-    );
+    assert!(helper_source.contains("return 1;"), "{helper_source}");
     assert!(helper_source.contains("export { callPublicNoop, publicNoop };"));
 }
 
@@ -5622,7 +5616,7 @@ fn entrypoint_island_erases_unreferenced_externalized_package_init_imports() {
         "{entrypoint_source}"
     );
     assert!(
-        entrypoint_source.contains("; return 1;"),
+        entrypoint_source.contains("return 1;"),
         "{entrypoint_source}"
     );
 }
@@ -10905,10 +10899,7 @@ fn reader_cluster_runtime_var_migration_erases_externalized_init_shim_locally() 
         "{writer_source}"
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
-    assert!(
-        writer_source.contains("function readShared() { ; return shared; }"),
-        "{writer_source}"
-    );
+    assert!(writer_source.contains("return shared;"), "{writer_source}");
     assert!(!writer_source.contains("function cNq()"), "{writer_source}");
     assert!(!writer_source.contains("cNq();"), "{writer_source}");
     assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
@@ -13064,10 +13055,7 @@ fn migrated_runtime_chunks_erase_call_only_noop_deps_in_folded_owner() {
     let plan = plan_from_rows(rows);
     let folded_source = planned_source(&plan, "modules/folded.ts");
 
-    assert!(
-        folded_source.contains("function ownedA() { ; return 1; }"),
-        "{folded_source}"
-    );
+    assert!(folded_source.contains("return 1;"), "{folded_source}");
     assert!(!folded_source.contains("noop();"), "{folded_source}");
     assert!(
         !folded_source.contains("function noop()"),

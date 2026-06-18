@@ -132,7 +132,7 @@ fn collects_top_level_statement_facts_for_runtime_attribution() {
 
 #[test]
 fn collects_void_zero_expression_statement_spans() {
-    let source = "function f() { void 0; return void 0; }\nif (ok) void 0;\nvoid 0;\n";
+    let source = "function f() { void 0; return void 0; }\nif (ok) void 0;\n{ void 0; }\nvoid 0;\n";
 
     let facts = collect_void_zero_expression_statements(
         source,
@@ -145,6 +145,7 @@ fn collects_void_zero_expression_statement_spans() {
         .map(|fact| &source[fact.byte_start as usize..fact.byte_end as usize])
         .collect::<Vec<_>>();
 
+    assert_eq!(source.matches("void 0;").count(), 5);
     assert_eq!(slices, vec!["void 0;", "void 0;", "void 0;"]);
 }
 

@@ -142,11 +142,11 @@ pub(crate) fn compact_bare_void_zero_expression_statements(source: &str) -> Stri
             (
                 statement.byte_start as usize,
                 statement.byte_end as usize,
-                ";".to_string(),
+                String::new(),
             )
         })
         .collect::<Vec<_>>();
-    apply_text_edits(source, &edits)
+    apply_text_edits(source, &expand_line_removal_edits(source, &edits))
 }
 
 pub(crate) fn source_reads_binding_only_as_erasable_noop_calls(
