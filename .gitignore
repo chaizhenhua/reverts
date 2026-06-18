@@ -2,4 +2,5 @@
 /.reverts-runs/
 /.worktrees/
 *.log
+/docs/superpowers/
 
