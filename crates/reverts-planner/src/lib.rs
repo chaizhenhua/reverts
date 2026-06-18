@@ -64,10 +64,6 @@ mod statements;
 #[cfg(test)]
 mod tests;
 
-#[allow(unused_imports)]
-use class_field_bindings::{
-    class_field_bindings_in_source, collect_class_field_bindings, find_class_body_open,
-};
 use decompose_namespace::{collect_member_access_only, decompose_function_namespace_objects};
 use delazify::delazify_pure_value_bindings;
 use external_adapters::{
@@ -76,103 +72,62 @@ use external_adapters::{
 };
 use helper_declarations::{lower_commonjs_wrapper_helper, lower_lazy_initializer_helper};
 
-#[allow(unused_imports)]
 use runtime_source_scan::{
-    call_identifiers_in_source, function_body_open, runtime_dependency_scan_source,
-    runtime_import_identifiers_in_source, source_contains_identifier_token,
-    top_level_function_declaration_names, top_level_return_statement_span, top_level_statement_end,
-    value_identifiers_in_source,
+    call_identifiers_in_source, runtime_import_identifiers_in_source, value_identifiers_in_source,
 };
 
-#[allow(unused_imports)]
 use runtime_externalized_scan::{
-    RuntimeExternalizedBindingScan, erase_rewritable_package_init_shim_calls,
-    retain_runtime_imports_referenced_in_source, runtime_module_owner_imports_for_source,
-    runtime_namespace_exports_for_helpers, scan_runtime_externalized_bindings,
-    unresolved_runtime_helper_references,
+    erase_rewritable_package_init_shim_calls, retain_runtime_imports_referenced_in_source,
+    runtime_module_owner_imports_for_source, runtime_namespace_exports_for_helpers,
+    scan_runtime_externalized_bindings, unresolved_runtime_helper_references,
 };
 use runtime_globals::is_runtime_global_identifier;
 
-#[allow(unused_imports)]
 use top_level_definitions::{
-    collect_variable_declaration_binding_starts, collect_variable_declaration_definitions,
     implicit_global_declarations_for_module, implicit_global_writes_in_source,
     top_level_definitions_in_source, variable_declaration_binding_starts,
 };
 
-#[allow(unused_imports)]
 use runtime_helper_source_closure::{
     ClosedRuntimeHelperSource, close_runtime_helper_source, close_runtime_helper_source_excluding,
-    emitted_runtime_helper_bindings, is_noop_runtime_side_effect, runtime_entrypoint,
-    runtime_entrypoint_root_bindings, runtime_entrypoint_side_effects, runtime_helper_source,
-    runtime_prelude_snippet_is_noop, runtime_required_bindings_excluding,
-    sanitize_identifier_fragment, simple_call_statement_binding,
+    runtime_entrypoint, runtime_entrypoint_root_bindings, runtime_entrypoint_side_effects,
+    runtime_prelude_snippet_is_noop, sanitize_identifier_fragment,
 };
 
-#[allow(unused_imports)]
 use migratable_reader_snippet::{
-    class_body_has_eager_static_element, class_body_has_top_level_computed_key,
-    class_declaration_names_binding, expression_is_function_like_reader,
-    function_declaration_names_binding, is_migratable_namespace_reader_snippet,
-    is_migratable_private_runtime_function_dependency, is_migratable_reader_class,
-    is_migratable_reader_function_snippet, migratable_reader_class_header,
-    static_class_element_is_eager, static_field_initializer_is_eager,
-    variable_declaration_names_function_like_binding,
+    class_declaration_names_binding, function_declaration_names_binding,
+    is_migratable_namespace_reader_snippet, is_migratable_private_runtime_function_dependency,
+    is_migratable_reader_function_snippet, variable_declaration_names_function_like_binding,
 };
 
-#[allow(unused_imports)]
 use module_dependency_index::{
-    direct_module_dependency_indexes, module_dependency_modules_by_owner,
-    module_dependency_path_exists, package_attribution_proves_package_ownership,
-    package_ownership_proven_module_ids, source_suppressed_consumer_is_boundary,
-    source_suppressed_package_dependency_closure, source_suppressed_same_package_consumer,
+    module_dependency_modules_by_owner, module_dependency_path_exists,
+    package_ownership_proven_module_ids, source_suppressed_package_dependency_closure,
 };
 
-#[allow(unused_imports)]
 use named_specifiers::{
-    NamedImportSpecifier, NamedReexportSpecifier, local_named_export_specifiers,
-    named_import_specifiers, named_reexport_specifiers, parse_named_export_inner,
+    local_named_export_specifiers, named_import_specifiers, named_reexport_specifiers,
     source_statements,
 };
 
-#[allow(unused_imports)]
-use local_bindings::{
-    collect_binding_pattern_identifiers, collect_binding_pattern_segment_identifiers,
-    collect_local_variable_bindings, collect_template_expression_local_bindings,
-    keyword_starts_statement_declaration, local_bindings_in_source,
-    top_level_binding_initializer_start,
-};
+use local_bindings::local_bindings_in_source;
 
-#[allow(unused_imports)]
 use runtime_literal_compaction::{
-    coalesce_runtime_lazy_initializer_call_runs, coalesced_lazy_body_call_run_edits,
-    coalescible_lazy_body_expression, compact_pure_static_runtime_literals,
-    compact_removed_separator_needs_space, compact_static_container_literal,
-    compact_static_literal_text, compactable_array_container_literal,
-    compactable_container_value_expression, compactable_object_container_literal,
-    compactable_object_container_property, container_literal_can_start_runtime_compaction,
-    flush_lazy_body_call_run_edit, regex_literal_covers_source,
-    simple_runtime_reference_expression, statement_leading_whitespace,
-    static_container_literal_is_compaction_safe, static_literal_is_text_compaction_safe,
+    coalesce_runtime_lazy_initializer_call_runs, compact_pure_static_runtime_literals,
 };
 
-#[allow(unused_imports)]
 use lazy_initializer_parse::{
-    ParsedLoweredLazyInitializer, ParsedRuntimeLazyInitializer, find_statement_end,
-    is_pure_runtime_assignment_value, parse_lowered_lazy_initializer_body,
-    parse_lowered_lazy_initializer_statement, parse_pure_top_level_var_value,
-    private_runtime_lazy_initializer_replacement, pure_lazy_body_assignments,
-    pure_lazy_initializer_replacement, pure_runtime_lazy_body_assignments,
+    private_runtime_lazy_initializer_replacement, pure_lazy_initializer_replacement,
     pure_runtime_value_bindings, try_parse_runtime_lazy_initializer_declaration,
 };
 
-#[allow(unused_imports)]
+#[cfg(test)]
+use identifier_facts::try_identifier_read_facts_in_source;
 use identifier_facts::{
-    IdentifierReadUsage, compact_js_source, control_flow_keyword_before_paren,
-    identifier_occurrence_is_value_reference, identifier_read_facts_in_source,
-    identifier_read_rename_site_is_safe, identifier_read_rename_sites_are_safe,
-    keyword_before_paren, previous_token_is_keyword, rename_identifier_reads_in_source,
-    try_identifier_read_facts_in_source,
+    IdentifierReadUsage, compact_js_source, identifier_occurrence_is_value_reference,
+    identifier_read_facts_in_source, identifier_read_rename_site_is_safe,
+    identifier_read_rename_sites_are_safe, previous_token_is_keyword,
+    rename_identifier_reads_in_source,
 };
 use lazy_wrapper_inline::{
     inline_remaining_lazy_module_wrappers, inline_remaining_lazy_value_wrappers,
@@ -214,9 +169,9 @@ pub(crate) use source_surgery::{
     previous_non_ws, top_level_statement_slices, top_level_statement_spans,
 };
 
-#[allow(unused_imports)]
+#[cfg(test)]
+use destructure_writes::array_destructuring_assignment_writes;
 use destructure_writes::{
-    array_destructuring_assignment_writes, object_destructuring_assignment_writes,
     rewrite_array_destructuring_helper_writes, rewrite_object_destructuring_helper_writes,
     split_top_level_properties,
 };
@@ -226,11 +181,9 @@ use eager_safe_analysis::{
 };
 
 use runtime_helper_strip::migratable_runtime_var_initializer;
-#[allow(unused_imports)]
-use runtime_helper_writes::{
-    inline_internal_setter_calls, is_simple_update_target, rewrite_runtime_helper_writes,
-    update_operator_at,
-};
+#[cfg(test)]
+use runtime_helper_writes::inline_internal_setter_calls;
+use runtime_helper_writes::rewrite_runtime_helper_writes;
 
 use pure_reexport_bypass::PureReexportBypassPlan;
 use runtime_namespace_rewrite::rewrite_runtime_namespace_member_accesses;
@@ -240,11 +193,10 @@ use byte_lexer::{
     skip_regex_literal, skip_ws,
 };
 use identifiers::{declaration_keyword_at_start, keyword_at, parse_identifier};
-#[allow(unused_imports)]
+#[cfg(test)]
+use import_coalesce::coalesce_top_level_import_declarations;
 use import_coalesce::{
-    coalesce_top_level_import_declarations, first_local_for_import,
-    import_statement_local_bindings, parse_named_import_clause,
-    parse_runtime_prelude_direct_import, split_import_clause_and_specifier,
+    first_local_for_import, import_statement_local_bindings, parse_runtime_prelude_direct_import,
 };
 
 pub use plan::{
@@ -262,14 +214,14 @@ pub use runtime_setter_migration_blocker::{
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
 };
 
-#[allow(unused_imports)]
+#[cfg(test)]
+use statements::runtime_helper_setter_declarations;
 use statements::{
     default_import_statement, default_named_import_alias_statement, named_export_statement,
     named_import_alias_statement, named_import_statement, named_reexport_statement,
     namespace_import_statement, node_require_prelude_statement, noop_function_statement,
-    runtime_helper_import_statement, runtime_helper_setter_declarations,
-    runtime_helper_setter_name, runtime_helpers_path, runtime_lazy_helpers_path,
-    runtime_namespace_export_statement, variable_declaration_statement,
+    runtime_helper_import_statement, runtime_helper_setter_name, runtime_helpers_path,
+    runtime_lazy_helpers_path, runtime_namespace_export_statement, variable_declaration_statement,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

@@ -15,10 +15,7 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
-pub(crate) use reverts_package::{
-    same_package_consumer as source_suppressed_same_package_consumer,
-    source_suppressed_consumer_is_boundary,
-};
+pub(crate) use reverts_package::source_suppressed_consumer_is_boundary;
 
 pub(crate) fn module_dependency_path_exists(
     dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
