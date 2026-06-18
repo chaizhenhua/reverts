@@ -1390,13 +1390,22 @@ fn pipeline_forced_external_uses_plain_filename_semantic_surface() {
 fn pipeline_resolves_forced_external_target_by_export_surface() {
     let mut rows = rows_with_package_source_at_version("function publicApi(){return 42;}", "1.2.3");
     rows.modules[0].semantic_path = "pkg/public/api.js".to_string();
-    let package_sources = [PackageSource::external(
-        "pkg",
-        "1.2.3",
-        "pkg/public/api",
-        "pkg@1.2.3/dist/index.js",
-        "export const unrelated = 'generic-build-entry';",
-    )];
+    let package_sources = [
+        PackageSource::external(
+            "pkg",
+            "1.2.3",
+            "pkg/public/api",
+            "pkg@1.2.3/dist/index.js",
+            "export const unrelated = 'generic-build-entry';",
+        ),
+        PackageSource::source_only(
+            "pkg",
+            "1.2.3",
+            "pkg/package.json",
+            "pkg@1.2.3/package.json",
+            r#"export default {"name":"pkg","exports":{"./public/api":"./dist/index.js"}};"#,
+        ),
+    ];
 
     let report = match_packages_with_pipeline(&rows, &package_sources, None);
 
@@ -1408,6 +1417,17 @@ fn pipeline_resolves_forced_external_target_by_export_surface() {
         "pkg/public/api"
     );
     assert_eq!(report.package_report.attributions.len(), 1);
+    assert_eq!(report.package_report.surfaces.len(), 1);
+    assert_eq!(
+        report.package_report.surfaces[0].export_specifier.as_str(),
+        "pkg/public/api"
+    );
+    assert!(
+        report.package_report.surfaces[0]
+            .evidence
+            .as_deref()
+            .is_some_and(|evidence| evidence.contains("cache-anchored-public-export"))
+    );
 }
 
 #[test]

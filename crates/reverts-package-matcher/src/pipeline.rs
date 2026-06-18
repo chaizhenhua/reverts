@@ -9,6 +9,7 @@ use reverts_observe::AuditReport;
 use crate::index::package_module_source_quality;
 use crate::model::{PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource};
 use crate::proof::concrete_source::unmatched_package_scope;
+use crate::source::cache_surfaces::append_cache_anchored_package_surfaces;
 use crate::strategy::{
     self, CascadeMatchReport, StructuralBagMatchReport,
     match_structural_bags_with_excluded_modules, match_with_cascade,
@@ -180,20 +181,12 @@ pub fn match_packages_with_pipeline(
     // surfaces over the now-complete attribution set so every publicly-importable
     // specifier — not just the concrete matcher matches — gets a surface and can
     // be externalized at generate time. Deduplicated by specifier.
-    let existing_specifiers = package_report
-        .surfaces
-        .iter()
-        .map(|surface| surface.export_specifier.clone())
-        .collect::<BTreeSet<_>>();
-    for surface in crate::source::cache_surfaces::resolve_cache_anchored_package_surfaces(
+    append_cache_anchored_package_surfaces(
+        &mut package_report.surfaces,
         &package_report.attributions,
         package_sources,
         package_filter,
-    ) {
-        if !existing_specifiers.contains(&surface.export_specifier) {
-            package_report.surfaces.push(surface);
-        }
-    }
+    );
     mark_timing!("cache_anchored_surfaces_final");
     if timing_enabled {
         let _ = timing_last;

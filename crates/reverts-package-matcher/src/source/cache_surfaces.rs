@@ -190,6 +190,33 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
     surfaces
 }
 
+/// Append cache-anchored package surfaces that are not already present in
+/// `surfaces`.
+///
+/// Both the versioned matcher and the full ownership pipeline need this same
+/// merge step: the matcher applies it after concrete matches, while the
+/// pipeline applies it again after later ownership passes add more accepted
+/// external-import attributions. Keeping the de-duplication here avoids two
+/// subtly different "surface merge" implementations.
+pub(crate) fn append_cache_anchored_package_surfaces(
+    surfaces: &mut Vec<PackageSurfaceInput>,
+    attributions: &[PackageAttributionInput],
+    package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
+) {
+    let mut existing_specifiers = surfaces
+        .iter()
+        .map(|surface| surface.export_specifier.clone())
+        .collect::<BTreeSet<_>>();
+    for surface in
+        resolve_cache_anchored_package_surfaces(attributions, package_sources, package_filter)
+    {
+        if existing_specifiers.insert(surface.export_specifier.clone()) {
+            surfaces.push(surface);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -160,7 +160,6 @@ pub enum AxisCombiner {
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
-#[allow(clippy::struct_field_names)]
 pub struct MatchModulesRecallArgs {
     #[arg(long)]
     pub input: PathBuf,
