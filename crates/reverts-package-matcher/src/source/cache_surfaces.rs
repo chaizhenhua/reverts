@@ -42,12 +42,15 @@ pub(crate) fn cached_root_package_json(
 ///   `./prefix/*` pattern whose target is non-null (an explicit allowlist).
 /// - `exports` string / root conditions object: only the bare root is public.
 /// - no `exports` field: the bare root is public when `main`/`module` is
-///   declared, and any subpath is resolvable (Node resolves any existing file;
-///   the matcher already proved the file exists for this specifier).
+///   declared or an `index` file exists (Node's default entry); any subpath is
+///   resolvable (Node resolves any existing file; the matcher already proved the
+///   file exists for this specifier). `has_index` reports whether the package
+///   ships a root `index.{js,json,node}`.
 pub(crate) fn specifier_is_public(
     package_name: &str,
     package_json: &serde_json::Value,
     specifier: &str,
+    has_index: bool,
 ) -> bool {
     let subpath = if specifier == package_name {
         ".".to_string()
@@ -72,13 +75,27 @@ pub(crate) fn specifier_is_public(
         Some(serde_json::Value::String(_)) => subpath == ".",
         _ => {
             if subpath == "." {
-                package_json.get("main").is_some() || package_json.get("module").is_some()
+                package_json.get("main").is_some()
+                    || package_json.get("module").is_some()
+                    || has_index
             } else {
                 // No `exports` allowlist: any existing file is importable.
                 true
             }
         }
     }
+}
+
+/// Whether the package ships a root default-entry file (`index.{js,json,node}`),
+/// which Node resolves for a bare import when `main`/`module` is absent.
+fn package_has_root_index(package_name: &str, package_sources: &[PackageSource]) -> bool {
+    package_sources.iter().any(|src| {
+        src.package_name == package_name
+            && matches!(
+                src.source_path.as_str(),
+                "index.js" | "index.json" | "index.node"
+            )
+    })
 }
 
 /// Whether `subpath` (e.g. `./operators` or `./internal/util/x.js`) is exposed
@@ -107,7 +124,7 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> Vec<PackageSurfaceInput> {
-    let mut package_json_by_name = BTreeMap::<String, Option<serde_json::Value>>::new();
+    let mut package_meta_by_name = BTreeMap::<String, (Option<serde_json::Value>, bool)>::new();
     let mut emitted = BTreeSet::<String>::new();
     let mut surfaces = Vec::new();
 
@@ -131,15 +148,23 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
         if emitted.contains(specifier) {
             continue;
         }
-        let package_json = package_json_by_name
+        let (package_json, has_index) = package_meta_by_name
             .entry(attribution.package_name.clone())
             .or_insert_with(|| {
-                cached_root_package_json(attribution.package_name.as_str(), package_sources)
+                (
+                    cached_root_package_json(attribution.package_name.as_str(), package_sources),
+                    package_has_root_index(attribution.package_name.as_str(), package_sources),
+                )
             });
         let Some(package_json) = package_json.as_ref() else {
             continue;
         };
-        if !specifier_is_public(attribution.package_name.as_str(), package_json, specifier) {
+        if !specifier_is_public(
+            attribution.package_name.as_str(),
+            package_json,
+            specifier,
+            *has_index,
+        ) {
             continue;
         }
         emitted.insert(specifier.to_string());
@@ -222,51 +247,61 @@ mod tests {
         let pj = json(
             r#"{"name":"rxjs","exports":{".":"./d/index.js","./operators":"./d/op.js","./fetch/*":"./d/fetch/*.js"}}"#,
         );
-        assert!(specifier_is_public("rxjs", &pj, "rxjs"));
-        assert!(specifier_is_public("rxjs", &pj, "rxjs/operators"));
-        assert!(specifier_is_public("rxjs", &pj, "rxjs/fetch/client"));
+        assert!(specifier_is_public("rxjs", &pj, "rxjs", false));
+        assert!(specifier_is_public("rxjs", &pj, "rxjs/operators", false));
+        assert!(specifier_is_public("rxjs", &pj, "rxjs/fetch/client", false));
         // `./internal/*` is not exported, so internal paths stay non-public.
         assert!(!specifier_is_public(
             "rxjs",
             &pj,
-            "rxjs/internal/util/isFunction"
+            "rxjs/internal/util/isFunction",
+            false
         ));
     }
 
     #[test]
     fn specifier_is_public_rejects_null_blocked_exports() {
         let pj = json(r#"{"name":"p","exports":{".":"./i.js","./internal/*":null}}"#);
-        assert!(specifier_is_public("p", &pj, "p"));
-        assert!(!specifier_is_public("p", &pj, "p/internal/secret"));
+        assert!(specifier_is_public("p", &pj, "p", false));
+        assert!(!specifier_is_public("p", &pj, "p/internal/secret", false));
     }
 
     #[test]
     fn specifier_is_public_root_only_for_conditions_or_string_exports() {
         let conditions = json(r#"{"name":"ws","exports":{"import":"./w.mjs","require":"./w.js"}}"#);
-        assert!(specifier_is_public("ws", &conditions, "ws"));
-        assert!(!specifier_is_public("ws", &conditions, "ws/lib/x"));
+        assert!(specifier_is_public("ws", &conditions, "ws", false));
+        assert!(!specifier_is_public("ws", &conditions, "ws/lib/x", false));
         let string_exports = json(r#"{"name":"ws","exports":"./w.js"}"#);
-        assert!(specifier_is_public("ws", &string_exports, "ws"));
-        assert!(!specifier_is_public("ws", &string_exports, "ws/lib/x"));
+        assert!(specifier_is_public("ws", &string_exports, "ws", false));
+        assert!(!specifier_is_public(
+            "ws",
+            &string_exports,
+            "ws/lib/x",
+            false
+        ));
     }
 
     #[test]
     fn specifier_is_public_allows_deep_imports_without_exports_field() {
         // No `exports` allowlist → any existing file is importable (Node CJS).
         let pj = json(r#"{"name":"semver","main":"./index.js"}"#);
-        assert!(specifier_is_public("semver", &pj, "semver"));
+        assert!(specifier_is_public("semver", &pj, "semver", false));
         assert!(specifier_is_public(
             "semver",
             &pj,
-            "semver/classes/range.js"
+            "semver/classes/range.js",
+            false
         ));
-        // Root needs main/module; absent → root not asserted, deep import still ok.
-        let no_main = json(r#"{"name":"semver"}"#);
-        assert!(!specifier_is_public("semver", &no_main, "semver"));
+        // No main/module/exports: the bare root is public only when an index
+        // file exists (Node's default entry); deep imports resolve regardless.
+        let no_entry = json(r#"{"name":"semver"}"#);
+        assert!(!specifier_is_public("semver", &no_entry, "semver", false));
+        assert!(specifier_is_public("semver", &no_entry, "semver", true));
         assert!(specifier_is_public(
             "semver",
-            &no_main,
-            "semver/classes/range.js"
+            &no_entry,
+            "semver/classes/range.js",
+            false
         ));
     }
 
