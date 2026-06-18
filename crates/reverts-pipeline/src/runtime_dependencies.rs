@@ -128,7 +128,7 @@ fn scope_target_major(
 ) -> Option<u64> {
     // Only attempt coherence when more than one scoped package is present;
     // a single package has nothing to align with so its own highest
-    // version (handled by the caller's fallback) is correct.
+    // version selected by the caller is correct.
     if packages.len() < 2 {
         return None;
     }

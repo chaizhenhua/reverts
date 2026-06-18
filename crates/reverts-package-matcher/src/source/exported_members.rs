@@ -1,6 +1,6 @@
 //! Public-export-member discovery for a package source body. Combines an
 //! OXC AST visitor over export declarations with the
-//! [`commonjs_export_members_from_text`] text-based scanner as a fallback,
+//! [`commonjs_export_members_from_text`] text-based scanner as a supplemental signal,
 //! plus the small classification predicates that decide whether a discovered
 //! identifier is strong enough to count as a usable public export.
 

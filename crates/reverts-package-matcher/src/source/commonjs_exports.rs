@@ -1,4 +1,4 @@
-//! Text-based fallback scanner for CommonJS-style export members. Used when
+//! Text-based supplemental scanner for CommonJS-style export members. Used when
 //! the AST-driven [`ExportMemberCollector`](crate::source::exported_members::ExportMemberCollector)
 //! path is unavailable or as a supplemental signal for sources that mix
 //! ES module and CommonJS export shapes.

@@ -24,7 +24,7 @@
 //!    consumer-side imports; `emit_package_runtime_helper_files`
 //!    writes the helper file itself once per (key, source-file-id);
 //!    `inline_package_runtime_helper_into_single_consumer` is the
-//!    single-consumer fallback that skips the helper file entirely.
+//!    single-consumer inline path that skips the helper file entirely.
 //!
 //! `push_packed_runtime_helper_imports` and
 //! `packed_named_import_statements` are the small import-coalescing

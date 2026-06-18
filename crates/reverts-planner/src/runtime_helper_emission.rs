@@ -379,7 +379,7 @@ pub(crate) fn emit_runtime_helper_files(
             .flatten()
             .cloned()
             .collect::<BTreeSet<_>>();
-        let fallback_public_imports = planned_public_export_imports(
+        let owner_public_reexport_imports = planned_public_export_imports(
             plan,
             helper_path.as_str(),
             &public_helper_bindings,
@@ -387,7 +387,7 @@ pub(crate) fn emit_runtime_helper_files(
             &helper_imported_bindings,
             &package_init_shims,
         );
-        let fallback_imported_bindings = fallback_public_imports
+        let owner_public_reexport_bindings = owner_public_reexport_imports
             .values()
             .flatten()
             .cloned()
@@ -413,7 +413,7 @@ pub(crate) fn emit_runtime_helper_files(
             helper_path.as_str(),
             &helper_imports,
         );
-        for (owner_path, bindings) in &fallback_public_imports {
+        for (owner_path, bindings) in &owner_public_reexport_imports {
             let specifier =
                 crate::relative_paths::relative_import_specifier(helper_path.as_str(), owner_path);
             file.push_source(named_import_statement(bindings.iter(), specifier.as_str()));
@@ -461,7 +461,7 @@ pub(crate) fn emit_runtime_helper_files(
         }
         let mut exportable_helper_bindings = helper_closure.emitted_bindings.clone();
         exportable_helper_bindings.extend(helper_imported_bindings.iter().cloned());
-        exportable_helper_bindings.extend(fallback_imported_bindings.iter().cloned());
+        exportable_helper_bindings.extend(owner_public_reexport_bindings.iter().cloned());
         exportable_helper_bindings.extend(package_init_shims.iter().cloned());
         let mut exported_bindings = public_helper_bindings
             .intersection(&exportable_helper_bindings)

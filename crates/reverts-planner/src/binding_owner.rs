@@ -23,7 +23,7 @@
 //! consulting the table: given a set of bindings a module needs, it
 //! partitions them into runtime-routed bindings, direct same-module
 //! imports, and direct-prelude imports (which can be later forced
-//! through runtime as a fallback).
+//! through runtime for compatibility).
 
 use std::collections::{BTreeMap, BTreeSet};
 
