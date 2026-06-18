@@ -104,21 +104,21 @@ pub enum MatchStrategy {
     /// provided string-corpus or keyword-histogram backs it up. Iterates
     /// until no new pairs land.
     DepGraphPropagation,
-    /// Bag-jaccard with orthogonal-signal rescue. Runs bag-jaccard at the
-    /// usual 0.20 threshold, then for every ref module that *failed* the
-    /// threshold checks string-corpus (≥ 0.50) and keyword-histogram
-    /// (≥ 0.90). If either orthogonal signal nominates a subject, accept
-    /// it. Recovers near-miss bag-jaccard modules that the orthogonal
+    /// Bag-jaccard with orthogonal-signal secondary acceptance. Runs
+    /// bag-jaccard at the usual 0.20 threshold; for every ref module
+    /// below that threshold it checks string-corpus (≥ 0.50) and
+    /// keyword-histogram (≥ 0.90). If either orthogonal signal nominates a subject, accept
+    /// it. Covers near-miss bag-jaccard modules that the orthogonal
     /// axes (which scoring noise affects independently) still see clearly.
-    BagJaccardRescued,
+    BagJaccardSignalBacked,
     /// Property/method/member-name Jaccard. Identifiers that bundlers
     /// cannot rename (class methods, object literal keys, `.prop`
     /// accesses) form a per-module corpus; pairs are scored by Jaccard
     /// over those corpora. Orthogonal to everything else.
     PropertyName,
     /// End-to-end composite — what production naming should run.
-    /// Step 1: `bag-jaccard-rescued` produces high-recall module pairs
-    /// (+ orthogonal-signal rescues). Step 2: feeds those pairs to
+    /// Step 1: `bag-jaccard-signal-backed` produces high-recall module pairs
+    /// (+ orthogonal-signal supplemental accepts). Step 2: feeds those pairs to
     /// `module-pinned-function-tier` so per-function name transfer
     /// happens inside the candidate-restricted bucket. Reports both
     /// module-level recall and function-level naming coverage in one go.
@@ -215,7 +215,7 @@ pub struct MatchModulesRecallArgs {
     /// at the module level. `high` only accepts exact AST matches; `medium`
     /// also accepts structural-anchored (Cfg + literal/callee/throw anchor)
     /// matches; `low` (default) accepts every tier the cascade returns,
-    /// including weak structural_only fallbacks.
+    /// including weak structural_only tiers.
     #[arg(long, value_enum, default_value_t = TierConfidence::Low)]
     pub min_tier_confidence: TierConfidence,
 }
@@ -229,7 +229,7 @@ pub enum TierConfidence {
     /// alternate variant (CFG + ≥1 anchor axis overlap on identity-keyed
     /// dedup).
     Medium,
-    /// Accept every cascade tier including structural-only fallbacks.
+    /// Accept every cascade tier, including low-confidence structural-only tiers.
     Low,
 }
 
@@ -521,8 +521,8 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             (best, None)
         }
         MatchStrategy::Composite => {
-            // Step 1: rescued pairing. Same logic as the standalone
-            // `bag-jaccard-rescued` strategy, but with a category-respect
+            // Step 1: signal-backed pairing. Same logic as the standalone
+            // `bag-jaccard-signal-backed` strategy, but with a category-respect
             // filter so cross-category pairings (application ↔ package
             // etc.) get dropped before we pin functions inside them.
             let bag_context = build_scoring_context(
@@ -548,11 +548,11 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // lower bag-jaccard floor without absorbing cross-category
             // noise: in-category 0.15-0.20 is still a real signal.
             const BAG_ACCEPT_STRICT: f64 = 0.15;
-            const STR_RESCUE: f64 = 0.50;
-            const KW_RESCUE: f64 = 0.90;
-            const PROP_RESCUE: f64 = 0.40;
+            const STR_ACCEPT: f64 = 0.50;
+            const KW_ACCEPT: f64 = 0.90;
+            const PROP_ACCEPT: f64 = 0.40;
             // ≥2 rare-AST hash hits on the same subject is a smoking gun.
-            const RARE_RESCUE: f64 = 2.0;
+            const RARE_ACCEPT: f64 = 2.0;
             // Strong evidence threshold to bypass category-respect:
             // ≥3 rare AST hashes pointing to the same subject is hard
             // to fake even across categories (vendored packages re-
@@ -563,15 +563,15 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             // match), so a 1-vote floor is safe. Higher thresholds limit
             // recall without adding precision because the cascade has
             // already filtered ambiguous candidates.
-            const FN_FIRST_RESCUE: f64 = 1.0;
+            const FN_FIRST_ACCEPT: f64 = 1.0;
             // Arity histogram is coarse — only fire when prefiltered
             // candidates plus near-perfect cosine agreement converge.
-            const ARITY_RESCUE: f64 = 0.95;
+            const ARITY_ACCEPT: f64 = 0.95;
             // Function-majority pin: even modest top-subject share
             // (≥15%) is a real signal when filtered by category. The
             // coverage gate (≥10% of ref fns mapped to ANY subject) is
             // the real noise filter, not the share threshold.
-            const FN_MAJORITY_RESCUE: f64 = 0.15;
+            const FN_MAJORITY_ACCEPT: f64 = 0.15;
             // Consensus floors: signal must clear these to vote, and ≥2
             // signals must agree on the same subject for a consensus pin.
             const BAG_FLOOR: f64 = 0.10;
@@ -580,16 +580,16 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             const PROP_FLOOR: f64 = 0.20;
 
             let mut pinned: Vec<Option<usize>> = Vec::with_capacity(ref_modules.len());
-            let mut rescued_str = 0usize;
-            let mut rescued_kw = 0usize;
-            let mut rescued_prop = 0usize;
-            let mut rescued_rare = 0usize;
-            let mut rescued_band = 0usize;
-            let mut rescued_fn_first = 0usize;
-            let mut rescued_arity = 0usize;
-            let mut rescued_fn_majority = 0usize;
-            let mut rescued_consensus = 0usize;
-            let mut rescued_cross_cat = 0usize;
+            let mut supplemental_str = 0usize;
+            let mut supplemental_kw = 0usize;
+            let mut supplemental_prop = 0usize;
+            let mut supplemental_rare = 0usize;
+            let mut supplemental_band = 0usize;
+            let mut supplemental_fn_first = 0usize;
+            let mut supplemental_arity = 0usize;
+            let mut supplemental_fn_majority = 0usize;
+            let mut supplemental_consensus = 0usize;
+            let mut supplemental_cross_cat = 0usize;
             let mut dropped_cross_category = 0usize;
             let category_ok = |ref_idx: usize, sub_idx: usize| -> bool {
                 let r = ref_modules[ref_idx].category.as_str();
@@ -621,56 +621,56 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                     && category_strict_ok(ref_idx, sub_idx)
                 {
                     pick = Some(sub_idx);
-                    rescued_band += 1;
+                    supplemental_band += 1;
                 }
                 if pick.is_none() {
                     let str_pick = str_best[ref_idx];
-                    if str_pick.score >= STR_RESCUE
+                    if str_pick.score >= STR_ACCEPT
                         && let Some(sub_idx) = str_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_str += 1;
+                        supplemental_str += 1;
                     }
                 }
                 if pick.is_none() {
                     let kw_pick = kw_best[ref_idx];
-                    if kw_pick.score >= KW_RESCUE
+                    if kw_pick.score >= KW_ACCEPT
                         && let Some(sub_idx) = kw_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_kw += 1;
+                        supplemental_kw += 1;
                     }
                 }
                 if pick.is_none() {
                     let prop_pick = prop_best[ref_idx];
-                    if prop_pick.score >= PROP_RESCUE
+                    if prop_pick.score >= PROP_ACCEPT
                         && let Some(sub_idx) = prop_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_prop += 1;
+                        supplemental_prop += 1;
                     }
                 }
                 if pick.is_none() {
                     let rare_pick = rare_best[ref_idx];
-                    if rare_pick.score >= RARE_RESCUE
+                    if rare_pick.score >= RARE_ACCEPT
                         && let Some(sub_idx) = rare_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_rare += 1;
+                        supplemental_rare += 1;
                     }
                 }
                 if pick.is_none() {
                     let rare_pick = rare_struct_best[ref_idx];
-                    if rare_pick.score >= RARE_RESCUE
+                    if rare_pick.score >= RARE_ACCEPT
                         && let Some(sub_idx) = rare_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_rare += 1;
+                        supplemental_rare += 1;
                     }
                 }
                 // Function-first pin: ≥2 function-tier votes converging on
@@ -678,32 +678,32 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                 // when bag/string/keyword signals all failed.
                 if pick.is_none() {
                     let fn_pick = fn_first_best[ref_idx];
-                    if fn_pick.score >= FN_FIRST_RESCUE
+                    if fn_pick.score >= FN_FIRST_ACCEPT
                         && let Some(sub_idx) = fn_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_fn_first += 1;
+                        supplemental_fn_first += 1;
                     }
                 }
                 if pick.is_none() {
                     let arity_pick = arity_best[ref_idx];
-                    if arity_pick.score >= ARITY_RESCUE
+                    if arity_pick.score >= ARITY_ACCEPT
                         && let Some(sub_idx) = arity_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_arity += 1;
+                        supplemental_arity += 1;
                     }
                 }
                 if pick.is_none() {
                     let maj_pick = fn_majority_best[ref_idx];
-                    if maj_pick.score >= FN_MAJORITY_RESCUE
+                    if maj_pick.score >= FN_MAJORITY_ACCEPT
                         && let Some(sub_idx) = maj_pick.subject_idx
                         && category_ok(ref_idx, sub_idx)
                     {
                         pick = Some(sub_idx);
-                        rescued_fn_majority += 1;
+                        supplemental_fn_majority += 1;
                     }
                 }
                 // Cross-cat bypass: very strong rare-anchor evidence
@@ -714,10 +714,10 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         && let Some(sub_idx) = rare_pick.subject_idx
                     {
                         pick = Some(sub_idx);
-                        rescued_cross_cat += 1;
+                        supplemental_cross_cat += 1;
                     }
                 }
-                // Consensus rescue: if ≥2 weak signals agree on the same
+                // Consensus secondary acceptance: if ≥2 weak signals agree on the same
                 // subject, pin it. Each signal alone is noisy at low
                 // thresholds; agreement is the filter.
                 if pick.is_none() {
@@ -753,14 +753,14 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                         && count >= 2
                     {
                         pick = Some(sub_idx);
-                        rescued_consensus += 1;
+                        supplemental_consensus += 1;
                     }
                 }
                 pinned.push(pick);
             }
             let pin_hits = pinned.iter().filter(|x| x.is_some()).count();
             println!(
-                "  composite step-1 (rescued module pairing): {} / {} ref modules pinned ({:.2}%), rescues: band={rescued_band} str={rescued_str} kw={rescued_kw} prop={rescued_prop} rare={rescued_rare} fn-first={rescued_fn_first} arity={rescued_arity} fn-maj={rescued_fn_majority} cross-cat={rescued_cross_cat} consensus={rescued_consensus}, cross-category-dropped={dropped_cross_category}",
+                "  composite step-1 (signal-backed module pairing): {} / {} ref modules pinned ({:.2}%), supplemental accepts: band={supplemental_band} str={supplemental_str} kw={supplemental_kw} prop={supplemental_prop} rare={supplemental_rare} fn-first={supplemental_fn_first} arity={supplemental_arity} fn-maj={supplemental_fn_majority} cross-cat={supplemental_cross_cat} consensus={supplemental_consensus}, cross-category-dropped={dropped_cross_category}",
                 pin_hits,
                 ref_modules.len(),
                 pct(pin_hits, ref_modules.len())
@@ -778,7 +778,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
                 .collect();
             let recall = summarise_recall(&best_per_ref, threshold);
             println!(
-                "[composite (rescued pairing → module-pinned function tier)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                "[composite (signal-backed pairing → module-pinned function tier)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
                 recall.matched,
                 ref_modules.len(),
                 pct(recall.matched, ref_modules.len()),
@@ -789,7 +789,7 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             print_function_naming_coverage(&func_report, &ref_fps, &sub_fps);
             (best_per_ref, None)
         }
-        MatchStrategy::BagJaccardRescued => {
+        MatchStrategy::BagJaccardSignalBacked => {
             let bag_context = build_scoring_context(
                 &ref_bags,
                 &sub_bags,
@@ -803,37 +803,37 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
             let kw_best = score_via_keyword_histogram(&ref_fps, &sub_fps);
 
             const BAG_ACCEPT: f64 = 0.20;
-            const STR_RESCUE: f64 = 0.50;
-            const KW_RESCUE: f64 = 0.90;
+            const STR_ACCEPT: f64 = 0.50;
+            const KW_ACCEPT: f64 = 0.90;
 
             let mut best_per_ref: Vec<BestMatch> = Vec::with_capacity(ref_modules.len());
-            let mut rescued_str = 0usize;
-            let mut rescued_kw = 0usize;
+            let mut supplemental_str = 0usize;
+            let mut supplemental_kw = 0usize;
             for ref_idx in 0..ref_modules.len() {
                 if bag_best[ref_idx].score >= BAG_ACCEPT && bag_best[ref_idx].subject_idx.is_some()
                 {
                     best_per_ref.push(bag_best[ref_idx]);
                     continue;
                 }
-                // Below the bag threshold — try orthogonal-signal rescue.
+                // Below the bag threshold — try orthogonal-signal secondary acceptance.
                 let str_pick = str_best[ref_idx];
                 let kw_pick = kw_best[ref_idx];
-                if str_pick.score >= STR_RESCUE && str_pick.subject_idx.is_some() {
-                    rescued_str += 1;
+                if str_pick.score >= STR_ACCEPT && str_pick.subject_idx.is_some() {
+                    supplemental_str += 1;
                     best_per_ref.push(BestMatch {
                         subject_idx: str_pick.subject_idx,
-                        // Carry the rescuing signal's own score forward so
+                        // Carry the accepting signal's own score forward so
                         // histogram bucketing reflects the true confidence
-                        // the rescue is based on (not the failed bag-jaccard
-                        // score). Downstream callers that need rescue
-                        // provenance can branch on score >= STR_RESCUE.
+                        // the supplemental signal is based on (not the failed
+                        // bag-jaccard score). Downstream callers that need signal
+                        // provenance can branch on score >= STR_ACCEPT.
                         score: str_pick.score,
                         axis: None,
                     });
                     continue;
                 }
-                if kw_pick.score >= KW_RESCUE && kw_pick.subject_idx.is_some() {
-                    rescued_kw += 1;
+                if kw_pick.score >= KW_ACCEPT && kw_pick.subject_idx.is_some() {
+                    supplemental_kw += 1;
                     best_per_ref.push(BestMatch {
                         subject_idx: kw_pick.subject_idx,
                         score: kw_pick.score,
@@ -846,13 +846,15 @@ pub(crate) fn run(args: MatchModulesRecallArgs) -> Result<(), CliRunError> {
 
             let recall = summarise_recall(&best_per_ref, threshold);
             println!(
-                "[bag_jaccard_rescued (bag>=0.20 OR str>=0.50 OR kw>=0.90)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
+                "[bag_jaccard_signal_backed (bag>=0.20 OR str>=0.50 OR kw>=0.90)]: {} / {} ref modules matched ({:.2}%) — scoring in {:.2}s",
                 recall.matched,
                 ref_modules.len(),
                 pct(recall.matched, ref_modules.len()),
                 scoring_started.elapsed().as_secs_f64(),
             );
-            println!("  rescues: string-corpus={rescued_str}, keyword-histogram={rescued_kw}");
+            println!(
+                "  supplemental accepts: string-corpus={supplemental_str}, keyword-histogram={supplemental_kw}"
+            );
             print_histogram(&recall.score_histogram, ref_modules.len());
             (best_per_ref, None)
         }
@@ -1094,7 +1096,7 @@ struct ModuleFingerprints {
     /// Per-module function-arity histogram (params 0..=ARITY_BUCKETS-1,
     /// last bucket caps anything ≥ that count). Bundler-stable because
     /// the bundler cannot change a function's arity without breaking
-    /// its callers. Use for cosine-similarity rescue.
+    /// its callers. Use for cosine-similarity secondary acceptance.
     arity_histogram: ArityHistogram,
 }
 
@@ -2217,7 +2219,7 @@ fn score_via_keyword_histogram(
 /// Per-module arity-histogram cosine similarity. Coarse signal — many
 /// modules share similar arity shapes — but cheap and bundler-stable
 /// (changing a function's arity breaks its callers). Used only as a
-/// late-stage rescue with an AST-hash candidate prefilter.
+/// late-stage secondary acceptance with an AST-hash candidate prefilter.
 fn score_via_arity_histogram(
     ref_fps: &[ModuleFingerprints],
     sub_fps: &[ModuleFingerprints],
