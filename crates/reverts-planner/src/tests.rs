@@ -8436,7 +8436,7 @@ fn accepted_external_package_suppresses_private_dependency_closure() {
 }
 
 #[test]
-fn source_suppressed_package_closure_allows_different_package_boundary_consumer() {
+fn source_suppressed_package_closure_keeps_private_internal_for_cross_package_source_consumer() {
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
     rows.source_files.push(SourceFileInput::new(
         1,
@@ -8523,9 +8523,19 @@ fn source_suppressed_package_closure_allows_different_package_boundary_consumer(
 
     let analysis = PlannerAnalysis::from_program(&enriched);
 
+    // `privateValue` (ModuleId 2) is a pkg-a *internal*: rejected, with no
+    // external import specifier. A cross-package source-preserved consumer
+    // (pkg-b, ModuleId 3) directly references its binding. The boundary
+    // exemption — "a different-package consumer re-imports it from its package,
+    // so the internal can be suppressed" — is INVALID here: a non-public
+    // internal can never be re-imported, so the kept pkg-b source would dangle
+    // (this is the real-world ws `buffer-util`/`permessage-deflate` ->
+    // `EI6 is not defined` failure, where a ws internal mis-attributed into
+    // another package's closure was wrongly suppressed). The internal must stay
+    // vendored.
     assert!(
-        analysis.source_suppressed_packages.contains(&ModuleId(2)),
-        "different-package source consumers are package boundaries; they must not block same-package source suppression"
+        !analysis.source_suppressed_packages.contains(&ModuleId(2)),
+        "a non-externally-providable internal directly read by a kept consumer must not be suppressed"
     );
 }
 

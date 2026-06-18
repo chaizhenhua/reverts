@@ -81,6 +81,27 @@ pub(crate) fn source_suppressed_package_dependency_closure(
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
     let (outgoing_dependencies, incoming_dependencies) = direct_module_dependency_indexes(program);
+    // Modules a consumer can obtain from a bare `import from "<pkg>"`: an
+    // accepted external import with a concrete specifier. A package *internal*
+    // (rejected, or no specifier) is NOT among these — no external import can
+    // hand back a non-public internal, so the cross-package "boundary" exemption
+    // below (which assumes a consumer re-imports the module from its package)
+    // is only valid for externally-providable modules.
+    let externally_providable = program
+        .model()
+        .input()
+        .package_attributions
+        .iter()
+        .filter(|attribution| {
+            attribution.status == PackageAttributionStatus::Accepted
+                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+                && attribution
+                    .export_specifier
+                    .as_deref()
+                    .is_some_and(|specifier| !specifier.trim().is_empty())
+        })
+        .map(|attribution| attribution.module_id)
+        .collect::<BTreeSet<_>>();
     let mut reachable = seed_modules
         .iter()
         .copied()
@@ -128,12 +149,21 @@ pub(crate) fn source_suppressed_package_dependency_closure(
                     .flatten()
                     .any(|consumer_id| {
                         modules_by_id.get(consumer_id).is_some_and(|consumer| {
+                            // A kept (non-suppressed) consumer keeps a module
+                            // suppressed only if it can re-obtain the module from
+                            // the externalized package: i.e. the module is
+                            // externally providable AND the consumer is a package
+                            // boundary. A non-public internal can never be
+                            // re-imported, so any kept consumer (even cross-package
+                            // — e.g. a ws internal mis-attributed into another
+                            // package's closure) forces it to stay vendored.
                             !reachable.contains(consumer_id)
-                                && !consumer_is_boundary(
-                                    ConsumerBoundaryPolicy::SourceSuppressed,
-                                    module,
-                                    consumer,
-                                )
+                                && (!externally_providable.contains(module_id)
+                                    || !consumer_is_boundary(
+                                        ConsumerBoundaryPolicy::SourceSuppressed,
+                                        module,
+                                        consumer,
+                                    ))
                         })
                     })
             })
