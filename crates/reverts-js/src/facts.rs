@@ -5,10 +5,10 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     Visit,
     ast::{
-        Argument, BindingPatternKind, BlockStatement, CallExpression, Declaration,
-        ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-        FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression, NewExpression,
-        Program, Statement, StringLiteral,
+        Argument, ArrowFunctionExpression, BindingPatternKind, BlockStatement, CallExpression,
+        Declaration, ExportAllDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
+        Expression, FunctionBody, IdentifierReference, ImportDeclaration, ImportExpression,
+        NewExpression, Program, Statement, StringLiteral,
     },
     visit::walk::{
         walk_block_statement, walk_call_expression, walk_export_all_declaration,
@@ -478,6 +478,21 @@ impl<'a> Visit<'a> for VoidZeroExpressionStatementCollector {
         self.collect_statement_list(&block.body);
         walk_block_statement(self, block);
     }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        // A concise-body arrow (`() => void 0`) is modelled by OXC as a
+        // FunctionBody holding one synthetic ExpressionStatement wrapping the
+        // returned expression. That statement is NOT erasable: removing a
+        // `void 0` concise body would leave `() =>`, which is invalid TS and
+        // panics the emitter's parse-audit. Walk into the body so genuinely
+        // nested erasable statements are still found, but do not collect the
+        // concise body's own statement. Block-body arrows collect normally.
+        if arrow.expression {
+            walk_function_body(self, &arrow.body);
+        } else {
+            self.visit_function_body(&arrow.body);
+        }
+    }
 }
 
 impl VoidZeroExpressionStatementCollector {
@@ -866,4 +881,44 @@ fn is_file_url_source_location(value: &str) -> bool {
         extension.as_deref(),
         Some("js" | "mjs" | "cjs" | "ts" | "mts" | "cts" | "jsx" | "tsx")
     )
+}
+
+#[cfg(test)]
+mod void_zero_collector_tests {
+    use super::collect_void_zero_expression_statements;
+    use crate::errors::ParseGoal;
+
+    fn spans(source: &str) -> Vec<(u32, u32)> {
+        collect_void_zero_expression_statements(source, None, ParseGoal::TypeScript)
+            .expect("parseable")
+            .into_iter()
+            .map(|fact| (fact.byte_start, fact.byte_end))
+            .collect()
+    }
+
+    #[test]
+    fn concise_arrow_void_zero_body_is_not_collected() {
+        // Erasing this `void 0` would leave `() =>` — invalid TS. The concise
+        // arrow body must be left intact.
+        let source = "Promise.resolve().then(() => void 0);";
+        assert!(
+            spans(source).is_empty(),
+            "concise arrow body must not be treated as an erasable statement: {:?}",
+            spans(source)
+        );
+    }
+
+    #[test]
+    fn real_bare_void_zero_statement_is_still_collected() {
+        let source = "void 0;\nconst x = 1;";
+        assert_eq!(spans(source).len(), 1, "a top-level `void 0;` is erasable");
+    }
+
+    #[test]
+    fn block_arrow_body_void_zero_statement_is_collected() {
+        // Inside a block body, `void 0;` is a genuine statement and erasing it
+        // leaves a valid `() => {}`.
+        let source = "const f = () => { void 0; };";
+        assert_eq!(spans(source).len(), 1);
+    }
 }
