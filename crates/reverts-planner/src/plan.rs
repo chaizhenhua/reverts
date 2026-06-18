@@ -198,6 +198,22 @@ impl PlannedFile {
     }
 
     pub fn add_export_with_source_backed(&mut self, binding: BindingName, source_backed: bool) {
+        // A binding can only be exported once; multiple planner passes may each
+        // request the same export (e.g. a source-backed re-export plus an adapter
+        // export of the same name). Deduplicate here so the emit plan stays valid
+        // instead of failing the "duplicate planned export" invariant. A
+        // source-backed request upgrades an existing synthetic export, since the
+        // raw body already carries the export statement.
+        if let Some(existing) = self
+            .exports
+            .iter_mut()
+            .find(|export| export.binding == binding)
+        {
+            if source_backed {
+                existing.source_backed = true;
+            }
+            return;
+        }
         self.exports.push(PlannedExport {
             binding,
             source_backed,
@@ -285,4 +301,35 @@ impl PlannedBinding {
 pub struct PlannedExport {
     pub binding: BindingName,
     pub source_backed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn add_export_deduplicates_by_binding() {
+        // Multiple passes may request the same export; only one PlannedExport
+        // must result, or the emit plan fails the "duplicate planned export"
+        // invariant. A later source-backed request upgrades the flag.
+        let mut file = PlannedFile::new("modules/a.ts");
+        file.add_export_with_source_backed(BindingName::new("Tm1"), false);
+        file.add_export_with_source_backed(BindingName::new("Tm1"), true);
+        file.add_export_with_source_backed(BindingName::new("Other"), false);
+
+        let names = file
+            .exports
+            .iter()
+            .map(|export| export.binding.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["Tm1", "Other"]);
+        assert!(
+            file.exports
+                .iter()
+                .find(|export| export.binding.as_str() == "Tm1")
+                .expect("Tm1 export")
+                .source_backed,
+            "source-backed request should upgrade the existing export"
+        );
+    }
 }
