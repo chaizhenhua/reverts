@@ -8640,6 +8640,7 @@ fn cache_surface_public_entry_frees_internal_dependency_from_adapter_required() 
             &enriched,
             &accepted,
             &source_facts,
+            &BTreeSet::new(),
         );
         (
             required.contains(&ModuleId(1)),
@@ -8667,6 +8668,107 @@ fn cache_surface_public_entry_frees_internal_dependency_from_adapter_required() 
     assert!(
         !internal_with_surface,
         "with a public surface, the internal dependency is no longer adapter-required",
+    );
+}
+
+#[test]
+fn source_preserved_public_entry_repins_its_externalized_internal() {
+    // A publicly-importable entry is freed of its internal ONLY because it is
+    // replaced by a bare `import from "pkg"` (source dropped). When no adapter
+    // can be built for it, the entry is *source-preserved* — its real source is
+    // kept and still references the internal — so the internal must be re-pinned
+    // as adapter-required. This is the lodash `memoize`/`MapCache` (`vt`) crash:
+    // memoize kept `new (qF1.Cache || vt)()`, but its bare-root-externalized
+    // internal `MapCache` was suppressed, leaving `vt` an unassigned phantom.
+    let internal_src = "var intHelper = () => 1;\n";
+    let entry_src = "var pubFn = () => intHelper();\n";
+    let app_src = "pubFn();\n";
+    let source = format!("{internal_src}{entry_src}{app_src}");
+    let internal_end = internal_src.len() as u32;
+    let entry_end = internal_end + entry_src.len() as u32;
+    let app_end = entry_end + app_src.len() as u32;
+
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source)));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(1),
+            "pubFn",
+            "modules/entry.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1)
+        .with_source_span(SourceSpan::new(internal_end, entry_end)),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(2),
+            "intHelper",
+            "modules/internal.ts",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1)
+        .with_source_span(SourceSpan::new(0, internal_end)),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(3), "app", "modules/app.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(entry_end, app_end)),
+    );
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(1),
+            "pkg",
+            "1.0.0",
+            "pkg",
+        ));
+    rows.package_attributions
+        .push(PackageAttributionInput::accepted_external(
+            ModuleId(2),
+            "pkg",
+            "1.0.0",
+            "pkg/internal/helper.js",
+        ));
+    rows.package_surfaces.push(PackageSurfaceInput {
+        package_name: "pkg".to_string(),
+        package_version: Some("1.0.0".to_string()),
+        export_specifier: "pkg".to_string(),
+        status: PackageAttributionStatus::Accepted,
+        evidence: None,
+    });
+
+    let enriched = enriched_from_rows(rows);
+    let accepted = accepted_external_module_ids(&enriched.model().input().package_attributions);
+    let source_facts = super::SourceModuleFacts::from_program(&enriched);
+
+    // Treated as bare-importable (not source-preserved): the internal is freed.
+    let freed = super::external_adapters::adapter_required_package_modules(
+        &enriched,
+        &accepted,
+        &source_facts,
+        &BTreeSet::new(),
+    );
+    assert!(
+        !freed.contains(&ModuleId(2)),
+        "a bare-imported public entry frees its internal",
+    );
+
+    // Once the entry is known source-preserved, its kept source re-pins the
+    // internal it reads — no phantom binding can survive.
+    let mut source_preserved = BTreeSet::new();
+    source_preserved.insert(ModuleId(1));
+    let repinned = super::external_adapters::adapter_required_package_modules(
+        &enriched,
+        &accepted,
+        &source_facts,
+        &source_preserved,
+    );
+    assert!(
+        repinned.contains(&ModuleId(2)),
+        "a source-preserved public entry re-pins the internal it reads",
     );
 }
 

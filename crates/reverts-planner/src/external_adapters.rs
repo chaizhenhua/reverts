@@ -151,15 +151,57 @@ pub(crate) fn external_package_adapter_analysis(
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
 ) -> ExternalPackageAdapterAnalysis {
-    let adapter_required_packages =
-        adapter_required_package_modules(program, externalized_packages, source_facts);
     let non_empty_call_bindings = non_empty_call_identifiers_in_program(program);
-    let adapter_export_bindings = package_adapter_export_bindings_by_module(
-        program,
-        source_facts,
-        &adapter_required_packages,
-    );
-    let adapters = adapter_required_packages
+
+    // Joint fixpoint between adapter-required propagation and the adapter build.
+    // A module that is adapter-required but whose adapter cannot be built is
+    // *source-preserved* (its real source is kept). A source-preserved consumer
+    // is NOT replaced by a bare `import from "<pkg>"`, so its reads of other
+    // externalized internals must pin those internals (e.g. vendored lodash
+    // `memoize` keeps `new (qF1.Cache || vt)()`, so `vt`/`MapCache` must stay
+    // vendored too). But that source-preserved set is only known after building
+    // the adapters, which in turn depends on the adapter-required set. Iterate:
+    // feed each round's source-preserved modules back as forced read-propagation
+    // consumers until the source-preserved set stabilizes. Publicly-importable
+    // modules that DO get an adapter (bare import, source dropped) never enter
+    // the forced set, so they keep freeing their internals for elimination.
+    let mut source_preserved = BTreeSet::<ModuleId>::new();
+    loop {
+        let adapter_required_packages = adapter_required_package_modules(
+            program,
+            externalized_packages,
+            source_facts,
+            &source_preserved,
+        );
+        let adapters = build_external_package_adapters(
+            program,
+            source_facts,
+            &adapter_required_packages,
+            &non_empty_call_bindings,
+        );
+        let next_source_preserved = adapter_required_packages
+            .difference(&adapters.keys().copied().collect())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if next_source_preserved == source_preserved {
+            return ExternalPackageAdapterAnalysis {
+                adapters,
+                adapter_required_packages,
+            };
+        }
+        source_preserved = next_source_preserved;
+    }
+}
+
+fn build_external_package_adapters(
+    program: &EnrichedProgram,
+    source_facts: &SourceModuleFacts,
+    adapter_required_packages: &BTreeSet<ModuleId>,
+    non_empty_call_bindings: &BTreeSet<BindingName>,
+) -> BTreeMap<ModuleId, ExternalPackageAdapterPlan> {
+    let adapter_export_bindings =
+        package_adapter_export_bindings_by_module(program, source_facts, adapter_required_packages);
+    adapter_required_packages
         .iter()
         .filter_map(|module_id| {
             let attribution = accepted_external_attribution_for_module(
@@ -202,7 +244,7 @@ pub(crate) fn external_package_adapter_analysis(
                     *module_id,
                     &bindings,
                     member_proof.as_ref(),
-                    &non_empty_call_bindings,
+                    non_empty_call_bindings,
                 ))
             .then_some((
                 *module_id,
@@ -213,11 +255,7 @@ pub(crate) fn external_package_adapter_analysis(
                 },
             ))
         })
-        .collect();
-    ExternalPackageAdapterAnalysis {
-        adapters,
-        adapter_required_packages,
-    }
+        .collect()
 }
 
 pub(crate) fn adapter_plan_is_safe(
@@ -1286,6 +1324,7 @@ pub(crate) fn adapter_required_package_modules(
     program: &EnrichedProgram,
     externalized_packages: &BTreeSet<ModuleId>,
     source_facts: &SourceModuleFacts,
+    source_preserved_consumers: &BTreeSet<ModuleId>,
 ) -> BTreeSet<ModuleId> {
     let candidate_reads_by_module = &source_facts.candidate_reads_by_module;
     let definition_modules = &source_facts.definition_modules_all;
@@ -1304,6 +1343,9 @@ pub(crate) fn adapter_required_package_modules(
     // propagate adapter-required-ness to its internal dependencies: the import
     // already provides them, so those internals become eliminable. Internals
     // with a direct application consumer are still pinned through that consumer.
+    // The exception is a publicly-importable module that is itself known to be
+    // source-preserved (no adapter could be built for it): its real source is
+    // kept and still references those internals, so it must keep propagating.
     let public_surface_index = PackageSurfaceIndex::from_attributions(
         &[],
         program.model().input().package_surfaces.as_slice(),
@@ -1340,7 +1382,9 @@ pub(crate) fn adapter_required_package_modules(
             let Some(from_module) = modules_by_id.get(&dependency.from_module_id) else {
                 continue;
             };
-            if publicly_importable.contains(&dependency.from_module_id) {
+            if publicly_importable.contains(&dependency.from_module_id)
+                && !source_preserved_consumers.contains(&dependency.from_module_id)
+            {
                 continue;
             }
             if from_module.kind == ModuleKind::Package
@@ -1366,7 +1410,9 @@ pub(crate) fn adapter_required_package_modules(
             let Some(from_module) = modules_by_id.get(from_module_id) else {
                 continue;
             };
-            if publicly_importable.contains(from_module_id) {
+            if publicly_importable.contains(from_module_id)
+                && !source_preserved_consumers.contains(from_module_id)
+            {
                 continue;
             }
             if from_module.kind == ModuleKind::Package
