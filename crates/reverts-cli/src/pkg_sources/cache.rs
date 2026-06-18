@@ -16,10 +16,10 @@ use crate::pkg_sources::registry::{self, PackumentVersion};
 /// Resolve the cache root: `REVERTS_PACKAGE_CACHE_DIR` if set, else
 /// `$HOME/.reverts/package-cache`.
 pub(crate) fn cache_root() -> Result<PathBuf, MatchPackagesError> {
-    if let Ok(dir) = std::env::var("REVERTS_PACKAGE_CACHE_DIR") {
-        if !dir.trim().is_empty() {
-            return Ok(PathBuf::from(dir));
-        }
+    if let Ok(dir) = std::env::var("REVERTS_PACKAGE_CACHE_DIR")
+        && !dir.trim().is_empty()
+    {
+        return Ok(PathBuf::from(dir));
     }
     let home = std::env::var("HOME").map_err(|_| MatchPackagesError::ResolveCacheDir {
         message: "HOME is not set and REVERTS_PACKAGE_CACHE_DIR is unset".to_string(),
@@ -197,17 +197,17 @@ pub(crate) fn ensure_package_source(
     // Case 2: tarball already on disk and verifies → re-extract locally, no
     // network and no re-write of the tarball.
     let tarball_path = entry.join(TARBALL_FILE);
-    if let Ok(bytes) = fs::read(&tarball_path) {
-        if registry::verify_integrity(package_name, version, &bytes, Some(integrity)).is_ok() {
-            return commit_entry(
-                &entry,
-                package_name,
-                version,
-                integrity,
-                &dist.tarball,
-                &bytes,
-            );
-        }
+    if let Ok(bytes) = fs::read(&tarball_path)
+        && registry::verify_integrity(package_name, version, &bytes, Some(integrity)).is_ok()
+    {
+        return commit_entry(
+            &entry,
+            package_name,
+            version,
+            integrity,
+            &dist.tarball,
+            &bytes,
+        );
     }
 
     // Case 3: miss → download, verify, commit.
@@ -463,7 +463,7 @@ mod tests {
             "x",
             "1.0.0",
             &dist,
-            &download,
+            download,
         )
         .expect("first ensure");
         assert!(pkg.join("package.json").is_file());
@@ -475,7 +475,7 @@ mod tests {
             "x",
             "1.0.0",
             &dist,
-            &download,
+            download,
         )
         .expect("second ensure");
         assert_eq!(pkg, pkg2);
@@ -494,7 +494,7 @@ mod tests {
             "x",
             "1.0.0",
             &dist,
-            &download,
+            download,
         )
         .expect_err("integrity must fail");
         assert!(matches!(
@@ -526,7 +526,7 @@ mod tests {
             "x",
             "1.0.0",
             &dist,
-            &download,
+            download,
         )
         .expect("first ensure");
         assert_eq!(calls.get(), 1);
@@ -542,7 +542,7 @@ mod tests {
             "x",
             "1.0.0",
             &dist,
-            &download,
+            download,
         )
         .expect("re-extract");
         assert!(pkg2.join("package.json").is_file());

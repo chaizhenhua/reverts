@@ -93,10 +93,10 @@ pub(crate) fn registry_base_url() -> String {
 /// (`@scope%2fname`).
 pub(crate) fn packument_url(base: &str, package_name: &str) -> String {
     let base = base.trim_end_matches('/');
-    if let Some(rest) = package_name.strip_prefix('@') {
-        if let Some((scope, name)) = rest.split_once('/') {
-            return format!("{base}/@{scope}%2f{name}");
-        }
+    if let Some(rest) = package_name.strip_prefix('@')
+        && let Some((scope, name)) = rest.split_once('/')
+    {
+        return format!("{base}/@{scope}%2f{name}");
     }
     format!("{base}/{package_name}")
 }
@@ -142,10 +142,10 @@ pub(crate) fn http_get(url: &str) -> Result<Vec<u8>, MatchPackagesError> {
         message,
     };
     let mut request = ureq::get(url).timeout(Duration::from_secs(http_timeout_secs()));
-    if let Ok(token) = std::env::var("REVERTS_NPM_TOKEN") {
-        if !token.trim().is_empty() {
-            request = request.set("Authorization", &format!("Bearer {token}"));
-        }
+    if let Ok(token) = std::env::var("REVERTS_NPM_TOKEN")
+        && !token.trim().is_empty()
+    {
+        request = request.set("Authorization", &format!("Bearer {token}"));
     }
     let response = request
         .call()
