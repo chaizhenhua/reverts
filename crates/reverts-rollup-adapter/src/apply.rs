@@ -190,7 +190,6 @@ pub fn apply_rollup_projections(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::db::load_snapshot;
@@ -322,7 +321,7 @@ mod tests {
 
     #[test]
     fn applies_flips_rejected_closure_modules_to_accepted_external_import() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
         minimal_schema(&conn);
         seed_lodash_project(&conn);
 
@@ -336,7 +335,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
         assert_eq!(accepted_count, 3, "1 pre-existing + 2 newly flipped");
 
         let policy: i64 = conn
@@ -345,7 +344,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
         assert_eq!(
             policy, PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION,
             "flipped row must stamp the current policy constant"
@@ -354,7 +353,7 @@ mod tests {
 
     #[test]
     fn applies_backfills_a_surface_row_for_the_top_level_specifier() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
         minimal_schema(&conn);
         seed_lodash_project(&conn);
 
@@ -369,13 +368,13 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
         assert_eq!(surface_specifier, "lodash");
     }
 
     #[test]
     fn applies_is_idempotent_when_rerun_against_the_already_flipped_database() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
         minimal_schema(&conn);
         seed_lodash_project(&conn);
 
@@ -392,7 +391,7 @@ mod tests {
 
     #[test]
     fn applies_does_not_touch_accepted_rows_outside_the_rollup_plan() {
-        let mut conn = Connection::open_in_memory().unwrap();
+        let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
         minimal_schema(&conn);
         seed_lodash_project(&conn);
         // Add a second project with an already-accepted external attribution for `react`.
@@ -410,7 +409,7 @@ mod tests {
                 (200, 'react/index', 'react', '18.0.0', 'react', 'external_import', 'accepted', 1, 'now', 'now');
             ",
         )
-        .unwrap();
+        .expect("execute sql");
 
         let timestamp_before: String = conn
             .query_row(
@@ -418,7 +417,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
         run_apply(&mut conn);
         let timestamp_after: String = conn
             .query_row(
@@ -426,7 +425,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
 
         assert_eq!(
             timestamp_before, timestamp_after,
@@ -440,7 +439,7 @@ mod tests {
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
+            .expect("query row");
         assert_eq!(
             react_surface_count, 1,
             "surface backfilled for pre-existing accepted row"
