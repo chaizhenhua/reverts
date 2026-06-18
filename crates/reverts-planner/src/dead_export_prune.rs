@@ -1,4 +1,12 @@
-//! Cross-module dead-export elimination (whole-program export tree-shaking).
+//! Export hygiene: cross-module dead-export elimination + invalid-export pruning.
+//!
+//! Two passes live here. `prune_dead_exports` (whole-program tree-shaking) and
+//! `prune_invalid_exports` (a correctness invariant): a local `export { X }`
+//! whose `X` is neither defined nor imported in the module is invalid ESM that
+//! crashes at load (`SyntaxError: Export 'X' is not defined`). Recovery /
+//! adapter emission can leave such dangling exports (e.g. an externalized
+//! package adapter that binds only some of a module's original export names);
+//! this pass removes them so the emitted program loads.
 //!
 //! `plan_reachability` drops whole files unreachable from `cli.ts`;
 //! `runtime_orphan_prune` drops dead *private* bindings inside a module. The gap
@@ -21,9 +29,130 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_ir::BindingName;
 
 use crate::runtime_orphan_prune::prune_orphan_runtime_bindings;
-use crate::{EmitPlan, PlannedFile, apply_text_edits, top_level_statement_spans};
+use crate::{
+    EmitPlan, PlannedFile, apply_text_edits, top_level_definitions_in_source,
+    top_level_statement_spans,
+};
 
 const CLI_ENTRYPOINT_PATH: &str = "cli.ts";
+
+/// Drop local `export { … }` names (and structured exports) that are neither
+/// defined nor imported in their module. Such an export is invalid ESM and
+/// crashes the program at module load, so this runs unconditionally (it is a
+/// correctness fix, not a whole-program optimization like `prune_dead_exports`).
+pub(crate) fn prune_invalid_exports(plan: &mut EmitPlan) {
+    for file in &mut plan.files {
+        let backed = module_backed_names(file);
+        let is_backed = |name: &str| backed.contains(name);
+
+        let before = file.exports.len();
+        file.exports
+            .retain(|export| is_backed(export.binding.as_str()));
+        let mut changed = file.exports.len() != before;
+
+        let joined = file.body.join("\n");
+        let mut edits = Vec::<(usize, usize, String)>::new();
+        for (start, end) in top_level_statement_spans(joined.as_str()) {
+            let statement = joined[start..end].trim();
+            let Some(ModuleItem::NamedExport { names }) = module_item(statement) else {
+                continue;
+            };
+            let kept = names
+                .iter()
+                .filter(|name| is_backed(name.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if kept.len() == names.len() {
+                continue;
+            }
+            let replacement = if kept.is_empty() {
+                String::new()
+            } else {
+                format!("export {{ {} }};", kept.join(", "))
+            };
+            edits.push((start, end, replacement));
+        }
+        if !edits.is_empty() {
+            file.body = vec![apply_text_edits(joined.as_str(), &edits)];
+            changed = true;
+        }
+        let _ = changed;
+    }
+}
+
+/// Names a module legitimately backs: every top-level definition in its body,
+/// every local binding introduced by an import (named/namespace/default), and
+/// the structured planner namespace imports the emitter injects.
+fn module_backed_names(file: &PlannedFile) -> BTreeSet<String> {
+    let mut backed = BTreeSet::<String>::new();
+    for import in &file.imports {
+        backed.insert(import.namespace.as_str().to_string());
+    }
+    let joined = file.body.join("\n");
+    for (start, end) in top_level_statement_spans(joined.as_str()) {
+        let statement = joined[start..end].trim();
+        for definition in top_level_definitions_in_source(statement) {
+            backed.insert(definition.as_str().to_string());
+        }
+        for local in import_local_names(statement) {
+            backed.insert(local);
+        }
+    }
+    backed
+}
+
+/// Local binding names introduced by an import statement: `* as ns`, the
+/// right-hand side of `{ a as b }` (or bare `{ a }`), and a default import.
+fn import_local_names(statement: &str) -> Vec<String> {
+    if !statement.starts_with("import ") {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    if let Some((_, after)) = statement.split_once("* as ") {
+        let ns = after
+            .trim_start()
+            .chars()
+            .take_while(|character| {
+                *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
+            })
+            .collect::<String>();
+        if is_identifier(ns.as_str()) {
+            names.push(ns);
+        }
+    }
+    if let Some(open) = statement.find('{')
+        && let Some(close) = statement[open..].find('}').map(|index| open + index)
+    {
+        for part in statement[open + 1..close].split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let local = part
+                .split_once(" as ")
+                .map(|(_, right)| right.trim())
+                .unwrap_or(part);
+            if is_identifier(local) {
+                names.push(local.to_string());
+            }
+        }
+    }
+    if let Some(rest) = statement.strip_prefix("import ") {
+        let head = rest.trim_start();
+        if !head.starts_with(['{', '*', '\'', '"']) {
+            let default = head
+                .chars()
+                .take_while(|character| {
+                    *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
+                })
+                .collect::<String>();
+            if is_identifier(default.as_str()) {
+                names.push(default);
+            }
+        }
+    }
+    names
+}
 
 pub(crate) fn prune_dead_exports(plan: &mut EmitPlan) {
     // Only meaningful with a known program entry: without `cli.ts` there is no
@@ -475,6 +604,43 @@ mod tests {
         assert!(
             body_of(&plan, "modules/a.ts").contains("import { mid } from './b.js'"),
             "import preserved for side-effect safety"
+        );
+    }
+
+    #[test]
+    fn prunes_export_of_undefined_binding() {
+        // Mirrors the externalized-zod adapter bug: the module defines `keep`
+        // and namespace-imports `external_zod`, but its export clause also lists
+        // `Zk`, which is never defined or imported. Exporting it is invalid ESM
+        // (`SyntaxError: Export 'Zk' is not defined`); the pass must drop it.
+        let mut plan = EmitPlan::default();
+        plan.push_file(file(
+            "modules/a.ts",
+            "import * as external_zod from 'zod';\nconst keep = external_zod;\nexport { keep, Zk };",
+        ));
+
+        prune_invalid_exports(&mut plan);
+
+        let a = body_of(&plan, "modules/a.ts");
+        assert!(a.contains("export { keep }"), "{a}");
+        assert!(!a.contains("Zk"), "undefined export must be dropped: {a}");
+    }
+
+    #[test]
+    fn keeps_exports_backed_by_definition_or_import() {
+        // `keep` is defined; `aliased` is an import-local binding; both valid.
+        let mut plan = EmitPlan::default();
+        plan.push_file(file(
+            "modules/a.ts",
+            "import { orig as aliased } from './b.js';\nfunction keep() {}\nexport { keep, aliased };",
+        ));
+
+        prune_invalid_exports(&mut plan);
+
+        let a = body_of(&plan, "modules/a.ts");
+        assert!(
+            a.contains("keep") && a.contains("aliased"),
+            "valid exports kept: {a}"
         );
     }
 
