@@ -116,7 +116,9 @@ pub(crate) fn filter_package_sources_to_best_build_variants(
     }
 
     package_sources.retain(|source| {
-        if source.external_importable && source.export_specifier == source.package_name {
+        if is_root_package_manifest(source)
+            || (source.external_importable && source.export_specifier == source.package_name)
+        {
             return true;
         }
         let key = (source.package_name.clone(), source.package_version.clone());
@@ -157,13 +159,24 @@ pub(crate) fn filter_package_sources_to_relevant_path_hints(
         let Some(hints) = hints_by_version.get(&key) else {
             return true;
         };
-        if source.external_importable && source.export_specifier == source.package_name {
+        if is_root_package_manifest(source)
+            || (source.external_importable && source.export_specifier == source.package_name)
+        {
             return true;
         }
         hints
             .iter()
             .any(|hint| package_source_semantic_filter_hint_score(source, hint.as_str()) > 0)
     });
+}
+
+/// Whether `source` is a package's root `package.json` manifest. The
+/// cache-anchored surface resolver reads it to derive each package's real
+/// public export specifiers, so it must survive every build-variant / path-hint
+/// prune even when its own `export_specifier` is a subpath (e.g. rxjs exposes
+/// `./package.json`, giving the manifest the specifier `rxjs/package.json`).
+fn is_root_package_manifest(source: &PackageSource) -> bool {
+    package_source_cache_entry_path(source) == "package.json"
 }
 
 fn package_source_semantic_filter_hint_score(source: &PackageSource, hint: &str) -> usize {

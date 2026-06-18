@@ -2592,6 +2592,87 @@ fn package_source_build_variant_selection_keeps_root_export_surface() {
 }
 
 #[test]
+fn package_source_build_variant_selection_keeps_root_manifest_for_surface() {
+    // rxjs ships `"./package.json": "./package.json"` in its exports, so the
+    // cached root manifest carries export_specifier `rxjs/package.json` (not the
+    // bare package name). The build-variant filter must still keep it: the
+    // cache-anchored surface resolver reads the root package.json to learn the
+    // package's public API, and the project's hints point at dist/cjs, not root.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "m10",
+        "modules/10-rxjs/internal/replay-subject.ts",
+        "rxjs",
+        Some("7.8.2".to_string()),
+    ));
+    let mut sources = vec![
+        PackageSource::source_only(
+            "rxjs",
+            "7.8.2",
+            "rxjs/internal/replay-subject",
+            "rxjs@7.8.2/dist/cjs/internal/replay-subject.js",
+            "exports.ReplaySubject = ReplaySubject;",
+        ),
+        PackageSource::external(
+            "rxjs",
+            "7.8.2",
+            "rxjs/package.json",
+            "rxjs@7.8.2/package.json",
+            r#"export default {"name":"rxjs","exports":{".":"./dist/cjs/index.js","./internal/*":"./dist/cjs/internal/*.js","./package.json":"./package.json"}};"#,
+        ),
+    ];
+
+    filter_package_sources_to_best_build_variants(&rows, &mut sources);
+
+    assert!(
+        sources
+            .iter()
+            .any(|source| source.source_path.ends_with("/package.json")),
+        "root manifest must survive build-variant filtering for surface resolution: {sources:?}"
+    );
+}
+
+#[test]
+fn package_source_path_hint_filter_keeps_root_manifest_for_surface() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "m10",
+        "modules/10-rxjs/internal/replay-subject.ts",
+        "rxjs",
+        Some("7.8.2".to_string()),
+    ));
+    let mut sources = (0..300)
+        .map(|index| {
+            PackageSource::source_only(
+                "rxjs",
+                "7.8.2",
+                format!("rxjs/internal/private-{index}"),
+                format!("rxjs@7.8.2/dist/cjs/internal/private-{index}.js"),
+                "exports.privateValue = 1;",
+            )
+        })
+        .collect::<Vec<_>>();
+    sources.push(PackageSource::external(
+        "rxjs",
+        "7.8.2",
+        "rxjs/package.json",
+        "rxjs@7.8.2/package.json",
+        r#"export default {"name":"rxjs","exports":{".":"./dist/cjs/index.js","./package.json":"./package.json"}};"#,
+    ));
+
+    filter_package_sources_to_relevant_path_hints(&rows, &mut sources);
+
+    assert!(
+        sources
+            .iter()
+            .any(|source| source.source_path.ends_with("/package.json")),
+        "root manifest must survive path-hint filtering for surface resolution: {sources:?}"
+    );
+}
+
+#[test]
 fn package_source_path_hint_filter_keeps_export_surface_match() {
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
     rows.modules.push(ModuleInput::package(
@@ -3364,8 +3445,9 @@ fn match_packages_externalizes_unrestricted_subpath_from_package_source_root() {
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
     assert_eq!(
-        outcome.loaded_package_sources, 1,
-        "only lib/add.js should be loaded; tests must be skipped"
+        outcome.loaded_package_sources, 2,
+        "lib/add.js + the root package.json (kept for surface resolution) should load; \
+         tests/add.test.js must be skipped (which would make 3)"
     );
     assert_eq!(outcome.matched_modules, 1);
     assert!(
