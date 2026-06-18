@@ -508,8 +508,20 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
     );
 }
 
-fn materialized(names: &[&str]) -> std::collections::BTreeSet<String> {
-    names.iter().map(|name| (*name).to_string()).collect()
+/// Materialized-manifest map for the given package names, each with a permissive
+/// `package.json` (a `main`, no `exports`) so every detected specifier — bare
+/// root or subpath — counts as public. Tests needing a restrictive exports map
+/// build their own map.
+fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, (String, bool)> {
+    names
+        .iter()
+        .map(|name| {
+            (
+                (*name).to_string(),
+                (format!(r#"{{"name":"{name}","main":"./index.js"}}"#), true),
+            )
+        })
+        .collect()
 }
 
 #[test]
@@ -538,6 +550,45 @@ fn detected_package_modules_skip_unmaterialized_packages() {
     let promoted = promote_detected_package_modules(&mut input, &materialized(&["other-pkg"]));
 
     assert_eq!(promoted, 0, "unmaterialized package must not be promoted");
+    assert_eq!(
+        input.package_attributions[0].status,
+        reverts_input::PackageAttributionStatus::Rejected
+    );
+}
+
+#[test]
+fn detected_package_modules_skip_non_public_specifier() {
+    // The module's semantic path maps to the subpath `pkg/internal`, but pkg's
+    // `exports` map only exposes `.`. Externalizing to `pkg/internal` would emit
+    // a bare import that crashes with ERR_PACKAGE_PATH_NOT_EXPORTED (the real
+    // `axios/exports` bug). The module must stay vendored (rejected).
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "internal",
+        "pkg/internal",
+        "pkg",
+        Some("1.0.0".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "pkg",
+            "package matcher did not produce an accepted attribution for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    // pkg is materialized but its exports map only exposes the bare root.
+    let manifests = std::collections::BTreeMap::from([(
+        "pkg".to_string(),
+        (
+            r#"{"name":"pkg","exports":{".":"./index.js"}}"#.to_string(),
+            false,
+        ),
+    )]);
+    let promoted = promote_detected_package_modules(&mut input, &manifests);
+
+    assert_eq!(promoted, 0, "non-public specifier must not be externalized");
     assert_eq!(
         input.package_attributions[0].status,
         reverts_input::PackageAttributionStatus::Rejected

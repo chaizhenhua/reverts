@@ -46,6 +46,27 @@ pub(crate) fn cached_root_package_json(
         .and_then(|src| parse_cached_package_json(src.source.as_str()))
 }
 
+/// Public entry point: whether `specifier` is a publicly-importable specifier of
+/// `package_name`, given the package's cached `package.json` source (which may be
+/// stored `export default`-wrapped) and whether it ships a root index file.
+/// Returns `false` when the manifest cannot be parsed — conservative: a specifier
+/// we cannot prove public must not be externalized into a bare import that may
+/// fail to resolve at runtime. Used by externalization passes outside this crate
+/// to avoid emitting imports for non-public subpaths (e.g. `axios/exports`).
+pub fn package_specifier_is_public(
+    package_json_source: &str,
+    package_name: &str,
+    specifier: &str,
+    has_root_index: bool,
+) -> bool {
+    match parse_cached_package_json(package_json_source) {
+        Some(package_json) => {
+            specifier_is_public(package_name, &package_json, specifier, has_root_index)
+        }
+        None => false,
+    }
+}
+
 /// Whether `specifier` is a *publicly resolvable* import of the package, per
 /// Node resolution applied to the cached `package.json`:
 /// - `exports` subpath map: the specifier must match an exact key or a

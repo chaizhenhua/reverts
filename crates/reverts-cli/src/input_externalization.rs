@@ -45,38 +45,61 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
             }
         })?;
     let mut bundle = load_project_bundle_from_connection(&connection, project_id)?;
-    let materialized_packages = materialized_package_names(&connection)?;
+    let materialized_packages = materialized_package_manifests(&connection)?;
     promote_detected_package_modules(&mut bundle, &materialized_packages);
     promote_verified_externalization_hints(&connection, &mut bundle)?;
     Ok(bundle)
 }
 
-/// Distinct package names that were actually materialized into the on-disk /
-/// cached source store. A package present here was successfully fetched, so it
-/// exists and is installable; a package absent here could not be resolved (e.g.
-/// a 404 version baked into the bundle) and must not be externalized into an
-/// uninstallable runtime dependency.
-fn materialized_package_names(
+/// Per-package materialization evidence: the cached root `package.json` source
+/// and whether the package ships a root `index.{js,json,node}`. A package is
+/// keyed here only if it was actually fetched (so it exists + is installable);
+/// the manifest then lets us verify a *specifier* is a public export before
+/// externalizing it (so we never emit `import 'pkg/non-public-subpath'`).
+pub(crate) type MaterializedPackageManifests = BTreeMap<String, (String, bool)>;
+
+fn materialized_package_manifests(
     connection: &Connection,
-) -> Result<BTreeSet<String>, SqliteInputError> {
+) -> Result<MaterializedPackageManifests, SqliteInputError> {
     if !sqlite_table_exists(connection, "package_source_cache")? {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     }
+    let mut manifests = BTreeMap::<String, String>::new();
     let mut statement = connection.prepare(
-        "SELECT DISTINCT package_name FROM package_source_cache \
-         WHERE TRIM(COALESCE(package_name, '')) != ''",
+        "SELECT package_name, source_content FROM package_source_cache \
+         WHERE entry_path = 'package.json' AND TRIM(COALESCE(package_name, '')) != ''",
     )?;
-    let names = statement
+    for row in statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(Result::ok)
+    {
+        manifests.insert(row.0.trim().to_string(), row.1);
+    }
+    let mut has_index = BTreeSet::<String>::new();
+    let mut index_statement = connection.prepare(
+        "SELECT DISTINCT package_name FROM package_source_cache \
+         WHERE entry_path IN ('index.js', 'index.json', 'index.node')",
+    )?;
+    for name in index_statement
         .query_map([], |row| row.get::<_, String>(0))?
         .filter_map(Result::ok)
-        .map(|name| name.trim().to_string())
-        .collect();
-    Ok(names)
+    {
+        has_index.insert(name.trim().to_string());
+    }
+    Ok(manifests
+        .into_iter()
+        .map(|(name, manifest)| {
+            let index = has_index.contains(name.as_str());
+            (name, (manifest, index))
+        })
+        .collect())
 }
 
 pub(crate) fn promote_detected_package_modules(
     bundle: &mut InputBundle,
-    materialized_packages: &BTreeSet<String>,
+    materialized_packages: &MaterializedPackageManifests,
 ) -> usize {
     let modules_by_id = bundle
         .modules
@@ -109,9 +132,10 @@ pub(crate) fn promote_detected_package_modules(
         // materialized (fetched). Promoting an unresolved package — e.g. a 404
         // version baked into the recovered bundle — would emit a bare import and
         // an uninstallable `package.json` dependency. Keep it vendored instead.
-        if !materialized_packages.contains(module_package_name) {
+        let Some((package_json, has_root_index)) = materialized_packages.get(module_package_name)
+        else {
             continue;
-        }
+        };
         let Some(module_package_version) = module
             .package_version
             .as_deref()
@@ -132,6 +156,18 @@ pub(crate) fn promote_detected_package_modules(
         ) else {
             continue;
         };
+        // Publicness gate: only externalize when the detected specifier is a real
+        // public export of the package (per its `package.json` exports map).
+        // Otherwise the bare import (e.g. `axios/exports`) crashes at load with
+        // ERR_PACKAGE_PATH_NOT_EXPORTED. Non-public detections stay vendored.
+        if !reverts_package_matcher::package_specifier_is_public(
+            package_json,
+            module_package_name,
+            export_specifier.as_str(),
+            *has_root_index,
+        ) {
+            continue;
+        }
         attribution.package_version = Some(module_package_version.to_string());
         attribution.subpath = detected_package_subpath(export_specifier.as_str());
         attribution.resolved_file = Some(format!(

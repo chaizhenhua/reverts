@@ -80,6 +80,7 @@ pub(crate) use scoring::{
     accepted_attribution_from_match, best_source_match, disambiguate_exact_source_candidate,
     module_package_match,
 };
+pub use source::cache_surfaces::package_specifier_is_public;
 pub use source::source_imports::{
     package_import_names_from_sources, package_import_sites_from_sources,
 };
