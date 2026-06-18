@@ -4,6 +4,7 @@ mod class_field_bindings;
 mod cli_entrypoint;
 mod compiler_preservation;
 mod compute_modules;
+mod dead_export_prune;
 mod destructure_writes;
 mod eager_safe_analysis;
 mod external_package_adapter_emit;

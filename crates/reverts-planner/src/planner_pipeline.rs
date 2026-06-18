@@ -36,6 +36,7 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     EmitRuntimeHelpersPass.run(context, &mut state)?;
     EmitCliEntrypointPass.run(context, &mut state)?;
     PruneUnreachableFilesPass.run(context, &mut state)?;
+    PruneDeadExportsPass.run(context, &mut state)?;
     Ok(state.plan)
 }
 
@@ -220,6 +221,19 @@ impl PlanningPass for PruneUnreachableFilesPass {
         state: &mut PlanningState,
     ) -> Result<(), PlanError> {
         prune_plan_to_cli_reachable(&mut state.plan);
+        Ok(())
+    }
+}
+
+struct PruneDeadExportsPass;
+
+impl PlanningPass for PruneDeadExportsPass {
+    fn run(
+        &self,
+        _context: &PlannerContext<'_>,
+        state: &mut PlanningState,
+    ) -> Result<(), PlanError> {
+        crate::dead_export_prune::prune_dead_exports(&mut state.plan);
         Ok(())
     }
 }
