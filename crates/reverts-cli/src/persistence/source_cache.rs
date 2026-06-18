@@ -8,11 +8,58 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_ir::hash::fnv1a_hex as stable_hash;
-use reverts_package_matcher::{PackageSource, package_source_entry_path};
+use reverts_package_matcher::{
+    PackageSource, SourceFingerprint, fingerprint_source, package_source_entry_path,
+};
 use rusqlite::{Connection, params, params_from_iter};
 
 use crate::errors::MatchPackagesError;
 use crate::{package_export_specifier, sqlite_placeholders, sqlite_table_has_column};
+
+/// Serialize a structural fingerprint for the `fingerprint_json` cache column.
+fn serialize_fingerprint(fingerprint: &SourceFingerprint) -> String {
+    serde_json::json!({
+        "h": fingerprint.normalized_source_hash,
+        "hs": fingerprint.normalized_source_hashes,
+        "fs": fingerprint.function_signature_hashes,
+        "sa": fingerprint.string_anchors,
+    })
+    .to_string()
+}
+
+/// Parse a cached `fingerprint_json` value back into a [`SourceFingerprint`].
+pub(crate) fn deserialize_fingerprint(json: &str) -> Option<SourceFingerprint> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let string_set = |key: &str| -> BTreeSet<String> {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some(SourceFingerprint {
+        normalized_source_hash: value.get("h")?.as_str()?.to_string(),
+        normalized_source_hashes: string_set("hs"),
+        function_signature_hashes: string_set("fs"),
+        string_anchors: string_set("sa"),
+    })
+}
+
+/// Fingerprint JSON to persist for a source: reuse an attached fingerprint, or
+/// compute it once (package sources are immutable, so this is cached forever).
+fn source_fingerprint_json(source: &PackageSource) -> Option<String> {
+    if let Some(fingerprint) = &source.fingerprint {
+        return Some(serialize_fingerprint(fingerprint));
+    }
+    fingerprint_source(source.source_path.as_str(), source.source.as_str())
+        .ok()
+        .map(|fingerprint| serialize_fingerprint(&fingerprint))
+}
 
 pub(crate) const PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION: i64 = 4;
 
@@ -26,6 +73,7 @@ CREATE TABLE IF NOT EXISTS package_source_cache (
     external_importable INTEGER NOT NULL DEFAULT 1,
     external_import_policy_version INTEGER NOT NULL DEFAULT 0,
     export_specifier TEXT NOT NULL DEFAULT '',
+    fingerprint_json TEXT,
     fetched_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     PRIMARY KEY (package_name, package_version, entry_path)
@@ -55,14 +103,15 @@ pub(crate) fn persist_package_source_cache(
                 INSERT INTO package_source_cache
                     (package_name, package_version, entry_path, source_content,
                      content_hash, external_importable, external_import_policy_version,
-                     export_specifier, fetched_at, expires_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now', '+30 days'))
+                     export_specifier, fingerprint_json, fetched_at, expires_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, datetime('now'), datetime('now', '+30 days'))
                 ON CONFLICT(package_name, package_version, entry_path) DO UPDATE SET
                     source_content = excluded.source_content,
                     content_hash = excluded.content_hash,
                     external_importable = excluded.external_importable,
                     external_import_policy_version = excluded.external_import_policy_version,
                     export_specifier = excluded.export_specifier,
+                    fingerprint_json = excluded.fingerprint_json,
                     fetched_at = excluded.fetched_at,
                     expires_at = excluded.expires_at
                 ",
@@ -79,6 +128,7 @@ pub(crate) fn persist_package_source_cache(
                     },
                     PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
                     source.export_specifier.as_str(),
+                    source_fingerprint_json(source),
                 ],
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -136,6 +186,18 @@ fn ensure_package_source_cache_table(
                 r"
                 ALTER TABLE package_source_cache
                     ADD COLUMN export_specifier TEXT NOT NULL DEFAULT '';
+                ",
+            )
+            .map_err(MatchPackagesError::WritePackageSourceCache)?;
+    }
+    if !sqlite_table_has_column(connection, "package_source_cache", "fingerprint_json")
+        .map_err(MatchPackagesError::WritePackageSourceCache)?
+    {
+        connection
+            .execute_batch(
+                r"
+                ALTER TABLE package_source_cache
+                    ADD COLUMN fingerprint_json TEXT;
                 ",
             )
             .map_err(MatchPackagesError::WritePackageSourceCache)?;
@@ -273,23 +335,30 @@ pub(crate) fn package_source_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Resu
         cached_export_specifier.trim().to_string()
     };
     let source_path = format!("{package_name}@{package_version}/{entry_path}");
-    if external_importable {
-        Ok(PackageSource::external(
+    let fingerprint = row
+        .get::<_, Option<String>>(6)?
+        .and_then(|json| deserialize_fingerprint(json.as_str()));
+    let package_source = if external_importable {
+        PackageSource::external(
             package_name,
             package_version,
             export_specifier,
             source_path,
             source,
-        ))
+        )
     } else {
-        Ok(PackageSource::source_only(
+        PackageSource::source_only(
             package_name,
             package_version,
             export_specifier,
             source_path,
             source,
-        ))
-    }
+        )
+    };
+    Ok(match fingerprint {
+        Some(fingerprint) => package_source.with_fingerprint(fingerprint),
+        None => package_source,
+    })
 }
 
 pub(crate) fn stale_package_source_cache_versions(
