@@ -45,15 +45,15 @@ const MIN_STRING_ANCHOR_LEN: usize = 3;
 const MIN_REGEX_ANCHOR_LEN: usize = 6;
 const MODULE_SOURCE_HASH_ALTERNATE_MAX_BYTES: usize = 64 * 1024;
 
-#[derive(Debug, Clone)]
-pub(crate) struct SourceFingerprint {
-    pub(crate) normalized_source_hash: String,
-    pub(crate) normalized_source_hashes: BTreeSet<String>,
-    pub(crate) function_signature_hashes: BTreeSet<String>,
-    pub(crate) string_anchors: BTreeSet<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFingerprint {
+    pub normalized_source_hash: String,
+    pub normalized_source_hashes: BTreeSet<String>,
+    pub function_signature_hashes: BTreeSet<String>,
+    pub string_anchors: BTreeSet<String>,
 }
 
-pub(crate) fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint, String> {
+pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint, String> {
     let normalized = normalize_source(path, source)?;
     let ast = ast_fingerprint(path, normalized.as_str())?;
     let normalized_source_hash = stable_hash(normalized.as_bytes());

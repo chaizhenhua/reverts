@@ -17,6 +17,7 @@ pub use api::{
 };
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
+pub use index::{SourceFingerprint, fingerprint_source};
 pub(crate) use index::{module_match_fingerprint, package_source_fingerprint};
 pub use matcher::VersionedPackageMatcher;
 pub(crate) use matcher::has_accepted_attribution;

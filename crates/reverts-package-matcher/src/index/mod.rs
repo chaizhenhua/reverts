@@ -9,4 +9,4 @@ pub(crate) use package_version::{
     is_strong_path_hint_token, module_match_fingerprint, package_source_fingerprint,
     package_source_fingerprint_from_source,
 };
-pub(crate) use source_fingerprint::{SourceFingerprint, fingerprint_source};
+pub use source_fingerprint::{SourceFingerprint, fingerprint_source};

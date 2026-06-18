@@ -311,6 +311,18 @@ pub(crate) fn module_match_fingerprint(
 pub(crate) fn package_source_fingerprint<'a>(
     source: &'a PackageSource,
 ) -> Result<PackageSourceFingerprint<'a>, String> {
+    // Reuse a precomputed fingerprint when the source carries one — package
+    // sources are immutable per (package, version, path), so this skips the
+    // expensive parse + normalize + signature extraction on warm runs.
+    if let Some(cached) = &source.fingerprint {
+        return Ok(PackageSourceFingerprint {
+            source,
+            normalized_source_hash: cached.normalized_source_hash.clone(),
+            normalized_source_hashes: cached.normalized_source_hashes.clone(),
+            function_signature_hashes: cached.function_signature_hashes.clone(),
+            string_anchors: cached.string_anchors.clone(),
+        });
+    }
     let fingerprint = fingerprint_source(source.source_path.as_str(), source.source.as_str())?;
     Ok(package_source_fingerprint_from_source(source, fingerprint))
 }
@@ -325,5 +337,50 @@ pub(crate) fn package_source_fingerprint_from_source<'a>(
         normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
         string_anchors: fingerprint.string_anchors,
+    }
+}
+
+#[cfg(test)]
+mod fingerprint_cache_tests {
+    use std::collections::BTreeSet;
+
+    use super::package_source_fingerprint;
+    use crate::{PackageSource, SourceFingerprint};
+
+    fn anchors(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn reuses_cached_fingerprint_without_parsing() {
+        let cached = SourceFingerprint {
+            normalized_source_hash: "deadbeef".to_string(),
+            normalized_source_hashes: anchors(&["deadbeef", "alt"]),
+            function_signature_hashes: anchors(&["sig1"]),
+            string_anchors: anchors(&["anchor"]),
+        };
+        // Deliberately unparseable body: if the matcher reused the cache it
+        // returns the cached hashes verbatim; if it re-parsed it would error or
+        // differ. This proves the warm path skips the parse entirely.
+        let source =
+            PackageSource::external("pkg", "1.0.0", "pkg", "index.js", "this is %%% $$$ broken")
+                .with_fingerprint(cached.clone());
+        let fp = package_source_fingerprint(&source)
+            .expect("cached fingerprint must be reused without parsing the source");
+        assert_eq!(fp.normalized_source_hash, cached.normalized_source_hash);
+        assert_eq!(fp.normalized_source_hashes, cached.normalized_source_hashes);
+        assert_eq!(
+            fp.function_signature_hashes,
+            cached.function_signature_hashes
+        );
+        assert_eq!(fp.string_anchors, cached.string_anchors);
+    }
+
+    #[test]
+    fn computes_fingerprint_when_uncached() {
+        let source =
+            PackageSource::external("pkg", "1.0.0", "pkg", "index.js", "export const x = 1;\n");
+        let fp = package_source_fingerprint(&source).expect("valid source fingerprints");
+        assert!(!fp.normalized_source_hash.is_empty());
     }
 }

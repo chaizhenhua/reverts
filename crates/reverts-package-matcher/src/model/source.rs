@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 
 use reverts_js::JsError;
 
+use crate::index::SourceFingerprint;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Package source candidate with a verified import surface.
 pub struct PackageSource {
@@ -22,6 +24,12 @@ pub struct PackageSource {
     /// through a package's `exports` map. Those sources must stay source-only
     /// until an import-shape resolver proves the specifier is safe.
     pub external_importable: bool,
+    /// Precomputed structural fingerprint for this source, if cached. When
+    /// present the matcher reuses it instead of re-parsing the source — package
+    /// sources are immutable per `(package, version, path)`, so the fingerprint
+    /// is deterministic and safe to memoize across runs. `None` means "compute
+    /// on demand".
+    pub fingerprint: Option<SourceFingerprint>,
 }
 
 pub(crate) const PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES: usize = 512 * 1024;
@@ -52,6 +60,7 @@ impl PackageSource {
             source_path: source_path.into(),
             source: source.into(),
             external_importable: true,
+            fingerprint: None,
         }
     }
 
@@ -73,7 +82,15 @@ impl PackageSource {
             source_path: source_path.into(),
             source: source.into(),
             external_importable: false,
+            fingerprint: None,
         }
+    }
+
+    /// Attaches a precomputed fingerprint so the matcher can skip re-parsing.
+    #[must_use]
+    pub fn with_fingerprint(mut self, fingerprint: SourceFingerprint) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
     }
 
     pub(crate) fn is_within_fingerprint_budget(&self) -> bool {
