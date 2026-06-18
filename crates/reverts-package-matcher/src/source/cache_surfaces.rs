@@ -4,7 +4,11 @@
 //! emit accepted surfaces only for attributions whose specifier is proven
 //! public. Pure logic; unit-tested with fixtures.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use reverts_input::{
+    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+};
 
 use crate::PackageSource;
 
@@ -75,12 +79,122 @@ pub(crate) fn public_export_specifiers(
     specifiers
 }
 
+/// Emit accepted external surfaces for matched packages, anchored on each
+/// package's cached `package.json` public API. Only attributions whose
+/// `export_specifier` is a proven public specifier produce a surface; internal
+/// paths (e.g. `rxjs/internal/...`) never do.
+pub(crate) fn resolve_cache_anchored_package_surfaces(
+    attributions: &[PackageAttributionInput],
+    package_sources: &[PackageSource],
+    package_filter: Option<&BTreeSet<String>>,
+) -> Vec<PackageSurfaceInput> {
+    let mut public_by_package = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut emitted = BTreeSet::<String>::new();
+    let mut surfaces = Vec::new();
+
+    for attribution in attributions {
+        if attribution.status != PackageAttributionStatus::Accepted
+            || attribution.emission_mode != PackageEmissionMode::ExternalImport
+        {
+            continue;
+        }
+        if let Some(filter) = package_filter
+            && !filter.contains(attribution.package_name.as_str())
+        {
+            continue;
+        }
+        let (Some(version), Some(specifier)) = (
+            attribution.package_version.as_deref(),
+            attribution.export_specifier.as_deref(),
+        ) else {
+            continue;
+        };
+        if emitted.contains(specifier) {
+            continue;
+        }
+        let public = public_by_package
+            .entry(attribution.package_name.clone())
+            .or_insert_with(|| {
+                cached_root_package_json(attribution.package_name.as_str(), package_sources)
+                    .map(|pj| public_export_specifiers(attribution.package_name.as_str(), &pj))
+                    .unwrap_or_default()
+            });
+        if !public.contains(specifier) {
+            continue;
+        }
+        emitted.insert(specifier.to_string());
+        surfaces.push(
+            PackageSurfaceInput::accepted_external(
+                attribution.package_name.clone(),
+                version.to_string(),
+                specifier.to_string(),
+            )
+            .with_evidence(format!("cache-anchored-public-export:{specifier}")),
+        );
+    }
+    surfaces
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverts_ir::ModuleId;
 
     fn json(s: &str) -> serde_json::Value {
         parse_cached_package_json(s).expect("parse")
+    }
+
+    fn pkg_json_source(name: &str, version: &str, body_json: &str) -> PackageSource {
+        PackageSource::source_only(
+            name,
+            version,
+            name,
+            "package.json",
+            format!("export default {body_json};"),
+        )
+    }
+
+    fn accepted(
+        module: u32,
+        name: &str,
+        version: &str,
+        specifier: &str,
+    ) -> PackageAttributionInput {
+        PackageAttributionInput::accepted_external(ModuleId(module), name, version, specifier)
+    }
+
+    #[test]
+    fn emits_surface_for_public_specifier_only() {
+        let sources = vec![pkg_json_source(
+            "rxjs",
+            "7.8.1",
+            r#"{"name":"rxjs","exports":{".":"./d/index.js","./operators":"./d/op.js"}}"#,
+        )];
+        let attrs = vec![
+            accepted(1, "rxjs", "7.8.1", "rxjs"),
+            accepted(2, "rxjs", "7.8.1", "rxjs/operators"),
+            accepted(3, "rxjs", "7.8.1", "rxjs/internal/util/isFunction"),
+        ];
+        let surfaces = resolve_cache_anchored_package_surfaces(&attrs, &sources, None);
+        let specs = surfaces
+            .iter()
+            .map(|s| s.export_specifier.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(specs.contains("rxjs"));
+        assert!(specs.contains("rxjs/operators"));
+        assert!(!specs.contains("rxjs/internal/util/isFunction"));
+        assert_eq!(surfaces.len(), 2);
+        assert!(
+            surfaces
+                .iter()
+                .all(|s| s.status == PackageAttributionStatus::Accepted)
+        );
+    }
+
+    #[test]
+    fn no_surface_when_package_json_absent() {
+        let attrs = vec![accepted(1, "zod", "3.0.0", "zod")];
+        assert!(resolve_cache_anchored_package_surfaces(&attrs, &[], None).is_empty());
     }
 
     #[test]
