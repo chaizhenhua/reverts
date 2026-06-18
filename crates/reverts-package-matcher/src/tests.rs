@@ -811,6 +811,59 @@ fn exact_hint_import_proof_accepts_root_export_entry_path_match() {
 }
 
 #[test]
+fn exact_hint_does_not_externalize_contradicted_root_hint_but_keeps_ownership() {
+    // A module hinted `zod` at its package root would normally be externalized
+    // directly here (short names leave no in-source token, so quality defaults
+    // to `Trusted`). But its body is really `ws` code present in the index, so
+    // the hint is provably mis-attributed. The direct externalization must be
+    // suppressed, yet the source-only ownership match must remain so the
+    // cross-package correction can later re-home the module to `ws`.
+    let ws_source = "export function Receiver(){return \"permessage-deflate\";}";
+    let mut rows = rows_with_package_source_at_version(ws_source, "3.22.5");
+    rows.modules[0].package_name = Some("zod".to_string());
+    rows.modules[0].semantic_path = "modules/10-zod/index.ts".to_string();
+    let package_sources = [
+        PackageSource::external(
+            "zod",
+            "3.22.5",
+            "zod",
+            "zod@3.22.5/index.js",
+            "export const schema = { parse() { return 'schema'; } };",
+        ),
+        PackageSource::external(
+            "ws",
+            "8.16.0",
+            "ws/receiver",
+            "ws@8.16.0/lib/receiver.js",
+            ws_source,
+        ),
+    ];
+    let mut report = VersionedPackageMatchReport {
+        attributions: Vec::new(),
+        surfaces: Vec::new(),
+        matches: Vec::new(),
+        version_matches: Vec::new(),
+        audit: Default::default(),
+    };
+
+    exact_hint::promote_exact_hint_ownership_matches(&rows, &package_sources, &mut report);
+
+    let package_match = report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(10))
+        .expect("the source-only ownership match must be kept for cross-package correction");
+    assert!(
+        !package_match.external_importable,
+        "a hint contradicted by another package's source must not be externalized from exact_hint"
+    );
+    assert!(
+        report.attributions.is_empty(),
+        "no external import attribution may be emitted for the contradicted hint"
+    );
+}
+
+#[test]
 fn pipeline_corrects_misattributed_hint_whose_semantic_path_resolves() {
     // A module wrapped under a bundler-misattributed `node_modules/zod/...`
     // path carries `package_name = zod`, and its semantic path *does* resolve

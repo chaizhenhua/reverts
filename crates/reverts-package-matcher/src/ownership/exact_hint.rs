@@ -5,9 +5,9 @@
 //! matches here, optionally with an external import specifier when the
 //! upstream source is importable from the bundle's entry contract.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputRows, PackageAttributionInput};
+use reverts_input::{InputRows, ModuleInput, PackageAttributionInput};
 use reverts_ir::{ModuleId, ModuleKind, split_bare_specifier};
 use reverts_package::ExternalImportProofPath;
 use semver::Version;
@@ -15,8 +15,9 @@ use semver::Version;
 use crate::{
     ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, accepted_external_modules, is_build_path_segment,
-    is_json_source_path, package_module_source_quality, package_module_source_quality_label,
-    package_semantic_path_prefixes, strip_source_extension,
+    is_json_source_path, module_match_fingerprint, package_module_source_quality,
+    package_module_source_quality_label, package_semantic_path_prefixes,
+    package_source_fingerprint, strip_source_extension,
 };
 
 pub(crate) fn promote_exact_hint_ownership_matches(
@@ -43,6 +44,12 @@ pub(crate) fn promote_exact_hint_ownership_matches(
         .iter()
         .map(|package_match| package_match.module_id)
         .collect::<BTreeSet<_>>();
+    // Normalized source hash -> the package names that ship a source with that
+    // hash. Used to fingerprint-verify a weak path hint: if a module's source
+    // positively matches some other package, the hint is mis-attributed and
+    // must not be trusted (e.g. ws Receiver code carrying a `node_modules/zod`
+    // path hint from the bundle).
+    let package_names_by_source_hash = package_names_by_source_hash(package_sources);
 
     for module in &rows.modules {
         if module.kind != ModuleKind::Package || already_accepted.contains(&module.id) {
@@ -75,7 +82,22 @@ pub(crate) fn promote_exact_hint_ownership_matches(
         if quality == PackageModuleSourceQuality::Invalid {
             continue;
         }
-        let external_specifier = (quality == PackageModuleSourceQuality::Trusted)
+        // A path hint can be mis-attributed by the bundle: e.g. ws Receiver code
+        // shipped under a `node_modules/zod` path hint. When the module's
+        // normalized source positively matches a DIFFERENT package's shipped
+        // source, the hint provably names the wrong package. Keep the source-only
+        // ownership match so the cross-package correction in `force_externalize`
+        // can re-home the module to its true package, but never externalize it to
+        // the contradicted package from here — including the false-`Trusted` case
+        // where a short package name leaves no in-source token to verify.
+        let contradicted = hint_contradicted_by_source_fingerprint(
+            module,
+            slice.source_file_path,
+            slice.source,
+            package_name,
+            &package_names_by_source_hash,
+        );
+        let external_specifier = (quality == PackageModuleSourceQuality::Trusted && !contradicted)
             .then(|| {
                 exact_hint_external_specifier(
                     package_sources,
@@ -177,6 +199,51 @@ fn exact_hint_source_path(
         package_module_source_quality_label(quality),
         semantic_path,
     )
+}
+
+/// Index every cached package source by its normalized source hashes, mapping
+/// each hash to the set of package names that ship a source with that hash.
+fn package_names_by_source_hash(
+    package_sources: &[PackageSource],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_hash = BTreeMap::<String, BTreeSet<String>>::new();
+    for source in package_sources {
+        let Ok(fingerprint) = package_source_fingerprint(source) else {
+            continue;
+        };
+        for hash in &fingerprint.normalized_source_hashes {
+            by_hash
+                .entry(hash.clone())
+                .or_default()
+                .insert(source.package_name.clone());
+        }
+    }
+    by_hash
+}
+
+/// Whether a path hint claiming `package_name` is contradicted by source
+/// fingerprint evidence. Returns true only when the module's normalized source
+/// positively matches at least one cached package source AND none of the
+/// matching packages is the claimed one — i.e. the source provably belongs to a
+/// different package. A module that matches nothing (common for minified
+/// surfaces) is not contradicted.
+fn hint_contradicted_by_source_fingerprint(
+    module: &ModuleInput,
+    source_path: &str,
+    source: &str,
+    package_name: &str,
+    package_names_by_source_hash: &BTreeMap<String, BTreeSet<String>>,
+) -> bool {
+    let Ok(fingerprint) = module_match_fingerprint(module, source_path, source) else {
+        return false;
+    };
+    let mut matched_packages = BTreeSet::<&str>::new();
+    for hash in &fingerprint.normalized_source_hashes {
+        if let Some(packages) = package_names_by_source_hash.get(hash) {
+            matched_packages.extend(packages.iter().map(String::as_str));
+        }
+    }
+    !matched_packages.is_empty() && !matched_packages.contains(package_name)
 }
 
 fn exact_hint_external_specifier(
