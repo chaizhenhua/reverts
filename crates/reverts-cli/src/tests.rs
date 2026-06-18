@@ -519,9 +519,14 @@ fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, Materializ
         .map(|name| {
             (
                 (*name).to_string(),
+                // A wildcard `exports` map makes both the bare root and every
+                // subpath public, and (having an exports field) skips file-based
+                // specifier resolution — so detected specifiers are accepted
+                // as-is, matching the permissive intent of this helper.
                 MaterializedPackageManifest::new(
-                    format!(r#"{{"name":"{name}","main":"./index.js"}}"#),
+                    format!(r#"{{"name":"{name}","exports":{{".":"./index.js","./*":"./*.js"}}}}"#),
                     true,
+                    std::collections::BTreeSet::new(),
                 ),
             )
         })
@@ -588,6 +593,7 @@ fn detected_package_modules_skip_non_public_specifier() {
         MaterializedPackageManifest::new(
             r#"{"name":"pkg","exports":{".":"./index.js"}}"#.to_string(),
             false,
+            std::collections::BTreeSet::new(),
         ),
     )]);
     let promoted = promote_detected_package_modules(&mut input, &manifests);
@@ -597,6 +603,84 @@ fn detected_package_modules_skip_non_public_specifier() {
         input.package_attributions[0].status,
         reverts_input::PackageAttributionStatus::Rejected
     );
+}
+
+#[test]
+fn detected_cjs_deep_import_resolves_real_file_extension() {
+    // lodash is a no-`exports` CJS package; its `_baseUnary` module ships as
+    // `_baseUnary.js`. Node ESM does not auto-append extensions, so the emitted
+    // specifier must name the real file (`lodash/_baseUnary.js`), not the bare
+    // `lodash/_baseUnary` (which fails with ERR_MODULE_NOT_FOUND).
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "baseUnary",
+        "lodash/_baseUnary",
+        "lodash",
+        Some("4.17.20".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "lodash",
+            "package matcher did not produce an accepted attribution for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    // lodash: no exports map; ships `_baseUnary.js` (and a root index).
+    let manifests = std::collections::BTreeMap::from([(
+        "lodash".to_string(),
+        MaterializedPackageManifest::new(
+            r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
+            false,
+            std::collections::BTreeSet::from([
+                "_baseUnary.js".to_string(),
+                "lodash.js".to_string(),
+            ]),
+        ),
+    )]);
+    let promoted = promote_detected_package_modules(&mut input, &manifests);
+
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        input.package_attributions[0].export_specifier.as_deref(),
+        Some("lodash/_baseUnary.js"),
+        "deep CJS import must name the real file with extension"
+    );
+}
+
+#[test]
+fn detected_cjs_deep_import_without_backing_file_is_not_externalized() {
+    // A no-`exports` deep subpath that resolves to no real cached file cannot be
+    // safely externalized (the bare import would not resolve), so it stays
+    // vendored rather than emitting a broken `import`.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "ghost",
+        "lodash/_ghost",
+        "lodash",
+        Some("4.17.20".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "lodash",
+            "package matcher did not produce an accepted attribution for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let manifests = std::collections::BTreeMap::from([(
+        "lodash".to_string(),
+        MaterializedPackageManifest::new(
+            r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
+            false,
+            std::collections::BTreeSet::from(["lodash.js".to_string()]),
+        ),
+    )]);
+    let promoted = promote_detected_package_modules(&mut input, &manifests);
+
+    assert_eq!(promoted, 0, "unresolvable deep import must stay vendored");
 }
 
 #[test]

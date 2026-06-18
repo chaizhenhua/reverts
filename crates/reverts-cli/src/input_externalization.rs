@@ -61,13 +61,23 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
 pub(crate) struct MaterializedPackageManifest {
     pub(crate) package_json_source: String,
     pub(crate) has_root_index: bool,
+    /// Relative file paths the package actually ships (from the cache). Used to
+    /// resolve a bare CJS subpath to the real on-disk file — Node ESM never
+    /// auto-appends extensions, so a no-`exports` deep import must name the exact
+    /// file (`lodash/_baseUnary.js`, not `lodash/_baseUnary`).
+    pub(crate) entry_paths: BTreeSet<String>,
 }
 
 impl MaterializedPackageManifest {
-    pub(crate) fn new(package_json_source: impl Into<String>, has_root_index: bool) -> Self {
+    pub(crate) fn new(
+        package_json_source: impl Into<String>,
+        has_root_index: bool,
+        entry_paths: BTreeSet<String>,
+    ) -> Self {
         Self {
             package_json_source: package_json_source.into(),
             has_root_index,
+            entry_paths,
         }
     }
 }
@@ -134,23 +144,34 @@ impl MaterializedPackageManifestRepository<'_> {
                 manifests.insert(name.to_string(), manifest);
             }
         }
-        let mut has_index = BTreeSet::<String>::new();
-        let mut index_statement = self.connection.prepare(
-            "SELECT DISTINCT package_name FROM package_source_cache \
-             WHERE entry_path IN ('index.js', 'index.json', 'index.node')",
+        let mut entry_paths = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut paths_statement = self.connection.prepare(
+            "SELECT package_name, entry_path FROM package_source_cache \
+             WHERE TRIM(COALESCE(package_name, '')) != '' AND TRIM(COALESCE(entry_path, '')) != ''",
         )?;
-        let rows = index_statement.query_map([], |row| row.get::<_, String>(0))?;
-        for name in collect_sqlite_rows(rows)? {
+        let rows = paths_statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for (name, entry_path) in collect_sqlite_rows(rows)? {
             let name = name.trim();
             if !name.is_empty() {
-                has_index.insert(name.to_string());
+                entry_paths
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert(entry_path.trim().to_string());
             }
         }
         Ok(manifests
             .into_iter()
             .map(|(name, manifest)| {
-                let index = has_index.contains(name.as_str());
-                (name, MaterializedPackageManifest::new(manifest, index))
+                let paths = entry_paths.remove(&name).unwrap_or_default();
+                let has_index = ["index.js", "index.json", "index.node"]
+                    .iter()
+                    .any(|index| paths.contains(*index));
+                (
+                    name,
+                    MaterializedPackageManifest::new(manifest, has_index, paths),
+                )
             })
             .collect())
     }
@@ -213,6 +234,17 @@ impl DetectedPackageExternalizationPolicy<'_> {
         ) {
             return None;
         }
+        // Specifier-resolution gate: a no-`exports` (CJS) deep import must name
+        // the exact on-disk file — Node ESM never auto-appends extensions. Append
+        // the real extension from the cache (`lodash/_baseUnary` ->
+        // `lodash/_baseUnary.js`); if no real file backs it, it is not safely
+        // externalizable, so keep it vendored.
+        let export_specifier = resolve_cjs_deep_import_specifier(
+            manifest.package_json_source.as_str(),
+            module_package_name,
+            export_specifier.as_str(),
+            &manifest.entry_paths,
+        )?;
 
         Some(DetectedPackageExternalizationDecision {
             package_version: package_version.to_string(),
@@ -224,6 +256,53 @@ impl DetectedPackageExternalizationPolicy<'_> {
             export_specifier,
         })
     }
+}
+
+/// Correct a detected external specifier to one Node can actually resolve.
+///
+/// Packages with an `exports` map are imported by export key (no file
+/// extension) and the bare root resolves via `main`/`index`, so those are left
+/// as-is. For a *deep subpath of a no-`exports` (CJS) package* the specifier
+/// must name the exact file: Node ESM does not auto-append extensions or resolve
+/// directory `index`. The real file is looked up in the package's cached file
+/// list and its extension appended. Returns `None` when nothing backs the
+/// subpath, so the caller keeps the module vendored instead of emitting a bare
+/// import that would fail with `ERR_MODULE_NOT_FOUND`.
+fn resolve_cjs_deep_import_specifier(
+    package_json_source: &str,
+    package_name: &str,
+    specifier: &str,
+    entry_paths: &BTreeSet<String>,
+) -> Option<String> {
+    if package_has_exports_field(package_json_source) {
+        return Some(specifier.to_string());
+    }
+    let Some(subpath) = specifier.strip_prefix(format!("{package_name}/").as_str()) else {
+        // Bare-root import resolves via `main`/`index`.
+        return Some(specifier.to_string());
+    };
+    if entry_paths.contains(subpath) {
+        return Some(specifier.to_string());
+    }
+    const EXTENSIONS: [&str; 5] = [".js", ".json", ".cjs", ".mjs", ".node"];
+    for extension in EXTENSIONS {
+        let file = format!("{subpath}{extension}");
+        if entry_paths.contains(file.as_str()) {
+            return Some(format!("{package_name}/{file}"));
+        }
+    }
+    for extension in EXTENSIONS {
+        let file = format!("{subpath}/index{extension}");
+        if entry_paths.contains(file.as_str()) {
+            return Some(format!("{package_name}/{file}"));
+        }
+    }
+    None
+}
+
+fn package_has_exports_field(package_json_source: &str) -> bool {
+    reverts_package::parse_package_json_source(package_json_source)
+        .is_some_and(|manifest| manifest.get("exports").is_some())
 }
 
 fn detected_package_attribution_is_already_externalized(
