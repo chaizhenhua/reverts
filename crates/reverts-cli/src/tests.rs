@@ -9,6 +9,7 @@ use reverts_input::{
 };
 use reverts_ir::{BindingName, ModuleId, ModuleKind};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::PackageSourceCacheView;
 use reverts_package_matcher::{
     ModuleMatchStrategy, PackageMatch, PackageSource, VersionedPackageMatchReport,
     package_source_normalized_hash,
@@ -28,8 +29,7 @@ use super::commands::runtime_inventory::{
     runtime_source_span_owner_label_for_range,
 };
 use super::input_externalization::{
-    MaterializedPackageKey, MaterializedPackageManifest, promote_detected_package_modules,
-    promote_verified_externalization_hints,
+    promote_detected_package_modules, promote_verified_externalization_hints,
 };
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
@@ -513,38 +513,40 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
 /// `package.json` (a `main`, no `exports`) so every detected specifier — bare
 /// root or subpath — counts as public. Tests needing a restrictive exports map
 /// build their own map.
-fn materialized(
-    packages: &[(&str, &str)],
-) -> std::collections::BTreeMap<MaterializedPackageKey, MaterializedPackageManifest> {
+fn materialized(packages: &[(&str, &str)]) -> PackageSourceCacheView {
     materialized_shipping(packages, &[])
 }
 
-fn materialized_shipping(
-    packages: &[(&str, &str)],
-    files: &[&str],
-) -> std::collections::BTreeMap<MaterializedPackageKey, MaterializedPackageManifest> {
-    let entry_paths = files
-        .iter()
-        .map(|file| (*file).to_string())
-        .chain(std::iter::once("index.js".to_string()))
-        .collect::<std::collections::BTreeSet<_>>();
-    packages
-        .iter()
-        .map(|(name, version)| {
-            (
-                ((*name).to_string(), (*version).to_string()),
-                // A wildcard `exports` map makes the bare root and every subpath
-                // public; the detected subpath then has to resolve to a file the
-                // package actually ships (`./*.js`), so the fixture lists those
-                // files in `entry_paths` exactly as a real cached package would.
-                MaterializedPackageManifest::new(
-                    format!(r#"{{"name":"{name}","exports":{{".":"./index.js","./*":"./*.js"}}}}"#),
-                    true,
-                    entry_paths.clone(),
-                ),
-            )
-        })
-        .collect()
+fn materialized_shipping(packages: &[(&str, &str)], files: &[&str]) -> PackageSourceCacheView {
+    let mut cache = PackageSourceCacheView::default();
+    for (name, version) in packages {
+        // A wildcard `exports` map makes the bare root and every subpath public;
+        // the detected subpath then has to resolve to a file the package
+        // actually ships (`./*.js`), so the fixture lists those files in
+        // `entry_paths` exactly as a real cached package would.
+        cache.insert_source(
+            name,
+            version,
+            "package.json",
+            format!(r#"{{"name":"{name}","exports":{{".":"./index.js","./*":"./*.js"}}}}"#),
+        );
+        cache.insert_entry_path(name, version, "index.js");
+        for file in files {
+            cache.insert_entry_path(name, version, file);
+        }
+    }
+    cache
+}
+
+fn materialized_from_entries(entries: &[(&str, &str, &str, &[&str])]) -> PackageSourceCacheView {
+    let mut cache = PackageSourceCacheView::default();
+    for (name, version, manifest, files) in entries {
+        cache.insert_source(name, version, "package.json", *manifest);
+        for file in *files {
+            cache.insert_entry_path(name, version, file);
+        }
+    }
+    cache
 }
 
 #[test]
@@ -603,13 +605,11 @@ fn detected_package_modules_skip_non_public_specifier() {
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
     // pkg is materialized but its exports map only exposes the bare root.
-    let manifests = std::collections::BTreeMap::from([(
-        ("pkg".to_string(), "1.0.0".to_string()),
-        MaterializedPackageManifest::new(
-            r#"{"name":"pkg","exports":{".":"./index.js"}}"#.to_string(),
-            false,
-            std::collections::BTreeSet::new(),
-        ),
+    let manifests = materialized_from_entries(&[(
+        "pkg",
+        "1.0.0",
+        r#"{"name":"pkg","exports":{".":"./index.js"}}"#,
+        &[],
     )]);
     let promoted = promote_detected_package_modules(&mut input, &manifests);
 
@@ -643,16 +643,11 @@ fn detected_cjs_deep_import_resolves_real_file_extension() {
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
     // lodash: no exports map; ships `_baseUnary.js` (and a root index).
-    let manifests = std::collections::BTreeMap::from([(
-        ("lodash".to_string(), "4.17.20".to_string()),
-        MaterializedPackageManifest::new(
-            r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
-            false,
-            std::collections::BTreeSet::from([
-                "_baseUnary.js".to_string(),
-                "lodash.js".to_string(),
-            ]),
-        ),
+    let manifests = materialized_from_entries(&[(
+        "lodash",
+        "4.17.20",
+        r#"{"name":"lodash","main":"./lodash.js"}"#,
+        &["_baseUnary.js", "lodash.js"],
     )]);
     let promoted = promote_detected_package_modules(&mut input, &manifests);
 
@@ -685,13 +680,11 @@ fn detected_cjs_deep_import_without_backing_file_is_not_externalized() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let manifests = std::collections::BTreeMap::from([(
-        ("lodash".to_string(), "4.17.20".to_string()),
-        MaterializedPackageManifest::new(
-            r#"{"name":"lodash","main":"./lodash.js"}"#.to_string(),
-            false,
-            std::collections::BTreeSet::from(["lodash.js".to_string()]),
-        ),
+    let manifests = materialized_from_entries(&[(
+        "lodash",
+        "4.17.20",
+        r#"{"name":"lodash","main":"./lodash.js"}"#,
+        &["lodash.js"],
     )]);
     let promoted = promote_detected_package_modules(&mut input, &manifests);
 
@@ -718,22 +711,18 @@ fn detected_package_manifest_lookup_is_version_scoped() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let manifests = std::collections::BTreeMap::from([
+    let manifests = materialized_from_entries(&[
         (
-            ("pkg".to_string(), "1.0.0".to_string()),
-            MaterializedPackageManifest::new(
-                r#"{"name":"pkg","exports":{".":"./index.js","./internal":"./internal.js"}}"#,
-                false,
-                std::collections::BTreeSet::new(),
-            ),
+            "pkg",
+            "1.0.0",
+            r#"{"name":"pkg","exports":{".":"./index.js","./internal":"./internal.js"}}"#,
+            &[],
         ),
         (
-            ("pkg".to_string(), "2.0.0".to_string()),
-            MaterializedPackageManifest::new(
-                r#"{"name":"pkg","exports":{".":"./index.js"}}"#,
-                false,
-                std::collections::BTreeSet::new(),
-            ),
+            "pkg",
+            "2.0.0",
+            r#"{"name":"pkg","exports":{".":"./index.js"}}"#,
+            &[],
         ),
     ]);
     let promoted = promote_detected_package_modules(&mut input, &manifests);

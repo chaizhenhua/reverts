@@ -8,7 +8,9 @@ use std::path::Path;
 
 use reverts_input::{InputRows, ModuleDependencyTarget};
 use reverts_ir::{ModuleId, split_bare_specifier};
-use reverts_package::is_accepted_external_attribution;
+use reverts_package::{
+    is_accepted_external_attribution, package_source_entry_path_from_source_path,
+};
 use semver::Version;
 
 use crate::{PackageSource, VersionedPackageMatchReport};
@@ -373,13 +375,11 @@ pub fn package_source_relative_path(source: &PackageSource) -> String {
 
 #[must_use]
 pub fn package_source_entry_path(source: &PackageSource) -> String {
-    let prefix = format!("{}@{}/", source.package_name, source.package_version);
-    source
-        .source_path
-        .strip_prefix(prefix.as_str())
-        .unwrap_or(source.source_path.as_str())
-        .trim_start_matches('/')
-        .to_string()
+    package_source_entry_path_from_source_path(
+        source.package_name.as_str(),
+        source.package_version.as_str(),
+        source.source_path.as_str(),
+    )
 }
 
 #[must_use]

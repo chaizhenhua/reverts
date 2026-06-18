@@ -4,12 +4,14 @@ use reverts_input::{ModuleDependencyTarget, PackageAttributionInput};
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
     is_ascii_identifier_continue as is_identifier_continue,
-    is_ascii_identifier_start as is_identifier_start, sanitize_identifier,
+    is_ascii_identifier_start as is_identifier_start, read_quoted_string_at as read_quoted_string,
+    sanitize_identifier,
 };
 use reverts_model::EnrichedProgram;
 use reverts_package::{
-    PackageResolution, PackageSurfaceIndex, accepted_external_attribution_for_module,
-    import_attributes_for_attribution, parse_export_members_import_proof,
+    ExternalImportProof, PackageResolution, PackageSurfaceIndex,
+    accepted_external_attribution_for_module, import_attributes_for_attribution,
+    parse_export_members_import_proof,
 };
 
 use crate::byte_lexer::{find_matching_brace, skip_ws};
@@ -669,31 +671,6 @@ pub(crate) fn collect_define_property_member_getters(
     }
 }
 
-pub(crate) fn read_quoted_string(source: &str, start: usize) -> Option<(String, usize)> {
-    let quote = *source.as_bytes().get(start)?;
-    if quote != b'\'' && quote != b'"' {
-        return None;
-    }
-    let mut escaped = false;
-    let mut out = String::new();
-    for (offset, ch) in source[start + 1..].char_indices() {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch as u8 == quote {
-            return Some((out, start + 1 + offset + ch.len_utf8()));
-        }
-        out.push(ch);
-    }
-    None
-}
-
 pub(crate) fn compact_source_declares_adapter_safe_binding(
     compact_source: &str,
     binding: &str,
@@ -1163,15 +1140,11 @@ fn external_adapter_attribution_has_semantic_path_proof(
     attribution
         .resolved_file
         .as_deref()
-        .is_some_and(|value| value.starts_with("forced-external:semantic-path:"))
+        .is_some_and(|value| ExternalImportProof::parse(value).is_semantic_path_proof())
 }
 
 fn external_adapter_resolved_file_has_weak_source_replacement_proof(value: &str) -> bool {
-    value.starts_with("forced-external:dependency-graph-source:")
-        || value.starts_with("forced-external:dependency-edge-path:")
-        || value.starts_with("forced-external:canonical-subpath:")
-        || value.starts_with("forced-external:semantic-source:")
-        || !value.contains(':')
+    ExternalImportProof::parse(value).is_weak_source_replacement_proof()
 }
 
 fn external_adapter_has_no_module_dependencies(

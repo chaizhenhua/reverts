@@ -298,6 +298,28 @@ fn load_package_attributions(
                     .to_string(),
             );
         }
+        // A `.ts`/`.tsx`/`.mts`/`.cts` import specifier targets a package's
+        // TypeScript *source* (some packages, e.g. ajv@7, ship `lib/*.ts`
+        // alongside compiled `dist/*.js`). Node cannot load it at runtime and
+        // `tsc` would recompile the dependency's own source into the output —
+        // breaking the build with the dependency's type errors. Such a target
+        // is never a valid external import; vendor the module instead.
+        if status == PackageAttributionStatus::Accepted
+            && emission_mode == PackageEmissionMode::ExternalImport
+            && export_specifier
+                .as_deref()
+                .is_some_and(specifier_is_typescript_source)
+        {
+            let dropped = export_specifier.take();
+            status = PackageAttributionStatus::Rejected;
+            emission_mode = PackageEmissionMode::ApplicationSource;
+            subpath = None;
+            resolved_file = None;
+            rejection_reason = Some(format!(
+                "external import specifier '{}' resolves to a TypeScript source file, which Node cannot load and tsc would recompile; vendored instead",
+                dropped.as_deref().unwrap_or_default()
+            ));
+        }
         Ok(PackageAttributionRow {
             module_id: row.get(0)?,
             package_name: row.get(1)?,
@@ -548,6 +570,16 @@ fn path_slug(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+/// Whether an external-import specifier targets a TypeScript source file
+/// (`.ts`/`.tsx`/`.mts`/`.cts`). Such a target is never a valid Node runtime
+/// import and forces `tsc` to recompile the dependency's own source.
+fn specifier_is_typescript_source(specifier: &str) -> bool {
+    let specifier = specifier.trim();
+    [".ts", ".tsx", ".mts", ".cts"]
+        .iter()
+        .any(|extension| specifier.ends_with(extension))
 }
 
 fn emission_mode_from_database(value: &str) -> rusqlite::Result<PackageEmissionMode> {

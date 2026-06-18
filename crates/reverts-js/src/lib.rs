@@ -25,7 +25,8 @@ pub use classify::{
 pub use commonjs_exports::{
     commonjs_create_binding_export_member, commonjs_export_property_name,
     commonjs_module_exports_target, expression_is_commonjs_exports_object, module_export_name,
-    object_define_property_export_member,
+    object_define_property_export_member, static_or_private_property_key_name_ref,
+    static_property_key_name, static_property_key_name_ref,
 };
 pub use format::{format_source_minified, format_source_pretty, normalize_source_for_pipeline};
 pub use format_module_items::{
@@ -45,8 +46,8 @@ pub use facts::{
 };
 pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,
-    is_identifier_part, is_identifier_start, is_js_keyword, sanitize_identifier,
-    skip_block_comment, skip_line_comment,
+    is_identifier_part, is_identifier_start, is_js_keyword, is_valid_static_member_property_name,
+    read_quoted_string_at, sanitize_identifier, skip_block_comment, skip_line_comment,
 };
 pub use lazy::{
     LazyBodyClassification, classify_lazy_module_body, extract_lazy_module_eager_value,

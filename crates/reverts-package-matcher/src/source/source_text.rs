@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+pub(crate) use reverts_js::read_quoted_string_at;
 use reverts_js::{normalize_source_for_pipeline, parse_error_message};
 
 #[must_use]
@@ -52,32 +53,6 @@ pub(crate) fn read_identifier_at(source: &str, start: usize) -> Option<&str> {
 pub(crate) fn read_identifier_with_end_at(source: &str, start: usize) -> Option<(&str, usize)> {
     let identifier = read_identifier_at(source, start)?;
     Some((identifier, start + identifier.len()))
-}
-
-#[must_use]
-pub(crate) fn read_quoted_string_at(source: &str, start: usize) -> Option<(String, usize)> {
-    let quote = *source.as_bytes().get(start)?;
-    if quote != b'\'' && quote != b'"' {
-        return None;
-    }
-    let mut escaped = false;
-    let mut out = String::new();
-    for (offset, ch) in source[start + 1..].char_indices() {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch as u8 == quote {
-            return Some((out, start + 1 + offset + ch.len_utf8()));
-        }
-        out.push(ch);
-    }
-    None
 }
 
 pub(crate) fn normalize_source(path: &str, source: &str) -> Result<String, String> {

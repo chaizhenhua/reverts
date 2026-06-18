@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_ir::split_bare_specifier;
-use reverts_package::is_node_builtin;
+use reverts_package::{is_node_builtin, package_source_entry_path_from_source_path};
 use reverts_package_matcher::{
     PackageSource, package_source_entry_path, package_source_exported_members,
     package_source_normalized_hash,
@@ -274,7 +274,7 @@ fn load_package_externalization_hints(
             package_name: package_name.clone(),
             package_version: package_version.clone(),
             entry_path: clean_package_entry_path(
-                hint_entry_path(
+                package_source_entry_path_from_source_path(
                     package_name.as_str(),
                     package_version.as_str(),
                     raw_entry_path.as_str(),
@@ -306,13 +306,6 @@ fn load_package_externalization_hints(
             .map_err(MatchPackagesError::QueryPackageSources)?;
         collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
     }
-}
-
-fn hint_entry_path<'a>(package_name: &str, package_version: &str, entry_path: &'a str) -> &'a str {
-    let clean = entry_path.trim();
-    clean
-        .strip_prefix(format!("{package_name}@{package_version}/").as_str())
-        .unwrap_or(clean)
 }
 
 fn parse_public_members_hint(value: Option<&str>) -> BTreeSet<String> {

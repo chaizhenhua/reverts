@@ -14,8 +14,13 @@ use reverts_input::{
     InputBundle, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
     PackageAttributionStatus, PackageEmissionMode,
 };
-use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
-use reverts_package::{package_specifier_is_public, resolve_package_deep_import_specifier};
+use reverts_ir::{
+    ModuleId, ModuleKind, is_identifier_like_ascii, is_valid_package_name, split_bare_specifier,
+};
+use reverts_package::{
+    ExternalImportProof, PackageSourceCacheView, package_source_entry_path_from_source_path,
+    package_source_path,
+};
 use reverts_package_matcher::{
     package_source_exported_members, package_source_normalized_hash,
     package_source_normalized_hashes,
@@ -52,39 +57,7 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
     Ok(bundle)
 }
 
-/// Per-package materialization evidence: the cached root `package.json` source
-/// and whether the package ships a root `index.{js,json,node}`. A package is
-/// keyed here only if it was actually fetched (so it exists + is installable);
-/// the manifest then lets us verify a *specifier* is a public export before
-/// externalizing it (so we never emit `import 'pkg/non-public-subpath'`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MaterializedPackageManifest {
-    pub(crate) package_json_source: String,
-    pub(crate) has_root_index: bool,
-    /// Relative file paths the package actually ships (from the cache). Used to
-    /// resolve a bare CJS subpath to the real on-disk file — Node ESM never
-    /// auto-appends extensions, so a no-`exports` deep import must name the exact
-    /// file (`lodash/_baseUnary.js`, not `lodash/_baseUnary`).
-    pub(crate) entry_paths: BTreeSet<String>,
-}
-
-impl MaterializedPackageManifest {
-    pub(crate) fn new(
-        package_json_source: impl Into<String>,
-        has_root_index: bool,
-        entry_paths: BTreeSet<String>,
-    ) -> Self {
-        Self {
-            package_json_source: package_json_source.into(),
-            has_root_index,
-            entry_paths,
-        }
-    }
-}
-
-pub(crate) type MaterializedPackageKey = (String, String);
-pub(crate) type MaterializedPackageManifests =
-    BTreeMap<MaterializedPackageKey, MaterializedPackageManifest>;
+pub(crate) type MaterializedPackageManifests = PackageSourceCacheView;
 
 fn materialized_package_manifests(
     connection: &Connection,
@@ -148,7 +121,7 @@ struct MaterializedPackageManifestRepository<'a> {
 impl MaterializedPackageManifestRepository<'_> {
     fn load(&self) -> Result<MaterializedPackageManifests, SqliteInputError> {
         if !sqlite_table_exists(self.connection, "package_source_cache")? {
-            return Ok(BTreeMap::new());
+            return Ok(PackageSourceCacheView::default());
         }
         for required in [
             "package_name",
@@ -157,13 +130,14 @@ impl MaterializedPackageManifestRepository<'_> {
             "source_content",
         ] {
             if !sqlite_table_has_column(self.connection, "package_source_cache", required)? {
-                return Ok(BTreeMap::new());
+                return Ok(PackageSourceCacheView::default());
             }
         }
-        let mut manifests = BTreeMap::<MaterializedPackageKey, String>::new();
+        let mut cache = PackageSourceCacheView::default();
         let mut statement = self.connection.prepare(
-            "SELECT package_name, package_version, source_content FROM package_source_cache \
-             WHERE entry_path = 'package.json' \
+            "SELECT package_name, package_version, entry_path, source_content \
+               FROM package_source_cache \
+              WHERE TRIM(COALESCE(entry_path, '')) != '' \
                AND TRIM(COALESCE(package_name, '')) != '' \
                AND TRIM(COALESCE(package_version, '')) != ''",
         )?;
@@ -172,52 +146,18 @@ impl MaterializedPackageManifestRepository<'_> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
-        for (name, version, manifest) in collect_sqlite_rows(rows)? {
-            let name = name.trim();
-            let version = version.trim();
-            if !name.is_empty() && !version.is_empty() {
-                manifests.insert((name.to_string(), version.to_string()), manifest);
-            }
+        for (name, version, entry_path, source_content) in collect_sqlite_rows(rows)? {
+            cache.insert_source(
+                name.as_str(),
+                version.as_str(),
+                entry_path.as_str(),
+                source_content,
+            );
         }
-        let mut entry_paths = BTreeMap::<MaterializedPackageKey, BTreeSet<String>>::new();
-        let mut paths_statement = self.connection.prepare(
-            "SELECT package_name, package_version, entry_path FROM package_source_cache \
-             WHERE TRIM(COALESCE(package_name, '')) != '' \
-               AND TRIM(COALESCE(package_version, '')) != '' \
-               AND TRIM(COALESCE(entry_path, '')) != ''",
-        )?;
-        let rows = paths_statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        for (name, version, entry_path) in collect_sqlite_rows(rows)? {
-            let name = name.trim();
-            let version = version.trim();
-            if !name.is_empty() && !version.is_empty() {
-                entry_paths
-                    .entry((name.to_string(), version.to_string()))
-                    .or_default()
-                    .insert(entry_path.trim().to_string());
-            }
-        }
-        Ok(manifests
-            .into_iter()
-            .map(|(key, manifest)| {
-                let paths = entry_paths.remove(&key).unwrap_or_default();
-                let has_index = ["index.js", "index.json", "index.node"]
-                    .iter()
-                    .any(|index| paths.contains(*index));
-                (
-                    key,
-                    MaterializedPackageManifest::new(manifest, has_index, paths),
-                )
-            })
-            .collect())
+        Ok(cache)
     }
 }
 
@@ -261,9 +201,6 @@ impl DetectedPackageExternalizationPolicy<'_> {
         // a 404 version baked into the input bundle — would emit a bare
         // import and an uninstallable `package.json` dependency. Keep it
         // vendored instead.
-        let manifest = self
-            .materialized_packages
-            .get(&(module_package_name.to_string(), package_version.to_string()))?;
         let export_specifier = detected_package_export_specifier(
             module_package_name,
             module.semantic_path.as_str(),
@@ -273,11 +210,10 @@ impl DetectedPackageExternalizationPolicy<'_> {
         // public export of the package (per its `package.json` exports map).
         // Otherwise the bare import (e.g. `axios/exports`) crashes at load with
         // ERR_PACKAGE_PATH_NOT_EXPORTED. Non-public detections stay vendored.
-        if !package_specifier_is_public(
-            manifest.package_json_source.as_str(),
+        if !self.materialized_packages.package_specifier_is_public(
             module_package_name,
+            package_version,
             export_specifier.as_str(),
-            manifest.has_root_index,
         ) {
             return None;
         }
@@ -286,11 +222,10 @@ impl DetectedPackageExternalizationPolicy<'_> {
         // the real extension from the cache (`lodash/_baseUnary` ->
         // `lodash/_baseUnary.js`); if no real file backs it, it is not safely
         // externalizable, so keep it vendored.
-        let export_specifier = resolve_package_deep_import_specifier(
-            manifest.package_json_source.as_str(),
+        let export_specifier = self.materialized_packages.resolve_deep_import_specifier(
             module_package_name,
+            package_version,
             export_specifier.as_str(),
-            &manifest.entry_paths,
         )?;
 
         Some(DetectedPackageExternalizationDecision {
@@ -570,11 +505,10 @@ fn attribution_has_worker_asset_hint(attribution: &PackageAttributionInput) -> b
 }
 
 fn attribution_has_strong_source_proof(attribution: &PackageAttributionInput) -> bool {
-    attribution.resolved_file.as_deref().is_some_and(|value| {
-        value.starts_with("normalized-source-export:")
-            || value.starts_with("exact-hint:")
-            || value.starts_with("forced-external:export-members:")
-    })
+    attribution
+        .resolved_file
+        .as_deref()
+        .is_some_and(|value| ExternalImportProof::parse(value).is_strong_source_proof())
 }
 
 fn load_externalization_hint_proofs(
@@ -627,7 +561,7 @@ fn load_externalization_hint_proofs(
     let rows = statement.query_map([], |row| {
         let package_name = row.get::<_, String>(0)?.trim().to_string();
         let package_version = row.get::<_, String>(1)?.trim().to_string();
-        let entry_path = clean_hint_entry_path(
+        let entry_path = package_source_entry_path_from_source_path(
             package_name.as_str(),
             package_version.as_str(),
             row.get::<_, String>(2)?.as_str(),
@@ -643,7 +577,11 @@ fn load_externalization_hint_proofs(
                 export_specifier,
             ),
             ExternalizationHintProof {
-                source_path: format!("{package_name}@{package_version}/{entry_path}"),
+                source_path: package_source_path(
+                    package_name.as_str(),
+                    package_version.as_str(),
+                    entry_path.as_str(),
+                ),
                 normalized_source_hashes,
                 public_members,
             },
@@ -689,7 +627,7 @@ fn enrich_hint_proofs_with_package_source_alternate_hashes(
     )?;
     for ((package_name, package_version, _export_specifier), proofs) in hints {
         for proof in proofs {
-            let entry_path = clean_hint_entry_path(
+            let entry_path = package_source_entry_path_from_source_path(
                 package_name.as_str(),
                 package_version.as_str(),
                 proof.source_path.as_str(),
@@ -747,7 +685,7 @@ fn source_public_members_are_proven_by_hint(
     }
     let source_public_members = package_source_exported_members(module_path, source)
         .into_iter()
-        .filter(|member| is_identifier_like(member.as_str()))
+        .filter(|member| is_identifier_like_ascii(member))
         .collect::<BTreeSet<_>>();
     !source_public_members.is_empty() && source_public_members.is_subset(hint_public_members)
 }
@@ -757,24 +695,6 @@ fn parse_public_members(value: Option<&str>) -> BTreeSet<String> {
         .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
         .unwrap_or_default()
         .into_iter()
-        .filter(|member| is_identifier_like(member.as_str()))
+        .filter(|member| is_identifier_like_ascii(member))
         .collect()
-}
-
-fn is_identifier_like(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first == '$' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch == '$' || ch.is_ascii_alphanumeric())
-}
-
-fn clean_hint_entry_path(package_name: &str, package_version: &str, entry_path: &str) -> String {
-    entry_path
-        .trim()
-        .trim_matches('/')
-        .strip_prefix(format!("{package_name}@{package_version}/").as_str())
-        .unwrap_or(entry_path.trim().trim_matches('/'))
-        .to_string()
 }

@@ -22,7 +22,7 @@ use super::export_member::{
     public_export_member_external_package_source,
 };
 use super::policy::{
-    SemanticExternalTargetPolicy, canonical_subpath_policy_allows,
+    SemanticExternalTargetPolicy, canonical_subpath_policy_allows, exact_hint_has_quality,
     semantic_external_source_proof_label, semantic_external_source_proof_rank,
     semantic_external_target_policies, semantic_source_only_export_member_policy_allows,
 };
@@ -221,8 +221,7 @@ fn dependency_exact_hint_source_match_external_package_source<'a>(
     cache: &ExternalImportProofScratch<'a>,
 ) -> Option<ExternalImportTarget> {
     if package_match.strategy != ModuleMatchStrategy::DependencyClosureOwnership
-        || !package_match.source_path.starts_with("exact-hint:")
-        || !package_match.source_path.contains(":quality=trusted:")
+        || !exact_hint_has_quality(package_match, "trusted")
         || module_source.trim().is_empty()
     {
         return None;

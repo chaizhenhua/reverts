@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::package_helpers::package_source_external_import_rank;
 use crate::source::exported_members::{export_member_set_is_strong, is_usable_export_member};
-use crate::source::package_refs::package_source_reexport_entries;
+use crate::source::package_refs::{
+    PackageReexportEdgeKind, package_source_reexported_source_only_sources,
+};
 use crate::{ExternalImportSourceIndex, PackagePublicExportProof, PackageSource};
 
 #[must_use]
@@ -17,7 +19,11 @@ pub fn package_source_public_export_proofs(
         .iter()
         .filter(|source| source.external_importable)
     {
-        for source in reexported_source_only_sources(external, &external_source_index) {
+        for source in package_source_reexported_source_only_sources(
+            external,
+            &external_source_index,
+            PackageReexportEdgeKind::AnyReexport,
+        ) {
             let public_members = external_source_index
                 .export_members(source)
                 .into_iter()
@@ -89,32 +95,4 @@ pub fn package_source_public_export_proofs(
             .then_with(|| left.export_specifier.cmp(&right.export_specifier))
     });
     proofs
-}
-
-fn reexported_source_only_sources<'a>(
-    external: &'a PackageSource,
-    external_source_index: &'a ExternalImportSourceIndex<'a>,
-) -> Vec<&'a PackageSource> {
-    let mut results = BTreeMap::<String, &'a PackageSource>::new();
-    let mut visited = BTreeSet::<String>::new();
-    let mut stack = vec![external];
-    while let Some(source) = stack.pop() {
-        if !visited.insert(source.source_path.clone()) {
-            continue;
-        }
-        for entry in package_source_reexport_entries(source) {
-            for target in external_source_index.sources_matching_entry(
-                source.package_name.as_str(),
-                source.package_version.as_str(),
-                entry.as_str(),
-            ) {
-                if target.external_importable {
-                    continue;
-                }
-                results.entry(target.source_path.clone()).or_insert(target);
-                stack.push(target);
-            }
-        }
-    }
-    results.into_values().collect()
 }

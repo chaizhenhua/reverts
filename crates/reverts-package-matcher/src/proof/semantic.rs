@@ -7,7 +7,7 @@ use crate::package_helpers::{
 };
 use crate::{PackageMatch, PackageSource, SemanticPathHintMode};
 
-use super::policy::semantic_external_source_proof_rank;
+use super::policy::{exact_hint_has_quality, semantic_external_source_proof_rank};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SemanticExternalSourceProof {
@@ -34,8 +34,7 @@ pub(crate) fn trusted_exact_generated_filename_hint(
     if !matches!(
         hint_mode,
         SemanticPathHintMode::ImportProof | SemanticPathHintMode::RelaxedImportProof
-    ) || !package_match.source_path.starts_with("exact-hint:")
-        || !package_match.source_path.contains(":quality=trusted:")
+    ) || !exact_hint_has_quality(package_match, "trusted")
     {
         return None;
     }

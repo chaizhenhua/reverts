@@ -11,6 +11,7 @@ pub(crate) use externalization::{
     externalization_hint_candidates_from_cache, hint_export_specifier_matches_package,
     promote_package_sources_with_externalization_hints,
 };
+pub(crate) use reverts_package::{clean_package_entry_path, package_export_specifier};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -617,23 +618,6 @@ pub(crate) fn filter_package_sources_to_referenced_package_versions(
             .is_none_or(|versions| versions.contains(source.package_version.as_str()))
     });
     before.saturating_sub(package_sources.len())
-}
-
-pub(crate) fn package_export_specifier(package_name: &str, entry_path: &str) -> String {
-    let clean_path = clean_package_entry_path(entry_path);
-    if clean_path.is_empty() || clean_path == "." {
-        package_name.to_string()
-    } else {
-        format!("{package_name}/{clean_path}")
-    }
-}
-
-pub(crate) fn clean_package_entry_path(entry_path: &str) -> String {
-    entry_path
-        .trim()
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_string()
 }
 
 fn load_package_sources_from_roots(

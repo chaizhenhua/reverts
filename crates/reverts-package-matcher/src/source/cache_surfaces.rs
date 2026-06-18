@@ -4,55 +4,31 @@
 //! emit accepted surfaces only for attributions whose specifier is proven
 //! public. Pure logic; unit-tested with fixtures.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use reverts_input::{
     PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
 };
-use reverts_package::package_specifier_is_public_from_manifest;
+use reverts_package::{PackageSourceCacheView, package_source_entry_path_from_source_path};
 
 use crate::PackageSource;
 
-/// The path of a source relative to its package root. Loaded/materialized
-/// sources carry `source_path == "{name}@{version}/{rel_path}"`, so the root
-/// `package.json` appears as e.g. `rxjs@7.8.1/package.json`, not `package.json`.
-fn source_rel_path(source: &PackageSource) -> Option<&str> {
-    let prefix = format!("{}@{}/", source.package_name, source.package_version);
-    source.source_path.strip_prefix(prefix.as_str())
-}
-
-/// The cached root `package.json` value for one concrete package version, if
-/// present in the loaded sources (its rel path is exactly `package.json`).
-pub(crate) fn cached_root_package_json(
-    package_name: &str,
-    package_version: &str,
-    package_sources: &[PackageSource],
-) -> Option<serde_json::Value> {
-    package_sources
-        .iter()
-        .find(|src| {
-            src.package_name == package_name
-                && src.package_version == package_version
-                && source_rel_path(src) == Some("package.json")
-        })
-        .and_then(|src| reverts_package::parse_package_json_source(src.source.as_str()))
-}
-
-/// Whether the package ships a root default-entry file (`index.{js,json,node}`),
-/// which Node resolves for a bare import when `main`/`module` is absent.
-fn package_has_root_index(
-    package_name: &str,
-    package_version: &str,
-    package_sources: &[PackageSource],
-) -> bool {
-    package_sources.iter().any(|src| {
-        src.package_name == package_name
-            && src.package_version == package_version
-            && matches!(
-                source_rel_path(src),
-                Some("index.js" | "index.json" | "index.node")
+fn package_source_cache_view(package_sources: &[PackageSource]) -> PackageSourceCacheView {
+    let mut cache = PackageSourceCacheView::default();
+    for source in package_sources {
+        cache.insert_source(
+            source.package_name.as_str(),
+            source.package_version.as_str(),
+            package_source_entry_path_from_source_path(
+                source.package_name.as_str(),
+                source.package_version.as_str(),
+                source.source_path.as_str(),
             )
-    })
+            .as_str(),
+            source.source.as_str(),
+        );
+    }
+    cache
 }
 
 /// Emit accepted external surfaces for matched packages, anchored on each
@@ -64,8 +40,7 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> Vec<PackageSurfaceInput> {
-    let mut package_meta_by_version =
-        BTreeMap::<(String, String), (Option<serde_json::Value>, bool)>::new();
+    let cache = package_source_cache_view(package_sources);
     let mut emitted = BTreeSet::<String>::new();
     let mut surfaces = Vec::new();
 
@@ -89,31 +64,8 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
         if emitted.contains(specifier) {
             continue;
         }
-        let (package_json, has_index) = package_meta_by_version
-            .entry((attribution.package_name.clone(), version.to_string()))
-            .or_insert_with(|| {
-                (
-                    cached_root_package_json(
-                        attribution.package_name.as_str(),
-                        version,
-                        package_sources,
-                    ),
-                    package_has_root_index(
-                        attribution.package_name.as_str(),
-                        version,
-                        package_sources,
-                    ),
-                )
-            });
-        let Some(package_json) = package_json.as_ref() else {
-            continue;
-        };
-        if !package_specifier_is_public_from_manifest(
-            attribution.package_name.as_str(),
-            package_json,
-            specifier,
-            *has_index,
-        ) {
+        if !cache.package_specifier_is_public(attribution.package_name.as_str(), version, specifier)
+        {
             continue;
         }
         emitted.insert(specifier.to_string());

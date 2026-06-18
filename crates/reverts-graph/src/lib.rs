@@ -14,10 +14,10 @@ use oxc_ast::{
         ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Function, FunctionType, ImportDeclaration,
         ImportDeclarationSpecifier, ImportExpression, ModuleExportName, NewExpression,
-        ObjectExpression, ObjectPropertyKind, Program, PropertyKey, PropertyKind,
-        SimpleAssignmentTarget, Statement, StaticMemberExpression, TSImportType,
-        TSInterfaceHeritage, TSType, TSTypeAnnotation, TSTypeParameterInstantiation,
-        UpdateExpression, VariableDeclaration, VariableDeclarator,
+        ObjectExpression, ObjectPropertyKind, Program, PropertyKind, SimpleAssignmentTarget,
+        Statement, StaticMemberExpression, TSImportType, TSInterfaceHeritage, TSType,
+        TSTypeAnnotation, TSTypeParameterInstantiation, UpdateExpression, VariableDeclaration,
+        VariableDeclarator,
     },
     visit::walk::{
         walk_arrow_function_expression, walk_call_expression, walk_class,
@@ -41,7 +41,7 @@ use reverts_ir::{
 };
 use reverts_js::{
     JsError, ParseError, ParseGoal, collect_identifier_read_facts, lazy_value_sub_snippets,
-    parse_error_message, parse_options_for, source_type_candidates,
+    parse_error_message, parse_options_for, source_type_candidates, static_property_key_name_ref,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1576,7 +1576,7 @@ impl<'a> Visit<'a> for AstFactVisitor {
                     if property.computed {
                         continue;
                     }
-                    if let Some(name) = property_key_name(&property.key) {
+                    if let Some(name) = static_property_key_name_ref(&property.key) {
                         self.member_constraint(rhs, BindingConstraintKind::MemberRead, name);
                     }
                 }
@@ -2404,17 +2404,6 @@ fn expression_is_static_member(
             if expression_is_identifier(&member.object, object_name)
                 && member.property.name.as_str() == property_name
     )
-}
-
-/// Recover the property name on a destructuring `BindingProperty`'s key
-/// when it is a plain identifier or string literal. Computed or numeric
-/// keys return `None` because we cannot statically attribute them.
-fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
-    match key {
-        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
-        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
-        _ => None,
-    }
 }
 
 /// Extract `(binding, property)` from an assignment target when the

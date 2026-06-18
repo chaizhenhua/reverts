@@ -143,6 +143,208 @@ pub fn parse_package_json_source(source: &str) -> Option<serde_json::Value> {
     serde_json::from_str::<serde_json::Value>(body).ok()
 }
 
+#[must_use]
+pub fn clean_package_entry_path(entry_path: &str) -> String {
+    entry_path
+        .trim()
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+#[must_use]
+pub fn package_source_path(package_name: &str, package_version: &str, entry_path: &str) -> String {
+    format!(
+        "{}@{}/{}",
+        package_name.trim(),
+        package_version.trim(),
+        clean_package_entry_path(entry_path)
+    )
+}
+
+#[must_use]
+pub fn package_source_entry_path_from_source_path(
+    package_name: &str,
+    package_version: &str,
+    source_path: &str,
+) -> String {
+    let clean = source_path.trim();
+    clean
+        .trim_start_matches('/')
+        .strip_prefix(format!("{}@{}/", package_name.trim(), package_version.trim()).as_str())
+        .unwrap_or(clean.trim_start_matches('/'))
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .to_string()
+}
+
+#[must_use]
+pub fn package_export_specifier(package_name: &str, entry_path: &str) -> String {
+    let clean_path = clean_package_entry_path(entry_path);
+    if clean_path.is_empty() || clean_path == "." {
+        package_name.to_string()
+    } else {
+        format!("{package_name}/{clean_path}")
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PackageSourceCacheView {
+    packages: BTreeMap<(String, String), PackageSourceCachePackage>,
+}
+
+impl PackageSourceCacheView {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn packages(&self) -> impl Iterator<Item = ((&str, &str), &PackageSourceCachePackage)> {
+        self.packages
+            .iter()
+            .map(|((name, version), package)| ((name.as_str(), version.as_str()), package))
+    }
+
+    pub fn insert_source(
+        &mut self,
+        package_name: &str,
+        package_version: &str,
+        entry_path: &str,
+        source_content: impl Into<String>,
+    ) {
+        let package_name = package_name.trim();
+        let package_version = package_version.trim();
+        let entry_path = clean_package_entry_path(entry_path);
+        if package_name.is_empty() || package_version.is_empty() || entry_path.is_empty() {
+            return;
+        }
+        let package = self
+            .packages
+            .entry((package_name.to_string(), package_version.to_string()))
+            .or_default();
+        package.entry_paths.insert(entry_path.clone());
+        if entry_path == "package.json" {
+            package.package_json_source = Some(source_content.into());
+        }
+    }
+
+    pub fn insert_entry_path(
+        &mut self,
+        package_name: &str,
+        package_version: &str,
+        entry_path: &str,
+    ) {
+        let package_name = package_name.trim();
+        let package_version = package_version.trim();
+        let entry_path = clean_package_entry_path(entry_path);
+        if package_name.is_empty() || package_version.is_empty() || entry_path.is_empty() {
+            return;
+        }
+        self.packages
+            .entry((package_name.to_string(), package_version.to_string()))
+            .or_default()
+            .entry_paths
+            .insert(entry_path);
+    }
+
+    #[must_use]
+    pub fn package(
+        &self,
+        package_name: &str,
+        package_version: &str,
+    ) -> Option<&PackageSourceCachePackage> {
+        self.packages
+            .get(&(package_name.to_string(), package_version.to_string()))
+    }
+
+    #[must_use]
+    pub fn package_json_source(&self, package_name: &str, package_version: &str) -> Option<&str> {
+        self.package(package_name, package_version)
+            .and_then(PackageSourceCachePackage::package_json_source)
+    }
+
+    #[must_use]
+    pub fn package_json(
+        &self,
+        package_name: &str,
+        package_version: &str,
+    ) -> Option<serde_json::Value> {
+        self.package_json_source(package_name, package_version)
+            .and_then(parse_package_json_source)
+    }
+
+    #[must_use]
+    pub fn entry_paths(&self, package_name: &str, package_version: &str) -> BTreeSet<String> {
+        self.package(package_name, package_version)
+            .map(|package| package.entry_paths.clone())
+            .unwrap_or_default()
+    }
+
+    #[must_use]
+    pub fn has_root_index(&self, package_name: &str, package_version: &str) -> bool {
+        self.package(package_name, package_version)
+            .is_some_and(PackageSourceCachePackage::has_root_index)
+    }
+
+    #[must_use]
+    pub fn package_specifier_is_public(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        specifier: &str,
+    ) -> bool {
+        let Some(package_json) = self.package_json(package_name, package_version) else {
+            return false;
+        };
+        package_specifier_is_public_from_manifest(
+            package_name,
+            &package_json,
+            specifier,
+            self.has_root_index(package_name, package_version),
+        )
+    }
+
+    #[must_use]
+    pub fn resolve_deep_import_specifier(
+        &self,
+        package_name: &str,
+        package_version: &str,
+        specifier: &str,
+    ) -> Option<String> {
+        resolve_package_deep_import_specifier(
+            self.package_json_source(package_name, package_version)?,
+            package_name,
+            specifier,
+            &self.entry_paths(package_name, package_version),
+        )
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct PackageSourceCachePackage {
+    package_json_source: Option<String>,
+    entry_paths: BTreeSet<String>,
+}
+
+impl PackageSourceCachePackage {
+    #[must_use]
+    pub fn package_json_source(&self) -> Option<&str> {
+        self.package_json_source.as_deref()
+    }
+
+    #[must_use]
+    pub fn entry_paths(&self) -> &BTreeSet<String> {
+        &self.entry_paths
+    }
+
+    #[must_use]
+    pub fn has_root_index(&self) -> bool {
+        ["index.js", "index.json", "index.node"]
+            .iter()
+            .any(|index| self.entry_paths.contains(*index))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PackageSpecifierPublicProof {
     Public(PackageSpecifierPublicReason),
@@ -652,6 +854,7 @@ impl PackageResolution {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalImportProofKind {
     DirectSource,
+    ExactHint,
     ExportSpecifierSource,
     RootExportSource,
     NormalizedSourceExport,
@@ -665,7 +868,9 @@ pub enum ExternalImportProofKind {
     CrossVersionSource,
     CrossPackageSource,
     ExportMembers,
+    PublicExportMembers,
     SemanticPath,
+    CanonicalSubpath,
     PackageRoot,
     Unknown,
 }
@@ -675,6 +880,7 @@ impl ExternalImportProofKind {
     pub const fn label(self) -> &'static str {
         match self {
             Self::DirectSource => "matched_package_source",
+            Self::ExactHint => "exact_hint",
             Self::ExportSpecifierSource => "export_specifier_source",
             Self::RootExportSource => "root_export_source",
             Self::NormalizedSourceExport => "normalized_source_export",
@@ -688,91 +894,209 @@ impl ExternalImportProofKind {
             Self::CrossVersionSource => "cross_version_source",
             Self::CrossPackageSource => "cross_package_source",
             Self::ExportMembers => "export_members_adapter",
+            Self::PublicExportMembers => "public_export_members",
             Self::SemanticPath => "semantic_path",
+            Self::CanonicalSubpath => "canonical_subpath",
             Self::PackageRoot => "package_root",
             Self::Unknown => "unknown",
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalImportProof<'a> {
+    raw: &'a str,
+    kind: ExternalImportProofKind,
+    tail: Option<&'a str>,
+}
+
+impl<'a> ExternalImportProof<'a> {
+    #[must_use]
+    pub fn parse(raw: &'a str) -> Self {
+        const PREFIXES: [(&str, ExternalImportProofKind); 18] = [
+            ("exact-hint:", ExternalImportProofKind::ExactHint),
+            (
+                "export-specifier-source:",
+                ExternalImportProofKind::ExportSpecifierSource,
+            ),
+            (
+                "root-export-source:",
+                ExternalImportProofKind::RootExportSource,
+            ),
+            (
+                "normalized-source-export:",
+                ExternalImportProofKind::NormalizedSourceExport,
+            ),
+            (
+                "normalized-source-adapter:",
+                ExternalImportProofKind::NormalizedSourceAdapter,
+            ),
+            (
+                "ownership-source-match:",
+                ExternalImportProofKind::OwnershipSourceMatch,
+            ),
+            (
+                "forced-external:semantic-export:",
+                ExternalImportProofKind::SemanticExport,
+            ),
+            (
+                "forced-external:semantic-source:",
+                ExternalImportProofKind::SemanticSource,
+            ),
+            (
+                "forced-external:source-match:",
+                ExternalImportProofKind::SourceMatch,
+            ),
+            (
+                "forced-external:dependency-graph-source:",
+                ExternalImportProofKind::DependencyGraphSource,
+            ),
+            (
+                "forced-external:dependency-edge-path:",
+                ExternalImportProofKind::DependencyEdgePath,
+            ),
+            (
+                "forced-external:cross-version-source:",
+                ExternalImportProofKind::CrossVersionSource,
+            ),
+            (
+                "forced-external:cross-package-source:",
+                ExternalImportProofKind::CrossPackageSource,
+            ),
+            (
+                "forced-external:export-members:",
+                ExternalImportProofKind::ExportMembers,
+            ),
+            (
+                "forced-external:public-export-members:",
+                ExternalImportProofKind::PublicExportMembers,
+            ),
+            (
+                "forced-external:semantic-path:",
+                ExternalImportProofKind::SemanticPath,
+            ),
+            (
+                "forced-external:canonical-subpath:",
+                ExternalImportProofKind::CanonicalSubpath,
+            ),
+            (
+                "forced-external:package-root:",
+                ExternalImportProofKind::PackageRoot,
+            ),
+        ];
+        for (prefix, kind) in PREFIXES {
+            if let Some(tail) = raw.strip_prefix(prefix) {
+                return Self {
+                    raw,
+                    kind,
+                    tail: Some(tail),
+                };
+            }
+        }
+        Self {
+            raw,
+            kind: if raw.contains(':') {
+                ExternalImportProofKind::Unknown
+            } else {
+                ExternalImportProofKind::DirectSource
+            },
+            tail: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn raw(&self) -> &'a str {
+        self.raw
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ExternalImportProofKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        self.kind.label()
+    }
+
+    #[must_use]
+    pub fn is_export_member_proof(&self) -> bool {
+        matches!(
+            self.kind,
+            ExternalImportProofKind::ExportMembers | ExternalImportProofKind::PublicExportMembers
+        )
+    }
+
+    #[must_use]
+    pub fn is_semantic_path_proof(&self) -> bool {
+        self.kind == ExternalImportProofKind::SemanticPath
+    }
+
+    #[must_use]
+    pub fn is_strong_source_proof(&self) -> bool {
+        matches!(
+            self.kind,
+            ExternalImportProofKind::ExactHint
+                | ExternalImportProofKind::NormalizedSourceExport
+                | ExternalImportProofKind::ExportMembers
+                | ExternalImportProofKind::PublicExportMembers
+        )
+    }
+
+    #[must_use]
+    pub fn is_weak_source_replacement_proof(&self) -> bool {
+        matches!(
+            self.kind,
+            ExternalImportProofKind::DependencyGraphSource
+                | ExternalImportProofKind::DependencyEdgePath
+                | ExternalImportProofKind::CanonicalSubpath
+                | ExternalImportProofKind::SemanticSource
+        ) || self.kind == ExternalImportProofKind::DirectSource
+    }
+
+    #[must_use]
+    pub fn concrete_source_path(&self) -> Option<String> {
+        let tail = self.tail?;
+        match self.kind {
+            ExternalImportProofKind::NormalizedSourceExport
+            | ExternalImportProofKind::SourceMatch
+            | ExternalImportProofKind::SemanticSource
+            | ExternalImportProofKind::SemanticExport
+            | ExternalImportProofKind::SemanticPath
+            | ExternalImportProofKind::CanonicalSubpath
+            | ExternalImportProofKind::PackageRoot => Some(tail.to_string()),
+            ExternalImportProofKind::DependencyGraphSource
+            | ExternalImportProofKind::DependencyEdgePath
+            | ExternalImportProofKind::CrossVersionSource
+            | ExternalImportProofKind::CrossPackageSource
+            | ExternalImportProofKind::ExportMembers
+            | ExternalImportProofKind::PublicExportMembers => {
+                tail.rsplit(':').next().map(ToOwned::to_owned)
+            }
+            ExternalImportProofKind::DirectSource
+            | ExternalImportProofKind::ExactHint
+            | ExternalImportProofKind::ExportSpecifierSource
+            | ExternalImportProofKind::RootExportSource
+            | ExternalImportProofKind::NormalizedSourceAdapter
+            | ExternalImportProofKind::OwnershipSourceMatch
+            | ExternalImportProofKind::Unknown => None,
+        }
+    }
+}
+
 #[must_use]
 pub fn external_import_proof_kind(source_path: &str) -> ExternalImportProofKind {
-    if source_path.starts_with("export-specifier-source:") {
-        ExternalImportProofKind::ExportSpecifierSource
-    } else if source_path.starts_with("root-export-source:") {
-        ExternalImportProofKind::RootExportSource
-    } else if source_path.starts_with("normalized-source-export:") {
-        ExternalImportProofKind::NormalizedSourceExport
-    } else if source_path.starts_with("normalized-source-adapter:") {
-        ExternalImportProofKind::NormalizedSourceAdapter
-    } else if source_path.starts_with("ownership-source-match:") {
-        ExternalImportProofKind::OwnershipSourceMatch
-    } else if source_path.starts_with("forced-external:semantic-export:") {
-        ExternalImportProofKind::SemanticExport
-    } else if source_path.starts_with("forced-external:semantic-source:") {
-        ExternalImportProofKind::SemanticSource
-    } else if source_path.starts_with("forced-external:source-match:") {
-        ExternalImportProofKind::SourceMatch
-    } else if source_path.starts_with("forced-external:dependency-graph-source:") {
-        ExternalImportProofKind::DependencyGraphSource
-    } else if source_path.starts_with("forced-external:dependency-edge-path:") {
-        ExternalImportProofKind::DependencyEdgePath
-    } else if source_path.starts_with("forced-external:cross-version-source:") {
-        ExternalImportProofKind::CrossVersionSource
-    } else if source_path.starts_with("forced-external:cross-package-source:") {
-        ExternalImportProofKind::CrossPackageSource
-    } else if source_path.starts_with("forced-external:export-members:") {
-        ExternalImportProofKind::ExportMembers
-    } else if source_path.starts_with("forced-external:semantic-path:") {
-        ExternalImportProofKind::SemanticPath
-    } else if source_path.starts_with("forced-external:package-root:") {
-        ExternalImportProofKind::PackageRoot
-    } else {
-        ExternalImportProofKind::DirectSource
-    }
+    ExternalImportProof::parse(source_path).kind()
 }
 
 #[must_use]
 pub fn external_import_proof_label(source_path: &str) -> &'static str {
-    external_import_proof_kind(source_path).label()
+    ExternalImportProof::parse(source_path).label()
 }
 
 #[must_use]
 pub fn external_import_concrete_source_path(proof_path: &str) -> Option<String> {
-    if let Some(rest) = proof_path.strip_prefix("normalized-source-export:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:source-match:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-source:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-export:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:semantic-path:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:package-root:") {
-        return Some(rest.to_string());
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-graph-source:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:dependency-edge-path:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-version-source:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:cross-package-source:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    if let Some(rest) = proof_path.strip_prefix("forced-external:export-members:") {
-        return rest.rsplit(':').next().map(ToOwned::to_owned);
-    }
-    None
+    ExternalImportProof::parse(proof_path).concrete_source_path()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

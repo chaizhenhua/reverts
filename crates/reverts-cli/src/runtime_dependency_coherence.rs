@@ -114,16 +114,19 @@ fn transitively_provided_package_names(
     let mut dependency_ranges: BTreeMap<(String, String), BTreeMap<String, String>> =
         BTreeMap::new();
     let mut versions_by_name: BTreeMap<String, Vec<Version>> = BTreeMap::new();
-    for ((name, version), manifest) in manifests {
+    for ((name, version), manifest) in manifests.packages() {
         if let Ok(parsed) = Version::parse(version.trim()) {
             versions_by_name
-                .entry(name.clone())
+                .entry(name.to_string())
                 .or_default()
                 .push(parsed);
         }
+        let Some(package_json_source) = manifest.package_json_source() else {
+            continue;
+        };
         dependency_ranges.insert(
-            (name.clone(), version.clone()),
-            package_json_dependency_ranges(manifest.package_json_source.as_str()),
+            (name.to_string(), version.to_string()),
+            package_json_dependency_ranges(package_json_source),
         );
     }
     for versions in versions_by_name.values_mut() {
@@ -218,7 +221,6 @@ fn dependency_major(dependency: &RuntimeDependency) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input_externalization::MaterializedPackageManifest;
 
     fn dep(name: &str, version: &str) -> RuntimeDependency {
         RuntimeDependency {
@@ -227,17 +229,23 @@ mod tests {
         }
     }
 
-    fn manifest(deps: &[(&str, &str)]) -> MaterializedPackageManifest {
+    fn insert_manifest(
+        manifests: &mut MaterializedPackageManifests,
+        name: &str,
+        version: &str,
+        deps: &[(&str, &str)],
+    ) {
         let body = deps
             .iter()
             .map(|(name, range)| format!("\"{name}\":\"{range}\""))
             .collect::<Vec<_>>()
             .join(",");
-        MaterializedPackageManifest::new(
+        manifests.insert_source(
+            name,
+            version,
+            "package.json",
             format!("export default {{\"dependencies\":{{{body}}}}}"),
-            true,
-            BTreeSet::new(),
-        )
+        );
     }
 
     #[test]
@@ -252,13 +260,17 @@ mod tests {
             dep("@smithy/core", "2.0.0"),
         ];
         let mut manifests = MaterializedPackageManifests::new();
-        manifests.insert(
-            ("@aws-sdk/client-sso".into(), "3.980.0".into()),
-            manifest(&[("@aws-sdk/core", "3.973.2")]),
+        insert_manifest(
+            &mut manifests,
+            "@aws-sdk/client-sso",
+            "3.980.0",
+            &[("@aws-sdk/core", "3.973.2")],
         );
-        manifests.insert(
-            ("@aws-sdk/core".into(), "3.973.2".into()),
-            manifest(&[("@smithy/core", "^3.1.0"), ("@smithy/types", "^3.7.2")]),
+        insert_manifest(
+            &mut manifests,
+            "@aws-sdk/core",
+            "3.973.2",
+            &[("@smithy/core", "^3.1.0"), ("@smithy/types", "^3.7.2")],
         );
 
         let pruned =
@@ -284,11 +296,13 @@ mod tests {
             dep("@sentry/browser", "8.55.0"),
         ];
         let mut manifests = MaterializedPackageManifests::new();
-        manifests.insert(
-            ("@sentry/node".into(), "7.120.4".into()),
-            manifest(&[("@sentry/core", "7.120.4")]),
+        insert_manifest(
+            &mut manifests,
+            "@sentry/node",
+            "7.120.4",
+            &[("@sentry/core", "7.120.4")],
         );
-        manifests.insert(("@sentry/core".into(), "7.120.3".into()), manifest(&[]));
+        insert_manifest(&mut manifests, "@sentry/core", "7.120.3", &[]);
 
         let pruned =
             prune_transitively_provided_scope_incoherent_dependencies(dependencies, &manifests);

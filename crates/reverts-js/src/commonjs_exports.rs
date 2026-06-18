@@ -25,12 +25,30 @@ pub fn module_export_identifier_name(name: &ModuleExportName<'_>) -> Option<Stri
 }
 
 #[must_use]
-pub fn property_key_readability_name(key: &PropertyKey<'_>) -> Option<String> {
+pub fn static_property_key_name_ref<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
     match key {
-        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str().to_string()),
-        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
         _ => None,
     }
+}
+
+#[must_use]
+pub fn static_or_private_property_key_name_ref<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
+    match key {
+        PropertyKey::PrivateIdentifier(identifier) => Some(identifier.name.as_str()),
+        _ => static_property_key_name_ref(key),
+    }
+}
+
+#[must_use]
+pub fn static_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    static_property_key_name_ref(key).map(ToOwned::to_owned)
+}
+
+#[must_use]
+pub fn property_key_readability_name(key: &PropertyKey<'_>) -> Option<String> {
+    static_property_key_name(key)
 }
 
 #[must_use]

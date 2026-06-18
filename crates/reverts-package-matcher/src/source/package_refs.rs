@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 
-use crate::PackageSource;
+use reverts_package::package_source_entry_path_from_source_path as package_source_entry_path_from_raw_source_path;
+
 use crate::package_helpers::{package_source_entry_path, strip_source_extension};
 use crate::source::import_targets::{
     export_all_reexport_targets, reexport_targets, relative_module_specifier_targets,
 };
+use crate::{ExternalImportSourceIndex, PackageSource};
 
 #[must_use]
 pub(crate) fn package_source_export_all_reexport_entries(
@@ -38,6 +40,105 @@ pub(crate) fn package_source_reexport_entries(source: &PackageSource) -> BTreeSe
         })
         .filter(|entry| !entry.is_empty())
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackageReexportEdgeKind {
+    ExportAll,
+    AnyReexport,
+}
+
+#[must_use]
+pub(crate) fn package_source_reexported_source_only_sources<'a>(
+    external: &'a PackageSource,
+    external_source_index: &'a ExternalImportSourceIndex<'a>,
+    edge_kind: PackageReexportEdgeKind,
+) -> Vec<&'a PackageSource> {
+    let mut results = BTreeSet::<String>::new();
+    let mut sources = Vec::<&'a PackageSource>::new();
+    let mut visited = BTreeSet::<String>::new();
+    let mut stack = vec![external];
+    while let Some(source) = stack.pop() {
+        if !visited.insert(package_source_cache_key(source)) {
+            continue;
+        }
+        for entry in package_source_reexport_entries_by_kind(source, edge_kind) {
+            for target in external_source_index.sources_matching_entry(
+                source.package_name.as_str(),
+                source.package_version.as_str(),
+                entry.as_str(),
+            ) {
+                if target.external_importable {
+                    continue;
+                }
+                if results.insert(target.source_path.clone()) {
+                    sources.push(target);
+                }
+                stack.push(target);
+            }
+        }
+    }
+    sources
+}
+
+#[must_use]
+pub(crate) fn package_source_reaches_entry_transitively(
+    source: &PackageSource,
+    matched_entry: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    edge_kind: PackageReexportEdgeKind,
+) -> bool {
+    let mut visited = BTreeSet::<String>::new();
+    package_source_reaches_entry_transitively_inner(
+        source,
+        matched_entry,
+        external_source_index,
+        edge_kind,
+        &mut visited,
+    )
+}
+
+fn package_source_reaches_entry_transitively_inner(
+    source: &PackageSource,
+    matched_entry: &str,
+    external_source_index: &ExternalImportSourceIndex<'_>,
+    edge_kind: PackageReexportEdgeKind,
+    visited: &mut BTreeSet<String>,
+) -> bool {
+    if !visited.insert(package_source_cache_key(source)) {
+        return false;
+    }
+    for entry in package_source_reexport_entries_by_kind(source, edge_kind) {
+        if source_entry_paths_match(entry.as_str(), matched_entry) {
+            return true;
+        }
+        for next in external_source_index.sources_matching_entry(
+            source.package_name.as_str(),
+            source.package_version.as_str(),
+            entry.as_str(),
+        ) {
+            if package_source_reaches_entry_transitively_inner(
+                next,
+                matched_entry,
+                external_source_index,
+                edge_kind,
+                visited,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn package_source_reexport_entries_by_kind(
+    source: &PackageSource,
+    edge_kind: PackageReexportEdgeKind,
+) -> BTreeSet<String> {
+    match edge_kind {
+        PackageReexportEdgeKind::ExportAll => package_source_export_all_reexport_entries(source),
+        PackageReexportEdgeKind::AnyReexport => package_source_reexport_entries(source),
+    }
 }
 
 #[must_use]
@@ -118,11 +219,7 @@ pub(crate) fn package_source_entry_path_from_source_path(
     package_version: &str,
     source_path: &str,
 ) -> String {
-    let prefix = format!("{package_name}@{package_version}/");
-    source_path
-        .strip_prefix(prefix.as_str())
-        .unwrap_or(source_path)
-        .trim_start_matches('/')
+    package_source_entry_path_from_raw_source_path(package_name, package_version, source_path)
         .to_ascii_lowercase()
 }
 

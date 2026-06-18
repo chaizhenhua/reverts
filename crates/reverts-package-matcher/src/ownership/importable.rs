@@ -8,14 +8,16 @@
 
 use std::collections::BTreeMap;
 
-use reverts_input::{InputRows, PackageAttributionInput};
-use reverts_ir::{ModuleKind, split_bare_specifier};
+use reverts_input::InputRows;
+use reverts_ir::ModuleKind;
 
 use crate::{
     ExternalImportSourceIndex, PackageModuleSourceQuality, PackageSource,
     VersionedPackageMatchReport, accepted_external_modules, importable_package_source_for_module,
     package_module_source_quality, source_only_match_can_be_promoted_to_import,
 };
+
+use super::promotion::{ExternalImportPromotion, apply_external_import_promotion};
 
 pub(crate) fn promote_importable_ownership_matches(
     rows: &InputRows,
@@ -29,7 +31,7 @@ pub(crate) fn promote_importable_ownership_matches(
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
-    let mut promotions = Vec::<(usize, PackageAttributionInput, String, String)>::new();
+    let mut promotions = Vec::<(usize, ExternalImportPromotion)>::new();
 
     for (idx, package_match) in report.matches.iter().enumerate() {
         if package_match.external_importable || already_accepted.contains(&package_match.module_id)
@@ -67,32 +69,22 @@ pub(crate) fn promote_importable_ownership_matches(
         ) else {
             continue;
         };
-        let mut attribution = PackageAttributionInput::accepted_external(
-            module.id,
-            package_match.package_name.as_str(),
-            package_match.package_version.as_str(),
-            import_target.export_specifier.as_str(),
-        )
-        .with_resolved_file(import_target.source_path.as_str());
-        if let Some((_package_name, Some(subpath))) =
-            split_bare_specifier(import_target.export_specifier.as_str())
-        {
-            attribution = attribution.with_subpath(subpath);
-        }
         promotions.push((
             idx,
-            attribution,
-            import_target.export_specifier,
-            import_target.source_path,
+            ExternalImportPromotion {
+                module_id: module.id,
+                package_name: package_match.package_name.clone(),
+                package_version: package_match.package_version.clone(),
+                export_specifier: import_target.export_specifier,
+                resolved_file: import_target.source_path,
+                strategy: package_match.strategy,
+                function_signature_matches: package_match.function_signature_matches,
+                string_anchor_matches: package_match.string_anchor_matches,
+            },
         ));
     }
 
-    for (idx, attribution, export_specifier, source_path) in promotions {
-        if let Some(package_match) = report.matches.get_mut(idx) {
-            package_match.external_importable = true;
-            package_match.export_specifier = export_specifier;
-            package_match.source_path = source_path;
-        }
-        report.attributions.push(attribution);
+    for (idx, promotion) in promotions {
+        apply_external_import_promotion(report, Some(idx), promotion);
     }
 }

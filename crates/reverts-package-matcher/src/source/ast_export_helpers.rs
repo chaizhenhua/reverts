@@ -5,8 +5,8 @@
 
 use oxc_ast::ast::{
     BindingPattern, BindingPatternKind, Declaration, ObjectExpression, ObjectPropertyKind,
-    PropertyKey,
 };
+use reverts_js::static_property_key_name;
 
 #[must_use]
 pub(crate) fn declaration_binding_names<'a>(declaration: &'a Declaration<'a>) -> Vec<&'a str> {
@@ -81,16 +81,7 @@ pub(crate) fn object_expression_static_keys(object: &ObjectExpression<'_>) -> Ve
             if property.computed {
                 return None;
             }
-            property_key_name(&property.key)
+            static_property_key_name(&property.key)
         })
         .collect()
-}
-
-#[must_use]
-pub(crate) fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
-    match key {
-        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str().to_string()),
-        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str().to_string()),
-        _ => None,
-    }
 }

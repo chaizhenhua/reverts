@@ -26,7 +26,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_ir::BindingName;
+use reverts_ir::{BindingName, is_identifier_like_ascii};
 
 use crate::runtime_orphan_prune::prune_orphan_runtime_bindings;
 use crate::{
@@ -121,7 +121,7 @@ fn import_local_names(statement: &str) -> Vec<String> {
                 *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
             })
             .collect::<String>();
-        if is_identifier(ns.as_str()) {
+        if is_identifier_like_ascii(ns.as_str()) {
             names.push(ns);
         }
     }
@@ -137,7 +137,7 @@ fn import_local_names(statement: &str) -> Vec<String> {
                 .split_once(" as ")
                 .map(|(_, right)| right.trim())
                 .unwrap_or(part);
-            if is_identifier(local) {
+            if is_identifier_like_ascii(local) {
                 names.push(local.to_string());
             }
         }
@@ -151,7 +151,7 @@ fn import_local_names(statement: &str) -> Vec<String> {
                     *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
                 })
                 .collect::<String>();
-            if is_identifier(default.as_str()) {
+            if is_identifier_like_ascii(default.as_str()) {
                 names.push(default);
             }
         }
@@ -439,9 +439,11 @@ fn local_export_specifiers(statement: &str) -> Option<Vec<LocalExportSpecifier>>
                 Some((left, right)) => (left.trim(), right.trim()),
                 None => (part, part),
             };
-            (is_identifier(local) && is_identifier(exported)).then(|| LocalExportSpecifier {
-                local: local.to_string(),
-                exported: exported.to_string(),
+            (is_identifier_like_ascii(local) && is_identifier_like_ascii(exported)).then(|| {
+                LocalExportSpecifier {
+                    local: local.to_string(),
+                    exported: exported.to_string(),
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -454,17 +456,6 @@ fn render_export_specifiers(specifiers: &[LocalExportSpecifier]) -> String {
         .map(LocalExportSpecifier::render)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn is_identifier(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c == '_' || c == '$' || c.is_ascii_alphabetic())
-        && name
-            .chars()
-            .all(|c| c == '_' || c == '$' || c.is_ascii_alphanumeric())
 }
 
 /// Parser-derived top-level statements of a file body. Delimiter-aware (unlike a

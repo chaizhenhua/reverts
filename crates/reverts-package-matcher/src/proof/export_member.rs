@@ -15,9 +15,8 @@ use crate::source::exported_members::{
 };
 use crate::source::import_targets::{commonjs_reexport_targets, export_all_reexport_targets};
 use crate::source::package_refs::{
-    package_source_cache_key, package_source_export_all_reexport_entries,
-    package_source_reexport_entries, relative_require_targets_package_source,
-    source_entry_paths_match,
+    PackageReexportEdgeKind, package_source_reaches_entry_transitively,
+    relative_require_targets_package_source,
 };
 use crate::{
     ExternalImportSourceIndex, ExternalImportTarget, PACKAGE_SOURCE_FINGERPRINT_MAX_BYTES,
@@ -596,48 +595,12 @@ fn external_source_export_all_reexports_matched_source_transitively(
     external_source_index: &ExternalImportSourceIndex<'_>,
 ) -> bool {
     let matched_entry = package_source_entry_path(matched);
-    let mut visited = BTreeSet::<String>::new();
-    external_source_export_all_reexports_entry_transitively(
+    package_source_reaches_entry_transitively(
         external,
         matched_entry.as_str(),
         external_source_index,
-        &mut visited,
+        PackageReexportEdgeKind::ExportAll,
     )
-}
-
-fn external_source_export_all_reexports_entry_transitively(
-    source: &PackageSource,
-    matched_entry: &str,
-    external_source_index: &ExternalImportSourceIndex<'_>,
-    visited: &mut BTreeSet<String>,
-) -> bool {
-    let source_key = format!(
-        "{}@{}:{}",
-        source.package_name, source.package_version, source.source_path
-    );
-    if !visited.insert(source_key) {
-        return false;
-    }
-    for entry in package_source_export_all_reexport_entries(source) {
-        if source_entry_paths_match(entry.as_str(), matched_entry) {
-            return true;
-        }
-        for next in external_source_index.sources_matching_entry(
-            source.package_name.as_str(),
-            source.package_version.as_str(),
-            entry.as_str(),
-        ) {
-            if external_source_export_all_reexports_entry_transitively(
-                next,
-                matched_entry,
-                external_source_index,
-                visited,
-            ) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 fn external_source_reexports_matched_source_transitively(
@@ -646,43 +609,10 @@ fn external_source_reexports_matched_source_transitively(
     external_source_index: &ExternalImportSourceIndex<'_>,
 ) -> bool {
     let matched_entry = package_source_entry_path(matched);
-    let mut visited = BTreeSet::<String>::new();
-    external_source_reexports_entry_transitively(
+    package_source_reaches_entry_transitively(
         external,
         matched_entry.as_str(),
         external_source_index,
-        &mut visited,
+        PackageReexportEdgeKind::AnyReexport,
     )
-}
-
-fn external_source_reexports_entry_transitively(
-    source: &PackageSource,
-    matched_entry: &str,
-    external_source_index: &ExternalImportSourceIndex<'_>,
-    visited: &mut BTreeSet<String>,
-) -> bool {
-    let source_key = package_source_cache_key(source);
-    if !visited.insert(source_key) {
-        return false;
-    }
-    for entry in package_source_reexport_entries(source) {
-        if source_entry_paths_match(entry.as_str(), matched_entry) {
-            return true;
-        }
-        for next in external_source_index.sources_matching_entry(
-            source.package_name.as_str(),
-            source.package_version.as_str(),
-            entry.as_str(),
-        ) {
-            if external_source_reexports_entry_transitively(
-                next,
-                matched_entry,
-                external_source_index,
-                visited,
-            ) {
-                return true;
-            }
-        }
-    }
-    false
 }

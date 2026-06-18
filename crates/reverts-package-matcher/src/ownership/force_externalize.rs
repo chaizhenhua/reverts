@@ -11,18 +11,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputRows, PackageAttributionInput};
-use reverts_ir::{ModuleKind, is_valid_package_name, split_bare_specifier};
+use reverts_input::InputRows;
+use reverts_ir::{ModuleKind, is_valid_package_name};
 
 use crate::{
-    ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy, PackageMatch,
-    PackageSource, VersionedPackageMatchReport, accepted_external_modules,
-    concrete_package_source_from_parts, concrete_package_sources_by_module,
-    cross_package_exact_source_external_import_target, dependency_edge_path_external_import_target,
+    ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy, PackageSource,
+    VersionedPackageMatchReport, accepted_external_modules, concrete_package_source_from_parts,
+    concrete_package_sources_by_module, cross_package_exact_source_external_import_target,
+    dependency_edge_path_external_import_target,
     dependency_graph_source_fingerprint_external_import_target, package_version_from_proof_path,
     proven_external_import_target, proven_external_package_version,
     same_package_cross_version_source_external_import_target,
 };
+
+use super::promotion::{ExternalImportPromotion, apply_external_import_promotion};
 
 pub(crate) fn promote_proven_external_import_targets(
     rows: &InputRows,
@@ -164,42 +166,23 @@ pub(crate) fn promote_proven_external_import_targets(
                 accepted_package_version = proven_version;
             }
             let target_source_path = target.source_path.clone();
-            let mut attribution = PackageAttributionInput::accepted_external(
-                module.id,
-                accepted_package_name.as_str(),
-                accepted_package_version.as_str(),
-                target.export_specifier.as_str(),
-            )
-            .with_resolved_file(target.source_path.as_str());
-            if let Some((_package_name, Some(subpath))) =
-                split_bare_specifier(target.export_specifier.as_str())
-            {
-                attribution = attribution.with_subpath(subpath);
-            }
-            report.attributions.push(attribution);
-            if let Some(index) = source_only_match_indices.get(&module.id).copied() {
-                let package_match = &mut report.matches[index];
-                package_match.package_name = accepted_package_name.clone();
-                package_match.package_version = accepted_package_version.clone();
-                package_match.export_specifier = target.export_specifier;
-                package_match.source_path = target.source_path;
-                package_match.function_signature_matches = accepted_function_matches;
-                package_match.string_anchor_matches = accepted_string_matches;
-                package_match.external_importable = true;
-            } else {
-                report.matches.push(PackageMatch {
+            let match_index = source_only_match_indices.get(&module.id).copied();
+            apply_external_import_promotion(
+                report,
+                match_index,
+                ExternalImportPromotion {
                     module_id: module.id,
                     package_name: accepted_package_name.clone(),
                     package_version: accepted_package_version.clone(),
                     export_specifier: target.export_specifier,
-                    source_path: target.source_path,
-                    normalized_source_hash: String::new(),
-                    strategy: ModuleMatchStrategy::DependencyClosureOwnership,
+                    resolved_file: target.source_path,
+                    strategy: source_only_match
+                        .map(|package_match| package_match.strategy)
+                        .unwrap_or(ModuleMatchStrategy::DependencyClosureOwnership),
                     function_signature_matches: accepted_function_matches,
                     string_anchor_matches: accepted_string_matches,
-                    external_importable: true,
-                });
-            }
+                },
+            );
             accepted_modules.insert(module.id);
             if let Some(concrete) = concrete_package_source_from_parts(
                 module.id,

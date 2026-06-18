@@ -18,10 +18,11 @@ use oxc_allocator::Allocator;
 use oxc_ast::Visit;
 use oxc_ast::ast::{
     Class, ClassElement, ComputedMemberExpression, Expression, MethodDefinition, ObjectExpression,
-    ObjectPropertyKind, PropertyKey, StaticMemberExpression,
+    ObjectPropertyKind, StaticMemberExpression,
 };
 use oxc_parser::Parser;
 use oxc_span::SourceType;
+use reverts_js::static_or_private_property_key_name_ref;
 
 use crate::parse_options_for;
 use reverts_ir::hash::fnv1a;
@@ -76,7 +77,7 @@ impl<'a> Visit<'a> for Collector {
     fn visit_object_expression(&mut self, obj: &ObjectExpression<'a>) {
         for prop in &obj.properties {
             if let ObjectPropertyKind::ObjectProperty(p) = prop
-                && let Some(name) = property_key_name(&p.key)
+                && let Some(name) = static_or_private_property_key_name_ref(&p.key)
             {
                 record(&mut self.out, name);
             }
@@ -101,12 +102,12 @@ impl<'a> Visit<'a> for Collector {
             match elem {
                 ClassElement::MethodDefinition(m) => visit_method(&mut self.out, m),
                 ClassElement::PropertyDefinition(p) => {
-                    if let Some(name) = property_key_name(&p.key) {
+                    if let Some(name) = static_or_private_property_key_name_ref(&p.key) {
                         record(&mut self.out, name);
                     }
                 }
                 ClassElement::AccessorProperty(a) => {
-                    if let Some(name) = property_key_name(&a.key) {
+                    if let Some(name) = static_or_private_property_key_name_ref(&a.key) {
                         record(&mut self.out, name);
                     }
                 }
@@ -118,17 +119,8 @@ impl<'a> Visit<'a> for Collector {
 }
 
 fn visit_method(set: &mut BTreeSet<u64>, m: &MethodDefinition<'_>) {
-    if let Some(name) = property_key_name(&m.key) {
+    if let Some(name) = static_or_private_property_key_name_ref(&m.key) {
         record(set, name);
-    }
-}
-
-fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
-    match key {
-        PropertyKey::StaticIdentifier(id) => Some(id.name.as_str()),
-        PropertyKey::PrivateIdentifier(id) => Some(id.name.as_str()),
-        PropertyKey::StringLiteral(s) => Some(s.value.as_str()),
-        _ => None,
     }
 }
 

@@ -18,6 +18,7 @@ use reverts_js::{
     ParseGoal, TopLevelStatementFact, TopLevelStatementKind, collect_top_level_statement_facts,
 };
 use reverts_model::EnrichedProgram;
+use reverts_package::{ExternalImportProof, ExternalImportProofKind};
 use reverts_pipeline::{
     EmittedFile, RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
@@ -705,7 +706,7 @@ fn package_source_blocker_reason(
         );
     };
     if package_source_blocker_has_commonjs_named_exports(source)
-        && !resolved_file.starts_with("forced-external:export-members:")
+        && !ExternalImportProof::parse(resolved_file).is_export_member_proof()
     {
         return (
             "commonjs_named_exports_need_member_proof".to_string(),
@@ -718,27 +719,18 @@ fn package_source_blocker_reason(
             resolved_file.to_string(),
         );
     }
-    for (prefix, reason) in [
-        (
-            "forced-external:canonical-subpath:",
-            "canonical_subpath_suggestion",
-        ),
-        (
-            "forced-external:semantic-source:",
-            "semantic_source_suggestion",
-        ),
-        (
-            "forced-external:dependency-graph-source:",
-            "dependency_graph_source_suggestion",
-        ),
-        (
-            "forced-external:dependency-edge-path:",
-            "dependency_edge_path_suggestion",
-        ),
-    ] {
-        if resolved_file.starts_with(prefix) {
-            return (reason.to_string(), resolved_file.to_string());
+    let proof = ExternalImportProof::parse(resolved_file);
+    let reason = match proof.kind() {
+        ExternalImportProofKind::CanonicalSubpath => Some("canonical_subpath_suggestion"),
+        ExternalImportProofKind::SemanticSource => Some("semantic_source_suggestion"),
+        ExternalImportProofKind::DependencyGraphSource => {
+            Some("dependency_graph_source_suggestion")
         }
+        ExternalImportProofKind::DependencyEdgePath => Some("dependency_edge_path_suggestion"),
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        return (reason.to_string(), resolved_file.to_string());
     }
     (
         "source_order_or_runtime_dependency".to_string(),

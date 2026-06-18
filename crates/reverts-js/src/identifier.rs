@@ -89,6 +89,11 @@ pub fn is_js_keyword(value: &str) -> bool {
 }
 
 #[must_use]
+pub fn is_valid_static_member_property_name(value: &str) -> bool {
+    is_identifier_like_ascii(value) && !is_reserved_word(value)
+}
+
+#[must_use]
 pub fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
     while cursor < bytes.len() && bytes[cursor] != b'\n' {
         cursor += 1;
@@ -105,6 +110,32 @@ pub fn skip_block_comment(bytes: &[u8], mut cursor: usize) -> usize {
         cursor += 1;
     }
     bytes.len()
+}
+
+#[must_use]
+pub fn read_quoted_string_at(source: &str, start: usize) -> Option<(String, usize)> {
+    let quote = *source.as_bytes().get(start)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let mut escaped = false;
+    let mut out = String::new();
+    for (offset, ch) in source[start + 1..].char_indices() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch as u8 == quote {
+            return Some((out, start + 1 + offset + ch.len_utf8()));
+        }
+        out.push(ch);
+    }
+    None
 }
 
 fn is_reserved_word(value: &str) -> bool {

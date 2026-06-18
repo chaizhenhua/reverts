@@ -8,6 +8,7 @@ use super::dependency_graph::DependencyGraphSourceProof;
 use super::export_member::ExportMemberSourceProof;
 use super::semantic::SemanticExternalSourceProof;
 use crate::{ModuleMatchStrategy, PackageMatch, SemanticPathHintMode};
+use reverts_package::{ExternalImportProof, ExternalImportProofKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SemanticExternalTargetPolicy {
@@ -25,6 +26,18 @@ pub(crate) fn source_only_match_can_be_promoted_to_import(strategy: ModuleMatchS
             | ModuleMatchStrategy::ClassShapeAndStringAnchors
             | ModuleMatchStrategy::SwitchShapeAndStringAnchors
     )
+}
+
+pub(crate) fn has_exact_hint_source_path(package_match: &PackageMatch) -> bool {
+    ExternalImportProof::parse(package_match.source_path.as_str()).kind()
+        == ExternalImportProofKind::ExactHint
+}
+
+pub(crate) fn exact_hint_has_quality(package_match: &PackageMatch, quality: &str) -> bool {
+    has_exact_hint_source_path(package_match)
+        && package_match
+            .source_path
+            .contains(format!(":quality={quality}:").as_str())
 }
 
 pub(crate) fn semantic_external_target_policies(
@@ -81,10 +94,10 @@ pub(crate) fn semantic_external_target_policies(
             }]
         }
         ModuleMatchStrategy::DependencyClosureOwnership => {
-            if !package_match.source_path.starts_with("exact-hint:") {
+            if !has_exact_hint_source_path(package_match) {
                 return Vec::new();
             }
-            if package_match.source_path.contains(":quality=trusted:") {
+            if exact_hint_has_quality(package_match, "trusted") {
                 return vec![
                     SemanticExternalTargetPolicy {
                         hint_mode: SemanticPathHintMode::ImportProof,
@@ -96,7 +109,7 @@ pub(crate) fn semantic_external_target_policies(
                     },
                 ];
             }
-            if package_match.source_path.contains(":quality=weak:") {
+            if exact_hint_has_quality(package_match, "weak") {
                 return vec![SemanticExternalTargetPolicy {
                     hint_mode: SemanticPathHintMode::RelaxedImportProof,
                     min_score: 4,
@@ -123,7 +136,7 @@ pub(crate) fn canonical_subpath_policy_allows(package_match: &PackageMatch) -> b
     }
     match package_match.strategy {
         ModuleMatchStrategy::DependencyClosureOwnership => {
-            package_match.source_path.starts_with("exact-hint:")
+            has_exact_hint_source_path(package_match)
         }
         ModuleMatchStrategy::AggregateStructuralBagSimilarity => {
             package_match.function_signature_matches >= 3
@@ -150,9 +163,8 @@ pub(crate) fn semantic_source_only_export_member_policy_allows(
 ) -> bool {
     match package_match.strategy {
         ModuleMatchStrategy::DependencyClosureOwnership => {
-            package_match.source_path.starts_with("exact-hint:")
-                && (package_match.source_path.contains(":quality=trusted:")
-                    || package_match.source_path.contains(":quality=weak:"))
+            exact_hint_has_quality(package_match, "trusted")
+                || exact_hint_has_quality(package_match, "weak")
         }
         ModuleMatchStrategy::NormalizedSourceHash
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
@@ -171,7 +183,7 @@ pub(crate) fn semantic_source_only_export_member_policy_allows(
 pub(crate) fn public_export_member_policy_allows(package_match: &PackageMatch) -> bool {
     source_only_match_can_be_promoted_to_import(package_match.strategy)
         || (package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-            && package_match.source_path.starts_with("exact-hint:"))
+            && has_exact_hint_source_path(package_match))
         || (package_match.strategy == ModuleMatchStrategy::AggregateStructuralBagSimilarity
             && package_match.function_signature_matches >= 3
             && package_match.string_anchor_matches >= 8)
@@ -204,22 +216,20 @@ pub(crate) fn dependency_graph_source_fingerprint_policy_allows(
 
 pub(crate) fn dependency_edge_path_policy_allows(package_match: &PackageMatch) -> bool {
     package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
-        && (package_match.source_path.contains(":quality=trusted:")
-            || package_match.source_path.contains(":quality=weak:"))
+        && (exact_hint_has_quality(package_match, "trusted")
+            || exact_hint_has_quality(package_match, "weak"))
 }
 
 pub(crate) fn same_package_cross_version_source_policy_allows(
     package_match: &PackageMatch,
 ) -> bool {
     package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
-        && package_match.source_path.contains(":quality=trusted:")
+        && exact_hint_has_quality(package_match, "trusted")
 }
 
 pub(crate) fn cross_package_exact_source_policy_allows(package_match: &PackageMatch) -> bool {
     package_match.strategy == ModuleMatchStrategy::DependencyClosureOwnership
-        && package_match.source_path.starts_with("exact-hint:")
+        && has_exact_hint_source_path(package_match)
 }
 
 pub(crate) const fn semantic_external_source_proof_label(

@@ -31,14 +31,12 @@ use reverts_js::{
     JsError, ParseError, ParseGoal, commonjs_create_binding_export_member,
     commonjs_export_property_name, commonjs_module_exports_target, module_export_name,
     object_define_property_export_member, parse_error_message, parse_options_for,
-    source_type_candidates,
+    source_type_candidates, static_property_key_name,
 };
 
 use crate::normalize_source;
 use crate::package_helpers::normalize_hint_text;
-use crate::source::ast_export_helpers::{
-    declaration_binding_names, object_expression_static_keys, property_key_name,
-};
+use crate::source::ast_export_helpers::{declaration_binding_names, object_expression_static_keys};
 use crate::source::exported_members::{is_identifier_name, is_usable_export_member};
 
 const MIN_STRING_ANCHOR_LEN: usize = 3;
@@ -464,7 +462,7 @@ fn class_method_shape_members(class: &Class<'_>) -> BTreeSet<String> {
             if method.computed {
                 return None;
             }
-            let name = property_key_name(&method.key)?;
+            let name = static_property_key_name(&method.key)?;
             if !is_usable_class_shape_member(name.as_str()) {
                 return None;
             }

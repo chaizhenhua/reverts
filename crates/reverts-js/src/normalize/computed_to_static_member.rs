@@ -8,6 +8,7 @@ use reverts_ir::NormalizationPassId;
 use std::mem;
 
 use super::NormalizationPass;
+use crate::is_valid_static_member_property_name;
 
 /// `ComputedToStaticMember` rewrites `obj["validIdent"]` into
 /// `obj.validIdent` when the bracketed key is a string literal that
@@ -110,7 +111,7 @@ fn is_rewritable_expr(expr: &Expression<'_>) -> bool {
     let Expression::StringLiteral(s) = &cme.expression else {
         return false;
     };
-    is_valid_identifier_name(s.value.as_str())
+    is_valid_static_member_property_name(s.value.as_str())
 }
 
 fn is_rewritable_target(t: &SimpleAssignmentTarget<'_>) -> bool {
@@ -120,96 +121,7 @@ fn is_rewritable_target(t: &SimpleAssignmentTarget<'_>) -> bool {
     let Expression::StringLiteral(s) = &cme.expression else {
         return false;
     };
-    is_valid_identifier_name(s.value.as_str())
-}
-
-/// Whether `s` can be used as a `.identifier` (lexical identifier rules
-/// per ECMA-262 §11.6.2 — `IdentifierStart` then `IdentifierPart*`),
-/// AND is not a reserved word that would change parsing.
-fn is_valid_identifier_name(s: &str) -> bool {
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !is_id_start(first) {
-        return false;
-    }
-    if !chars.all(is_id_part) {
-        return false;
-    }
-    !is_reserved_word(s)
-}
-
-fn is_id_start(c: char) -> bool {
-    c == '_' || c == '$' || c.is_ascii_alphabetic() || unicode_id_start(c)
-}
-
-fn is_id_part(c: char) -> bool {
-    is_id_start(c) || c.is_ascii_digit() || unicode_id_continue(c)
-}
-
-// Conservative bare-minimum unicode coverage: we don't include full
-// Unicode ID_Start/ID_Continue tables, only ASCII + a handful of
-// common non-ASCII letters. Property names that include non-ASCII
-// characters are vanishingly rare in package code and would only
-// cause us to miss an opportunity, never to produce invalid code.
-fn unicode_id_start(_c: char) -> bool {
-    false
-}
-fn unicode_id_continue(_c: char) -> bool {
-    false
-}
-
-fn is_reserved_word(s: &str) -> bool {
-    matches!(
-        s,
-        "break"
-            | "case"
-            | "catch"
-            | "class"
-            | "const"
-            | "continue"
-            | "debugger"
-            | "default"
-            | "delete"
-            | "do"
-            | "else"
-            | "export"
-            | "extends"
-            | "false"
-            | "finally"
-            | "for"
-            | "function"
-            | "if"
-            | "import"
-            | "in"
-            | "instanceof"
-            | "new"
-            | "null"
-            | "return"
-            | "super"
-            | "switch"
-            | "this"
-            | "throw"
-            | "true"
-            | "try"
-            | "typeof"
-            | "var"
-            | "void"
-            | "while"
-            | "with"
-            | "yield"
-            | "let"
-            | "static"
-            | "enum"
-            | "await"
-            | "implements"
-            | "interface"
-            | "package"
-            | "private"
-            | "protected"
-            | "public"
-    )
+    is_valid_static_member_property_name(s.value.as_str())
 }
 
 #[cfg(test)]

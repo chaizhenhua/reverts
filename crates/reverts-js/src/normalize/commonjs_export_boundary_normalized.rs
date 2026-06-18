@@ -1,7 +1,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, AssignmentTarget, Expression, FunctionBody, ObjectExpression, ObjectPropertyKind,
-    Program, PropertyKey, Statement,
+    Program, Statement,
 };
 use reverts_ir::NormalizationPassId;
 
@@ -9,6 +9,7 @@ use super::NormalizationPass;
 use crate::commonjs_exports::{
     argument_is_commonjs_exports_object, argument_object_expression,
     commonjs_module_exports_target, expression_is_commonjs_exports_object,
+    static_property_key_name_ref,
 };
 use crate::expression_identifier;
 
@@ -117,7 +118,7 @@ fn descriptor_is_reexport_boundary(descriptor: &ObjectExpression<'_>) -> bool {
         if property.computed {
             return false;
         }
-        let Some(key) = property_key_name(&property.key) else {
+        let Some(key) = static_property_key_name_ref(&property.key) else {
             return false;
         };
         match key {
@@ -138,14 +139,6 @@ fn descriptor_is_reexport_boundary(descriptor: &ObjectExpression<'_>) -> bool {
         }
     }
     found_reexport_binding
-}
-
-fn property_key_name<'a>(key: &'a PropertyKey<'a>) -> Option<&'a str> {
-    match key {
-        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.as_str()),
-        PropertyKey::StringLiteral(literal) => Some(literal.value.as_str()),
-        _ => None,
-    }
 }
 
 fn invokable_returns_reexported_binding(expression: &Expression<'_>) -> bool {

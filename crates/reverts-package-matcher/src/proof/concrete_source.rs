@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputRows, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
-use reverts_package::external_import_concrete_source_path;
+use reverts_package::{
+    ExternalImportProof, ExternalImportProofKind, external_import_concrete_source_path,
+};
 
 use crate::package_helpers::has_accepted_external_attribution;
 use crate::{ConcretePackageSourcePath, VersionedPackageMatchReport};
@@ -85,7 +87,7 @@ pub(crate) fn concrete_package_source_from_parts(
 fn concrete_package_source_path_from_proof(proof_path: &str) -> Option<String> {
     let proof_path = proof_path.trim();
     if proof_path.is_empty()
-        || proof_path.starts_with("exact-hint:")
+        || ExternalImportProof::parse(proof_path).kind() == ExternalImportProofKind::ExactHint
         || proof_path.starts_with("dependency-closure:")
         || proof_path.starts_with("dependency-cluster:")
         || proof_path.starts_with("package-file-graph:")

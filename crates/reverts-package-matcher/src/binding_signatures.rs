@@ -6,6 +6,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use reverts_js::{
+    skip_block_comment as skip_block_comment_for_signature,
+    skip_line_comment as skip_line_comment_for_signature,
+};
+
 use crate::source::exported_members::is_identifier_name;
 use crate::source::source_text::{
     previous_non_ascii_ws, read_identifier_with_end_at, skip_ascii_ws,
@@ -297,21 +302,4 @@ fn skip_non_code_for_signature(source: &str, cursor: usize) -> Option<usize> {
         }
         _ => None,
     }
-}
-
-fn skip_line_comment_for_signature(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor < bytes.len() && bytes[cursor] != b'\n' {
-        cursor += 1;
-    }
-    cursor
-}
-
-fn skip_block_comment_for_signature(bytes: &[u8], mut cursor: usize) -> usize {
-    while cursor + 1 < bytes.len() {
-        if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
-            return cursor + 2;
-        }
-        cursor += 1;
-    }
-    bytes.len()
 }
