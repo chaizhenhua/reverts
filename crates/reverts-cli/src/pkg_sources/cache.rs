@@ -69,6 +69,19 @@ pub(crate) fn entry_dir(
     root.join(registry_host).join(package_path).join(version)
 }
 
+/// Flatten an error's `source()` chain into a single readable string so the
+/// root cause (e.g. the underlying io error) is not lost.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
+}
+
 /// Extract a gzipped tar (npm tarball) into `dest`, creating it. npm tarballs
 /// root every entry under `package/`, so after extraction `dest/package/`
 /// holds the package. Path traversal entries (`..`) are rejected.
@@ -85,6 +98,11 @@ pub(crate) fn extract_tarball_gz(
     };
     fs::create_dir_all(dest).map_err(|source| make_err(format!("create dest: {source}")))?;
     let mut archive = Archive::new(GzDecoder::new(tarball));
+    // We only read the extracted sources, so do not apply the archive's file
+    // and directory modes (some npm packages ship non-executable dir entries
+    // that would block writing files into them) or its mtimes.
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_mtime(false);
     let entries = archive
         .entries()
         .map_err(|source| make_err(format!("read tar entries: {source}")))?;
@@ -103,9 +121,38 @@ pub(crate) fn extract_tarball_gz(
                 path.display()
             )));
         }
-        entry
-            .unpack_in(dest)
-            .map_err(|source| make_err(format!("unpack {}: {source}", path.display())))?;
+        let is_dir = entry.header().entry_type().is_dir();
+        entry.unpack_in(dest).map_err(|source| {
+            make_err(format!(
+                "unpack {}: {}",
+                path.display(),
+                error_chain(&source)
+            ))
+        })?;
+        // Some npm packages (e.g. pngjs@7.0.0) ship directory entries with mode
+        // 0o666 (no execute bit). The tar crate applies the archived mode even
+        // when preserve_permissions is false, which makes the directory
+        // unenterable and causes subsequent file writes inside it to fail with
+        // EACCES. We only read the extracted sources, so always ensure
+        // directories are at least 0o755.
+        if is_dir {
+            let dir_path = dest.join(&path);
+            if dir_path.is_dir() {
+                let mut perms = fs::metadata(&dir_path)
+                    .map_err(|source| make_err(format!("stat dir {}: {source}", path.display())))?
+                    .permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let mode = perms.mode();
+                    // Ensure owner, group, and other all have the execute bit.
+                    perms.set_mode(mode | 0o111);
+                }
+                fs::set_permissions(&dir_path, perms).map_err(|source| {
+                    make_err(format!("fix dir perms {}: {source}", path.display()))
+                })?;
+            }
+        }
     }
     Ok(())
 }
@@ -507,6 +554,45 @@ mod tests {
                 .join("registry.npmjs.org/x/1.0.0/package")
                 .exists()
         );
+    }
+
+    #[test]
+    fn extract_tarball_handles_non_executable_dir_entry() {
+        // A directory entry with mode 0o666 (no execute bit) followed by a file
+        // inside it — mirrors packages like pngjs@7.0.0. If the archived dir
+        // mode is applied, writing the file fails with EACCES.
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut dir_header = tar::Header::new_gnu();
+            dir_header.set_entry_type(tar::EntryType::Directory);
+            dir_header.set_size(0);
+            dir_header.set_mode(0o666);
+            dir_header.set_cksum();
+            builder
+                .append_data(&mut dir_header, "package/", std::io::empty())
+                .expect("append dir");
+            let body = br#"{"name":"x","version":"1.0.0"}"#;
+            let mut file_header = tar::Header::new_gnu();
+            file_header.set_size(body.len() as u64);
+            file_header.set_mode(0o644);
+            file_header.set_cksum();
+            builder
+                .append_data(&mut file_header, "package/package.json", &body[..])
+                .expect("append file");
+            builder.finish().expect("finish tar");
+        }
+        let mut gz = Vec::new();
+        {
+            use std::io::Write as _;
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default());
+            encoder.write_all(&tar_bytes).expect("gz write");
+            encoder.finish().expect("gz finish");
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        extract_tarball_gz("x", "1.0.0", &gz, dir.path()).expect("extract should succeed");
+        assert!(dir.path().join("package").join("package.json").is_file());
     }
 
     #[test]
