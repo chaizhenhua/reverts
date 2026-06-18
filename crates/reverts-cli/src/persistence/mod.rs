@@ -7,6 +7,7 @@
 
 pub(crate) mod attributions;
 pub(crate) mod externalization_hints;
+pub(crate) mod fingerprint_cache;
 pub(crate) mod function_attributions;
 pub(crate) mod package_surfaces;
 pub(crate) mod repository;

@@ -2262,9 +2262,18 @@ fn local_package_source_collection_prefers_compiled_runtime_family_over_src_ts()
     collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)
         .expect("collect sources");
 
-    assert_eq!(sources.len(), 1);
-    assert!(sources[0].source_path.ends_with("dist/index.js"));
-    assert!(sources[0].external_importable);
+    // package.json is also collected now (read for cache-anchored surface
+    // resolution), so locate the importable code source by path.
+    let dist = sources
+        .iter()
+        .find(|source| source.source_path.ends_with("dist/index.js"))
+        .expect("dist/index.js source");
+    assert!(dist.external_importable);
+    assert!(
+        !sources
+            .iter()
+            .any(|source| source.source_path.ends_with("src/index.ts"))
+    );
 }
 
 #[test]
@@ -2308,13 +2317,24 @@ fn local_package_source_collection_wraps_importable_json_data() {
     collect_local_package_sources(package_dir.as_path(), &metadata, &mut sources)
         .expect("collect sources");
 
-    assert_eq!(sources.len(), 1);
-    assert!(sources[0].source_path.ends_with("css-color-names.json"));
-    assert_eq!(sources[0].package_name, "css-color-names");
-    assert_eq!(sources[0].package_version, "1.0.1");
-    assert!(sources[0].external_importable);
-    assert!(sources[0].source.starts_with("export default "));
-    assert!(sources[0].source.contains("aliceblue"));
+    // Two sources: the importable JSON data plus the root package.json, which
+    // is now always kept for cache-anchored surface resolution. The unrelated
+    // `ignored.json` is still dropped (no importable target).
+    assert_eq!(sources.len(), 2);
+    assert!(
+        !sources
+            .iter()
+            .any(|source| source.source_path.ends_with("ignored.json"))
+    );
+    let data = sources
+        .iter()
+        .find(|source| source.source_path.ends_with("css-color-names.json"))
+        .expect("css-color-names.json source");
+    assert_eq!(data.package_name, "css-color-names");
+    assert_eq!(data.package_version, "1.0.1");
+    assert!(data.external_importable);
+    assert!(data.source.starts_with("export default "));
+    assert!(data.source.contains("aliceblue"));
 }
 
 #[test]
@@ -3415,7 +3435,9 @@ fn match_packages_externalizes_public_export_from_package_source_root() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // package.json is now loaded as a source (read for cache-anchored surface
+    // resolution) alongside the importable lib/add.js, hence 2.
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(outcome.matched_modules, 1);
     assert!(outcome.function_ownership_matches >= 1);
     assert_eq!(outcome.written_attributions, 1);
@@ -4086,7 +4108,9 @@ fn match_packages_externalizes_wildcard_export_from_package_source_root() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // 2 = the wildcard-matched module source + the root package.json (kept for
+    // cache-anchored surface resolution).
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(outcome.matched_modules, 1);
     assert!(outcome.function_ownership_matches >= 1);
     let (status, emission_mode, package_version, export_specifier): (
@@ -4151,7 +4175,8 @@ fn match_packages_externalizes_conditional_wildcard_export_from_package_source_r
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 2);
+    // 3 = the two conditional wildcard module sources + the root package.json.
+    assert_eq!(outcome.loaded_package_sources, 3);
     assert_eq!(outcome.matched_modules, 1);
     let export_specifier: String = connection
         .query_row(
@@ -4202,7 +4227,8 @@ fn match_packages_forces_require_only_conditional_export_external() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // 2 = the matched module source + the root package.json.
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(outcome.matched_modules, 1);
     assert_eq!(
         outcome.function_attributions, 0,
@@ -4272,7 +4298,8 @@ fn match_packages_forces_ambiguous_wildcard_export_external() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // 2 = the matched module source + the root package.json.
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(outcome.matched_modules, 1);
     assert_eq!(
         outcome.function_attributions, 0,
@@ -4335,7 +4362,8 @@ fn match_packages_uses_package_source_root_without_cache_table() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // 2 = the matched module source + the root package.json.
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(outcome.matched_modules, 1);
     assert!(
         outcome.function_attributions >= 1,
@@ -4425,7 +4453,8 @@ fn match_packages_forces_source_only_cascade_ownership_external() {
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
 
     assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
-    assert_eq!(outcome.loaded_package_sources, 1);
+    // 2 = the matched module source + the root package.json.
+    assert_eq!(outcome.loaded_package_sources, 2);
     assert_eq!(
         outcome.matched_modules, 1,
         "source-only cascade coverage should still count as package ownership"

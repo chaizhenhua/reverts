@@ -443,6 +443,10 @@ pub(crate) fn load_package_sources(
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
     filter_package_sources_to_relevant_path_hints(rows, &mut package_sources);
     dedup_package_sources(&mut package_sources);
+    // Attach globally-cached fingerprints (shared across projects) so the
+    // matcher skips re-parsing sources whose fingerprint was already computed
+    // on any prior run, on any project.
+    crate::persistence::fingerprint_cache::attach_global_fingerprints(&mut package_sources);
     Ok(package_sources)
 }
 
@@ -451,7 +455,6 @@ struct PackageSourceCacheColumns {
     has_external_importable: bool,
     has_external_import_policy_version: bool,
     has_export_specifier: bool,
-    has_fingerprint: bool,
 }
 
 impl PackageSourceCacheColumns {
@@ -475,23 +478,7 @@ impl PackageSourceCacheColumns {
                 "export_specifier",
             )
             .map_err(MatchPackagesError::QueryPackageSources)?,
-            has_fingerprint: sqlite_table_has_column(
-                connection,
-                "package_source_cache",
-                "fingerprint_json",
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?,
         })
-    }
-
-    /// SELECT expression yielding the cached fingerprint JSON (or `NULL` on
-    /// older snapshots without the column), as the 7th projected column.
-    fn fingerprint_select_expr(self) -> &'static str {
-        if self.has_fingerprint {
-            "fingerprint_json"
-        } else {
-            "NULL"
-        }
     }
 
     fn has_current_external_import_policy(self) -> bool {
@@ -547,14 +534,12 @@ fn load_cached_package_sources(
         columns.cache_import_policy_predicate(materialize_package_sources);
     let external_importable_expr = columns.external_importable_select_expr();
     let export_specifier_expr = columns.export_specifier_select_expr();
-    let fingerprint_expr = columns.fingerprint_select_expr();
     let mut sql = String::from(
         format!(
             r"
         SELECT package_name, package_version, entry_path, source_content,
                {external_importable_expr},
-               {export_specifier_expr},
-               {fingerprint_expr}
+               {export_specifier_expr}
           FROM package_source_cache
          WHERE TRIM(COALESCE(package_name, '')) != ''
            AND TRIM(COALESCE(package_version, '')) != ''
