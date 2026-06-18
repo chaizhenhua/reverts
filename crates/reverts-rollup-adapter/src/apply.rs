@@ -38,6 +38,7 @@ pub struct RollupRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ApplyOutcome {
     pub attributions_updated: usize,
+    pub attributions_revoked: usize,
     pub surfaces_inserted: usize,
     pub candidate_modules: usize,
 }
@@ -96,6 +97,22 @@ pub fn collect_rollups(snapshot: &Snapshot, oracle: &Oracle) -> Vec<RollupRow> {
         }
     }
     out
+}
+
+/// Collect the module ids of stale rollup flips that the current oracle no
+/// longer judges externalizable. These accepted external-import rows were
+/// promoted by an earlier rollup-apply (their `evidence_json` still records the
+/// matcher's closure-ownership rejection) but must be reverted to rejected so a
+/// later oracle fix is not silently ignored by the forward-only flip.
+#[must_use]
+pub fn collect_revocations(snapshot: &Snapshot, oracle: &Oracle) -> Vec<i64> {
+    project(snapshot, oracle)
+        .into_iter()
+        .filter_map(|proj| match proj.kind {
+            ProjectionKind::Revoke { .. } => Some(proj.module_id),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Apply the rollup projections to `package_attributions` and backfill
@@ -157,6 +174,34 @@ pub fn apply_rollup_projections(
     }
     drop(stmt);
 
+    // Revoke stale rollup flips: accepted external-import rows a prior apply
+    // promoted from a matcher closure-ownership rejection, whose package the
+    // current oracle no longer judges externalizable. The forward-only flip
+    // above never undoes these, so a later oracle fix (e.g. requiring a
+    // non-empty public-member enumeration) leaves incoherent root-imports
+    // stranded in the table until they are reverted here.
+    let revocations = collect_revocations(snapshot, oracle);
+    let mut attributions_revoked = 0usize;
+    if !revocations.is_empty() {
+        let mut revoke_stmt = tx.prepare(
+            "UPDATE package_attributions
+             SET status='rejected',
+                 emission_mode='application_source',
+                 export_specifier=NULL,
+                 package_subpath=NULL,
+                 resolved_file=NULL,
+                 rejection_reason='rollup revoked: current oracle no longer judges this package externalizable',
+                 external_import_policy_version=0,
+                 updated_at=?1
+             WHERE module_id=?2
+               AND status='accepted'
+               AND emission_mode='external_import'",
+        )?;
+        for module_id in revocations {
+            attributions_revoked += revoke_stmt.execute(params![now_iso8601, module_id])?;
+        }
+    }
+
     let evidence = format!(
         "{{\"matcher\":\"rollup_apply\",\"policy_version\":{}}}",
         PACKAGE_ATTRIBUTION_EXTERNAL_IMPORT_POLICY_VERSION
@@ -184,6 +229,7 @@ pub fn apply_rollup_projections(
 
     Ok(ApplyOutcome {
         attributions_updated,
+        attributions_revoked,
         surfaces_inserted,
         candidate_modules: plan.len(),
     })

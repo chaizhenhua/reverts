@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use reverts_analyze::rollup::oracle::{OracleConfig, build_oracle};
-use reverts_rollup_adapter::apply::{ApplyOutcome, apply_rollup_projections, collect_rollups};
+use reverts_rollup_adapter::apply::{
+    ApplyOutcome, apply_rollup_projections, collect_revocations, collect_rollups,
+};
 use reverts_rollup_adapter::db::load_snapshot;
 use rusqlite::{Connection, OpenFlags};
 
@@ -68,12 +70,14 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let snapshot = load_snapshot(&conn)?;
     let oracle = build_oracle(&snapshot, OracleConfig::default());
     let plan = collect_rollups(&snapshot, &oracle);
+    let revocations = collect_revocations(&snapshot, &oracle);
 
     println!(
-        "rollup-apply: db={} mode={} candidates={}",
+        "rollup-apply: db={} mode={} candidates={} revocations={}",
         args.db.display(),
         if args.dry_run { "DRY-RUN" } else { "APPLY" },
-        plan.len()
+        plan.len(),
+        revocations.len(),
     );
     if args.dry_run {
         for sample in plan.iter().take(5) {
@@ -81,6 +85,9 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
                 "  would flip module {} → {} ({})",
                 sample.module_id, sample.top_specifier, sample.package_version
             );
+        }
+        for module_id in revocations.iter().take(5) {
+            println!("  would revoke stale rollup on module {module_id}");
         }
         println!("dry-run complete; pass --apply to commit");
         return Ok(ExitCode::SUCCESS);
@@ -90,12 +97,13 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let now = unix_timestamp_iso8601();
     let ApplyOutcome {
         attributions_updated,
+        attributions_revoked,
         surfaces_inserted,
         ..
     } = apply_rollup_projections(&tx, &snapshot, &oracle, &now)?;
     tx.commit().map_err(|e| format!("commit: {e}"))?;
     println!(
-        "apply complete: {attributions_updated} attribution row(s), \
+        "apply complete: {attributions_updated} flipped, {attributions_revoked} revoked, \
          {surfaces_inserted} surface row(s) inserted"
     );
     Ok(ExitCode::SUCCESS)

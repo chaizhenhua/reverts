@@ -73,7 +73,7 @@ pub fn summarize(snap: &Snapshot, projections: &[Projection]) -> RollupReport {
                 global.rolled_up += 1;
                 *per_pkg_rolled.entry(proj.package_name.clone()).or_default() += 1;
             }
-            ProjectionKind::StillRejected { .. } => {
+            ProjectionKind::StillRejected { .. } | ProjectionKind::Revoke { .. } => {
                 global.still_rejected += 1;
                 *per_pkg_still.entry(proj.package_name.clone()).or_default() += 1;
             }
