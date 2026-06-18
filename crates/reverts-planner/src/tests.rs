@@ -10846,7 +10846,7 @@ fn reader_cluster_runtime_var_migration_imports_implicit_source_write_dependency
 }
 
 #[test]
-fn reader_cluster_runtime_var_migration_emits_externalized_init_shim_locally() {
+fn reader_cluster_runtime_var_migration_erases_externalized_init_shim_locally() {
     let prelude = "var shared;\nfunction readShared() { cNq(); return shared; }\n";
     let package_body = "function cNq() {}\nexport { cNq };\n";
     let writer_body = "shared = 'ok';\nexport { shared };\n";
@@ -10903,13 +10903,11 @@ fn reader_cluster_runtime_var_migration_emits_externalized_init_shim_locally() {
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
     assert!(
-        writer_source.contains("function readShared() { cNq(); return shared; }"),
+        writer_source.contains("function readShared() { void 0; return shared; }"),
         "{writer_source}"
     );
-    assert!(
-        writer_source.contains("function cNq() {}"),
-        "{writer_source}"
-    );
+    assert!(!writer_source.contains("function cNq()"), "{writer_source}");
+    assert!(!writer_source.contains("cNq();"), "{writer_source}");
     assert!(writer_source.contains("shared = 'ok';"), "{writer_source}");
     assert!(consumer_source.contains("import { readShared } from './writer.js';"));
     assert!(planned_source_opt(&plan, "modules/runtime/source-1-helpers.ts").is_none());
@@ -13036,6 +13034,42 @@ fn global_owner_rebuild_emits_noop_deps_in_folded_owner() {
             "{helper_source}"
         );
     }
+}
+
+#[test]
+fn migrated_runtime_chunks_erase_call_only_noop_deps_in_folded_owner() {
+    let prelude = concat!(
+        "var lazy = (init, value) => () => (init && (value = init(init = 0)), value);\n",
+        "function ownedA() { noop(); return 1; }\n",
+        "function noop() {}\n",
+    );
+    let folded_body = concat!(
+        "var initUse = lazy(() => { ownedA(); });\n",
+        "export { initUse, ownedA };\n",
+    );
+    let source = format!("{prelude}{folded_body}");
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files
+        .push(SourceFileInput::new(1, "bundle.js", Some(source.clone())));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(1), "folded", "modules/folded.ts")
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(prelude.len() as u32, source.len() as u32)),
+    );
+    rows.symbols.push(SymbolInput::new(ModuleId(1), "ownedA"));
+
+    let plan = plan_from_rows(rows);
+    let folded_source = planned_source(&plan, "modules/folded.ts");
+
+    assert!(
+        folded_source.contains("function ownedA() { void 0; return 1; }"),
+        "{folded_source}"
+    );
+    assert!(!folded_source.contains("noop();"), "{folded_source}");
+    assert!(
+        !folded_source.contains("function noop()"),
+        "{folded_source}"
+    );
 }
 
 #[test]

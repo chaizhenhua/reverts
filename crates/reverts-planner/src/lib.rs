@@ -1029,12 +1029,14 @@ pub(crate) fn emit_migrated_extra_chunks(
     migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
     migrated_extra_namespace_exports: &BTreeSet<(u32, BindingName)>,
     migrated_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    migrated_extra_noop_deps: &BTreeSet<BindingName>,
     migrated_extra_runtime_setter_deps_by_source: &BTreeMap<u32, BTreeSet<BindingName>>,
-) {
+) -> BTreeSet<BindingName> {
     if migrated_extra_snippets.is_empty() && migrated_extra_namespace_exports.is_empty() {
-        return;
+        return BTreeSet::new();
     }
     let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+    let mut retained_noop_deps = BTreeSet::<BindingName>::new();
     let migrated_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
         .values()
         .flat_map(|aliases| aliases.iter())
@@ -1053,6 +1055,11 @@ pub(crate) fn emit_migrated_extra_chunks(
         {
             source = rewrite_runtime_helper_writes(source.as_str(), setter_deps);
         }
+        source = rewrite_migrated_extra_noop_calls(
+            source.as_str(),
+            migrated_extra_noop_deps,
+            &mut retained_noop_deps,
+        );
         migrated_chunks.push((
             snippet.byte_start,
             0,
@@ -1070,19 +1077,42 @@ pub(crate) fn emit_migrated_extra_chunks(
         else {
             continue;
         };
+        let mut source = runtime_namespace_export_statement(namespace_export);
+        source = rewrite_migrated_extra_noop_calls(
+            source.as_str(),
+            migrated_extra_noop_deps,
+            &mut retained_noop_deps,
+        );
         migrated_chunks.push((
             namespace_export.byte_start,
             1,
-            rename_identifier_reads_in_source(
-                runtime_namespace_export_statement(namespace_export).as_str(),
-                &migrated_runtime_dep_aliases,
-            ),
+            rename_identifier_reads_in_source(source.as_str(), &migrated_runtime_dep_aliases),
         ));
     }
     migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
     for (_, _, source) in migrated_chunks {
         file.push_source(source);
     }
+    retained_noop_deps
+}
+
+fn rewrite_migrated_extra_noop_calls(
+    source: &str,
+    migrated_extra_noop_deps: &BTreeSet<BindingName>,
+    retained_noop_deps: &mut BTreeSet<BindingName>,
+) -> String {
+    if migrated_extra_noop_deps.is_empty() {
+        return source.to_string();
+    }
+    let rewritten = rewrite_noop_runtime_helper_calls(source, migrated_extra_noop_deps);
+    let remaining = identifiers_in_source(rewritten.as_str());
+    retained_noop_deps.extend(
+        migrated_extra_noop_deps
+            .iter()
+            .filter(|binding| remaining.contains(binding.as_str()))
+            .cloned(),
+    );
+    rewritten
 }
 
 /// Emit `PlannedBinding`s for every graph-known definition in this
@@ -2127,10 +2157,11 @@ pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
     migrated_extra_snippets: &BTreeSet<(u32, BindingName)>,
     migrated_extra_namespace_exports: &BTreeSet<(u32, BindingName)>,
     migrated_extra_runtime_dep_aliases: &BTreeMap<u32, BTreeMap<BindingName, BindingName>>,
+    migrated_extra_noop_deps: &BTreeSet<BindingName>,
     file: &mut PlannedFile,
-) {
+) -> BTreeSet<BindingName> {
     if migrated_extra_snippets.is_empty() && migrated_extra_namespace_exports.is_empty() {
-        return;
+        return BTreeSet::new();
     }
     let migrated_extra_runtime_dep_aliases = migrated_extra_runtime_dep_aliases
         .values()
@@ -2139,6 +2170,7 @@ pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
         .collect::<BTreeMap<_, _>>();
     let migrated_extra_runtime_dep_aliases = &migrated_extra_runtime_dep_aliases;
     let mut migrated_chunks = Vec::<(u32, u8, String)>::new();
+    let mut retained_noop_deps = BTreeSet::<BindingName>::new();
     for (source_file_id, binding) in migrated_extra_snippets {
         let Some(prelude) = program.model().graph().runtime_prelude(*source_file_id) else {
             continue;
@@ -2146,13 +2178,15 @@ pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
         let Some(snippet) = prelude.snippets.get(binding) else {
             continue;
         };
+        let source = rewrite_migrated_extra_noop_calls(
+            snippet.source.as_str(),
+            migrated_extra_noop_deps,
+            &mut retained_noop_deps,
+        );
         migrated_chunks.push((
             snippet.byte_start,
             0,
-            rename_identifier_reads_in_source(
-                snippet.source.as_str(),
-                migrated_extra_runtime_dep_aliases,
-            ),
+            rename_identifier_reads_in_source(source.as_str(), migrated_extra_runtime_dep_aliases),
         ));
     }
     for (source_file_id, namespace) in migrated_extra_namespace_exports {
@@ -2166,19 +2200,22 @@ pub(crate) fn push_migrated_runtime_snippets_and_namespaces(
         else {
             continue;
         };
+        let source = rewrite_migrated_extra_noop_calls(
+            runtime_namespace_export_statement(namespace_export).as_str(),
+            migrated_extra_noop_deps,
+            &mut retained_noop_deps,
+        );
         migrated_chunks.push((
             namespace_export.byte_start,
             1,
-            rename_identifier_reads_in_source(
-                runtime_namespace_export_statement(namespace_export).as_str(),
-                migrated_extra_runtime_dep_aliases,
-            ),
+            rename_identifier_reads_in_source(source.as_str(), migrated_extra_runtime_dep_aliases),
         ));
     }
     migrated_chunks.sort_by_key(|(byte_start, kind, _source)| (*byte_start, *kind));
     for (_, _, source) in migrated_chunks {
         file.push_source(source);
     }
+    retained_noop_deps
 }
 
 /// Emit `import { X, Y } from runtime` for each (source_file_id, bindings)

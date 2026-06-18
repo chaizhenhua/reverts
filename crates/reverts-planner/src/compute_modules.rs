@@ -388,18 +388,19 @@ impl FoldedModulePass<'_> {
             self.exported_runtime_helper_bindings,
             self.required_runtime_helper_bindings,
         );
-        push_migrated_runtime_snippets_and_namespaces(
+        let retained_noop_deps = push_migrated_runtime_snippets_and_namespaces(
             self.program,
             &migrated_extra_snippets,
             &migrated_extra_namespace_exports,
             &migrated_extra_runtime_dep_aliases,
+            &migrated_extra_noop_deps,
             file,
         );
         push_folded_noop_and_migrated_exports(
             folded,
             &runtime_stub_exports,
             &direct_stub_exports,
-            &migrated_extra_noop_deps,
+            &retained_noop_deps,
             &migrated_local_bindings,
             &migrated_extra_namespace_bindings,
             file,
@@ -903,15 +904,16 @@ impl NormalModuleBodyPass<'_> {
             &self.migration.migrated_locally,
             self.runtime_var_migrations,
         );
-        emit_migrated_extra_chunks(
+        let retained_noop_deps = emit_migrated_extra_chunks(
             self.program,
             file,
             &self.migration.migrated_extra_snippets,
             &self.migration.migrated_extra_namespace_exports,
             &self.migration.migrated_extra_runtime_dep_aliases,
+            &self.migration.migrated_extra_noop_deps,
             &self.migration.migrated_extra_runtime_setter_deps_by_source,
         );
-        for binding in &self.migration.migrated_extra_noop_deps {
+        for binding in &retained_noop_deps {
             file.push_source(noop_function_statement(binding));
         }
     }
@@ -976,15 +978,16 @@ impl NormalModuleBodyPass<'_> {
             &self.migration.migrated_locally,
             self.runtime_var_migrations,
         );
-        emit_migrated_extra_chunks(
+        let retained_noop_deps = emit_migrated_extra_chunks(
             self.program,
             file,
             &self.migration.migrated_extra_snippets,
             &self.migration.migrated_extra_namespace_exports,
             &self.migration.migrated_extra_runtime_dep_aliases,
+            &self.migration.migrated_extra_noop_deps,
             &self.migration.migrated_extra_runtime_setter_deps_by_source,
         );
-        for binding in &self.migration.migrated_extra_noop_deps {
+        for binding in &retained_noop_deps {
             file.push_source(noop_function_statement(binding));
         }
         let normalized = normalize_source_for_emit(
