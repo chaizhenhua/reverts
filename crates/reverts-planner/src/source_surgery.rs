@@ -37,23 +37,37 @@ pub(crate) fn apply_text_edits(source: &str, edits: &[(usize, usize, String)]) -
 /// Several passes remove entire top-level statements after a syntax-aware
 /// scanner has identified their byte ranges. Keeping the newline policy here
 /// prevents each pass from hand-rolling subtly different text surgery.
+///
+/// Adjacency safety: two consecutive removed statements share the single newline
+/// between them. The earlier edit consumes it as its *trailing* newline; without
+/// care the later edit would also try to consume it as its *leading* newline,
+/// producing overlapping ranges that `apply_text_edits` cannot apply. Edits are
+/// therefore sorted and each expanded `drop_start` is clamped to the previous
+/// edit's `drop_end`, so the shared newline is removed exactly once.
 pub(crate) fn expand_line_removal_edits(
     source: &str,
     edits: &[(usize, usize, String)],
 ) -> Vec<(usize, usize, String)> {
-    edits
-        .iter()
-        .map(|(start, end, replacement)| {
-            let mut drop_start = *start;
-            let mut drop_end = *end;
-            if source.as_bytes().get(drop_end) == Some(&b'\n') {
-                drop_end += 1;
-            } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
-                drop_start -= 1;
-            }
-            (drop_start, drop_end, replacement.clone())
-        })
-        .collect()
+    let mut sorted = edits.to_vec();
+    sorted.sort_by_key(|(start, _, _)| *start);
+    let mut previous_drop_end = 0usize;
+    let mut expanded = Vec::with_capacity(sorted.len());
+    for (start, end, replacement) in sorted {
+        let mut drop_start = start;
+        let mut drop_end = end;
+        if source.as_bytes().get(drop_end) == Some(&b'\n') {
+            drop_end += 1;
+        } else if drop_start > 0 && source.as_bytes().get(drop_start - 1) == Some(&b'\n') {
+            drop_start -= 1;
+        }
+        // Never overlap the previous edit: the shared newline (if any) was
+        // already claimed by it. Clamp into `[previous_drop_end, drop_end]` so
+        // the range stays well-formed even for back-to-back removals.
+        drop_start = drop_start.max(previous_drop_end).min(drop_end);
+        previous_drop_end = drop_end;
+        expanded.push((drop_start, drop_end, replacement));
+    }
+    expanded
 }
 
 /// Return parser-derived top-level statement slices for a generated module.
@@ -192,6 +206,22 @@ export { value };";
         let source = "const a = 1;\nconst b = 2;";
         let edits = expand_line_removal_edits(source, &[(13, 25, String::new())]);
         assert_eq!(apply_text_edits(source, &edits), "const a = 1;");
+    }
+
+    #[test]
+    fn adjacent_line_removals_do_not_overlap_on_shared_newline() {
+        // Two back-to-back removals: the first consumes the trailing newline at
+        // byte 12; without clamping, the second would consume the same newline
+        // as its leading newline, producing overlapping ranges that
+        // `apply_text_edits` cannot apply. Removing both statements yields "".
+        let source = "const a = 1;\nconst b = 2;";
+        let edits =
+            expand_line_removal_edits(source, &[(0, 12, String::new()), (13, 25, String::new())]);
+        // Sorted, expanded ranges must be non-overlapping (start_n >= end_{n-1}).
+        for window in edits.windows(2) {
+            assert!(window[1].0 >= window[0].1, "overlapping edits: {edits:?}");
+        }
+        assert_eq!(apply_text_edits(source, &edits), "");
     }
 
     #[test]
