@@ -24,15 +24,25 @@ pub(crate) fn parse_cached_package_json(source: &str) -> Option<serde_json::Valu
     serde_json::from_str::<serde_json::Value>(body).ok()
 }
 
+/// The path of a source relative to its package root. Loaded/materialized
+/// sources carry `source_path == "{name}@{version}/{rel_path}"`, so the root
+/// `package.json` appears as e.g. `rxjs@7.8.1/package.json`, not `package.json`.
+fn source_rel_path(source: &PackageSource) -> Option<&str> {
+    let prefix = format!("{}@{}/", source.package_name, source.package_version);
+    source.source_path.strip_prefix(prefix.as_str())
+}
+
 /// The cached root `package.json` value for `package_name`, if present in the
-/// loaded sources (root entry has `source_path == "package.json"`).
+/// loaded sources (its rel path is exactly `package.json`).
 pub(crate) fn cached_root_package_json(
     package_name: &str,
     package_sources: &[PackageSource],
 ) -> Option<serde_json::Value> {
     package_sources
         .iter()
-        .find(|src| src.package_name == package_name && src.source_path == "package.json")
+        .find(|src| {
+            src.package_name == package_name && source_rel_path(src) == Some("package.json")
+        })
         .and_then(|src| parse_cached_package_json(src.source.as_str()))
 }
 
@@ -92,8 +102,8 @@ fn package_has_root_index(package_name: &str, package_sources: &[PackageSource])
     package_sources.iter().any(|src| {
         src.package_name == package_name
             && matches!(
-                src.source_path.as_str(),
-                "index.js" | "index.json" | "index.node"
+                source_rel_path(src),
+                Some("index.js" | "index.json" | "index.node")
             )
     })
 }
@@ -190,11 +200,13 @@ mod tests {
     }
 
     fn pkg_json_source(name: &str, version: &str, body_json: &str) -> PackageSource {
+        // Real loaded/materialized sources carry `{name}@{version}/{rel_path}`
+        // as source_path — the root manifest is NOT bare "package.json".
         PackageSource::source_only(
             name,
             version,
             name,
-            "package.json",
+            format!("{name}@{version}/package.json"),
             format!("export default {body_json};"),
         )
     }

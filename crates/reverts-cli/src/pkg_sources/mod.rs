@@ -219,7 +219,13 @@ pub(crate) fn collect_local_package_sources(
             }
         })?;
         let importable_target = metadata.importable_target_for(rel_path.as_str());
-        if is_json_source_path(rel_path.as_str()) && importable_target.is_none() {
+        // Keep the root `package.json` even when it has no importable target:
+        // cache-anchored surface resolution reads its `exports`/`main` to learn
+        // the package's real public API. Other JSON without a target is skipped.
+        if is_json_source_path(rel_path.as_str())
+            && importable_target.is_none()
+            && rel_path.as_str() != "package.json"
+        {
             continue;
         }
         let source = package_source_body_for_local_file(rel_path.as_str(), source.as_str())
