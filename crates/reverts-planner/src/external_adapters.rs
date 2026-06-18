@@ -8,8 +8,8 @@ use reverts_js::{
 };
 use reverts_model::EnrichedProgram;
 use reverts_package::{
-    PackageResolution, accepted_external_attribution_for_module, import_attributes_for_attribution,
-    parse_export_members_import_proof,
+    PackageResolution, PackageSurfaceIndex, accepted_external_attribution_for_module,
+    import_attributes_for_attribution, parse_export_members_import_proof,
 };
 
 use crate::byte_lexer::{find_matching_brace, skip_ws};
@@ -1275,6 +1275,34 @@ pub(crate) fn adapter_required_package_modules(
     let exportable_bindings_by_module = &source_facts.exportable_bindings_by_module;
     let mut required = BTreeSet::new();
 
+    // A module that is publicly importable (its specifier is accepted by the
+    // package surfaces derived from each package's real public API) is replaced
+    // in the output by a bare `import from "<package>"`. Such a module must not
+    // propagate adapter-required-ness to its internal dependencies: the import
+    // already provides them, so those internals become eliminable. Internals
+    // with a direct application consumer are still pinned through that consumer.
+    let public_surface_index = PackageSurfaceIndex::from_attributions(
+        &[],
+        program.model().input().package_surfaces.as_slice(),
+    );
+    let publicly_importable = externalized_packages
+        .iter()
+        .copied()
+        .filter(|module_id| {
+            accepted_external_attribution_for_module(
+                &program.model().input().package_attributions,
+                *module_id,
+            )
+            .and_then(|attribution| attribution.export_specifier.as_deref())
+            .is_some_and(|specifier| {
+                matches!(
+                    public_surface_index.resolve(specifier),
+                    PackageResolution::External { .. }
+                )
+            })
+        })
+        .collect::<BTreeSet<ModuleId>>();
+
     loop {
         let mut changed = false;
         for dependency in &program.model().input().dependencies {
@@ -1289,6 +1317,9 @@ pub(crate) fn adapter_required_package_modules(
             let Some(from_module) = modules_by_id.get(&dependency.from_module_id) else {
                 continue;
             };
+            if publicly_importable.contains(&dependency.from_module_id) {
+                continue;
+            }
             if from_module.kind == ModuleKind::Package
                 && externalized_packages.contains(&from_module.id)
                 && !required.contains(&from_module.id)
@@ -1312,6 +1343,9 @@ pub(crate) fn adapter_required_package_modules(
             let Some(from_module) = modules_by_id.get(from_module_id) else {
                 continue;
             };
+            if publicly_importable.contains(from_module_id) {
+                continue;
+            }
             if from_module.kind == ModuleKind::Package
                 && externalized_packages.contains(&from_module.id)
                 && !required.contains(&from_module.id)

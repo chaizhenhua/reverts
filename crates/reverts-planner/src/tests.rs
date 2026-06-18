@@ -8563,6 +8563,114 @@ fn accepted_external_package_read_from_runtime_helper_uses_external_adapter() {
 }
 
 #[test]
+fn cache_surface_public_entry_frees_internal_dependency_from_adapter_required() {
+    // A package's public entry (specifier accepted by a cache-anchored public
+    // surface) is replaced by a bare `import from "pkg"`, so it must NOT pin its
+    // internal dependency as adapter-required: the import already provides it,
+    // making the internal eliminable. Without the surface the internal stays
+    // required (the pre-fix fault mode). The behaviour is driven solely by the
+    // surface — no package is hard-coded.
+    fn internal_is_adapter_required(with_surface: bool) -> (bool, bool) {
+        let internal_src = "var intHelper = () => 1;\n";
+        let entry_src = "var pubFn = () => intHelper();\n";
+        let app_src = "pubFn();\n";
+        let source = format!("{internal_src}{entry_src}{app_src}");
+        let internal_end = internal_src.len() as u32;
+        let entry_end = internal_end + entry_src.len() as u32;
+        let app_end = entry_end + app_src.len() as u32;
+
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files
+            .push(SourceFileInput::new(1, "bundle.js", Some(source)));
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(1),
+                "pubFn",
+                "modules/entry.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(internal_end, entry_end)),
+        );
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(2),
+                "intHelper",
+                "modules/internal.ts",
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file(1)
+            .with_source_span(SourceSpan::new(0, internal_end)),
+        );
+        rows.modules.push(
+            ModuleInput::application(ModuleId(3), "app", "modules/app.ts")
+                .with_source_file(1)
+                .with_source_span(SourceSpan::new(entry_end, app_end)),
+        );
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            ));
+        rows.package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(2),
+                "pkg",
+                "1.0.0",
+                "pkg/internal/helper.js",
+            ));
+        if with_surface {
+            rows.package_surfaces.push(PackageSurfaceInput {
+                package_name: "pkg".to_string(),
+                package_version: Some("1.0.0".to_string()),
+                export_specifier: "pkg".to_string(),
+                status: PackageAttributionStatus::Accepted,
+                evidence: None,
+            });
+        }
+
+        let enriched = enriched_from_rows(rows);
+        let accepted = accepted_external_module_ids(&enriched.model().input().package_attributions);
+        let source_facts = super::SourceModuleFacts::from_program(&enriched);
+        let required = super::external_adapters::adapter_required_package_modules(
+            &enriched,
+            &accepted,
+            &source_facts,
+        );
+        (
+            required.contains(&ModuleId(1)),
+            required.contains(&ModuleId(2)),
+        )
+    }
+
+    // Fault mode: with no public surface, the internal dependency is pinned.
+    let (entry_no_surface, internal_no_surface) = internal_is_adapter_required(false);
+    assert!(
+        entry_no_surface,
+        "public entry is pinned by the application read in both cases",
+    );
+    assert!(
+        internal_no_surface,
+        "without a public surface the internal stays adapter-required (pre-fix fault mode)",
+    );
+
+    // Fix: a cache-anchored public surface frees the internal for elimination.
+    let (entry_with_surface, internal_with_surface) = internal_is_adapter_required(true);
+    assert!(
+        entry_with_surface,
+        "public entry must still be adapter-required (app imports it)",
+    );
+    assert!(
+        !internal_with_surface,
+        "with a public surface, the internal dependency is no longer adapter-required",
+    );
+}
+
+#[test]
 fn package_only_runtime_helper_inlines_into_single_consumer() {
     let prelude = "function packageHelper() { return 1; }\n";
     let package_body = "var value = packageHelper();\nexport { value };\n";
