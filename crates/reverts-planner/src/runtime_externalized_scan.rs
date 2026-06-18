@@ -19,8 +19,8 @@ use crate::runtime_source_scan::{
     call_identifiers_in_source, runtime_import_identifiers_in_source,
 };
 use crate::{
-    drop_bare_void_zero_top_level_statements, identifiers_in_source,
-    rewrite_noop_runtime_helper_calls, unique_source_definition_modules,
+    compact_bare_void_zero_expression_statements, drop_bare_void_zero_top_level_statements,
+    identifiers_in_source, rewrite_noop_runtime_helper_calls, unique_source_definition_modules,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -91,6 +91,7 @@ pub(crate) fn erase_rewritable_package_init_shim_calls(
     }
     let rewritten = rewrite_noop_runtime_helper_calls(source, package_init_shims);
     let rewritten = drop_bare_void_zero_top_level_statements(rewritten.as_str());
+    let rewritten = compact_bare_void_zero_expression_statements(rewritten.as_str());
     let remaining_identifiers = identifiers_in_source(rewritten.as_str());
     package_init_shims.retain(|binding| remaining_identifiers.contains(binding.as_str()));
     rewritten

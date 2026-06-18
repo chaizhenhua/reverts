@@ -183,9 +183,10 @@ use node_builtin_require::{
     rewrite_node_builtin_require_calls_with_imports, runtime_create_require_helpers,
 };
 use noop_runtime_helpers::{
-    drop_bare_void_zero_top_level_statements, localizable_noop_runtime_helpers,
-    noop_runtime_helpers_in_source, private_noop_runtime_helpers_in_source,
-    rewrite_noop_runtime_helper_calls, strip_runtime_noop_declarations,
+    compact_bare_void_zero_expression_statements, drop_bare_void_zero_top_level_statements,
+    localizable_noop_runtime_helpers, noop_runtime_helpers_in_source,
+    private_noop_runtime_helpers_in_source, rewrite_noop_runtime_helper_calls,
+    strip_runtime_noop_declarations,
 };
 use pure_expression::{
     is_pure_initializer_expression, looks_like_arrow_function_expression, pure_class_expression,
@@ -929,6 +930,7 @@ pub(crate) fn build_lowered_module_source(
     if !localized_noop_runtime_helpers.is_empty() {
         source = rewrite_noop_runtime_helper_calls(source.as_str(), localized_noop_runtime_helpers);
         source = drop_bare_void_zero_top_level_statements(source.as_str());
+        source = compact_bare_void_zero_expression_statements(source.as_str());
     }
     if let Some(rewrite) = node_builtin_require_rewrite
         && !rewrite.imports.is_empty()
@@ -1105,6 +1107,7 @@ fn rewrite_migrated_extra_noop_calls(
         return source.to_string();
     }
     let rewritten = rewrite_noop_runtime_helper_calls(source, migrated_extra_noop_deps);
+    let rewritten = compact_bare_void_zero_expression_statements(rewritten.as_str());
     let remaining = identifiers_in_source(rewritten.as_str());
     retained_noop_deps.extend(
         migrated_extra_noop_deps

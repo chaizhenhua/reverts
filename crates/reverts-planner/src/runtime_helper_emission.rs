@@ -42,14 +42,15 @@ use crate::statements::{
 use crate::{
     EmitPlan, ExternalPackageAdapterPlan, PlanError, PlannedBinding, PlannedFile,
     RuntimeLazyFoldPlan, adapter_owned_runtime_bindings, close_runtime_helper_source_excluding,
-    coalesce_runtime_lazy_initializer_call_runs, compact_pure_static_runtime_literals,
-    drop_bare_void_zero_top_level_statements, identifiers_in_source,
-    inline_single_use_runtime_proxy_functions, noop_runtime_helpers_in_source,
-    private_noop_runtime_helpers_in_source, prune_orphan_runtime_bindings,
-    purify_private_runtime_lazy_initializers, rewrite_noop_runtime_helper_calls,
-    runtime_entrypoint_root_bindings, runtime_module_owner_imports_for_source,
-    scan_runtime_externalized_bindings, source_contains_top_level_call,
-    strip_runtime_noop_declarations, unresolved_runtime_helper_references,
+    coalesce_runtime_lazy_initializer_call_runs, compact_bare_void_zero_expression_statements,
+    compact_pure_static_runtime_literals, drop_bare_void_zero_top_level_statements,
+    identifiers_in_source, inline_single_use_runtime_proxy_functions,
+    noop_runtime_helpers_in_source, private_noop_runtime_helpers_in_source,
+    prune_orphan_runtime_bindings, purify_private_runtime_lazy_initializers,
+    rewrite_noop_runtime_helper_calls, runtime_entrypoint_root_bindings,
+    runtime_module_owner_imports_for_source, scan_runtime_externalized_bindings,
+    source_contains_top_level_call, strip_runtime_noop_declarations,
+    unresolved_runtime_helper_references,
 };
 use crate::{
     erase_rewritable_package_init_shim_calls, retain_runtime_imports_referenced_in_source,
@@ -268,6 +269,8 @@ pub(crate) fn emit_runtime_helper_files(
             );
             helper_closure.source =
                 drop_bare_void_zero_top_level_statements(helper_closure.source.as_str());
+            helper_closure.source =
+                compact_bare_void_zero_expression_statements(helper_closure.source.as_str());
         }
         if !erased_private_noops.is_empty() {
             helper_closure.source = strip_runtime_noop_declarations(

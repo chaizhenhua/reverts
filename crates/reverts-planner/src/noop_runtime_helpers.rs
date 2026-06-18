@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use reverts_graph::RuntimePrelude;
 use reverts_ir::BindingName;
+use reverts_js::{ParseGoal, collect_void_zero_expression_statements};
 
 use crate::byte_lexer::{find_matching_paren, skip_ws};
 use crate::{
@@ -124,6 +125,28 @@ pub(crate) fn drop_bare_void_zero_top_level_statements(source: &str) -> String {
     } else {
         apply_text_edits(source, &expand_line_removal_edits(source, &edits))
     }
+}
+
+pub(crate) fn compact_bare_void_zero_expression_statements(source: &str) -> String {
+    let Ok(statements) =
+        collect_void_zero_expression_statements(source, None, ParseGoal::TypeScript)
+    else {
+        return source.to_string();
+    };
+    if statements.is_empty() {
+        return source.to_string();
+    }
+    let edits = statements
+        .into_iter()
+        .map(|statement| {
+            (
+                statement.byte_start as usize,
+                statement.byte_end as usize,
+                ";".to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    apply_text_edits(source, &edits)
 }
 
 pub(crate) fn source_reads_binding_only_as_erasable_noop_calls(

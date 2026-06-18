@@ -3652,7 +3652,7 @@ fn runtime_noop_helper_localizes_call_only_use_and_unblocks_lazy_value() {
     let entry_source = planned_source(&plan, "modules/entry.ts");
 
     assert!(!entry_source.contains("source-1-helpers"), "{entry_source}");
-    assert!(entry_source.contains("void 0;"), "{entry_source}");
+    assert!(!entry_source.contains("void 0;"), "{entry_source}");
     assert!(!entry_source.contains("initShim"), "{entry_source}");
     assert!(
         !entry_source.contains("= lazyValue("),
@@ -3771,7 +3771,7 @@ fn runtime_private_noop_initializer_calls_are_erased_inside_helper() {
 
     assert!(helper_source.contains("cached = 42;"), "{helper_source}");
     assert!(
-        helper_source.contains("function readCached() { void 0; return cached; }"),
+        helper_source.contains("function readCached() { ; return cached; }"),
         "{helper_source}"
     );
     assert!(!helper_source.contains("initCached"), "{helper_source}");
@@ -3815,7 +3815,7 @@ fn runtime_public_noop_internal_calls_are_erased_but_export_stays() {
         "{helper_source}"
     );
     assert!(
-        helper_source.contains("function callPublicNoop() { void 0; return 1; }"),
+        helper_source.contains("function callPublicNoop() { ; return 1; }"),
         "{helper_source}"
     );
     assert!(helper_source.contains("export { callPublicNoop, publicNoop };"));
@@ -5621,7 +5621,10 @@ fn entrypoint_island_erases_unreferenced_externalized_package_init_imports() {
         !entrypoint_source.contains("./package.js"),
         "{entrypoint_source}"
     );
-    assert!(entrypoint_source.contains("void 0"), "{entrypoint_source}");
+    assert!(
+        entrypoint_source.contains("; return 1;"),
+        "{entrypoint_source}"
+    );
 }
 
 #[test]
@@ -10903,7 +10906,7 @@ fn reader_cluster_runtime_var_migration_erases_externalized_init_shim_locally() 
     );
     assert!(writer_source.contains("var shared;"), "{writer_source}");
     assert!(
-        writer_source.contains("function readShared() { void 0; return shared; }"),
+        writer_source.contains("function readShared() { ; return shared; }"),
         "{writer_source}"
     );
     assert!(!writer_source.contains("function cNq()"), "{writer_source}");
@@ -13062,7 +13065,7 @@ fn migrated_runtime_chunks_erase_call_only_noop_deps_in_folded_owner() {
     let folded_source = planned_source(&plan, "modules/folded.ts");
 
     assert!(
-        folded_source.contains("function ownedA() { void 0; return 1; }"),
+        folded_source.contains("function ownedA() { ; return 1; }"),
         "{folded_source}"
     );
     assert!(!folded_source.contains("noop();"), "{folded_source}");

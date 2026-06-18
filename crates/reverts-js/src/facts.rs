@@ -12,11 +12,12 @@ use oxc_ast::{
     visit::walk::{
         walk_call_expression, walk_export_all_declaration, walk_export_named_declaration,
         walk_expression, walk_import_declaration, walk_import_expression, walk_new_expression,
-        walk_string_literal,
+        walk_statement, walk_string_literal,
     },
 };
 use oxc_parser::Parser;
 use oxc_span::GetSpan;
+use oxc_syntax::operator::UnaryOperator;
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
 use crate::parse::{parse_options_for, source_type_candidates};
@@ -32,6 +33,12 @@ pub struct StringLiteralFact {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticTemplateLiteralFact {
     pub value: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementSpanFact {
     pub byte_start: u32,
     pub byte_end: u32,
 }
@@ -165,6 +172,34 @@ pub fn collect_static_template_literals(
         let mut collector = StaticTemplateLiteralCollector::default();
         collector.visit_program(&parsed.program);
         return Ok(collector.literals);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_void_zero_expression_statements(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<StatementSpanFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = VoidZeroExpressionStatementCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.statements);
     }
 
     Err(JsError::ParseFailed(errors))
@@ -419,6 +454,34 @@ impl<'a> Visit<'a> for StaticTemplateLiteralCollector {
         }
         walk_expression(self, expression);
     }
+}
+
+#[derive(Debug, Default)]
+struct VoidZeroExpressionStatementCollector {
+    statements: Vec<StatementSpanFact>,
+}
+
+impl<'a> Visit<'a> for VoidZeroExpressionStatementCollector {
+    fn visit_statement(&mut self, statement: &Statement<'a>) {
+        if let Statement::ExpressionStatement(expression_statement) = statement
+            && matches_void_numeric_expression(&expression_statement.expression)
+        {
+            let span = statement.span();
+            self.statements.push(StatementSpanFact {
+                byte_start: span.start,
+                byte_end: span.end,
+            });
+        }
+        walk_statement(self, statement);
+    }
+}
+
+fn matches_void_numeric_expression(expression: &Expression<'_>) -> bool {
+    let Expression::UnaryExpression(unary) = expression else {
+        return false;
+    };
+    matches!(unary.operator, UnaryOperator::Void)
+        && matches!(&unary.argument, Expression::NumericLiteral(_))
 }
 
 pub(crate) fn top_level_statement_fact(statement: &Statement<'_>) -> TopLevelStatementFact {

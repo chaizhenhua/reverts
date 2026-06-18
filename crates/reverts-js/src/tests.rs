@@ -6,8 +6,9 @@ use super::{
     classify_lazy_module_body, collect_file_url_source_location_rewrites,
     collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
     collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
-    extract_lazy_module_eager_value, format_source_minified, format_source_pretty,
-    format_source_with_module_items, format_source_with_module_items_and_renames,
+    collect_void_zero_expression_statements, extract_lazy_module_eager_value,
+    format_source_minified, format_source_pretty, format_source_with_module_items,
+    format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
     sanitize_identifier, skip_block_comment, skip_line_comment,
@@ -127,6 +128,24 @@ fn collects_top_level_statement_facts_for_runtime_attribution() {
         facts.iter().all(|fact| fact.byte_end > fact.byte_start),
         "statement spans must be non-empty: {facts:?}"
     );
+}
+
+#[test]
+fn collects_void_zero_expression_statement_spans() {
+    let source = "function f() { void 0; return void 0; }\nif (ok) void 0;\nvoid 0;\n";
+
+    let facts = collect_void_zero_expression_statements(
+        source,
+        Some(Path::new("runtime.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("source should parse");
+    let slices = facts
+        .iter()
+        .map(|fact| &source[fact.byte_start as usize..fact.byte_end as usize])
+        .collect::<Vec<_>>();
+
+    assert_eq!(slices, vec!["void 0;", "void 0;", "void 0;"]);
 }
 
 #[test]
