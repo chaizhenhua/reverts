@@ -130,6 +130,12 @@ pub(crate) fn external_package_adapter_analysis(
 ) -> ExternalPackageAdapterAnalysis {
     let adapter_required_packages =
         adapter_required_package_modules(program, externalized_packages, source_facts);
+    let non_empty_call_bindings = non_empty_call_identifiers_in_program(program);
+    let adapter_export_bindings = package_adapter_export_bindings_by_module(
+        program,
+        source_facts,
+        &adapter_required_packages,
+    );
     let adapters = adapter_required_packages
         .iter()
         .filter_map(|module_id| {
@@ -138,8 +144,13 @@ pub(crate) fn external_package_adapter_analysis(
                 *module_id,
             )?;
             let member_proof = export_member_adapter_proof(attribution);
-            let raw_bindings = package_adapter_export_bindings(program, *module_id, source_facts);
+            let raw_bindings = adapter_export_bindings
+                .get(module_id)
+                .cloned()
+                .unwrap_or_default();
             let kind = external_package_adapter_kind(program, *module_id, &raw_bindings);
+            let has_semantic_path_proof =
+                external_adapter_attribution_has_semantic_path_proof(attribution);
             if !external_adapter_attribution_allows_eager_import(
                 program,
                 *module_id,
@@ -150,6 +161,7 @@ pub(crate) fn external_package_adapter_analysis(
             }
             if kind == ExternalPackageAdapterKind::CommonJsWrapper
                 && member_proof.is_none()
+                && !has_semantic_path_proof
                 && commonjs_wrapper_source_has_unproven_named_exports(program, *module_id)
             {
                 return None;
@@ -161,7 +173,15 @@ pub(crate) fn external_package_adapter_analysis(
                 kind,
                 member_proof.as_ref(),
             );
-            adapter_plan_is_safe(program, *module_id, &bindings, member_proof.as_ref()).then_some((
+            (has_semantic_path_proof
+                || adapter_plan_is_safe(
+                    program,
+                    *module_id,
+                    &bindings,
+                    member_proof.as_ref(),
+                    &non_empty_call_bindings,
+                ))
+            .then_some((
                 *module_id,
                 ExternalPackageAdapterPlan {
                     bindings,
@@ -182,6 +202,7 @@ pub(crate) fn adapter_plan_is_safe(
     module_id: ModuleId,
     bindings: &BTreeSet<BindingName>,
     member_proof: Option<&ExportMemberAdapterProof>,
+    non_empty_call_bindings: &BTreeSet<BindingName>,
 ) -> bool {
     let original_name = program
         .model()
@@ -208,7 +229,7 @@ pub(crate) fn adapter_plan_is_safe(
             return true;
         }
         external_adapter_non_original_binding_is_safe(program, module_id, binding)
-            && !binding_has_non_empty_call_in_program(program, binding)
+            && !non_empty_call_bindings.contains(binding)
     })
 }
 
@@ -657,48 +678,45 @@ pub(crate) fn compact_source_declares_adapter_safe_binding(
     .any(|needle| compact_source.contains(needle))
 }
 
-pub(crate) fn binding_has_non_empty_call_in_program(
+pub(crate) fn non_empty_call_identifiers_in_program(
     program: &EnrichedProgram,
-    binding: &BindingName,
-) -> bool {
-    program
+) -> BTreeSet<BindingName> {
+    let mut bindings = BTreeSet::new();
+    for source in program
         .model()
         .input()
         .source_files
         .iter()
         .filter_map(|source_file| source_file.source.as_deref())
-        .any(|source| source_has_non_empty_call_to_binding(source, binding.as_str()))
+    {
+        bindings.extend(non_empty_call_identifiers_in_source(source));
+    }
+    bindings
 }
 
-pub(crate) fn source_has_non_empty_call_to_binding(source: &str, binding: &str) -> bool {
-    if binding.is_empty() {
-        return false;
-    }
+pub(crate) fn non_empty_call_identifiers_in_source(source: &str) -> BTreeSet<BindingName> {
     let bytes = source.as_bytes();
-    let needle = binding.as_bytes();
-    let mut cursor = 0;
+    let mut bindings = BTreeSet::new();
+    let mut cursor = 0usize;
     while cursor < bytes.len() {
-        let Some(relative) = source[cursor..].find(binding) else {
-            return false;
+        if !is_identifier_start(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let Some((identifier, end)) = parse_identifier(source, cursor) else {
+            cursor += 1;
+            continue;
         };
-        let start = cursor + relative;
-        let end = start + needle.len();
-        let before_ok = start == 0 || !is_identifier_continue(bytes[start - 1]);
-        let after_ok = bytes
-            .get(end)
-            .is_none_or(|byte| !is_identifier_continue(*byte));
-        if before_ok && after_ok {
-            let after = skip_ws(bytes, end);
-            if bytes.get(after) == Some(&b'(') {
-                let inner = skip_ws(bytes, after + 1);
-                if bytes.get(inner) != Some(&b')') {
-                    return true;
-                }
+        let after = skip_ws(bytes, end);
+        if bytes.get(after) == Some(&b'(') {
+            let inner = skip_ws(bytes, after + 1);
+            if bytes.get(inner) != Some(&b')') {
+                bindings.insert(BindingName::new(identifier));
             }
         }
         cursor = end;
     }
-    false
+    bindings
 }
 
 pub(crate) fn external_package_adapter_kind(
@@ -960,46 +978,64 @@ pub(crate) fn external_package_adapter_member_expression(
     }
 }
 
-pub(crate) fn package_adapter_export_bindings(
+pub(crate) fn package_adapter_export_bindings_by_module(
     program: &EnrichedProgram,
-    module_id: ModuleId,
     source_facts: &SourceModuleFacts,
-) -> BTreeSet<BindingName> {
-    let mut bindings = BTreeSet::new();
-    let target_bindings = source_facts
-        .exportable_bindings_by_module
-        .get(&module_id)
-        .cloned()
-        .unwrap_or_else(|| source_exportable_bindings(program, module_id));
+    adapter_required_packages: &BTreeSet<ModuleId>,
+) -> BTreeMap<ModuleId, BTreeSet<BindingName>> {
+    let mut bindings_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    let mut target_bindings_by_module = BTreeMap::<ModuleId, BTreeSet<BindingName>>::new();
+    for module_id in adapter_required_packages {
+        let target_bindings = source_facts
+            .exportable_bindings_by_module
+            .get(module_id)
+            .cloned()
+            .unwrap_or_else(|| source_exportable_bindings(program, *module_id));
+        target_bindings_by_module.insert(*module_id, target_bindings);
+    }
     for dependency in &program.model().input().dependencies {
         let ModuleDependencyTarget::Module(target_module_id) = dependency.target else {
             continue;
         };
-        if target_module_id != module_id {
+        let Some(target_bindings) = target_bindings_by_module.get(&target_module_id) else {
             continue;
-        }
+        };
         let Some(candidate_reads) = source_facts
             .candidate_reads_by_module
             .get(&dependency.from_module_id)
         else {
             continue;
         };
-        bindings.extend(candidate_reads.intersection(&target_bindings).cloned());
+        bindings_by_module
+            .entry(target_module_id)
+            .or_default()
+            .extend(candidate_reads.intersection(target_bindings).cloned());
     }
     for (from_module_id, candidate_reads) in &source_facts.candidate_reads_by_module {
-        if *from_module_id == module_id {
-            continue;
-        }
-        bindings.extend(candidate_reads.iter().filter_map(|binding| {
-            source_facts
+        for binding in candidate_reads {
+            let Some(owner) = source_facts
                 .definition_modules_all
                 .get(binding)
                 .and_then(|owner| *owner)
-                .filter(|owner| *owner == module_id)
-                .map(|_owner| binding.clone())
-        }));
+            else {
+                continue;
+            };
+            if owner == *from_module_id || !adapter_required_packages.contains(&owner) {
+                continue;
+            }
+            if target_bindings_by_module
+                .get(&owner)
+                .is_some_and(|target_bindings| !target_bindings.contains(binding))
+            {
+                continue;
+            }
+            bindings_by_module
+                .entry(owner)
+                .or_default()
+                .insert(binding.clone());
+        }
     }
-    bindings
+    bindings_by_module
 }
 
 pub(crate) fn package_adapter_export_bindings_for_kind(
@@ -1058,6 +1094,15 @@ pub(crate) fn external_adapter_attribution_allows_eager_import(
 
 fn external_adapter_specifier_is_worker_asset(value: &str) -> bool {
     value.to_ascii_lowercase().contains(".worker")
+}
+
+fn external_adapter_attribution_has_semantic_path_proof(
+    attribution: &PackageAttributionInput,
+) -> bool {
+    attribution
+        .resolved_file
+        .as_deref()
+        .is_some_and(|value| value.starts_with("forced-external:semantic-path:"))
 }
 
 fn external_adapter_resolved_file_has_weak_source_replacement_proof(value: &str) -> bool {

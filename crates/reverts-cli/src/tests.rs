@@ -27,7 +27,9 @@ use super::commands::runtime_inventory::{
     runtime_module_owner_label, runtime_original_name_owners_by_binding,
     runtime_source_span_owner_label_for_range,
 };
-use super::input_externalization::promote_verified_externalization_hints;
+use super::input_externalization::{
+    promote_detected_package_modules, promote_verified_externalization_hints,
+};
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
     package_source_elimination_stats_for_report, source_eliminated_package_modules_for_report,
@@ -503,6 +505,120 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
     assert_eq!(
         input.package_attributions[0].resolved_file.as_deref(),
         Some("normalized-source-export:pkg@1.0.0/index.js")
+    );
+}
+
+#[test]
+fn detected_package_modules_promote_rejected_source_attributions() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "init",
+        "pkg/internal/init",
+        "pkg",
+        Some("1.2.3".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "pkg",
+            "no cached package source was available for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted = promote_detected_package_modules(&mut input);
+
+    let attribution = &input.package_attributions[0];
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        attribution.status,
+        reverts_input::PackageAttributionStatus::Accepted
+    );
+    assert_eq!(
+        attribution.emission_mode,
+        reverts_input::PackageEmissionMode::ExternalImport
+    );
+    assert_eq!(attribution.package_version.as_deref(), Some("1.2.3"));
+    assert_eq!(
+        attribution.export_specifier.as_deref(),
+        Some("pkg/internal/init")
+    );
+    assert_eq!(attribution.subpath.as_deref(), Some("internal/init"));
+    assert_eq!(
+        attribution.resolved_file.as_deref(),
+        Some("forced-external:semantic-path:pkg@1.2.3/pkg/internal/init")
+    );
+    assert_eq!(attribution.rejection_reason, None);
+}
+
+#[test]
+fn detected_package_modules_use_scoped_package_alias_subpaths() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "client",
+        "sdk/client",
+        "@scope/sdk",
+        Some("2.0.0".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "@scope/sdk",
+            "package version search found no usable evidence",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted = promote_detected_package_modules(&mut input);
+
+    assert_eq!(promoted, 1);
+    assert_eq!(
+        input.package_attributions[0].export_specifier.as_deref(),
+        Some("@scope/sdk/client")
+    );
+}
+
+#[test]
+fn detected_package_modules_infer_missing_version_from_package_group() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "known",
+        "modules/10-pkg/known.ts",
+        "pkg",
+        Some("1.2.3".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "pkg",
+            "source-only",
+        ));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(11),
+        "minified",
+        "modules/11-minified.ts",
+        "pkg",
+        None,
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(11),
+            "pkg",
+            "no cached package source was available for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    let promoted = promote_detected_package_modules(&mut input);
+
+    assert_eq!(promoted, 2);
+    assert_eq!(
+        input.package_attributions[1].package_version.as_deref(),
+        Some("1.2.3")
+    );
+    assert_eq!(
+        input.package_attributions[1].export_specifier.as_deref(),
+        Some("pkg")
     );
 }
 

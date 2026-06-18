@@ -335,6 +335,7 @@ pub struct ImportExportPlanner;
 pub(crate) struct PlannerAnalysis {
     external_package_adapters: BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     externalized_packages: BTreeSet<ModuleId>,
+    externalized_package_init_bindings: BTreeSet<BindingName>,
     source_suppressed_packages: BTreeSet<ModuleId>,
     source_module_wiring: SourceModuleWiring,
     lowered_runtime_sources: BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -390,6 +391,15 @@ impl PlannerAnalysis {
             &external_package_adapters,
             &source_facts,
         );
+        let externalized_package_init_bindings = source_facts
+            .definition_modules_all
+            .iter()
+            .filter_map(|(binding, module_id)| {
+                module_id
+                    .filter(|module_id| externalized_packages.contains(module_id))
+                    .map(|_| binding.clone())
+            })
+            .collect::<BTreeSet<_>>();
         let eager_safe_analysis = if should_compute_cross_module_eager_safe_analysis(program) {
             compute_eager_safe_analysis(program, &source_module_wiring)
         } else {
@@ -411,6 +421,7 @@ impl PlannerAnalysis {
         Self {
             external_package_adapters,
             externalized_packages,
+            externalized_package_init_bindings,
             source_suppressed_packages,
             source_module_wiring,
             lowered_runtime_sources,

@@ -14,7 +14,7 @@ use reverts_input::{
     InputBundle, ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus,
     PackageEmissionMode,
 };
-use reverts_ir::ModuleId;
+use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
 use reverts_package_matcher::{
     package_source_exported_members, package_source_normalized_hash,
     package_source_normalized_hashes,
@@ -45,8 +45,189 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
             }
         })?;
     let mut bundle = load_project_bundle_from_connection(&connection, project_id)?;
+    promote_detected_package_modules(&mut bundle);
     promote_verified_externalization_hints(&connection, &mut bundle)?;
     Ok(bundle)
+}
+
+pub(crate) fn promote_detected_package_modules(bundle: &mut InputBundle) -> usize {
+    let modules_by_id = bundle
+        .modules
+        .iter()
+        .map(|module| (module.id, module))
+        .collect::<BTreeMap<_, _>>();
+    let package_versions = detected_package_versions_by_name(bundle);
+    let mut promoted = 0usize;
+    for attribution in &mut bundle.package_attributions {
+        if attribution.status == PackageAttributionStatus::Accepted
+            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+            && attribution.export_specifier.is_some()
+            && attribution.package_version.is_some()
+        {
+            continue;
+        }
+        let Some(module) = modules_by_id.get(&attribution.module_id).copied() else {
+            continue;
+        };
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(module_package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        if module_package_name.is_empty() || module_package_name != attribution.package_name {
+            continue;
+        }
+        let Some(module_package_version) = module
+            .package_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .or_else(|| {
+                package_versions
+                    .get(module_package_name)
+                    .map(String::as_str)
+            })
+        else {
+            continue;
+        };
+        let Some(export_specifier) = detected_package_export_specifier(
+            module_package_name,
+            module.semantic_path.as_str(),
+            module.original_name.as_str(),
+        ) else {
+            continue;
+        };
+        attribution.package_version = Some(module_package_version.to_string());
+        attribution.subpath = detected_package_subpath(export_specifier.as_str());
+        attribution.resolved_file = Some(format!(
+            "forced-external:semantic-path:{module_package_name}@{module_package_version}/{}",
+            module.semantic_path.trim().trim_matches('/')
+        ));
+        attribution.export_specifier = Some(export_specifier);
+        attribution.emission_mode = PackageEmissionMode::ExternalImport;
+        attribution.status = PackageAttributionStatus::Accepted;
+        attribution.rejection_reason = None;
+        promoted += 1;
+    }
+    promoted
+}
+
+fn detected_package_versions_by_name(bundle: &InputBundle) -> BTreeMap<String, String> {
+    let mut counts = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for module in &bundle.modules {
+        if module.kind != ModuleKind::Package {
+            continue;
+        }
+        let Some(package_name) = module.package_name.as_deref().map(str::trim) else {
+            continue;
+        };
+        let Some(package_version) = module.package_version.as_deref().map(str::trim) else {
+            continue;
+        };
+        if package_name.is_empty() || package_version.is_empty() {
+            continue;
+        }
+        *counts
+            .entry(package_name.to_string())
+            .or_default()
+            .entry(package_version.to_string())
+            .or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(package_name, versions)| {
+            versions
+                .into_iter()
+                .max_by(|(left_version, left_count), (right_version, right_count)| {
+                    left_count
+                        .cmp(right_count)
+                        .then_with(|| left_version.cmp(right_version))
+                })
+                .map(|(version, _)| (package_name, version))
+        })
+        .collect()
+}
+
+fn detected_package_export_specifier(
+    package_name: &str,
+    semantic_path: &str,
+    original_name: &str,
+) -> Option<String> {
+    let package_name = package_name.trim();
+    if !is_valid_package_name(package_name) {
+        return None;
+    }
+    let semantic_path = clean_detected_semantic_path(semantic_path);
+    let specifier = if semantic_path.is_empty()
+        || semantic_path == "index"
+        || normalize_package_path_segment(semantic_path.as_str())
+            == normalize_package_path_segment(original_name)
+        || detected_semantic_path_is_package_root(package_name, semantic_path.as_str())
+    {
+        package_name.to_string()
+    } else if semantic_path == package_name
+        || semantic_path.starts_with(&format!("{package_name}/"))
+    {
+        semantic_path
+    } else if let Some(relative) =
+        semantic_path.strip_prefix(format!("{}/", package_alias_segment(package_name)).as_str())
+    {
+        format!("{package_name}/{relative}")
+    } else {
+        format!("{package_name}/{semantic_path}")
+    };
+    specifier_resolves_package(specifier.as_str(), package_name).then_some(specifier)
+}
+
+fn clean_detected_semantic_path(semantic_path: &str) -> String {
+    let trimmed = semantic_path.trim().trim_matches('/');
+    let without_modules = trimmed.strip_prefix("modules/").unwrap_or(trimmed);
+    let without_extension = without_modules
+        .strip_suffix(".ts")
+        .or_else(|| without_modules.strip_suffix(".js"))
+        .or_else(|| without_modules.strip_suffix(".mjs"))
+        .or_else(|| without_modules.strip_suffix(".cjs"))
+        .unwrap_or(without_modules);
+    let without_generated_prefix = without_extension
+        .split_once('-')
+        .filter(|(prefix, _)| prefix.chars().all(|ch| ch.is_ascii_digit()))
+        .map(|(_, rest)| rest)
+        .unwrap_or(without_extension);
+    without_generated_prefix.trim_matches('/').to_string()
+}
+
+fn detected_semantic_path_is_package_root(package_name: &str, semantic_path: &str) -> bool {
+    let package_alias = package_alias_segment(package_name);
+    let normalized_path = normalize_package_path_segment(semantic_path);
+    normalized_path == normalize_package_path_segment(package_name)
+        || normalized_path == normalize_package_path_segment(package_alias.as_str())
+}
+
+fn package_alias_segment(package_name: &str) -> String {
+    package_name
+        .trim_start_matches('@')
+        .rsplit('/')
+        .next()
+        .unwrap_or(package_name)
+        .to_string()
+}
+
+fn normalize_package_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn specifier_resolves_package(specifier: &str, package_name: &str) -> bool {
+    split_bare_specifier(specifier)
+        .is_some_and(|(resolved_package, _)| resolved_package == package_name)
+}
+
+fn detected_package_subpath(specifier: &str) -> Option<String> {
+    split_bare_specifier(specifier).and_then(|(_, subpath)| subpath.map(|value| value.to_string()))
 }
 
 pub(crate) fn promote_verified_externalization_hints(

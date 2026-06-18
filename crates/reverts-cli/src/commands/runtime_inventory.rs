@@ -748,7 +748,6 @@ fn package_source_blocker_reason(
 
 fn emitted_file_is_external_adapter(file: &EmittedFile) -> bool {
     file.source.contains("import * as external_")
-        && file.source.contains("Object.prototype.hasOwnProperty.call")
 }
 
 fn package_source_blocker_has_worker_asset_hint(attribution: &PackageAttributionInput) -> bool {

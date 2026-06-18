@@ -49,8 +49,7 @@ use crate::{
     partition_runtime_owner_bindings, push_folded_noop_and_migrated_exports,
     push_migrated_runtime_snippets_and_namespaces, push_package_imports,
     record_lowered_runtime_helper_usage, route_prelude_imports_for_runtime_sources,
-    scan_runtime_externalized_bindings, try_localize_lazy_value,
-    try_post_inline_localize_lazy_value, variable_declaration_statement,
+    try_localize_lazy_value, try_post_inline_localize_lazy_value, variable_declaration_statement,
 };
 
 /// Immutable planner facts needed while planning one module.
@@ -63,6 +62,7 @@ pub(crate) struct ModulePlanInput<'a> {
     pub(crate) module: &'a ModuleInput,
     pub(crate) external_package_adapters: &'a BTreeMap<ModuleId, ExternalPackageAdapterPlan>,
     pub(crate) externalized_packages: &'a BTreeSet<ModuleId>,
+    pub(crate) externalized_package_init_bindings: &'a BTreeSet<BindingName>,
     pub(crate) source_suppressed_packages: &'a BTreeSet<ModuleId>,
     pub(crate) source_module_wiring: &'a SourceModuleWiring,
     pub(crate) lowered_runtime_sources: &'a BTreeMap<ModuleId, LoweredRuntimeModuleSource>,
@@ -112,6 +112,7 @@ pub(crate) fn plan_one_module(
         module,
         external_package_adapters,
         externalized_packages,
+        externalized_package_init_bindings,
         source_suppressed_packages,
         source_module_wiring,
         lowered_runtime_sources,
@@ -214,6 +215,7 @@ pub(crate) fn plan_one_module(
         runtime_edge_direct_prelude_imports,
         binding_owners,
         externalized_packages,
+        externalized_package_init_bindings,
         package_runtime_owner: package_runtime_owner.as_ref(),
         has_runtime_edge_before_lazy_helpers,
         migration: &migration,
@@ -425,6 +427,7 @@ struct NormalRuntimePass<'a> {
     runtime_edge_direct_prelude_imports: &'a BTreeMap<u32, BTreeSet<BindingName>>,
     binding_owners: &'a BindingOwnerPlan,
     externalized_packages: &'a BTreeSet<ModuleId>,
+    externalized_package_init_bindings: &'a BTreeSet<BindingName>,
     package_runtime_owner: Option<&'a crate::package_runtime::PackageRuntimeOwner>,
     has_runtime_edge_before_lazy_helpers: bool,
     migration: &'a OwnerMigrationState,
@@ -560,10 +563,10 @@ impl<'a> NormalRuntimePass<'a> {
         let mut localized_noop_runtime_helpers = localized_noop_runtime_helpers;
         localized_noop_runtime_helpers.extend(
             rewritable_externalized_package_init_shims_for_source(
-                self.program,
                 lowered_source,
                 namespace_member_rewrite.as_ref(),
                 self.externalized_packages,
+                self.externalized_package_init_bindings,
             ),
         );
         let remaining_runtime_helpers: BTreeSet<BindingName> = remaining_runtime_helpers
@@ -800,27 +803,26 @@ impl<'a> NormalRuntimePass<'a> {
 }
 
 fn rewritable_externalized_package_init_shims_for_source(
-    program: &EnrichedProgram,
     lowered_source: Option<&LoweredRuntimeModuleSource>,
     namespace_member_rewrite: Option<&RuntimeNamespaceMemberAccessRewrite>,
     externalized_packages: &BTreeSet<ModuleId>,
+    externalized_package_init_bindings: &BTreeSet<BindingName>,
 ) -> BTreeSet<BindingName> {
     let Some(lowered_source) = lowered_source else {
         return BTreeSet::new();
     };
-    if externalized_packages.is_empty() {
+    if externalized_packages.is_empty() || externalized_package_init_bindings.is_empty() {
         return BTreeSet::new();
     }
     let source = namespace_member_rewrite
         .map(|rewrite| rewrite.source.as_str())
         .unwrap_or(lowered_source.source.as_str());
-    let mut shims = scan_runtime_externalized_bindings(
-        program,
-        source,
-        &BTreeSet::new(),
-        externalized_packages,
-    )
-    .package_init_shims;
+    let call_identifiers = crate::call_identifiers_in_source(source);
+    let mut shims = externalized_package_init_bindings
+        .iter()
+        .filter(|binding| call_identifiers.contains(binding.as_str()))
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if shims.is_empty() {
         return BTreeSet::new();
     }

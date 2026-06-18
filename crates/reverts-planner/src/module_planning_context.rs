@@ -24,6 +24,8 @@ impl ModulePlanningContext<'_> {
                     module,
                     external_package_adapters: &analysis.external_package_adapters,
                     externalized_packages: &analysis.externalized_packages,
+                    externalized_package_init_bindings: &analysis
+                        .externalized_package_init_bindings,
                     source_suppressed_packages: &analysis.source_suppressed_packages,
                     source_module_wiring: &analysis.source_module_wiring,
                     lowered_runtime_sources: &analysis.lowered_runtime_sources,
