@@ -15,7 +15,9 @@ use reverts_input::{
     PackageEmissionMode,
 };
 use reverts_ir::{ModuleKind, is_valid_package_name, split_bare_specifier};
-use reverts_package::{ExternalImportProofPath, package_source_path};
+use reverts_package::{
+    ExternalImportProofPath, is_providable_external_attribution, package_source_path,
+};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::persistence::source_cache::{
@@ -181,10 +183,7 @@ impl DetectedPackageExternalizationPolicy<'_> {
 fn detected_package_attribution_is_already_externalized(
     attribution: &PackageAttributionInput,
 ) -> bool {
-    attribution.status == PackageAttributionStatus::Accepted
-        && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        && attribution.export_specifier.is_some()
-        && attribution.package_version.is_some()
+    is_providable_external_attribution(attribution) && attribution.package_version.is_some()
 }
 
 fn apply_detected_package_externalization_decision(

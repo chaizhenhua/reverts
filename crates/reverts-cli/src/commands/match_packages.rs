@@ -14,9 +14,13 @@ use crate::{
 pub(crate) fn run(args: MatchPackagesArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "matched packages for project {} from {} package source(s): {} module attribution(s), {} direct external import module attribution(s), {} private source-suppressed package module(s), {} package source eliminated ({:.2}%), {} package source remaining, {} external import candidate(s), {} unsafe external import candidate(s) removed, {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
+        "matched packages for project {} from {} package source(s): fingerprint cache {} hit(s) / {} miss(es) / {} computed / {} error(s), {} module attribution(s), {} direct external import module attribution(s), {} private source-suppressed package module(s), {} package source eliminated ({:.2}%), {} package source remaining, {} external import candidate(s), {} unsafe external import candidate(s) removed, {} package surface(s), {} attribution(s) written, {} surface(s) written, {} function attribution(s) ({} written), {} function ownership match(es), {} trusted / {} weak / {} invalid / {} missing package module source slice(s), {} audit finding(s)",
         outcome.project_id,
         outcome.loaded_package_sources,
+        outcome.fingerprint_cache_hits,
+        outcome.fingerprint_cache_misses,
+        outcome.fingerprint_cache_computed,
+        outcome.fingerprint_cache_errors,
         outcome.matched_modules,
         outcome.external_import_modules,
         outcome.private_source_suppressed_package_modules,
@@ -50,7 +54,7 @@ pub(crate) fn run(args: MatchPackagesArgs) -> Result<(), CliRunError> {
 pub(crate) fn run_report(args: MatchPackagesReportArgs) -> Result<(), CliRunError> {
     let outcome = match_packages_report_from_sqlite(&args).map_err(CliRunError::MatchPackages)?;
     println!(
-        "package match report: projects={}, package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
+        "package match report: projects={}, package_modules={}, matched={} ({:.2}%), fingerprint_cache_hits={}, fingerprint_cache_misses={}, fingerprint_cache_computed={}, fingerprint_cache_errors={}, direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
         outcome.projects.len(),
         outcome.totals.package_modules,
         outcome.totals.matched_modules,
@@ -58,6 +62,10 @@ pub(crate) fn run_report(args: MatchPackagesReportArgs) -> Result<(), CliRunErro
             outcome.totals.matched_modules,
             outcome.totals.package_modules
         ),
+        outcome.totals.fingerprint_cache_hits,
+        outcome.totals.fingerprint_cache_misses,
+        outcome.totals.fingerprint_cache_computed,
+        outcome.totals.fingerprint_cache_errors,
         outcome.totals.external_import_modules,
         pct(
             outcome.totals.external_import_modules,
@@ -77,11 +85,15 @@ pub(crate) fn run_report(args: MatchPackagesReportArgs) -> Result<(), CliRunErro
     );
     for project in &outcome.projects {
         println!(
-            "  project {}: package_modules={}, matched={} ({:.2}%), direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
+            "  project {}: package_modules={}, matched={} ({:.2}%), fingerprint_cache_hits={}, fingerprint_cache_misses={}, fingerprint_cache_computed={}, fingerprint_cache_errors={}, direct_externalized={} ({:.2}% of package modules), private_source_suppressed={}, source_eliminated={} ({:.2}% of package modules), source_remaining={}, candidates={}, unsafe_removed={}, surfaces={}, audit_findings={}",
             project.project_id,
             project.loaded_package_modules,
             project.matched_modules,
             pct(project.matched_modules, project.loaded_package_modules),
+            project.fingerprint_cache_hits,
+            project.fingerprint_cache_misses,
+            project.fingerprint_cache_computed,
+            project.fingerprint_cache_errors,
             project.external_import_modules,
             pct(
                 project.external_import_modules,

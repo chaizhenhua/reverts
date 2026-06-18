@@ -25,6 +25,7 @@ use rusqlite::Connection;
 use semver::Version;
 
 use crate::errors::MatchPackagesError;
+use crate::persistence::fingerprint_cache::{FingerprintCacheStats, attach_global_fingerprints};
 use crate::persistence::source_cache::{
     load_cached_package_sources, persist_package_source_cache, stale_package_source_cache_versions,
 };
@@ -42,6 +43,12 @@ pub(crate) struct PackageModuleSourceQualityCounts {
     pub(crate) weak: usize,
     pub(crate) invalid: usize,
     pub(crate) missing: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct LoadedPackageSources {
+    pub(crate) sources: Vec<PackageSource>,
+    pub(crate) fingerprint_cache: FingerprintCacheStats,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,8 +399,27 @@ pub(crate) fn load_package_sources(
     materialize_package_sources: bool,
     persist_materialized_package_sources: bool,
 ) -> Result<Vec<PackageSource>, MatchPackagesError> {
+    Ok(load_package_sources_with_fingerprint_stats(
+        connection,
+        rows,
+        package_names,
+        package_source_roots,
+        materialize_package_sources,
+        persist_materialized_package_sources,
+    )?
+    .sources)
+}
+
+pub(crate) fn load_package_sources_with_fingerprint_stats(
+    connection: &mut Connection,
+    rows: &InputRows,
+    package_names: &BTreeSet<String>,
+    package_source_roots: &[PathBuf],
+    materialize_package_sources: bool,
+    persist_materialized_package_sources: bool,
+) -> Result<LoadedPackageSources, MatchPackagesError> {
     if package_names.is_empty() {
-        return Ok(Vec::new());
+        return Ok(LoadedPackageSources::default());
     }
 
     let has_package_source_cache = sqlite_table_exists(connection, "package_source_cache")
@@ -441,8 +467,11 @@ pub(crate) fn load_package_sources(
     // Attach globally-cached fingerprints (shared across projects) so the
     // matcher skips re-parsing sources whose fingerprint was already computed
     // on any prior run, on any project.
-    crate::persistence::fingerprint_cache::attach_global_fingerprints(&mut package_sources);
-    Ok(package_sources)
+    let fingerprint_cache = attach_global_fingerprints(&mut package_sources);
+    Ok(LoadedPackageSources {
+        sources: package_sources,
+        fingerprint_cache,
+    })
 }
 
 pub(crate) fn filter_package_sources_to_referenced_package_versions(

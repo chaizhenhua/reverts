@@ -15,7 +15,10 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
-use reverts_package::{ConsumerBoundaryPolicy, consumer_is_boundary};
+use reverts_package::{
+    ConsumerBoundaryPolicy, consumer_is_boundary, externally_providable_module_ids,
+    is_providable_external_attribution,
+};
 
 pub(crate) fn module_dependency_path_exists(
     dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
@@ -87,21 +90,8 @@ pub(crate) fn source_suppressed_package_dependency_closure(
     // hand back a non-public internal, so the cross-package "boundary" exemption
     // below (which assumes a consumer re-imports the module from its package)
     // is only valid for externally-providable modules.
-    let externally_providable = program
-        .model()
-        .input()
-        .package_attributions
-        .iter()
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-                && attribution
-                    .export_specifier
-                    .as_deref()
-                    .is_some_and(|specifier| !specifier.trim().is_empty())
-        })
-        .map(|attribution| attribution.module_id)
-        .collect::<BTreeSet<_>>();
+    let externally_providable =
+        externally_providable_module_ids(&program.model().input().package_attributions);
     let mut reachable = seed_modules
         .iter()
         .copied()
@@ -218,9 +208,7 @@ pub(crate) fn package_attribution_proves_package_ownership(
     {
         return false;
     }
-    (attribution.status == PackageAttributionStatus::Accepted
-        && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        && attribution.export_specifier.is_some())
+    is_providable_external_attribution(attribution)
         || (attribution.status == PackageAttributionStatus::Rejected
             && attribution.emission_mode == PackageEmissionMode::ApplicationSource
             && attribution.package_version.is_some())

@@ -20,13 +20,12 @@ use oxc_ast::{
 };
 use oxc_parser::Parser;
 use reverts_input::{
-    InputRows, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-    PackageSurfaceInput,
+    InputRows, PackageAttributionInput, PackageAttributionStatus, PackageSurfaceInput,
 };
 use reverts_ir::{ModuleKind, is_valid_package_name, split_bare_specifier};
 use reverts_js::{JsError, ParseError, ParseGoal, parse_options_for, source_type_candidates};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
-use reverts_package::is_node_builtin;
+use reverts_package::{is_accepted_external_attribution, is_node_builtin};
 
 use crate::{PackageImportSite, PackageSource, SourcePackageImportParseError};
 
@@ -219,8 +218,7 @@ fn external_package_version(
         .chain(current_attributions.iter())
         .filter(|attribution| {
             attribution.package_name == package_name
-                && attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
+                && is_accepted_external_attribution(attribution)
         })
         .filter_map(|attribution| attribution.package_version.clone())
         .collect::<BTreeSet<_>>();

@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use reverts_input::{
     ModuleInput, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
@@ -128,6 +129,15 @@ impl PackageSurfaceIndex {
 pub fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -> bool {
     attribution.status == PackageAttributionStatus::Accepted
         && attribution.emission_mode == PackageEmissionMode::ExternalImport
+}
+
+#[must_use]
+pub fn is_providable_external_attribution(attribution: &PackageAttributionInput) -> bool {
+    is_accepted_external_attribution(attribution)
+        && attribution
+            .export_specifier
+            .as_deref()
+            .is_some_and(|specifier| !specifier.trim().is_empty())
 }
 
 /// Parse package metadata carried as plain `package.json` text or as the
@@ -753,14 +763,23 @@ pub fn accepted_external_module_ids(
 }
 
 #[must_use]
+pub fn externally_providable_module_ids(
+    attributions: &[PackageAttributionInput],
+) -> BTreeSet<ModuleId> {
+    attributions
+        .iter()
+        .filter(|attribution| is_providable_external_attribution(attribution))
+        .map(|attribution| attribution.module_id)
+        .collect()
+}
+
+#[must_use]
 pub fn accepted_external_attribution_for_module(
     attributions: &[PackageAttributionInput],
     module_id: ModuleId,
 ) -> Option<&PackageAttributionInput> {
     attributions.iter().find(|attribution| {
-        attribution.module_id == module_id
-            && is_accepted_external_attribution(attribution)
-            && attribution.export_specifier.is_some()
+        attribution.module_id == module_id && is_providable_external_attribution(attribution)
     })
 }
 
@@ -1082,7 +1101,48 @@ impl<'a> ExternalImportProof<'a> {
     }
 }
 
-pub struct ExternalImportProofPath;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExternalImportProofPath {
+    ExactHint {
+        package_name: String,
+        package_version: String,
+        quality: String,
+        semantic_path: String,
+    },
+    NormalizedSourceExport {
+        source_path: String,
+    },
+    ForcedExternal {
+        kind: String,
+        tail: String,
+    },
+}
+
+impl fmt::Display for ExternalImportProofPath {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExactHint {
+                package_name,
+                package_version,
+                quality,
+                semantic_path,
+            } => write!(
+                formatter,
+                "exact-hint:{}@{}:quality={}:semantic_path={}",
+                package_name.trim(),
+                package_version.trim(),
+                quality.trim(),
+                semantic_path.trim()
+            ),
+            Self::NormalizedSourceExport { source_path } => {
+                write!(formatter, "normalized-source-export:{}", source_path.trim())
+            }
+            Self::ForcedExternal { kind, tail } => {
+                write!(formatter, "forced-external:{}:{}", kind.trim(), tail.trim())
+            }
+        }
+    }
+}
 
 impl ExternalImportProofPath {
     #[must_use]
@@ -1092,18 +1152,21 @@ impl ExternalImportProofPath {
         quality: &str,
         semantic_path: &str,
     ) -> String {
-        format!(
-            "exact-hint:{}@{}:quality={}:semantic_path={}",
-            package_name.trim(),
-            package_version.trim(),
-            quality.trim(),
-            semantic_path.trim()
-        )
+        Self::ExactHint {
+            package_name: package_name.to_string(),
+            package_version: package_version.to_string(),
+            quality: quality.to_string(),
+            semantic_path: semantic_path.to_string(),
+        }
+        .to_string()
     }
 
     #[must_use]
     pub fn normalized_source_export(source_path: &str) -> String {
-        format!("normalized-source-export:{}", source_path.trim())
+        Self::NormalizedSourceExport {
+            source_path: source_path.to_string(),
+        }
+        .to_string()
     }
 
     #[must_use]
@@ -1260,7 +1323,11 @@ impl ExternalImportProofPath {
 
     #[must_use]
     fn forced_external(kind: &str, tail: &str) -> String {
-        format!("forced-external:{}:{}", kind.trim(), tail.trim())
+        Self::ForcedExternal {
+            kind: kind.to_string(),
+            tail: tail.to_string(),
+        }
+        .to_string()
     }
 }
 
@@ -1507,7 +1574,8 @@ mod tests {
         PackageSpecifierPublicProof, PackageSpecifierPublicReason, PackageSurfaceIndex,
         accepted_external_attribution_for_module, accepted_external_module_ids,
         external_import_concrete_source_path, external_import_proof_kind,
-        external_import_proof_label, is_accepted_external_attribution, is_node_builtin,
+        external_import_proof_label, externally_providable_module_ids,
+        is_accepted_external_attribution, is_node_builtin, is_providable_external_attribution,
         package_specifier_is_public, package_specifier_public_proof,
         parse_export_members_import_proof, parse_package_json_source,
         resolve_package_deep_import_specifier,
@@ -1994,8 +2062,13 @@ mod tests {
         let attributions = vec![accepted.clone(), rejected];
 
         assert!(is_accepted_external_attribution(&accepted));
+        assert!(is_providable_external_attribution(&accepted));
         assert_eq!(
             accepted_external_module_ids(&attributions),
+            BTreeSet::from([ModuleId(1)])
+        );
+        assert_eq!(
+            externally_providable_module_ids(&attributions),
             BTreeSet::from([ModuleId(1)])
         );
         assert_eq!(

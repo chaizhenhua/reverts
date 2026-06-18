@@ -19,9 +19,9 @@ use crate::persistence::attributions;
 use crate::persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
 use crate::{
     MatchPackagesOutcome, dedup_audit_report, enrich_package_modules_from_source_units,
-    filter_package_sources_to_referenced_package_versions, load_package_sources,
-    package_module_source_quality_counts, package_source_load_scope,
-    package_version_resolution_evidence, package_versions_by_module,
+    filter_package_sources_to_referenced_package_versions,
+    load_package_sources_with_fingerprint_stats, package_module_source_quality_counts,
+    package_source_load_scope, package_version_resolution_evidence, package_versions_by_module,
     remove_package_attributions_for_revalidation,
     resolve_package_version_hints_to_available_sources,
 };
@@ -67,7 +67,7 @@ pub(crate) fn match_packages_from_connection(
     let package_names =
         package_source_load_scope(&rows, &args.package_names, &mut source_import_audit);
     remove_package_attributions_for_revalidation(&mut rows, &package_names);
-    let mut package_sources = load_package_sources(
+    let loaded_package_sources = load_package_sources_with_fingerprint_stats(
         connection,
         &rows,
         &package_names,
@@ -75,6 +75,8 @@ pub(crate) fn match_packages_from_connection(
         args.materialize_package_sources,
         args.apply,
     )?;
+    let fingerprint_cache = loaded_package_sources.fingerprint_cache;
+    let mut package_sources = loaded_package_sources.sources;
     mark_timing!("load_package_sources");
     let package_versions_before_resolution = package_versions_by_module(&rows);
     resolve_package_version_hints_to_available_sources(
@@ -149,6 +151,10 @@ pub(crate) fn match_packages_from_connection(
         project_id: args.project_id,
         loaded_package_modules,
         loaded_package_sources: package_sources.len(),
+        fingerprint_cache_hits: fingerprint_cache.cache_hits,
+        fingerprint_cache_misses: fingerprint_cache.cache_misses,
+        fingerprint_cache_computed: fingerprint_cache.computed,
+        fingerprint_cache_errors: fingerprint_cache.total_errors(),
         matched_modules,
         external_import_modules: source_elimination.direct_external_import_modules,
         private_source_suppressed_package_modules: source_elimination

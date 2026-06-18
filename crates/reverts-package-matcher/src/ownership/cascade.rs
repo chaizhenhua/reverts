@@ -11,10 +11,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{
-    InputRows, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-};
+use reverts_input::{InputRows, PackageAttributionInput};
 use reverts_ir::{FunctionFingerprint, MatchTier, ModuleId, ModuleKind, split_bare_specifier};
+use reverts_package::is_accepted_external_attribution;
 
 use crate::{
     CascadeMatchReport, CascadeOwnershipMatch, ModuleMatchStrategy, PackageMatch,
@@ -31,10 +30,7 @@ pub(crate) fn promote_cascade_function_coverage_to_module_attributions(
         .attributions
         .iter()
         .chain(rows.package_attributions.iter())
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
+        .filter(|attribution| is_accepted_external_attribution(attribution))
         .map(|attribution| attribution.module_id)
         .collect::<BTreeSet<_>>();
     let matched_modules = report

@@ -9,16 +9,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use reverts_input::{
-    InputBundle, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode,
-};
+use reverts_input::{InputBundle, ModuleInput, PackageAttributionInput};
 use reverts_ir::{BindingName, ModuleKind};
 use reverts_js::{
     ParseGoal, TopLevelStatementFact, TopLevelStatementKind, collect_top_level_statement_facts,
 };
 use reverts_model::EnrichedProgram;
-use reverts_package::{ExternalImportProof, ExternalImportProofKind};
+use reverts_package::{
+    ExternalImportProof, ExternalImportProofKind, is_accepted_external_attribution,
+};
 use reverts_pipeline::{
     EmittedFile, RuntimeSetterMigrationBindingKey, RuntimeSetterMigrationBindingStatus,
     RuntimeSetterMigrationBlockerReason, RuntimeSetterMigrationBlockerReport,
@@ -631,10 +630,7 @@ pub(crate) fn package_source_blocker_report_from_files(
     let attributions_by_module = input
         .package_attributions
         .iter()
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
+        .filter(|attribution| is_accepted_external_attribution(attribution))
         .map(|attribution| (attribution.module_id, attribution))
         .collect::<BTreeMap<_, _>>();
     let mut report = PackageSourceBlockerReport::default();

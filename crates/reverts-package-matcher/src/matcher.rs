@@ -1,10 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{
-    InputRows, PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode,
-};
+use reverts_input::{InputRows, PackageAttributionInput};
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::is_accepted_external_attribution;
 
 use crate::index::{PackageVersionIndex, fingerprint_modules_for_package};
 use crate::model::{
@@ -165,9 +164,7 @@ fn collect_decision_outputs(
 
 pub(crate) fn has_accepted_attribution(rows: &InputRows, module_id: ModuleId) -> bool {
     rows.package_attributions.iter().any(|attribution| {
-        attribution.module_id == module_id
-            && attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        attribution.module_id == module_id && is_accepted_external_attribution(attribution)
     })
 }
 

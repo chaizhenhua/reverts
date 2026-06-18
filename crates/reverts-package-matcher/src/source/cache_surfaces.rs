@@ -6,10 +6,11 @@
 
 use std::collections::BTreeSet;
 
-use reverts_input::{
-    PackageAttributionInput, PackageAttributionStatus, PackageEmissionMode, PackageSurfaceInput,
+use reverts_input::{PackageAttributionInput, PackageSurfaceInput};
+use reverts_package::{
+    PackageSourceCacheView, is_accepted_external_attribution,
+    package_source_entry_path_from_source_path,
 };
-use reverts_package::{PackageSourceCacheView, package_source_entry_path_from_source_path};
 
 use crate::PackageSource;
 
@@ -45,9 +46,7 @@ pub(crate) fn resolve_cache_anchored_package_surfaces(
     let mut surfaces = Vec::new();
 
     for attribution in attributions {
-        if attribution.status != PackageAttributionStatus::Accepted
-            || attribution.emission_mode != PackageEmissionMode::ExternalImport
-        {
+        if !is_accepted_external_attribution(attribution) {
             continue;
         }
         if let Some(filter) = package_filter
@@ -111,6 +110,7 @@ pub(crate) fn append_cache_anchored_package_surfaces(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverts_input::PackageAttributionStatus;
     use reverts_ir::ModuleId;
 
     fn pkg_json_source(name: &str, version: &str, body_json: &str) -> PackageSource {

@@ -14,6 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use reverts_input::InputRows;
 use reverts_ir::{ModuleKind, is_valid_package_name};
 
+use crate::model::{PackageVersionCandidate, VersionedPackageMatcherConfig};
+use crate::scoring::best_source_match;
 use crate::{
     ExternalImportProofScratch, ExternalImportSourceIndex, ModuleMatchStrategy, PackageSource,
     VersionedPackageMatchReport, accepted_external_modules, concrete_package_source_from_parts,
@@ -48,6 +50,10 @@ pub(crate) fn promote_proven_external_import_targets(
         .collect::<BTreeMap<_, _>>();
     let external_source_index = ExternalImportSourceIndex::build(package_sources);
     let cache = ExternalImportProofScratch::default();
+    let indexed_versions = package_sources
+        .iter()
+        .map(|source| (source.package_name.clone(), source.package_version.clone()))
+        .collect::<BTreeSet<_>>();
     let mut concrete_sources_by_module = concrete_package_sources_by_module(rows, report);
     let mut promoted = 0usize;
 
@@ -88,6 +94,23 @@ pub(crate) fn promote_proven_external_import_targets(
                 source_only_match,
                 &external_source_index,
             );
+            // The hinted package's own target is tried first, but a path hint
+            // can be an upstream bundler misattribution (e.g. `ws` code wrapped
+            // under a stale `node_modules/zod/...` path). When the module's
+            // source is provably equivalent to a *different* indexed package,
+            // suppress the hinted-package target so the cross-package source
+            // correction below can re-home the module to its true package
+            // instead of emitting a wrong external import.
+            let standard_target = standard_target.filter(|_target| {
+                !module_proven_in_other_package(
+                    module,
+                    module_source,
+                    package_name,
+                    &indexed_versions,
+                    &external_source_index,
+                    &cache,
+                )
+            });
             let mut accepted_package_name = package_name.to_string();
             let mut accepted_package_version = package_version.clone();
             let mut accepted_function_matches = source_only_match
@@ -205,4 +228,65 @@ pub(crate) fn promote_proven_external_import_targets(
         }
     }
     promoted
+}
+
+/// Returns whether the module's source is provably equivalent to an indexed
+/// package other than the one its hint names. Equivalence reuses the same
+/// per-module source strategies the external-import proof resolver accepts, so
+/// a match is concrete evidence of misattribution rather than a coincidental
+/// token overlap. A module that truly is the hinted package never matches a
+/// different package's source, so genuine hints are unaffected.
+fn module_proven_in_other_package<'a>(
+    module: &reverts_input::ModuleInput,
+    module_source: &str,
+    hinted_package_name: &str,
+    indexed_versions: &BTreeSet<(String, String)>,
+    external_source_index: &ExternalImportSourceIndex<'a>,
+    cache: &ExternalImportProofScratch<'a>,
+) -> bool {
+    let Some(module_fingerprint) =
+        cache.module_fingerprint(module, module.semantic_path.as_str(), module_source)
+    else {
+        return false;
+    };
+    indexed_versions
+        .iter()
+        .filter(|(package_name, _version)| package_name != hinted_package_name)
+        .any(|(package_name, package_version)| {
+            let sources = cache.source_fingerprints_for_version(
+                external_source_index,
+                package_name,
+                package_version,
+            );
+            if sources.is_empty() {
+                return false;
+            }
+            let version = PackageVersionCandidate {
+                package_name: package_name.clone(),
+                package_version: package_version.clone(),
+                sources,
+            };
+            best_source_match(
+                &version,
+                &module_fingerprint,
+                &VersionedPackageMatcherConfig::default(),
+            )
+            .is_some_and(|source_match| is_proven_module_source_strategy(source_match.strategy))
+        })
+}
+
+/// Per-module source strategies strong enough to prove a module's identity
+/// against a concrete package source. Mirrors the set the external-import proof
+/// resolver trusts; aggregate, cascade, and ownership strategies are too weak
+/// to override a hint and are excluded.
+fn is_proven_module_source_strategy(strategy: ModuleMatchStrategy) -> bool {
+    matches!(
+        strategy,
+        ModuleMatchStrategy::NormalizedSourceHash
+            | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
+            | ModuleMatchStrategy::PropertyShapeAndStringAnchors
+            | ModuleMatchStrategy::ObjectShapeAndStringAnchors
+            | ModuleMatchStrategy::ClassShapeAndStringAnchors
+            | ModuleMatchStrategy::SwitchShapeAndStringAnchors
+    )
 }

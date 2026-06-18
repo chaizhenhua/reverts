@@ -37,7 +37,8 @@ pub use help::{HelpTopic, help_text, version_text};
 pub(crate) use package_source_workflow::{
     clean_package_entry_path, enrich_package_modules_from_source_units,
     filter_package_sources_to_referenced_package_versions, load_package_sources,
-    package_export_specifier, package_module_source_quality_counts, package_source_load_scope,
+    load_package_sources_with_fingerprint_stats, package_export_specifier,
+    package_module_source_quality_counts, package_source_load_scope,
     remove_package_attributions_for_revalidation,
 };
 #[cfg(test)]
@@ -347,6 +348,10 @@ pub struct MatchPackagesOutcome {
     pub project_id: u32,
     pub loaded_package_modules: usize,
     pub loaded_package_sources: usize,
+    pub fingerprint_cache_hits: usize,
+    pub fingerprint_cache_misses: usize,
+    pub fingerprint_cache_computed: usize,
+    pub fingerprint_cache_errors: usize,
     pub matched_modules: usize,
     /// Accepted direct package-import modules in the loaded project rows,
     /// including existing persisted external attributions and fresh matches.
@@ -403,6 +408,10 @@ pub struct MatchPackagesReportOutcome {
 pub struct MatchPackagesReportTotals {
     pub package_modules: usize,
     pub matched_modules: usize,
+    pub fingerprint_cache_hits: usize,
+    pub fingerprint_cache_misses: usize,
+    pub fingerprint_cache_computed: usize,
+    pub fingerprint_cache_errors: usize,
     pub external_import_modules: usize,
     pub private_source_suppressed_package_modules: usize,
     pub source_eliminated_package_modules: usize,
@@ -465,6 +474,10 @@ pub fn match_packages_report_from_sqlite(
         })?;
         outcome.totals.package_modules += project_outcome.loaded_package_modules;
         outcome.totals.matched_modules += project_outcome.matched_modules;
+        outcome.totals.fingerprint_cache_hits += project_outcome.fingerprint_cache_hits;
+        outcome.totals.fingerprint_cache_misses += project_outcome.fingerprint_cache_misses;
+        outcome.totals.fingerprint_cache_computed += project_outcome.fingerprint_cache_computed;
+        outcome.totals.fingerprint_cache_errors += project_outcome.fingerprint_cache_errors;
         outcome.totals.external_import_modules += project_outcome.external_import_modules;
         outcome.totals.private_source_suppressed_package_modules +=
             project_outcome.private_source_suppressed_package_modules;

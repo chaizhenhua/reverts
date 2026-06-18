@@ -290,18 +290,12 @@ fn rejected_package_attributions_for_unaccepted_modules(
     let accepted_modules = report
         .attributions
         .iter()
-        .filter(|attribution| {
-            attribution.status == PackageAttributionStatus::Accepted
-                && attribution.emission_mode == PackageEmissionMode::ExternalImport
-        })
+        .filter(|attribution| is_accepted_external_attribution(attribution))
         .map(|attribution| attribution.module_id)
         .chain(
             rows.package_attributions
                 .iter()
-                .filter(|attribution| {
-                    attribution.status == PackageAttributionStatus::Accepted
-                        && attribution.emission_mode == PackageEmissionMode::ExternalImport
-                })
+                .filter(|attribution| is_accepted_external_attribution(attribution))
                 .map(|attribution| attribution.module_id),
         )
         .collect::<BTreeSet<_>>();

@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputRows, PackageAttributionStatus, PackageEmissionMode};
+use reverts_input::InputRows;
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name};
 use reverts_package::{
     ExternalImportProof, ExternalImportProofKind, external_import_concrete_source_path,
+    is_accepted_external_attribution,
 };
 
 use crate::package_helpers::has_accepted_external_attribution;
@@ -37,9 +38,7 @@ pub(crate) fn concrete_package_sources_by_module(
         .iter()
         .chain(report.attributions.iter())
     {
-        if attribution.status != PackageAttributionStatus::Accepted
-            || attribution.emission_mode != PackageEmissionMode::ExternalImport
-        {
+        if !is_accepted_external_attribution(attribution) {
             continue;
         }
         let Some(package_version) = attribution.package_version.as_deref() else {

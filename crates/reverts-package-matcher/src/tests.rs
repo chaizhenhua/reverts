@@ -811,6 +811,61 @@ fn exact_hint_import_proof_accepts_root_export_entry_path_match() {
 }
 
 #[test]
+fn pipeline_corrects_misattributed_hint_whose_semantic_path_resolves() {
+    // A module wrapped under a bundler-misattributed `node_modules/zod/...`
+    // path carries `package_name = zod`, and its semantic path *does* resolve
+    // to a real `zod` import surface — so the hinted-package promotion fires
+    // first and would emit a wrong `external_import zod`. But the module body
+    // is really `ws` code present in the index. The proven cross-package
+    // source match must override the wrong hint and re-home it to `ws`.
+    let ws_source = "export function Receiver(options){const marker=\"permessage-deflate-extension-negotiation\";this.options=options;this.marker=marker;return this;}";
+    let mut rows = rows_with_package_source_at_version(ws_source, "3.22.5");
+    rows.modules[0].package_name = Some("zod".to_string());
+    rows.modules[0].semantic_path = "modules/10-zod/helpers/parse.ts".to_string();
+    let package_sources = [
+        PackageSource::external(
+            "zod",
+            "3.22.5",
+            "zod/internal/helpers/parse",
+            "zod@3.22.5/dist/cjs/internal/helpers/parse.js",
+            "export function parse(){return 'surface';}",
+        ),
+        PackageSource::external(
+            "ws",
+            "8.16.0",
+            "ws/receiver",
+            "ws@8.16.0/lib/receiver.js",
+            ws_source,
+        ),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    assert!(report.package_report.audit.is_clean());
+    let attribution = report
+        .package_report
+        .attributions
+        .iter()
+        .find(|attribution| attribution.module_id == ModuleId(10))
+        .expect("module should be attributed to its proven package");
+    assert_eq!(
+        attribution.package_name.as_str(),
+        "ws",
+        "proven `ws` source must override the misattributed `zod` hint"
+    );
+    assert_eq!(attribution.package_version.as_deref(), Some("8.16.0"));
+    assert!(
+        !report
+            .package_report
+            .attributions
+            .iter()
+            .any(|attribution| attribution.module_id == ModuleId(10)
+                && attribution.package_name.as_str() == "zod"),
+        "the misattributed `zod` hint must not be emitted as an external import"
+    );
+}
+
+#[test]
 fn pipeline_promotes_structural_bag_with_unique_export_surface_to_external_import() {
     let mut rows = rows_with_package_source(
         r#"

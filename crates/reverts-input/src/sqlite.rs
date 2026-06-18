@@ -3,6 +3,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use reverts_ir::split_bare_specifier;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::{
@@ -576,10 +577,12 @@ fn path_slug(value: &str) -> String {
 /// (`.ts`/`.tsx`/`.mts`/`.cts`). Such a target is never a valid Node runtime
 /// import and forces `tsc` to recompile the dependency's own source.
 fn specifier_is_typescript_source(specifier: &str) -> bool {
-    let specifier = specifier.trim();
+    let Some((_package_name, Some(subpath))) = split_bare_specifier(specifier.trim()) else {
+        return false;
+    };
     [".ts", ".tsx", ".mts", ".cts"]
         .iter()
-        .any(|extension| specifier.ends_with(extension))
+        .any(|extension| subpath.ends_with(extension))
 }
 
 fn emission_mode_from_database(value: &str) -> rusqlite::Result<PackageEmissionMode> {
@@ -971,7 +974,14 @@ mod tests {
                 "{ts} should be detected as a TypeScript source specifier",
             );
         }
-        for runtime in ["ajv/dist/code.js", "lodash/map.js", "react", "pkg/x.json"] {
+        for runtime in [
+            "ajv/dist/code.js",
+            "lodash/map.js",
+            "react",
+            "pkg/x.json",
+            "foo.ts",
+            "@scope/pkg.ts",
+        ] {
             assert!(
                 !super::specifier_is_typescript_source(runtime),
                 "{runtime} is a valid runtime specifier and must not be downgraded",
