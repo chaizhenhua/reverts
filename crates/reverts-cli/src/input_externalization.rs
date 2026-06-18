@@ -92,6 +92,24 @@ fn materialized_package_manifests(
     MaterializedPackageManifestRepository { connection }.load()
 }
 
+/// Load the cached per-package `package.json` manifests from `path`. The
+/// final `package.json` coherence prune needs the dependency graph these
+/// carry, which the generation pipeline (working only from the `InputBundle`)
+/// cannot see.
+pub(crate) fn load_materialized_package_manifests(
+    path: impl AsRef<Path>,
+) -> Result<MaterializedPackageManifests, SqliteInputError> {
+    let path = path.as_ref();
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|source| {
+            SqliteInputError::OpenDatabase {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?;
+    materialized_package_manifests(&connection)
+}
+
 pub(crate) fn promote_detected_package_modules(
     bundle: &mut InputBundle,
     materialized_packages: &MaterializedPackageManifests,

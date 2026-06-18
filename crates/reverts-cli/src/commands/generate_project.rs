@@ -10,7 +10,10 @@ use reverts_pipeline::generate_project_from_input;
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
 use crate::format_audit_findings;
-use crate::input_externalization::load_project_bundle_with_verified_externalization_hints;
+use crate::input_externalization::{
+    load_materialized_package_manifests, load_project_bundle_with_verified_externalization_hints,
+};
+use crate::runtime_dependency_coherence::prune_transitively_provided_scope_incoherent_dependencies;
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -62,11 +65,22 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         .accepted_project
         .as_ref()
         .ok_or_else(|| CliRunError::AuditRejected(format_audit_findings(&run.audit)))?;
+    // Drop scope-incoherent root pins (e.g. a mis-matched off-major `@smithy/*`
+    // sibling) that npm would otherwise install transitively at a coherent
+    // version; root-pinning conflicting majors of one scope blows up `npm
+    // install`. Needs the cached `package.json` dependency graph, which only
+    // the CLI (not the generation pipeline) can see.
+    let manifests =
+        load_materialized_package_manifests(&args.input).map_err(CliRunError::LoadInput)?;
+    let runtime_dependencies = prune_transitively_provided_scope_incoherent_dependencies(
+        run.runtime_dependencies.clone(),
+        &manifests,
+    );
     let written = write_accepted_project(
         accepted_project,
         &run.assets,
         &args.output,
-        &run.runtime_dependencies,
+        &runtime_dependencies,
     )?;
     println!(
         "generated project {} into {} with {written} files",

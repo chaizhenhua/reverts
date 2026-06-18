@@ -8,6 +8,7 @@ mod package_source_workflow;
 mod persistence;
 mod pkg_sources;
 mod project_writer;
+mod runtime_dependency_coherence;
 #[cfg(test)]
 mod tests;
 
