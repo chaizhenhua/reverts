@@ -412,8 +412,21 @@ pub fn resolve_package_deep_import_specifier(
     specifier: &str,
     entry_paths: &BTreeSet<String>,
 ) -> Option<String> {
-    if package_has_exports_field(package_json_source) {
-        return Some(specifier.to_string());
+    if let Some(exports) = parse_package_json_source(package_json_source)
+        .as_ref()
+        .and_then(|manifest| manifest.get("exports").cloned())
+    {
+        // An `exports` map maps the specifier itself (Node performs no
+        // extension search), so the bare specifier is correct as-is — EXCEPT a
+        // wildcard pattern (`"./*": "./*"`, the way tslib re-exports its whole
+        // tree) matches subpaths whose target file need not exist. Verify a
+        // wildcard-resolved target is a real shipped file before externalizing;
+        // exact subpath keys and the root are author-declared and trusted.
+        return match exports_wildcard_target_exists(&exports, package_name, specifier, entry_paths)
+        {
+            Some(false) => None,
+            _ => Some(specifier.to_string()),
+        };
     }
     let Some(subpath) = specifier.strip_prefix(format!("{package_name}/").as_str()) else {
         return Some(specifier.to_string());
@@ -437,9 +450,93 @@ pub fn resolve_package_deep_import_specifier(
     None
 }
 
-fn package_has_exports_field(package_json_source: &str) -> bool {
-    parse_package_json_source(package_json_source)
-        .is_some_and(|manifest| manifest.get("exports").is_some())
+/// When `specifier` resolves through a *wildcard* `exports` pattern, whether the
+/// substituted target file actually ships in the package. Returns `None` when
+/// the specifier matches an exact key, the package root, or no pattern at all —
+/// those are author-declared and need no existence proof here.
+fn exports_wildcard_target_exists(
+    exports: &serde_json::Value,
+    package_name: &str,
+    specifier: &str,
+    entry_paths: &BTreeSet<String>,
+) -> Option<bool> {
+    let serde_json::Value::Object(map) = exports else {
+        return None;
+    };
+    let subpath = if specifier == package_name {
+        ".".to_string()
+    } else {
+        format!("./{}", specifier.strip_prefix(&format!("{package_name}/"))?)
+    };
+    if subpath == "." || map.contains_key(&subpath) {
+        return None;
+    }
+    for (key, target) in map {
+        let Some(captured) = exports_pattern_capture(key, &subpath) else {
+            continue;
+        };
+        let templates = exports_runtime_target_strings(target);
+        if templates.is_empty() {
+            return Some(false);
+        }
+        let exists = templates.iter().any(|template| {
+            exports_target_path_exists(&template.replacen('*', &captured, 1), entry_paths)
+        });
+        return Some(exists);
+    }
+    None
+}
+
+/// The portion of `subpath` captured by the `*` in a wildcard `exports` key,
+/// or `None` when the key has no `*` or does not match.
+fn exports_pattern_capture(pattern: &str, subpath: &str) -> Option<String> {
+    let (prefix, suffix) = pattern.split_once('*')?;
+    if subpath.starts_with(prefix)
+        && subpath.ends_with(suffix)
+        && subpath.len() > prefix.len() + suffix.len()
+    {
+        Some(subpath[prefix.len()..subpath.len() - suffix.len()].to_string())
+    } else {
+        None
+    }
+}
+
+/// All string runtime targets reachable in an `exports` target value, skipping
+/// `types`/`typings` conditions (which never resolve at runtime).
+fn exports_runtime_target_strings(target: &serde_json::Value) -> Vec<String> {
+    match target {
+        serde_json::Value::String(value) => vec![value.clone()],
+        serde_json::Value::Array(items) => items
+            .iter()
+            .flat_map(exports_runtime_target_strings)
+            .collect(),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .filter(|(condition, _)| *condition != "types" && *condition != "typings")
+            .flat_map(|(_, value)| exports_runtime_target_strings(value))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether an `exports` target path (e.g. `./dist/cjs/internal/foo.js`) names a
+/// file the package ships, allowing the same extension/index fallbacks Node
+/// would try.
+fn exports_target_path_exists(target: &str, entry_paths: &BTreeSet<String>) -> bool {
+    let relative = target.trim_start_matches("./").trim_start_matches('/');
+    if relative.is_empty() {
+        return false;
+    }
+    if entry_paths.contains(relative) {
+        return true;
+    }
+    const EXTENSIONS: [&str; 5] = [".js", ".json", ".cjs", ".mjs", ".node"];
+    EXTENSIONS
+        .iter()
+        .any(|extension| entry_paths.contains(&format!("{relative}{extension}")))
+        || EXTENSIONS
+            .iter()
+            .any(|extension| entry_paths.contains(&format!("{relative}/index{extension}")))
 }
 
 #[must_use]
@@ -1235,6 +1332,52 @@ mod tests {
                 &BTreeSet::new(),
             ),
             Some("pkg/feature".to_string())
+        );
+    }
+
+    #[test]
+    fn exports_wildcard_specifier_requires_a_shipped_target_file() {
+        // tslib's `"./*": "./*"` makes the exports map *accept* any subpath, but
+        // it ships no `helpers` file, so `tslib/helpers` must not externalize —
+        // Node would throw ERR_MODULE_NOT_FOUND at import.
+        let tslib = r#"{"name":"tslib","main":"tslib.js","exports":{".":"./tslib.js","./*":"./*","./":"./"}}"#;
+        let tslib_files = BTreeSet::from([
+            "tslib.js".to_string(),
+            "tslib.es6.mjs".to_string(),
+            "modules/index.js".to_string(),
+        ]);
+        assert_eq!(
+            resolve_package_deep_import_specifier(tslib, "tslib", "tslib/helpers", &tslib_files),
+            None,
+            "wildcard subpath with no shipped file is not externalizable"
+        );
+        // The package root still resolves through the same map.
+        assert_eq!(
+            resolve_package_deep_import_specifier(tslib, "tslib", "tslib", &tslib_files),
+            Some("tslib".to_string())
+        );
+
+        // rxjs maps `./internal/*` to a real file template — that subpath ships,
+        // so it stays externalizable (the wildcard fix must not over-reject).
+        let rxjs = r#"{"name":"rxjs","exports":{"./internal/*":"./dist/cjs/internal/*.js"}}"#;
+        let rxjs_files = BTreeSet::from(["dist/cjs/internal/Observable.js".to_string()]);
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                rxjs,
+                "rxjs",
+                "rxjs/internal/Observable",
+                &rxjs_files,
+            ),
+            Some("rxjs/internal/Observable".to_string())
+        );
+        assert_eq!(
+            resolve_package_deep_import_specifier(
+                rxjs,
+                "rxjs",
+                "rxjs/internal/DoesNotExist",
+                &rxjs_files,
+            ),
+            None
         );
     }
 

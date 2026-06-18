@@ -516,19 +516,31 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
 fn materialized(
     packages: &[(&str, &str)],
 ) -> std::collections::BTreeMap<MaterializedPackageKey, MaterializedPackageManifest> {
+    materialized_shipping(packages, &[])
+}
+
+fn materialized_shipping(
+    packages: &[(&str, &str)],
+    files: &[&str],
+) -> std::collections::BTreeMap<MaterializedPackageKey, MaterializedPackageManifest> {
+    let entry_paths = files
+        .iter()
+        .map(|file| (*file).to_string())
+        .chain(std::iter::once("index.js".to_string()))
+        .collect::<std::collections::BTreeSet<_>>();
     packages
         .iter()
         .map(|(name, version)| {
             (
                 ((*name).to_string(), (*version).to_string()),
-                // A wildcard `exports` map makes both the bare root and every
-                // subpath public, and (having an exports field) skips file-based
-                // specifier resolution — so detected specifiers are accepted
-                // as-is, matching the permissive intent of this helper.
+                // A wildcard `exports` map makes the bare root and every subpath
+                // public; the detected subpath then has to resolve to a file the
+                // package actually ships (`./*.js`), so the fixture lists those
+                // files in `entry_paths` exactly as a real cached package would.
                 MaterializedPackageManifest::new(
                     format!(r#"{{"name":"{name}","exports":{{".":"./index.js","./*":"./*.js"}}}}"#),
                     true,
-                    std::collections::BTreeSet::new(),
+                    entry_paths.clone(),
                 ),
             )
         })
@@ -747,7 +759,10 @@ fn detected_package_modules_promote_rejected_source_attributions() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&[("pkg", "1.2.3")]));
+    let promoted = promote_detected_package_modules(
+        &mut input,
+        &materialized_shipping(&[("pkg", "1.2.3")], &["internal/init.js"]),
+    );
 
     let attribution = &input.package_attributions[0];
     assert_eq!(promoted, 1);
@@ -790,8 +805,10 @@ fn detected_package_modules_use_scoped_package_alias_subpaths() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted =
-        promote_detected_package_modules(&mut input, &materialized(&[("@scope/sdk", "2.0.0")]));
+    let promoted = promote_detected_package_modules(
+        &mut input,
+        &materialized_shipping(&[("@scope/sdk", "2.0.0")], &["client.js"]),
+    );
 
     assert_eq!(promoted, 1);
     assert_eq!(
@@ -831,7 +848,10 @@ fn detected_package_modules_infer_missing_version_from_package_group() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input, &materialized(&[("pkg", "1.2.3")]));
+    let promoted = promote_detected_package_modules(
+        &mut input,
+        &materialized_shipping(&[("pkg", "1.2.3")], &["known.js"]),
+    );
 
     assert_eq!(promoted, 2);
     assert_eq!(
