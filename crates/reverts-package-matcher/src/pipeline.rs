@@ -172,6 +172,29 @@ pub fn match_packages_with_pipeline(
         &mut package_report,
     );
     mark_timing!("force_externalize");
+
+    // The ownership / force-externalize passes above appended accepted
+    // external-import attributions (exact-hint, dependency-closure, importable,
+    // forced-external, ...) *after* the versioned matcher resolved its surfaces
+    // from the initial concrete matches alone. Re-resolve cache-anchored
+    // surfaces over the now-complete attribution set so every publicly-importable
+    // specifier — not just the concrete matcher matches — gets a surface and can
+    // be externalized at generate time. Deduplicated by specifier.
+    let existing_specifiers = package_report
+        .surfaces
+        .iter()
+        .map(|surface| surface.export_specifier.clone())
+        .collect::<BTreeSet<_>>();
+    for surface in crate::source::cache_surfaces::resolve_cache_anchored_package_surfaces(
+        &package_report.attributions,
+        package_sources,
+        package_filter,
+    ) {
+        if !existing_specifiers.contains(&surface.export_specifier) {
+            package_report.surfaces.push(surface);
+        }
+    }
+    mark_timing!("cache_anchored_surfaces_final");
     if timing_enabled {
         let _ = timing_last;
     }
