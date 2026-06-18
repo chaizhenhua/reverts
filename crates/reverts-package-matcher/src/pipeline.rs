@@ -2,17 +2,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use reverts_graph::FunctionExtractor;
-use reverts_input::InputRows;
-use reverts_ir::{ModuleId, ModuleKind};
+use reverts_input::{InputRows, PackageAttributionInput};
+use reverts_ir::{FunctionFingerprint, ModuleId, ModuleKind};
 use reverts_observe::AuditReport;
 
 use crate::index::package_module_source_quality;
-use crate::model::{PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource};
+use crate::model::{
+    PackageMatchingPipelineReport, PackageModuleSourceQuality, PackageSource,
+    VersionedPackageMatchReport,
+};
 use crate::proof::concrete_source::unmatched_package_scope;
 use crate::source::cache_surfaces::append_cache_anchored_package_surfaces;
 use crate::strategy::{
-    self, CascadeMatchReport, StructuralBagMatchReport,
-    match_structural_bags_with_excluded_modules, match_with_cascade,
+    self, CascadeMatchReport, match_structural_bags_with_excluded_modules, match_with_cascade,
 };
 use crate::{VersionedPackageMatcher, ownership};
 
@@ -33,169 +35,387 @@ pub fn match_packages_with_pipeline(
     package_sources: &[PackageSource],
     package_filter: Option<&BTreeSet<String>>,
 ) -> PackageMatchingPipelineReport {
-    let timing_enabled = std::env::var_os("REVERTS_MATCH_TIMING").is_some();
-    let timing_started = Instant::now();
-    let mut timing_last = timing_started;
-    macro_rules! mark_timing {
-        ($stage:literal) => {
-            if timing_enabled {
-                let now = Instant::now();
-                eprintln!(
-                    "package-pipeline timing: {} stage={:.3}s total={:.3}s",
-                    $stage,
-                    now.duration_since(timing_last).as_secs_f64(),
-                    now.duration_since(timing_started).as_secs_f64()
-                );
-                timing_last = now;
-            }
-        };
+    let context = PackageMatchContext {
+        rows,
+        package_sources,
+        package_filter,
+    };
+    let mut state = PackageMatchState::new();
+    let mut timing = PipelineTiming::from_env();
+
+    run_package_match_pass(VersionedMatcherPass, &context, &mut state, &mut timing);
+    run_package_match_pass(
+        ModuleFunctionFingerprintsPass,
+        &context,
+        &mut state,
+        &mut timing,
+    );
+    run_package_match_pass(CascadeMatchPass, &context, &mut state, &mut timing);
+    run_package_match_pass(StructuralBagPass, &context, &mut state, &mut timing);
+    run_package_match_pass(WeakSourceEquivalentPass, &context, &mut state, &mut timing);
+    run_package_match_pass(ExactHintPass, &context, &mut state, &mut timing);
+    run_package_match_pass(DependencyClosurePass, &context, &mut state, &mut timing);
+    run_package_match_pass(DependencyClusterPass, &context, &mut state, &mut timing);
+    run_package_match_pass(PackageFileGraphPass, &context, &mut state, &mut timing);
+    run_package_match_pass(ImportablePass, &context, &mut state, &mut timing);
+    run_package_match_pass(ForceExternalizePass, &context, &mut state, &mut timing);
+    run_package_match_pass(CacheAnchoredSurfacesPass, &context, &mut state, &mut timing);
+
+    PackageMatchingPipelineReport {
+        package_report: state.package_report,
+        function_attributions: state.function_attributions,
+        function_ownership_matches: state.function_ownership_matches,
+    }
+}
+
+/// Immutable inputs shared by every package-matching pass.
+///
+/// Keeping the context explicit prevents individual passes from reaching out to
+/// unrelated global state and makes package-name filtering and source limits
+/// visible at the orchestration layer.
+struct PackageMatchContext<'a> {
+    rows: &'a InputRows,
+    package_sources: &'a [PackageSource],
+    package_filter: Option<&'a BTreeSet<String>>,
+}
+
+impl PackageMatchContext<'_> {
+    fn cascade_disabled(&self) -> bool {
+        self.package_sources.len() > CASCADE_PIPELINE_SOURCE_LIMIT
     }
 
-    let mut package_report = if let Some(package_filter) = package_filter {
-        VersionedPackageMatcher::default().match_rows_for_packages(
-            rows,
-            package_sources,
-            package_filter,
-        )
-    } else {
-        VersionedPackageMatcher::default().match_rows(rows, package_sources)
-    };
-    mark_timing!("versioned_matcher");
+    fn restrict_function_inputs_to_weak_sources(&self) -> bool {
+        self.package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT
+    }
+}
 
-    let skip_cascade = package_sources.len() > CASCADE_PIPELINE_SOURCE_LIMIT;
-    let package_matched_modules = if package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT {
-        package_report
-            .matches
-            .iter()
-            .map(|package_match| package_match.module_id)
-            .collect::<BTreeSet<_>>()
-    } else {
-        BTreeSet::new()
-    };
-    let fingerprints_by_module = if skip_cascade {
-        BTreeMap::new()
-    } else {
-        fingerprints_from_rows(
-            rows,
-            package_filter,
+/// Mutable product of the package-matching pipeline.
+///
+/// Passes communicate only through this state object: concrete package report,
+/// function-level evidence, and reusable per-module function fingerprints.
+struct PackageMatchState {
+    package_report: VersionedPackageMatchReport,
+    fingerprints_by_module: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
+    function_attributions: Vec<PackageAttributionInput>,
+    function_ownership_matches: usize,
+}
+
+impl PackageMatchState {
+    fn new() -> Self {
+        Self {
+            package_report: empty_versioned_package_match_report(),
+            fingerprints_by_module: BTreeMap::new(),
+            function_attributions: Vec::new(),
+            function_ownership_matches: 0,
+        }
+    }
+}
+
+trait PackageMatchPass {
+    fn name(&self) -> &'static str;
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState);
+}
+
+fn run_package_match_pass(
+    pass: impl PackageMatchPass,
+    context: &PackageMatchContext<'_>,
+    state: &mut PackageMatchState,
+    timing: &mut PipelineTiming,
+) {
+    let name = pass.name();
+    pass.run(context, state);
+    timing.mark(name);
+}
+
+struct PipelineTiming {
+    enabled: bool,
+    started: Instant,
+    last: Instant,
+}
+
+impl PipelineTiming {
+    fn from_env() -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: std::env::var_os("REVERTS_MATCH_TIMING").is_some(),
+            started: now,
+            last: now,
+        }
+    }
+
+    fn mark(&mut self, stage: &str) {
+        if !self.enabled {
+            return;
+        }
+        let now = Instant::now();
+        eprintln!(
+            "package-pipeline timing: {} stage={:.3}s total={:.3}s",
+            stage,
+            now.duration_since(self.last).as_secs_f64(),
+            now.duration_since(self.started).as_secs_f64()
+        );
+        self.last = now;
+    }
+}
+
+struct VersionedMatcherPass;
+
+impl PackageMatchPass for VersionedMatcherPass {
+    fn name(&self) -> &'static str {
+        "versioned_matcher"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        state.package_report = if let Some(package_filter) = context.package_filter {
+            VersionedPackageMatcher::default().match_rows_for_packages(
+                context.rows,
+                context.package_sources,
+                package_filter,
+            )
+        } else {
+            VersionedPackageMatcher::default().match_rows(context.rows, context.package_sources)
+        };
+    }
+}
+
+struct ModuleFunctionFingerprintsPass;
+
+impl PackageMatchPass for ModuleFunctionFingerprintsPass {
+    fn name(&self) -> &'static str {
+        "module_function_fingerprints"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        if context.cascade_disabled() {
+            state.fingerprints_by_module.clear();
+            return;
+        }
+        let package_matched_modules = if context.restrict_function_inputs_to_weak_sources() {
+            state
+                .package_report
+                .matches
+                .iter()
+                .map(|package_match| package_match.module_id)
+                .collect::<BTreeSet<_>>()
+        } else {
+            BTreeSet::new()
+        };
+        state.fingerprints_by_module = fingerprints_from_rows(
+            context.rows,
+            context.package_filter,
             &package_matched_modules,
-            package_sources.len() > CASCADE_MATCHED_MODULE_SOURCE_LIMIT,
-        )
-    };
-    mark_timing!("module_function_fingerprints");
-    let cascade_report = if skip_cascade {
-        CascadeMatchReport {
-            attributions: Vec::new(),
-            ownership_matches: Vec::new(),
-            audit: AuditReport::default(),
-        }
-    } else {
-        match_with_cascade_scoped_by_module_hints(rows, &fingerprints_by_module, package_sources)
-    };
-    mark_timing!("cascade_match");
-    ownership::cascade::promote_cascade_function_coverage_to_module_attributions(
-        rows,
-        &fingerprints_by_module,
-        &cascade_report,
-        &mut package_report,
-    );
-    mark_timing!("cascade_promote");
-    let function_attributions = cascade_report.attributions;
-    let function_ownership_matches = cascade_report.ownership_matches.len();
-    package_report.audit.extend(cascade_report.audit);
+            context.restrict_function_inputs_to_weak_sources(),
+        );
+    }
+}
 
-    let structural_bag_report = if skip_cascade {
-        StructuralBagMatchReport {
-            matches: Vec::new(),
-            audit: AuditReport::default(),
+struct CascadeMatchPass;
+
+impl PackageMatchPass for CascadeMatchPass {
+    fn name(&self) -> &'static str {
+        "cascade_match"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        if context.cascade_disabled() {
+            return;
         }
-    } else {
-        let structural_bag_excluded_modules = package_report
+        let cascade_report = match_with_cascade_scoped_by_module_hints(
+            context.rows,
+            &state.fingerprints_by_module,
+            context.package_sources,
+        );
+        ownership::cascade::promote_cascade_function_coverage_to_module_attributions(
+            context.rows,
+            &state.fingerprints_by_module,
+            &cascade_report,
+            &mut state.package_report,
+        );
+        state.function_attributions = cascade_report.attributions;
+        state.function_ownership_matches = cascade_report.ownership_matches.len();
+        state.package_report.audit.extend(cascade_report.audit);
+    }
+}
+
+struct StructuralBagPass;
+
+impl PackageMatchPass for StructuralBagPass {
+    fn name(&self) -> &'static str {
+        "structural_bag"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        if context.cascade_disabled() {
+            return;
+        }
+        let excluded_modules = state
+            .package_report
             .matches
             .iter()
             .map(|package_match| package_match.module_id)
             .collect::<BTreeSet<_>>();
-        match_structural_bags_with_excluded_modules(
-            rows,
-            package_sources,
-            package_filter,
-            &structural_bag_excluded_modules,
-        )
-    };
-    mark_timing!("structural_bag");
-    strategy::structural_bag::promote_structural_bag_ownership_matches(
-        rows,
-        structural_bag_report.matches.as_slice(),
-        &mut package_report,
-    );
-    mark_timing!("structural_promote");
-    package_report.audit.extend(structural_bag_report.audit);
-    ownership::weak_source_equivalent::promote_weak_source_equivalent_matches(
-        rows,
-        package_sources,
-        &mut package_report,
-    );
-    mark_timing!("weak_source_equivalent");
-    ownership::exact_hint::promote_exact_hint_ownership_matches(
-        rows,
-        package_sources,
-        &mut package_report,
-    );
-    mark_timing!("exact_hint_promote");
-    ownership::dependency_neighborhood::promote_dependency_closure_ownership_matches(
-        rows,
-        &mut package_report,
-    );
-    mark_timing!("dependency_closure");
-    ownership::dependency_neighborhood::promote_dependency_cluster_ownership_matches(
-        rows,
-        &mut package_report,
-    );
-    mark_timing!("dependency_cluster");
-    ownership::package_file_graph::promote_package_file_graph_ownership_matches(
-        rows,
-        &mut package_report,
-    );
-    mark_timing!("package_file_graph");
-    ownership::importable::promote_importable_ownership_matches(
-        rows,
-        package_sources,
-        &mut package_report,
-    );
-    mark_timing!("importable_promote");
-    let matched_package_names = package_filter
-        .cloned()
-        .unwrap_or_else(|| unmatched_package_scope(rows));
-    ownership::force_externalize::force_externalize_remaining_package_modules(
-        rows,
-        package_sources,
-        &matched_package_names,
-        &mut package_report,
-    );
-    mark_timing!("force_externalize");
+        let structural_bag_report = match_structural_bags_with_excluded_modules(
+            context.rows,
+            context.package_sources,
+            context.package_filter,
+            &excluded_modules,
+        );
+        strategy::structural_bag::promote_structural_bag_ownership_matches(
+            context.rows,
+            structural_bag_report.matches.as_slice(),
+            &mut state.package_report,
+        );
+        state
+            .package_report
+            .audit
+            .extend(structural_bag_report.audit);
+    }
+}
 
-    // The ownership / force-externalize passes above appended accepted
-    // external-import attributions (exact-hint, dependency-closure, importable,
-    // forced-external, ...) *after* the versioned matcher resolved its surfaces
-    // from the initial concrete matches alone. Re-resolve cache-anchored
-    // surfaces over the now-complete attribution set so every publicly-importable
-    // specifier — not just the concrete matcher matches — gets a surface and can
-    // be externalized at generate time. Deduplicated by specifier.
-    append_cache_anchored_package_surfaces(
-        &mut package_report.surfaces,
-        &package_report.attributions,
-        package_sources,
-        package_filter,
-    );
-    mark_timing!("cache_anchored_surfaces_final");
-    if timing_enabled {
-        let _ = timing_last;
+struct WeakSourceEquivalentPass;
+
+impl PackageMatchPass for WeakSourceEquivalentPass {
+    fn name(&self) -> &'static str {
+        "weak_source_equivalent"
     }
 
-    PackageMatchingPipelineReport {
-        package_report,
-        function_attributions,
-        function_ownership_matches,
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::weak_source_equivalent::promote_weak_source_equivalent_matches(
+            context.rows,
+            context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct ExactHintPass;
+
+impl PackageMatchPass for ExactHintPass {
+    fn name(&self) -> &'static str {
+        "exact_hint_promote"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::exact_hint::promote_exact_hint_ownership_matches(
+            context.rows,
+            context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct DependencyClosurePass;
+
+impl PackageMatchPass for DependencyClosurePass {
+    fn name(&self) -> &'static str {
+        "dependency_closure"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::dependency_neighborhood::promote_dependency_closure_ownership_matches(
+            context.rows,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct DependencyClusterPass;
+
+impl PackageMatchPass for DependencyClusterPass {
+    fn name(&self) -> &'static str {
+        "dependency_cluster"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::dependency_neighborhood::promote_dependency_cluster_ownership_matches(
+            context.rows,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct PackageFileGraphPass;
+
+impl PackageMatchPass for PackageFileGraphPass {
+    fn name(&self) -> &'static str {
+        "package_file_graph"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::package_file_graph::promote_package_file_graph_ownership_matches(
+            context.rows,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct ImportablePass;
+
+impl PackageMatchPass for ImportablePass {
+    fn name(&self) -> &'static str {
+        "importable_promote"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        ownership::importable::promote_importable_ownership_matches(
+            context.rows,
+            context.package_sources,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct ForceExternalizePass;
+
+impl PackageMatchPass for ForceExternalizePass {
+    fn name(&self) -> &'static str {
+        "force_externalize"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        let matched_package_names = context
+            .package_filter
+            .cloned()
+            .unwrap_or_else(|| unmatched_package_scope(context.rows));
+        ownership::force_externalize::force_externalize_remaining_package_modules(
+            context.rows,
+            context.package_sources,
+            &matched_package_names,
+            &mut state.package_report,
+        );
+    }
+}
+
+struct CacheAnchoredSurfacesPass;
+
+impl PackageMatchPass for CacheAnchoredSurfacesPass {
+    fn name(&self) -> &'static str {
+        "cache_anchored_surfaces_final"
+    }
+
+    fn run(&self, context: &PackageMatchContext<'_>, state: &mut PackageMatchState) {
+        // Ownership / force-externalize passes can append accepted
+        // external-import attributions after the versioned matcher resolved
+        // surfaces from the initial concrete matches. Re-resolve
+        // cache-anchored surfaces over the now-complete attribution set so
+        // every publicly importable specifier gets a generation surface.
+        append_cache_anchored_package_surfaces(
+            &mut state.package_report.surfaces,
+            &state.package_report.attributions,
+            context.package_sources,
+            context.package_filter,
+        );
+    }
+}
+
+fn empty_versioned_package_match_report() -> VersionedPackageMatchReport {
+    VersionedPackageMatchReport {
+        attributions: Vec::new(),
+        surfaces: Vec::new(),
+        matches: Vec::new(),
+        version_matches: Vec::new(),
+        audit: AuditReport::default(),
     }
 }
 
@@ -206,7 +426,7 @@ fn fingerprints_from_rows(
     package_filter: Option<&BTreeSet<String>>,
     excluded_modules: &BTreeSet<ModuleId>,
     only_weak_package_sources: bool,
-) -> BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>> {
+) -> BTreeMap<ModuleId, Vec<FunctionFingerprint>> {
     let mut out = BTreeMap::new();
     for module in &rows.modules {
         if excluded_modules.contains(&module.id) {
@@ -242,7 +462,7 @@ fn fingerprints_from_rows(
 
 fn match_with_cascade_scoped_by_module_hints(
     rows: &InputRows,
-    fingerprints_by_module: &BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
+    fingerprints_by_module: &BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
     package_sources: &[PackageSource],
 ) -> CascadeMatchReport {
     let modules_by_id = rows
@@ -252,7 +472,7 @@ fn match_with_cascade_scoped_by_module_hints(
         .collect::<BTreeMap<_, _>>();
     let mut grouped_fingerprints = BTreeMap::<
         (Option<String>, Option<String>),
-        BTreeMap<ModuleId, Vec<reverts_ir::FunctionFingerprint>>,
+        BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
     >::new();
     for (module_id, fingerprints) in fingerprints_by_module {
         let scope = modules_by_id.get(module_id).and_then(|module| {

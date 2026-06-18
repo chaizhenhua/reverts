@@ -28,7 +28,8 @@ use super::commands::runtime_inventory::{
     runtime_source_span_owner_label_for_range,
 };
 use super::input_externalization::{
-    promote_detected_package_modules, promote_verified_externalization_hints,
+    MaterializedPackageManifest, promote_detected_package_modules,
+    promote_verified_externalization_hints,
 };
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
@@ -512,13 +513,16 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
 /// `package.json` (a `main`, no `exports`) so every detected specifier — bare
 /// root or subpath — counts as public. Tests needing a restrictive exports map
 /// build their own map.
-fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, (String, bool)> {
+fn materialized(names: &[&str]) -> std::collections::BTreeMap<String, MaterializedPackageManifest> {
     names
         .iter()
         .map(|name| {
             (
                 (*name).to_string(),
-                (format!(r#"{{"name":"{name}","main":"./index.js"}}"#), true),
+                MaterializedPackageManifest::new(
+                    format!(r#"{{"name":"{name}","main":"./index.js"}}"#),
+                    true,
+                ),
             )
         })
         .collect()
@@ -581,7 +585,7 @@ fn detected_package_modules_skip_non_public_specifier() {
     // pkg is materialized but its exports map only exposes the bare root.
     let manifests = std::collections::BTreeMap::from([(
         "pkg".to_string(),
-        (
+        MaterializedPackageManifest::new(
             r#"{"name":"pkg","exports":{".":"./index.js"}}"#.to_string(),
             false,
         ),

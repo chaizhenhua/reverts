@@ -130,6 +130,103 @@ pub fn is_accepted_external_attribution(attribution: &PackageAttributionInput) -
         && attribution.emission_mode == PackageEmissionMode::ExternalImport
 }
 
+/// Parse package metadata carried as plain `package.json` text or as the
+/// cache-normalized `export default { ... };` wrapper.
+#[must_use]
+pub fn parse_package_json_source(source: &str) -> Option<serde_json::Value> {
+    let trimmed = source.trim();
+    let body = trimmed
+        .strip_prefix("export default")
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    let body = body.trim().trim_end_matches(';').trim();
+    serde_json::from_str::<serde_json::Value>(body).ok()
+}
+
+/// Whether `specifier` is publicly importable from `package_name`, using the
+/// package's cached `package.json` source and whether the package ships a root
+/// `index.{js,json,node}` default entry. Invalid metadata is conservative:
+/// unproven specifiers are treated as non-public.
+#[must_use]
+pub fn package_specifier_is_public(
+    package_json_source: &str,
+    package_name: &str,
+    specifier: &str,
+    has_root_index: bool,
+) -> bool {
+    parse_package_json_source(package_json_source).is_some_and(|package_json| {
+        package_specifier_is_public_from_manifest(
+            package_name,
+            &package_json,
+            specifier,
+            has_root_index,
+        )
+    })
+}
+
+/// Whether `specifier` is publicly importable from `package_name`, using an
+/// already-parsed package manifest.
+///
+/// This intentionally models the package public-surface policy, not matcher
+/// scoring: callers must prove that a matched module corresponds to this
+/// specifier separately before they emit an external import.
+#[must_use]
+pub fn package_specifier_is_public_from_manifest(
+    package_name: &str,
+    package_json: &serde_json::Value,
+    specifier: &str,
+    has_root_index: bool,
+) -> bool {
+    let subpath = if specifier == package_name {
+        ".".to_string()
+    } else if let Some(rest) = specifier.strip_prefix(package_name) {
+        match rest.strip_prefix('/') {
+            Some(sub) if !sub.is_empty() => format!("./{sub}"),
+            _ => return false,
+        }
+    } else {
+        return false;
+    };
+
+    match package_json.get("exports") {
+        Some(serde_json::Value::Object(map)) => {
+            if map.keys().any(|key| key == "." || key.starts_with("./")) {
+                exports_subpath_is_public(map, &subpath)
+            } else {
+                // Root-only conditions object (e.g. { import, require }).
+                subpath == "."
+            }
+        }
+        Some(serde_json::Value::String(_)) => subpath == ".",
+        _ => {
+            if subpath == "." {
+                package_json.get("main").is_some()
+                    || package_json.get("module").is_some()
+                    || has_root_index
+            } else {
+                // No `exports` allowlist: existing files are importable by
+                // Node resolution. The caller is responsible for proving the
+                // file/specifier exists.
+                true
+            }
+        }
+    }
+}
+
+fn exports_subpath_is_public(
+    map: &serde_json::Map<String, serde_json::Value>,
+    subpath: &str,
+) -> bool {
+    if let Some(target) = map.get(subpath) {
+        return !target.is_null();
+    }
+    map.iter().any(|(key, target)| {
+        key.strip_suffix('*').is_some_and(|prefix| {
+            subpath.len() > prefix.len() && subpath.starts_with(prefix) && !target.is_null()
+        })
+    })
+}
+
 #[must_use]
 pub fn accepted_external_module_ids(
     attributions: &[PackageAttributionInput],
@@ -594,7 +691,7 @@ mod tests {
         accepted_external_attribution_for_module, accepted_external_module_ids,
         external_import_concrete_source_path, external_import_proof_kind,
         external_import_proof_label, is_accepted_external_attribution, is_node_builtin,
-        parse_export_members_import_proof,
+        package_specifier_is_public, parse_export_members_import_proof, parse_package_json_source,
     };
 
     #[test]
@@ -707,6 +804,122 @@ mod tests {
             panic!("package root should resolve");
         };
         assert!(import_attributes.is_empty());
+    }
+
+    #[test]
+    fn package_public_surface_matches_exports_exact_and_pattern() {
+        let package_json = r#"export default {
+            "name": "rxjs",
+            "exports": {
+                ".": "./dist/index.js",
+                "./operators": "./dist/operators.js",
+                "./fetch/*": "./dist/fetch/*.js",
+                "./internal/*": null
+            }
+        };"#;
+
+        assert!(package_specifier_is_public(
+            package_json,
+            "rxjs",
+            "rxjs",
+            false
+        ));
+        assert!(package_specifier_is_public(
+            package_json,
+            "rxjs",
+            "rxjs/operators",
+            false
+        ));
+        assert!(package_specifier_is_public(
+            package_json,
+            "rxjs",
+            "rxjs/fetch/client",
+            false
+        ));
+        assert!(!package_specifier_is_public(
+            package_json,
+            "rxjs",
+            "rxjs/internal/util",
+            false
+        ));
+    }
+
+    #[test]
+    fn package_public_surface_is_conservative_for_invalid_manifest() {
+        assert!(!package_specifier_is_public("not json", "pkg", "pkg", true));
+    }
+
+    #[test]
+    fn package_public_surface_matches_root_only_exports() {
+        let conditions =
+            r#"{"name":"ws","exports":{"import":"./wrapper.mjs","require":"./wrapper.js"}}"#;
+        assert!(package_specifier_is_public(conditions, "ws", "ws", false));
+        assert!(!package_specifier_is_public(
+            conditions, "ws", "ws/lib/x", false
+        ));
+
+        let string_exports = r#"{"name":"ws","exports":"./wrapper.js"}"#;
+        assert!(package_specifier_is_public(
+            string_exports,
+            "ws",
+            "ws",
+            false
+        ));
+        assert!(!package_specifier_is_public(
+            string_exports,
+            "ws",
+            "ws/lib/x",
+            false
+        ));
+    }
+
+    #[test]
+    fn package_public_surface_allows_proven_deep_imports_without_exports() {
+        let package_json = r#"{"name":"semver","main":"./index.js"}"#;
+        assert!(package_specifier_is_public(
+            package_json,
+            "semver",
+            "semver",
+            false
+        ));
+        assert!(package_specifier_is_public(
+            package_json,
+            "semver",
+            "semver/classes/range.js",
+            false
+        ));
+
+        let no_entry = r#"{"name":"semver"}"#;
+        assert!(!package_specifier_is_public(
+            no_entry, "semver", "semver", false
+        ));
+        assert!(package_specifier_is_public(
+            no_entry, "semver", "semver", true
+        ));
+        assert!(package_specifier_is_public(
+            no_entry,
+            "semver",
+            "semver/classes/range.js",
+            false
+        ));
+    }
+
+    #[test]
+    fn package_json_source_parser_accepts_cache_wrapped_and_plain_json() {
+        let wrapped =
+            r#"export default {"name":"rxjs","version":"7.8.1","main":"./dist/cjs/index.js"};"#;
+        assert_eq!(
+            parse_package_json_source(wrapped)
+                .and_then(|value| value.get("main").cloned())
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("./dist/cjs/index.js".to_string())
+        );
+        assert_eq!(
+            parse_package_json_source(r#"{"name":"x","version":"1.0.0"}"#)
+                .and_then(|value| value.get("name").cloned())
+                .and_then(|value| value.as_str().map(str::to_string)),
+            Some("x".to_string())
+        );
     }
 
     #[test]

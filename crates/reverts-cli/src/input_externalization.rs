@@ -11,10 +11,11 @@ use std::path::Path;
 
 use reverts_input::sqlite::{SqliteInputError, load_project_bundle_from_connection};
 use reverts_input::{
-    InputBundle, ModuleDependencyTarget, PackageAttributionInput, PackageAttributionStatus,
-    PackageEmissionMode,
+    InputBundle, ModuleDependencyTarget, ModuleInput, PackageAttributionInput,
+    PackageAttributionStatus, PackageEmissionMode,
 };
 use reverts_ir::{ModuleId, ModuleKind, is_valid_package_name, split_bare_specifier};
+use reverts_package::package_specifier_is_public;
 use reverts_package_matcher::{
     package_source_exported_members, package_source_normalized_hash,
     package_source_normalized_hashes,
@@ -56,45 +57,27 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
 /// keyed here only if it was actually fetched (so it exists + is installable);
 /// the manifest then lets us verify a *specifier* is a public export before
 /// externalizing it (so we never emit `import 'pkg/non-public-subpath'`).
-pub(crate) type MaterializedPackageManifests = BTreeMap<String, (String, bool)>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaterializedPackageManifest {
+    pub(crate) package_json_source: String,
+    pub(crate) has_root_index: bool,
+}
+
+impl MaterializedPackageManifest {
+    pub(crate) fn new(package_json_source: impl Into<String>, has_root_index: bool) -> Self {
+        Self {
+            package_json_source: package_json_source.into(),
+            has_root_index,
+        }
+    }
+}
+
+pub(crate) type MaterializedPackageManifests = BTreeMap<String, MaterializedPackageManifest>;
 
 fn materialized_package_manifests(
     connection: &Connection,
 ) -> Result<MaterializedPackageManifests, SqliteInputError> {
-    if !sqlite_table_exists(connection, "package_source_cache")? {
-        return Ok(BTreeMap::new());
-    }
-    let mut manifests = BTreeMap::<String, String>::new();
-    let mut statement = connection.prepare(
-        "SELECT package_name, source_content FROM package_source_cache \
-         WHERE entry_path = 'package.json' AND TRIM(COALESCE(package_name, '')) != ''",
-    )?;
-    for row in statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .filter_map(Result::ok)
-    {
-        manifests.insert(row.0.trim().to_string(), row.1);
-    }
-    let mut has_index = BTreeSet::<String>::new();
-    let mut index_statement = connection.prepare(
-        "SELECT DISTINCT package_name FROM package_source_cache \
-         WHERE entry_path IN ('index.js', 'index.json', 'index.node')",
-    )?;
-    for name in index_statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .filter_map(Result::ok)
-    {
-        has_index.insert(name.trim().to_string());
-    }
-    Ok(manifests
-        .into_iter()
-        .map(|(name, manifest)| {
-            let index = has_index.contains(name.as_str());
-            (name, (manifest, index))
-        })
-        .collect())
+    MaterializedPackageManifestRepository { connection }.load()
 }
 
 pub(crate) fn promote_detected_package_modules(
@@ -107,80 +90,162 @@ pub(crate) fn promote_detected_package_modules(
         .map(|module| (module.id, module))
         .collect::<BTreeMap<_, _>>();
     let package_versions = detected_package_versions_by_name(bundle);
+    let policy = DetectedPackageExternalizationPolicy {
+        materialized_packages,
+        package_versions: &package_versions,
+    };
     let mut promoted = 0usize;
     for attribution in &mut bundle.package_attributions {
-        if attribution.status == PackageAttributionStatus::Accepted
-            && attribution.emission_mode == PackageEmissionMode::ExternalImport
-            && attribution.export_specifier.is_some()
-            && attribution.package_version.is_some()
-        {
+        if detected_package_attribution_is_already_externalized(attribution) {
             continue;
         }
         let Some(module) = modules_by_id.get(&attribution.module_id).copied() else {
             continue;
         };
-        if module.kind != ModuleKind::Package {
-            continue;
-        }
-        let Some(module_package_name) = module.package_name.as_deref().map(str::trim) else {
+        let Some(decision) = policy.decide(module, attribution) else {
             continue;
         };
+        apply_detected_package_externalization_decision(attribution, decision);
+        promoted += 1;
+    }
+    promoted
+}
+
+struct MaterializedPackageManifestRepository<'a> {
+    connection: &'a Connection,
+}
+
+impl MaterializedPackageManifestRepository<'_> {
+    fn load(&self) -> Result<MaterializedPackageManifests, SqliteInputError> {
+        if !sqlite_table_exists(self.connection, "package_source_cache")? {
+            return Ok(BTreeMap::new());
+        }
+        let mut manifests = BTreeMap::<String, String>::new();
+        let mut statement = self.connection.prepare(
+            "SELECT package_name, source_content FROM package_source_cache \
+             WHERE entry_path = 'package.json' AND TRIM(COALESCE(package_name, '')) != ''",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for (name, manifest) in collect_sqlite_rows(rows)? {
+            let name = name.trim();
+            if !name.is_empty() {
+                manifests.insert(name.to_string(), manifest);
+            }
+        }
+        let mut has_index = BTreeSet::<String>::new();
+        let mut index_statement = self.connection.prepare(
+            "SELECT DISTINCT package_name FROM package_source_cache \
+             WHERE entry_path IN ('index.js', 'index.json', 'index.node')",
+        )?;
+        let rows = index_statement.query_map([], |row| row.get::<_, String>(0))?;
+        for name in collect_sqlite_rows(rows)? {
+            let name = name.trim();
+            if !name.is_empty() {
+                has_index.insert(name.to_string());
+            }
+        }
+        Ok(manifests
+            .into_iter()
+            .map(|(name, manifest)| {
+                let index = has_index.contains(name.as_str());
+                (name, MaterializedPackageManifest::new(manifest, index))
+            })
+            .collect())
+    }
+}
+
+struct DetectedPackageExternalizationPolicy<'a> {
+    materialized_packages: &'a MaterializedPackageManifests,
+    package_versions: &'a BTreeMap<String, String>,
+}
+
+struct DetectedPackageExternalizationDecision {
+    package_version: String,
+    export_specifier: String,
+    subpath: Option<String>,
+    resolved_file: String,
+}
+
+impl DetectedPackageExternalizationPolicy<'_> {
+    fn decide(
+        &self,
+        module: &ModuleInput,
+        attribution: &PackageAttributionInput,
+    ) -> Option<DetectedPackageExternalizationDecision> {
+        if module.kind != ModuleKind::Package {
+            return None;
+        }
+        let module_package_name = module.package_name.as_deref().map(str::trim)?;
         if module_package_name.is_empty() || module_package_name != attribution.package_name {
-            continue;
+            return None;
         }
         // Existence gate: only externalize a package that was actually
         // materialized (fetched). Promoting an unresolved package — e.g. a 404
         // version baked into the recovered bundle — would emit a bare import and
         // an uninstallable `package.json` dependency. Keep it vendored instead.
-        let Some((package_json, has_root_index)) = materialized_packages.get(module_package_name)
-        else {
-            continue;
-        };
-        let Some(module_package_version) = module
+        let manifest = self.materialized_packages.get(module_package_name)?;
+        let package_version = module
             .package_version
             .as_deref()
             .map(str::trim)
             .filter(|version| !version.is_empty())
             .or_else(|| {
-                package_versions
+                self.package_versions
                     .get(module_package_name)
                     .map(String::as_str)
-            })
-        else {
-            continue;
-        };
-        let Some(export_specifier) = detected_package_export_specifier(
+            })?;
+        let export_specifier = detected_package_export_specifier(
             module_package_name,
             module.semantic_path.as_str(),
             module.original_name.as_str(),
-        ) else {
-            continue;
-        };
+        )?;
         // Publicness gate: only externalize when the detected specifier is a real
         // public export of the package (per its `package.json` exports map).
         // Otherwise the bare import (e.g. `axios/exports`) crashes at load with
         // ERR_PACKAGE_PATH_NOT_EXPORTED. Non-public detections stay vendored.
-        if !reverts_package_matcher::package_specifier_is_public(
-            package_json,
+        if !package_specifier_is_public(
+            manifest.package_json_source.as_str(),
             module_package_name,
             export_specifier.as_str(),
-            *has_root_index,
+            manifest.has_root_index,
         ) {
-            continue;
+            return None;
         }
-        attribution.package_version = Some(module_package_version.to_string());
-        attribution.subpath = detected_package_subpath(export_specifier.as_str());
-        attribution.resolved_file = Some(format!(
-            "forced-external:semantic-path:{module_package_name}@{module_package_version}/{}",
-            module.semantic_path.trim().trim_matches('/')
-        ));
-        attribution.export_specifier = Some(export_specifier);
-        attribution.emission_mode = PackageEmissionMode::ExternalImport;
-        attribution.status = PackageAttributionStatus::Accepted;
-        attribution.rejection_reason = None;
-        promoted += 1;
+
+        Some(DetectedPackageExternalizationDecision {
+            package_version: package_version.to_string(),
+            subpath: detected_package_subpath(export_specifier.as_str()),
+            resolved_file: format!(
+                "forced-external:semantic-path:{module_package_name}@{package_version}/{}",
+                module.semantic_path.trim().trim_matches('/')
+            ),
+            export_specifier,
+        })
     }
-    promoted
+}
+
+fn detected_package_attribution_is_already_externalized(
+    attribution: &PackageAttributionInput,
+) -> bool {
+    attribution.status == PackageAttributionStatus::Accepted
+        && attribution.emission_mode == PackageEmissionMode::ExternalImport
+        && attribution.export_specifier.is_some()
+        && attribution.package_version.is_some()
+}
+
+fn apply_detected_package_externalization_decision(
+    attribution: &mut PackageAttributionInput,
+    decision: DetectedPackageExternalizationDecision,
+) {
+    attribution.package_version = Some(decision.package_version);
+    attribution.subpath = decision.subpath;
+    attribution.resolved_file = Some(decision.resolved_file);
+    attribution.export_specifier = Some(decision.export_specifier);
+    attribution.emission_mode = PackageEmissionMode::ExternalImport;
+    attribution.status = PackageAttributionStatus::Accepted;
+    attribution.rejection_reason = None;
 }
 
 fn detected_package_versions_by_name(bundle: &InputBundle) -> BTreeMap<String, String> {

@@ -1354,6 +1354,7 @@ version = "0.1.0"
 dependencies = [
  "reverts-input",
  "reverts-ir",
+ "serde_json",
 ]
 
 [[package]]

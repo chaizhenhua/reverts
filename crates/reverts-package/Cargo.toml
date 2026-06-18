@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 reverts-input = { path = "../reverts-input" }
 reverts-ir = { path = "../reverts-ir" }
+serde_json = "1"
