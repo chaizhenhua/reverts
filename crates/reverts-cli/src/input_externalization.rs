@@ -45,12 +45,39 @@ pub(crate) fn load_project_bundle_with_verified_externalization_hints(
             }
         })?;
     let mut bundle = load_project_bundle_from_connection(&connection, project_id)?;
-    promote_detected_package_modules(&mut bundle);
+    let materialized_packages = materialized_package_names(&connection)?;
+    promote_detected_package_modules(&mut bundle, &materialized_packages);
     promote_verified_externalization_hints(&connection, &mut bundle)?;
     Ok(bundle)
 }
 
-pub(crate) fn promote_detected_package_modules(bundle: &mut InputBundle) -> usize {
+/// Distinct package names that were actually materialized into the on-disk /
+/// cached source store. A package present here was successfully fetched, so it
+/// exists and is installable; a package absent here could not be resolved (e.g.
+/// a 404 version baked into the bundle) and must not be externalized into an
+/// uninstallable runtime dependency.
+fn materialized_package_names(
+    connection: &Connection,
+) -> Result<BTreeSet<String>, SqliteInputError> {
+    if !sqlite_table_exists(connection, "package_source_cache")? {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT package_name FROM package_source_cache \
+         WHERE TRIM(COALESCE(package_name, '')) != ''",
+    )?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .filter_map(Result::ok)
+        .map(|name| name.trim().to_string())
+        .collect();
+    Ok(names)
+}
+
+pub(crate) fn promote_detected_package_modules(
+    bundle: &mut InputBundle,
+    materialized_packages: &BTreeSet<String>,
+) -> usize {
     let modules_by_id = bundle
         .modules
         .iter()
@@ -76,6 +103,13 @@ pub(crate) fn promote_detected_package_modules(bundle: &mut InputBundle) -> usiz
             continue;
         };
         if module_package_name.is_empty() || module_package_name != attribution.package_name {
+            continue;
+        }
+        // Existence gate: only externalize a package that was actually
+        // materialized (fetched). Promoting an unresolved package — e.g. a 404
+        // version baked into the recovered bundle — would emit a bare import and
+        // an uninstallable `package.json` dependency. Keep it vendored instead.
+        if !materialized_packages.contains(module_package_name) {
             continue;
         }
         let Some(module_package_version) = module

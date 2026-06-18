@@ -508,6 +508,42 @@ fn verified_externalization_hints_promote_dependency_free_attributions() {
     );
 }
 
+fn materialized(names: &[&str]) -> std::collections::BTreeSet<String> {
+    names.iter().map(|name| (*name).to_string()).collect()
+}
+
+#[test]
+fn detected_package_modules_skip_unmaterialized_packages() {
+    // A package the matcher never materialized (e.g. a 404 version baked into
+    // the recovered bundle) must NOT be promoted to an external import: that
+    // would emit a bare import plus an uninstallable `package.json` dependency.
+    // It stays a rejected source attribution and is vendored instead.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.modules.push(ModuleInput::package(
+        ModuleId(10),
+        "sha",
+        "@smithy/sha256-js/index",
+        "@smithy/sha256-js",
+        Some("2.3.0".to_string()),
+    ));
+    rows.package_attributions
+        .push(PackageAttributionInput::rejected_source(
+            ModuleId(10),
+            "@smithy/sha256-js",
+            "package matcher did not produce an accepted attribution for this package",
+        ));
+    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+
+    // Only `other-pkg` was materialized; @smithy/sha256-js was never fetched.
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&["other-pkg"]));
+
+    assert_eq!(promoted, 0, "unmaterialized package must not be promoted");
+    assert_eq!(
+        input.package_attributions[0].status,
+        reverts_input::PackageAttributionStatus::Rejected
+    );
+}
+
 #[test]
 fn detected_package_modules_promote_rejected_source_attributions() {
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
@@ -526,7 +562,7 @@ fn detected_package_modules_promote_rejected_source_attributions() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input);
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&["pkg"]));
 
     let attribution = &input.package_attributions[0];
     assert_eq!(promoted, 1);
@@ -569,7 +605,7 @@ fn detected_package_modules_use_scoped_package_alias_subpaths() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input);
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&["@scope/sdk"]));
 
     assert_eq!(promoted, 1);
     assert_eq!(
@@ -609,7 +645,7 @@ fn detected_package_modules_infer_missing_version_from_package_group() {
         ));
     let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
 
-    let promoted = promote_detected_package_modules(&mut input);
+    let promoted = promote_detected_package_modules(&mut input, &materialized(&["pkg"]));
 
     assert_eq!(promoted, 2);
     assert_eq!(
