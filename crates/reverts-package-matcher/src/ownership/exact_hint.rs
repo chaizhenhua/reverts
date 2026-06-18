@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 use reverts_input::{InputRows, PackageAttributionInput};
 use reverts_ir::{ModuleId, ModuleKind, split_bare_specifier};
+use reverts_package::ExternalImportProofPath;
 use semver::Version;
 
 use crate::{
@@ -170,9 +171,11 @@ fn exact_hint_source_path(
     quality: PackageModuleSourceQuality,
     semantic_path: &str,
 ) -> String {
-    format!(
-        "exact-hint:{package_name}@{package_version}:quality={}:semantic_path={semantic_path}",
+    ExternalImportProofPath::exact_hint(
+        package_name,
+        package_version,
         package_module_source_quality_label(quality),
+        semantic_path,
     )
 }
 

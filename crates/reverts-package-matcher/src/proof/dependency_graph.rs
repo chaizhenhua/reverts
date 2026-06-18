@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::ModuleId;
+use reverts_package::ExternalImportProofPath;
 
 use super::export_member::export_member_external_package_source_for_source_path;
 use super::policy::{
@@ -144,14 +145,13 @@ pub(crate) fn dependency_graph_source_fingerprint_external_import_target<'a>(
     if selected.source.external_importable {
         return Some(ExternalImportTarget {
             export_specifier: selected.source.export_specifier.clone(),
-            source_path: format!(
-                "forced-external:dependency-graph-source:{}:graph={}/{}:functions={}:strings={}:{}",
+            source_path: ExternalImportProofPath::dependency_graph_source(
                 dependency_graph_source_proof_label(selected.proof),
                 selected.graph.matched_edges,
                 selected.graph.known_edges,
                 selected.function_matches,
                 selected.string_matches,
-                selected.source.source_path,
+                selected.source.source_path.as_str(),
             ),
         });
     }
@@ -281,12 +281,11 @@ pub(crate) fn dependency_edge_path_external_import_target(
     })?;
     Some(ExternalImportTarget {
         export_specifier: selected.source.export_specifier.clone(),
-        source_path: format!(
-            "forced-external:dependency-edge-path:dependent={}:entry={}:from={}:{}",
+        source_path: ExternalImportProofPath::dependency_edge_path(
             selected.dependent_id.0,
-            selected.entry,
+            selected.entry.as_str(),
             selected.dependent_source_path,
-            selected.source.source_path,
+            selected.source.source_path.as_str(),
         ),
     })
 }

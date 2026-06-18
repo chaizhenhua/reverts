@@ -30,7 +30,7 @@ use rusqlite::{Connection, OpenFlags, params};
 use crate::args::RuntimeInventoryArgs;
 use crate::collect_sqlite_rows;
 use crate::errors::{CliRunError, RuntimeInventoryError};
-use crate::input_externalization::load_project_bundle_with_verified_externalization_hints;
+use crate::input_externalization::load_project_bundle_with_package_externalization;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeInventoryOutcome {
@@ -486,7 +486,7 @@ pub fn runtime_inventory_from_sqlite(
             continue;
         }
 
-        let input = load_project_bundle_with_verified_externalization_hints(
+        let input = load_project_bundle_with_package_externalization(
             args.input.as_path(),
             selection.project_id,
         )

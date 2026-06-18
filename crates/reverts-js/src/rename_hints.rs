@@ -13,7 +13,7 @@ use oxc_ast::{
 
 use crate::commonjs_exports::{
     commonjs_export_property_name, commonjs_module_exports_target, module_export_identifier_name,
-    object_define_property_export_getter, property_key_readability_name,
+    object_define_property_export_getter, static_property_key_name,
 };
 use crate::identifier::sanitize_identifier;
 use crate::rename_apply::{ReadabilityRenameHint, ReadabilityRenameSource};
@@ -105,7 +105,7 @@ impl<'a> Visit<'a> for LateReadabilityRenameCollector {
         if !property.computed
             && !property.method
             && !property.shorthand
-            && let Some(property_name) = property_key_readability_name(&property.key)
+            && let Some(property_name) = static_property_key_name(&property.key)
             && let Expression::Identifier(identifier) = &property.value
         {
             self.push_hint(
@@ -130,7 +130,7 @@ fn collect_object_export_readability_renames(
         if !property.computed
             && !property.method
             && !property.shorthand
-            && let Some(property_name) = property_key_readability_name(&property.key)
+            && let Some(property_name) = static_property_key_name(&property.key)
             && let Expression::Identifier(identifier) = &property.value
         {
             collector.push_hint(identifier.name.as_str(), property_name.as_str(), source);

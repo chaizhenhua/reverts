@@ -12,7 +12,6 @@ use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::PackageSourceCacheView;
 use reverts_package_matcher::{
     ModuleMatchStrategy, PackageMatch, PackageSource, VersionedPackageMatchReport,
-    package_source_normalized_hash,
 };
 use reverts_pipeline::{
     EmittedAsset, EmittedFile, RuntimeDependency, RuntimeSetterMigrationBlockerReason,
@@ -28,9 +27,7 @@ use super::commands::runtime_inventory::{
     runtime_module_owner_label, runtime_original_name_owners_by_binding,
     runtime_source_span_owner_label_for_range,
 };
-use super::input_externalization::{
-    promote_detected_package_modules, promote_verified_externalization_hints,
-};
+use super::input_externalization::promote_detected_package_modules;
 use super::persistence::attributions::{
     externalization_chain_proofs, filter_unsafe_interpackage_external_attributions,
     package_source_elimination_stats_for_report, source_eliminated_package_modules_for_report,
@@ -55,6 +52,57 @@ use super::{
     stale_cache_version_hints_for_materialization, stale_package_source_cache_versions,
     version_text,
 };
+
+fn materialized(packages: &[(&str, &str)]) -> PackageSourceCacheView {
+    let mut view = PackageSourceCacheView::new();
+    for (package_name, package_version) in packages {
+        insert_package_json(&mut view, package_name, package_version);
+        view.insert_entry_path(package_name, package_version, "index.js");
+    }
+    view
+}
+
+fn materialized_from_entries(entries: &[(&str, &str, &str, &[&str])]) -> PackageSourceCacheView {
+    let mut view = PackageSourceCacheView::new();
+    for (package_name, package_version, package_json, entry_paths) in entries {
+        view.insert_source(package_name, package_version, "package.json", *package_json);
+        for entry_path in *entry_paths {
+            view.insert_entry_path(package_name, package_version, entry_path);
+        }
+    }
+    view
+}
+
+fn materialized_shipping(
+    packages: &[(&str, &str)],
+    entry_paths: &[&str],
+) -> PackageSourceCacheView {
+    let mut view = PackageSourceCacheView::new();
+    for (package_name, package_version) in packages {
+        insert_package_json(&mut view, package_name, package_version);
+        view.insert_entry_path(package_name, package_version, "index.js");
+        for entry_path in entry_paths {
+            view.insert_entry_path(package_name, package_version, entry_path);
+            if let Some(extensionless) = entry_path.strip_suffix(".js") {
+                view.insert_entry_path(package_name, package_version, extensionless);
+            }
+        }
+    }
+    view
+}
+
+fn insert_package_json(
+    view: &mut PackageSourceCacheView,
+    package_name: &str,
+    package_version: &str,
+) {
+    let package_json = serde_json::json!({
+        "name": package_name,
+        "main": "./index.js",
+    })
+    .to_string();
+    view.insert_source(package_name, package_version, "package.json", package_json);
+}
 
 #[test]
 fn parses_generate_project_v2_paths_without_external_process() {
@@ -443,113 +491,6 @@ fn package_source_blocker_report_groups_preserved_package_source() {
 }
 
 #[test]
-fn verified_externalization_hints_promote_dependency_free_attributions() {
-    let package_source =
-        "var init = (() => { let cached; return () => cached ||= { ok: true }; })();";
-    let normalized_source_hash =
-        package_source_normalized_hash("pkg@1.0.0/index.js", package_source)
-            .expect("source should normalize");
-    let connection = Connection::open_in_memory().expect("open db");
-    connection
-        .execute(
-            r"
-            CREATE TABLE package_externalization_hints (
-                package_name TEXT NOT NULL,
-                package_version TEXT NOT NULL,
-                entry_path TEXT NOT NULL,
-                export_specifier TEXT NOT NULL,
-                normalized_source_hash TEXT NOT NULL
-            )
-            ",
-            [],
-        )
-        .expect("create hints");
-    connection
-        .execute(
-            r"
-            INSERT INTO package_externalization_hints
-                (package_name, package_version, entry_path, export_specifier, normalized_source_hash)
-            VALUES ('pkg', '1.0.0', 'index.js', 'pkg', ?1)
-            ",
-            params![normalized_source_hash],
-        )
-        .expect("insert hint");
-    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    rows.source_files.push(SourceFileInput::new(
-        1,
-        "package.js",
-        Some(package_source.to_string()),
-    ));
-    rows.modules.push(
-        ModuleInput::package(
-            ModuleId(10),
-            "init",
-            "modules/pkg.ts",
-            "pkg",
-            Some("1.0.0".to_string()),
-        )
-        .with_source_file(1),
-    );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
-            ModuleId(10),
-            "pkg",
-            "1.0.0",
-            "pkg",
-        ));
-    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
-
-    let promoted =
-        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
-
-    assert_eq!(promoted, 1);
-    assert_eq!(
-        input.package_attributions[0].resolved_file.as_deref(),
-        Some("normalized-source-export:pkg@1.0.0/index.js")
-    );
-}
-
-/// Materialized-manifest map for the given package versions, each with a permissive
-/// `package.json` (a `main`, no `exports`) so every detected specifier — bare
-/// root or subpath — counts as public. Tests needing a restrictive exports map
-/// build their own map.
-fn materialized(packages: &[(&str, &str)]) -> PackageSourceCacheView {
-    materialized_shipping(packages, &[])
-}
-
-fn materialized_shipping(packages: &[(&str, &str)], files: &[&str]) -> PackageSourceCacheView {
-    let mut cache = PackageSourceCacheView::default();
-    for (name, version) in packages {
-        // A wildcard `exports` map makes the bare root and every subpath public;
-        // the detected subpath then has to resolve to a file the package
-        // actually ships (`./*.js`), so the fixture lists those files in
-        // `entry_paths` exactly as a real cached package would.
-        cache.insert_source(
-            name,
-            version,
-            "package.json",
-            format!(r#"{{"name":"{name}","exports":{{".":"./index.js","./*":"./*.js"}}}}"#),
-        );
-        cache.insert_entry_path(name, version, "index.js");
-        for file in files {
-            cache.insert_entry_path(name, version, file);
-        }
-    }
-    cache
-}
-
-fn materialized_from_entries(entries: &[(&str, &str, &str, &[&str])]) -> PackageSourceCacheView {
-    let mut cache = PackageSourceCacheView::default();
-    for (name, version, manifest, files) in entries {
-        cache.insert_source(name, version, "package.json", *manifest);
-        for file in *files {
-            cache.insert_entry_path(name, version, file);
-        }
-    }
-    cache
-}
-
-#[test]
 fn detected_package_modules_skip_unmaterialized_packages() {
     // A package the matcher never materialized (e.g. a 404 version baked into
     // the input bundle) must NOT be promoted to an external import: that
@@ -850,182 +791,6 @@ fn detected_package_modules_infer_missing_version_from_package_group() {
     assert_eq!(
         input.package_attributions[1].export_specifier.as_deref(),
         Some("pkg")
-    );
-}
-
-#[test]
-fn verified_externalization_hints_skip_loading_when_no_promotable_attributions() {
-    let connection = Connection::open_in_memory().expect("open db");
-    connection
-        .execute(
-            "CREATE TABLE package_externalization_hints (unexpected TEXT NOT NULL)",
-            [],
-        )
-        .expect("create irrelevant malformed hints table");
-    let rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
-
-    let promoted =
-        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
-
-    assert_eq!(promoted, 0);
-}
-
-#[test]
-fn verified_externalization_hints_promote_stable_normalization_alternates() {
-    let package_source = "function add(a,b){return a+b;}\nexports.add = add;";
-    let module_source = "function add(a,b){return a+b;}";
-    let normalized_source_hash =
-        package_source_normalized_hash("pkg@1.0.0/lib/add.js", package_source)
-            .expect("source should normalize");
-    let connection = Connection::open_in_memory().expect("open db");
-    connection
-        .execute(
-            r"
-            CREATE TABLE package_externalization_hints (
-                package_name TEXT NOT NULL,
-                package_version TEXT NOT NULL,
-                entry_path TEXT NOT NULL,
-                export_specifier TEXT NOT NULL,
-                normalized_source_hash TEXT NOT NULL
-            )
-            ",
-            [],
-        )
-        .expect("create hints");
-    connection
-        .execute(
-            r"
-            CREATE TABLE package_source_cache (
-                package_name TEXT NOT NULL,
-                package_version TEXT NOT NULL,
-                entry_path TEXT NOT NULL,
-                source_content TEXT NOT NULL
-            )
-            ",
-            [],
-        )
-        .expect("create cache");
-    connection
-        .execute(
-            r"
-            INSERT INTO package_externalization_hints
-                (package_name, package_version, entry_path, export_specifier, normalized_source_hash)
-            VALUES ('pkg', '1.0.0', 'lib/add.js', 'pkg/add', ?1)
-            ",
-            params![normalized_source_hash],
-        )
-        .expect("insert hint");
-    connection
-        .execute(
-            r"
-            INSERT INTO package_source_cache
-                (package_name, package_version, entry_path, source_content)
-            VALUES ('pkg', '1.0.0', 'lib/add.js', ?1)
-            ",
-            params![package_source],
-        )
-        .expect("insert cache source");
-    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    rows.source_files.push(SourceFileInput::new(
-        1,
-        "module.js",
-        Some(module_source.to_string()),
-    ));
-    rows.modules.push(
-        ModuleInput::package(
-            ModuleId(10),
-            "add",
-            "modules/pkg/add.ts",
-            "pkg",
-            Some("1.0.0".to_string()),
-        )
-        .with_source_file(1),
-    );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
-            ModuleId(10),
-            "pkg",
-            "1.0.0",
-            "pkg/add",
-        ));
-    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
-
-    let promoted =
-        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
-
-    assert_eq!(promoted, 1);
-    assert_eq!(
-        input.package_attributions[0].resolved_file.as_deref(),
-        Some("normalized-source-export:pkg@1.0.0/lib/add.js")
-    );
-}
-
-#[test]
-fn verified_externalization_hints_promote_public_member_proofs() {
-    let package_source = "exports.PublicClient = class PublicClient {};";
-    let normalized_source_hash =
-        package_source_normalized_hash("pkg@1.0.0/index.js", package_source)
-            .expect("source should normalize");
-    let connection = Connection::open_in_memory().expect("open db");
-    connection
-        .execute(
-            r"
-            CREATE TABLE package_externalization_hints (
-                package_name TEXT NOT NULL,
-                package_version TEXT NOT NULL,
-                entry_path TEXT NOT NULL,
-                export_specifier TEXT NOT NULL,
-                normalized_source_hash TEXT NOT NULL,
-                public_members_json TEXT NOT NULL
-            )
-            ",
-            [],
-        )
-        .expect("create hints");
-    connection
-        .execute(
-            r"
-            INSERT INTO package_externalization_hints
-                (package_name, package_version, entry_path, export_specifier,
-                 normalized_source_hash, public_members_json)
-            VALUES ('pkg', '1.0.0', 'index.js', 'pkg', ?1, ?2)
-            ",
-            params![normalized_source_hash, "[\"PublicClient\"]"],
-        )
-        .expect("insert hint");
-    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    rows.source_files.push(SourceFileInput::new(
-        1,
-        "module.js",
-        Some("var packageInit = U((exports, module) => { exports.PublicClient = class LocalClient {}; });".to_string()),
-    ));
-    rows.modules.push(
-        ModuleInput::package(
-            ModuleId(10),
-            "packageInit",
-            "modules/pkg.ts",
-            "pkg",
-            Some("1.0.0".to_string()),
-        )
-        .with_source_file(1),
-    );
-    rows.package_attributions
-        .push(PackageAttributionInput::accepted_external(
-            ModuleId(10),
-            "pkg",
-            "1.0.0",
-            "pkg",
-        ));
-    let mut input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
-
-    let promoted =
-        promote_verified_externalization_hints(&connection, &mut input).expect("promote hints");
-
-    assert_eq!(promoted, 1);
-    assert_eq!(
-        input.package_attributions[0].resolved_file.as_deref(),
-        Some("forced-external:export-members:public-members:PublicClient:pkg@1.0.0/index.js")
     );
 }
 

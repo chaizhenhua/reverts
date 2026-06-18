@@ -18,7 +18,7 @@ use oxc_syntax::{reference::ReferenceId, symbol::SymbolId};
 use crate::ReadabilityReport;
 use crate::commonjs_exports::{
     commonjs_export_property_name, commonjs_module_exports_target, module_export_identifier_name,
-    object_define_property_export_getter, property_key_readability_name,
+    object_define_property_export_getter, static_property_key_name,
 };
 use crate::identifier::sanitize_identifier;
 
@@ -513,7 +513,7 @@ impl<'a> VisitMut<'a> for ObjectPropertyReadability<'_> {
         if !property.computed
             && !property.method
             && !property.shorthand
-            && let Some(property_name) = property_key_readability_name(&property.key)
+            && let Some(property_name) = static_property_key_name(&property.key)
             && let Expression::Identifier(identifier) = &property.value
             && identifier.name.as_str() == property_name
         {
@@ -528,7 +528,7 @@ impl<'a> VisitMut<'a> for ObjectPropertyReadability<'_> {
             && let Expression::FunctionExpression(function) = &property.value
             && function.id.is_none()
         {
-            if let Some(property_name) = property_key_readability_name(&property.key) {
+            if let Some(property_name) = static_property_key_name(&property.key) {
                 self.report
                     .push(format!("recovered object method {property_name}"));
             }

@@ -47,11 +47,6 @@ pub fn static_property_key_name(key: &PropertyKey<'_>) -> Option<String> {
 }
 
 #[must_use]
-pub fn property_key_readability_name(key: &PropertyKey<'_>) -> Option<String> {
-    static_property_key_name(key)
-}
-
-#[must_use]
 pub fn commonjs_export_property_name(target: &AssignmentTarget<'_>) -> Option<String> {
     match target {
         AssignmentTarget::StaticMemberExpression(member) => {
@@ -172,9 +167,7 @@ fn descriptor_getter_return_identifier(descriptor: &ObjectExpression<'_>) -> Opt
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             continue;
         };
-        if property.computed
-            || property_key_readability_name(&property.key).as_deref() != Some("get")
-        {
+        if property.computed || static_property_key_name(&property.key).as_deref() != Some("get") {
             continue;
         }
         if let Some(identifier) = returned_identifier_from_invokable(&property.value) {

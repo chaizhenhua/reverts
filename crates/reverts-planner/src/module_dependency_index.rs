@@ -15,7 +15,7 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
-pub(crate) use reverts_package::source_suppressed_consumer_is_boundary;
+use reverts_package::{ConsumerBoundaryPolicy, consumer_is_boundary};
 
 pub(crate) fn module_dependency_path_exists(
     dependencies: &BTreeMap<ModuleId, BTreeSet<ModuleId>>,
@@ -129,7 +129,11 @@ pub(crate) fn source_suppressed_package_dependency_closure(
                     .any(|consumer_id| {
                         modules_by_id.get(consumer_id).is_some_and(|consumer| {
                             !reachable.contains(consumer_id)
-                                && !source_suppressed_consumer_is_boundary(module, consumer)
+                                && !consumer_is_boundary(
+                                    ConsumerBoundaryPolicy::SourceSuppressed,
+                                    module,
+                                    consumer,
+                                )
                         })
                     })
             })

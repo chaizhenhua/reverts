@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::ModuleInput;
 use reverts_ir::hash::fnv1a_hex as stable_hash;
+use reverts_package::ExternalImportProofPath;
 
 use crate::binding_signatures::binding_string_signatures_from_source;
 use crate::index::{fingerprint_source, is_strong_path_hint_token};
@@ -75,20 +76,11 @@ pub(crate) fn export_member_proof_source_path(
         .collect::<Vec<_>>()
         .join(",");
     let alias_proof = export_member_alias_proof_fragment(aliases);
-    if !alias_proof.is_empty() {
-        return format!(
-            "forced-external:export-members:{}:{}:aliases={}:{}",
-            export_member_source_proof_label(proof),
-            members,
-            alias_proof,
-            source.source_path
-        );
-    }
-    format!(
-        "forced-external:export-members:{}:{}:{}",
+    ExternalImportProofPath::export_members(
         export_member_source_proof_label(proof),
-        members,
-        source.source_path
+        members.as_str(),
+        (!alias_proof.is_empty()).then_some(alias_proof.as_str()),
+        source.source_path.as_str(),
     )
 }
 
@@ -299,10 +291,9 @@ pub(crate) fn public_export_member_external_package_source(
     })?;
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: format!(
-            "forced-external:public-export-members:members={}:{}",
-            export_member_proof_fragment(&module_members),
-            source.0.source_path
+        source_path: ExternalImportProofPath::public_export_members(
+            export_member_proof_fragment(&module_members).as_str(),
+            source.0.source_path.as_str(),
         ),
     })
 }

@@ -11,7 +11,7 @@ use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
 use crate::format_audit_findings;
 use crate::input_externalization::{
-    load_materialized_package_manifests, load_project_bundle_with_verified_externalization_hints,
+    load_materialized_package_manifests, load_project_bundle_with_package_externalization,
 };
 use crate::runtime_dependency_coherence::prune_transitively_provided_scope_incoherent_dependencies;
 
@@ -40,9 +40,8 @@ impl GenerateProjectV2Args {
 }
 
 pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
-    let input =
-        load_project_bundle_with_verified_externalization_hints(&args.input, args.project_id)
-            .map_err(CliRunError::LoadInput)?;
+    let input = load_project_bundle_with_package_externalization(&args.input, args.project_id)
+        .map_err(CliRunError::LoadInput)?;
     let run = generate_project_from_input(input).map_err(CliRunError::Pipeline)?;
 
     // Only errors block writing the output. Warnings (e.g. duplicate

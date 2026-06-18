@@ -24,7 +24,7 @@ use reverts_package::parse_package_json_source;
 use reverts_pipeline::RuntimeDependency;
 use semver::{Version, VersionReq};
 
-use crate::input_externalization::MaterializedPackageManifests;
+use crate::persistence::source_cache::MaterializedPackageManifests;
 
 /// Drop scope-incoherent runtime dependencies that npm will install
 /// transitively at a coherent version anyway. See module docs for the why.

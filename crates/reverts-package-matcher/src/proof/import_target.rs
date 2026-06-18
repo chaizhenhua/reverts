@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
+use reverts_package::ExternalImportProofPath;
 
 use crate::index::ExternalImportSourceIndex;
 #[cfg(test)]
@@ -263,7 +264,7 @@ fn dependency_exact_hint_source_match_external_package_source<'a>(
     if source_match.external_importable {
         return Some(ExternalImportTarget {
             export_specifier: source_match.export_specifier,
-            source_path: format!("forced-external:source-match:{}", source_match.source_path),
+            source_path: ExternalImportProofPath::source_match(source_match.source_path.as_str()),
         });
     }
     export_member_external_package_source_for_source_path(
@@ -329,10 +330,9 @@ fn semantic_external_package_source(
         let source = disambiguate_semantic_build_variant_source(best.as_slice())?;
         return Some(ExternalImportTarget {
             export_specifier: source.export_specifier.clone(),
-            source_path: format!(
-                "forced-external:{}:build-variant:{}",
+            source_path: ExternalImportProofPath::semantic_build_variant(
                 semantic_external_source_proof_label(best_proof),
-                source.source_path
+                source.source_path.as_str(),
             ),
         });
     }
@@ -344,10 +344,9 @@ fn semantic_external_package_source(
     })?;
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: format!(
-            "forced-external:{}:{}",
+        source_path: ExternalImportProofPath::semantic_source(
             semantic_external_source_proof_label(best_proof),
-            source.source_path
+            source.source_path.as_str(),
         ),
     })
 }
@@ -428,7 +427,7 @@ fn canonical_subpath_external_package_source(
     })?;
     Some(ExternalImportTarget {
         export_specifier: export_specifier.to_string(),
-        source_path: format!("forced-external:canonical-subpath:{}", source.source_path),
+        source_path: ExternalImportProofPath::canonical_subpath(source.source_path.as_str()),
     })
 }
 
@@ -582,7 +581,7 @@ fn normalized_source_external_package_source(
     }
     Some(ExternalImportTarget {
         export_specifier: best.export_specifier.clone(),
-        source_path: format!("normalized-source-export:{}", best.source_path),
+        source_path: ExternalImportProofPath::normalized_source_export(best.source_path.as_str()),
     })
 }
 

@@ -6272,7 +6272,7 @@ pub(crate) fn runtime_reader_cycle_imports_can_move(
         .chain(gate.folded_runtime_deps.iter().cloned())
         .collect::<BTreeSet<_>>();
 
-    let old_safe_model = gate.extra_runtime_deps.is_empty()
+    let self_contained_owner_runtime_is_safe = gate.extra_runtime_deps.is_empty()
         && gate.folded_runtime_deps.is_empty()
         && !owner_state_needs_shared_lazy_helper(owner_state)
         && owner_state
@@ -6283,7 +6283,7 @@ pub(crate) fn runtime_reader_cycle_imports_can_move(
             .written_helpers
             .iter()
             .all(|helper| gate.primary_bindings.contains(helper));
-    if old_safe_model {
+    if self_contained_owner_runtime_is_safe {
         return Ok(true);
     }
 

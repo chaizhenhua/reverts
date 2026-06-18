@@ -18,9 +18,8 @@ use reverts_input::{
 };
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_package::{
-    external_import_consumer_is_boundary, external_import_proof_label,
+    ConsumerBoundaryPolicy, consumer_is_boundary, external_import_proof_label,
     is_accepted_external_attribution, same_package_consumer,
-    source_suppressed_consumer_is_boundary,
 };
 use reverts_package_matcher::{
     BestVersionMatch, ModuleMatchStrategy, PackageMatch, PackageModuleSourceQuality,
@@ -653,7 +652,7 @@ fn external_import_blocker_summaries(
             let Some(consumer) = modules_by_id.get(consumer_id).copied() else {
                 continue;
             };
-            if external_import_consumer_is_boundary(module, consumer) {
+            if consumer_is_boundary(ConsumerBoundaryPolicy::ExternalImport, module, consumer) {
                 continue;
             }
             let reason = match consumer.kind {
@@ -735,10 +734,9 @@ fn external_attribution_has_unexternalized_consumer(
         {
             continue;
         }
-        if modules_by_id
-            .get(consumer_id)
-            .is_some_and(|consumer| !external_import_consumer_is_boundary(module, consumer))
-        {
+        if modules_by_id.get(consumer_id).is_some_and(|consumer| {
+            !consumer_is_boundary(ConsumerBoundaryPolicy::ExternalImport, module, consumer)
+        }) {
             return true;
         }
     }
@@ -847,7 +845,11 @@ fn external_import_source_suppressed_package_closure(
                 .any(|consumer_id| {
                     modules_by_id.get(consumer_id).is_some_and(|consumer| {
                         !reachable.contains(consumer_id)
-                            && !source_suppressed_consumer_is_boundary(module, consumer)
+                            && !consumer_is_boundary(
+                                ConsumerBoundaryPolicy::SourceSuppressed,
+                                module,
+                                consumer,
+                            )
                     })
                 });
             if has_external_consumer {
@@ -921,7 +923,11 @@ pub(crate) fn externalization_chain_proofs(
                         "application_boundary"
                     } else if consumer.kind == ModuleKind::Builtin {
                         "builtin_boundary"
-                    } else if external_import_consumer_is_boundary(module, consumer) {
+                    } else if consumer_is_boundary(
+                        ConsumerBoundaryPolicy::ExternalImport,
+                        module,
+                        consumer,
+                    ) {
                         "package_boundary"
                     } else if source_boundary_modules.contains(consumer_id) {
                         "source_boundary"

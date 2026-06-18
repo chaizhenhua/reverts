@@ -9,9 +9,14 @@
 
 use std::collections::BTreeSet;
 
+use reverts_ir::{is_identifier_like_ascii, split_bare_specifier};
+use reverts_package::{is_node_builtin, package_source_entry_path_from_source_path};
 use rusqlite::{Connection, params};
 
 use crate::errors::MatchPackagesError;
+use crate::{
+    collect_sqlite_rows, sqlite_placeholders, sqlite_table_exists, sqlite_table_has_column,
+};
 
 pub(crate) const PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION: i64 = 1;
 
@@ -79,6 +84,150 @@ pub(crate) fn persist_package_externalization_hints(
         .commit()
         .map_err(MatchPackagesError::WritePackageExternalizationHints)?;
     Ok(written)
+}
+
+pub(crate) fn load_package_externalization_hints(
+    connection: &Connection,
+    package_names: &BTreeSet<String>,
+) -> Result<Vec<PackageExternalizationHint>, MatchPackagesError> {
+    if !sqlite_table_exists(connection, "package_externalization_hints")
+        .map_err(MatchPackagesError::QueryPackageSources)?
+    {
+        return Ok(Vec::new());
+    }
+    let has_content_hash =
+        sqlite_table_has_column(connection, "package_externalization_hints", "content_hash")
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_normalized_source_hash = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "normalized_source_hash",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_public_members = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "public_members_json",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    let has_policy_version = sqlite_table_has_column(
+        connection,
+        "package_externalization_hints",
+        "proof_policy_version",
+    )
+    .map_err(MatchPackagesError::QueryPackageSources)?;
+    for required in [
+        "package_name",
+        "package_version",
+        "entry_path",
+        "export_specifier",
+    ] {
+        if !sqlite_table_has_column(connection, "package_externalization_hints", required)
+            .map_err(MatchPackagesError::QueryPackageSources)?
+        {
+            return Ok(Vec::new());
+        }
+    }
+    let content_hash_expr = if has_content_hash {
+        "content_hash"
+    } else {
+        "NULL"
+    };
+    let normalized_hash_expr = if has_normalized_source_hash {
+        "normalized_source_hash"
+    } else {
+        "NULL"
+    };
+    let public_members_expr = if has_public_members {
+        "public_members_json"
+    } else {
+        "NULL"
+    };
+    let policy_version_expr = if has_policy_version {
+        "proof_policy_version"
+    } else {
+        "NULL"
+    };
+    let mut sql = format!(
+        r"
+        SELECT package_name, package_version, entry_path, export_specifier,
+               {content_hash_expr}, {normalized_hash_expr},
+               {public_members_expr}, {policy_version_expr}
+          FROM package_externalization_hints
+         WHERE TRIM(COALESCE(package_name, '')) != ''
+           AND TRIM(COALESCE(package_version, '')) != ''
+           AND TRIM(COALESCE(entry_path, '')) != ''
+           AND TRIM(COALESCE(export_specifier, '')) != ''
+        "
+    );
+    if !package_names.is_empty() {
+        use std::fmt::Write as _;
+        let _ = write!(
+            sql,
+            " AND package_name IN ({})",
+            sqlite_placeholders(package_names.len())
+        );
+    }
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(MatchPackagesError::QueryPackageSources)?;
+    let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<PackageExternalizationHint> {
+        let package_name = row.get::<_, String>(0)?.trim().to_string();
+        let package_version = row.get::<_, String>(1)?.trim().to_string();
+        let raw_entry_path = row.get::<_, String>(2)?;
+        Ok(PackageExternalizationHint {
+            package_name: package_name.clone(),
+            package_version: package_version.clone(),
+            entry_path: package_source_entry_path_from_source_path(
+                package_name.as_str(),
+                package_version.as_str(),
+                raw_entry_path.as_str(),
+            ),
+            export_specifier: row.get::<_, String>(3)?.trim().to_string(),
+            content_hash: row
+                .get::<_, Option<String>>(4)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            normalized_source_hash: row
+                .get::<_, Option<String>>(5)?
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            public_members: parse_public_members_json(row.get::<_, Option<String>>(6)?.as_deref()),
+            proof_policy_version: row.get::<_, Option<i64>>(7)?,
+        })
+    };
+    if package_names.is_empty() {
+        let rows = statement
+            .query_map([], map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    } else {
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(package_names.iter()), map_row)
+            .map_err(MatchPackagesError::QueryPackageSources)?;
+        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
+    }
+}
+
+pub(crate) fn parse_public_members_json(value: Option<&str>) -> BTreeSet<String> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return BTreeSet::new();
+    };
+    serde_json::from_str::<Vec<String>>(value)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|member| member.trim().to_string())
+        .filter(|member| is_identifier_like_ascii(member))
+        .collect()
+}
+
+pub(crate) fn hint_export_specifier_matches_package(
+    package_name: &str,
+    export_specifier: &str,
+) -> bool {
+    split_bare_specifier(export_specifier).is_some_and(|(specifier_package, _subpath)| {
+        specifier_package == package_name && !is_node_builtin(specifier_package.as_str())
+    })
 }
 
 fn ensure_package_externalization_hints_table(

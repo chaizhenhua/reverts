@@ -4,8 +4,10 @@
 
 use std::path::Path;
 
-pub(crate) use reverts_js::read_quoted_string_at;
 use reverts_js::{normalize_source_for_pipeline, parse_error_message};
+pub(crate) use reverts_js::{
+    read_identifier_at, read_identifier_with_end_at, read_quoted_string_at,
+};
 
 #[must_use]
 pub(crate) fn compact_ascii_ws(source: &str) -> String {
@@ -30,29 +32,6 @@ pub(crate) fn previous_non_ascii_ws(bytes: &[u8], before: usize) -> Option<u8> {
         cursor = cursor.checked_sub(1)?;
     }
     bytes.get(cursor).copied()
-}
-
-#[must_use]
-pub(crate) fn read_identifier_at(source: &str, start: usize) -> Option<&str> {
-    let bytes = source.as_bytes();
-    let first = *bytes.get(start)?;
-    if !(first == b'_' || first == b'$' || first.is_ascii_alphabetic()) {
-        return None;
-    }
-    let mut end = start + 1;
-    while bytes
-        .get(end)
-        .is_some_and(|byte| *byte == b'_' || *byte == b'$' || byte.is_ascii_alphanumeric())
-    {
-        end += 1;
-    }
-    source.get(start..end)
-}
-
-#[must_use]
-pub(crate) fn read_identifier_with_end_at(source: &str, start: usize) -> Option<(&str, usize)> {
-    let identifier = read_identifier_at(source, start)?;
-    Some((identifier, start + identifier.len()))
 }
 
 pub(crate) fn normalize_source(path: &str, source: &str) -> Result<String, String> {

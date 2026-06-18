@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputRows, ModuleInput};
 use reverts_ir::ModuleId;
+use reverts_package::ExternalImportProofPath;
 use semver::Version;
 
 use super::export_member::export_member_external_package_source_for_source_path;
@@ -70,11 +71,10 @@ pub(crate) fn same_package_cross_version_source_external_import_target<'a>(
         let target = if source_match.external_importable {
             ExternalImportTarget {
                 export_specifier: source_match.export_specifier.clone(),
-                source_path: format!(
-                    "forced-external:cross-version-source:{}:from={}:{}",
+                source_path: ExternalImportProofPath::cross_version_source(
                     source_match.strategy.as_str(),
-                    package_match.package_version,
-                    source_match.source_path
+                    package_match.package_version.as_str(),
+                    source_match.source_path.as_str(),
                 ),
             }
         } else {
@@ -308,15 +308,14 @@ pub(crate) fn cross_package_exact_source_external_import_target<'a>(
         string_anchor_matches: selected.string_matches,
         target: ExternalImportTarget {
             export_specifier: selected.source.export_specifier.clone(),
-            source_path: format!(
-                "forced-external:cross-package-source:source-hash:hint={}@{}:graph={}/{}:functions={}:strings={}:{}",
-                package_match.package_name,
-                package_match.package_version,
+            source_path: ExternalImportProofPath::cross_package_source(
+                package_match.package_name.as_str(),
+                package_match.package_version.as_str(),
                 selected.graph.matched_edges,
                 selected.graph.known_edges,
                 selected.function_matches,
                 selected.string_matches,
-                selected.source.source_path,
+                selected.source.source_path.as_str(),
             ),
         },
     })

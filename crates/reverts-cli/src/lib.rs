@@ -36,10 +36,9 @@ pub use help::{HelpTopic, help_text, version_text};
 
 pub(crate) use package_source_workflow::{
     clean_package_entry_path, enrich_package_modules_from_source_units,
-    externalization_hint_candidates_from_cache,
-    filter_package_sources_to_referenced_package_versions, hint_export_specifier_matches_package,
-    load_package_sources, package_export_specifier, package_module_source_quality_counts,
-    package_source_load_scope, remove_package_attributions_for_revalidation,
+    filter_package_sources_to_referenced_package_versions, load_package_sources,
+    package_export_specifier, package_module_source_quality_counts, package_source_load_scope,
+    remove_package_attributions_for_revalidation,
 };
 #[cfg(test)]
 pub(crate) use package_source_workflow::{
@@ -47,9 +46,10 @@ pub(crate) use package_source_workflow::{
 };
 use persistence::externalization_hints::{
     PACKAGE_EXTERNALIZATION_HINT_POLICY_VERSION, PackageExternalizationHint,
-    persist_package_externalization_hints,
+    hint_export_specifier_matches_package, persist_package_externalization_hints,
 };
 pub(crate) use persistence::source_cache::PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION;
+pub(crate) use persistence::source_cache::externalization_hint_candidates_from_cache;
 #[cfg(test)]
 pub(crate) use persistence::source_cache::{
     persist_package_source_cache, stale_package_source_cache_versions,
@@ -75,6 +75,7 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use reverts_ir::hash::fnv1a_hex as stable_hash;
 use reverts_observe::AuditReport;
+use reverts_package::package_source_path;
 use reverts_package_matcher::{
     PackageSource, is_exact_package_version_hint, package_source_exported_members,
     package_source_normalized_hash, package_source_public_export_proofs,
@@ -587,9 +588,10 @@ fn package_externalization_hints_from_connection(
             outcome.content_hash_mismatch_rows += 1;
             continue;
         }
-        let source_path = format!(
-            "{}@{}/{}",
-            candidate.package_name, candidate.package_version, candidate.entry_path
+        let source_path = package_source_path(
+            candidate.package_name.as_str(),
+            candidate.package_version.as_str(),
+            candidate.entry_path.as_str(),
         );
         let Some(normalized_source_hash) =
             package_source_normalized_hash(source_path.as_str(), candidate.source_content.as_str())

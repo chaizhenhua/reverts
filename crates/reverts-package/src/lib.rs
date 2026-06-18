@@ -775,24 +775,22 @@ pub fn same_package_consumer(module: &ModuleInput, consumer: &ModuleInput) -> bo
     !module_package.is_empty() && module_package == consumer_package
 }
 
-#[must_use]
-pub fn external_import_consumer_is_boundary(module: &ModuleInput, consumer: &ModuleInput) -> bool {
-    match consumer.kind {
-        ModuleKind::Application => true,
-        ModuleKind::Package => !same_package_consumer(module, consumer),
-        ModuleKind::Builtin => true,
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsumerBoundaryPolicy {
+    ExternalImport,
+    SourceSuppressed,
 }
 
 #[must_use]
-pub fn source_suppressed_consumer_is_boundary(
+pub fn consumer_is_boundary(
+    policy: ConsumerBoundaryPolicy,
     module: &ModuleInput,
     consumer: &ModuleInput,
 ) -> bool {
     match consumer.kind {
         ModuleKind::Application => true,
         ModuleKind::Package => !same_package_consumer(module, consumer),
-        ModuleKind::Builtin => false,
+        ModuleKind::Builtin => policy == ConsumerBoundaryPolicy::ExternalImport,
     }
 }
 
@@ -1081,6 +1079,188 @@ impl<'a> ExternalImportProof<'a> {
             | ExternalImportProofKind::OwnershipSourceMatch
             | ExternalImportProofKind::Unknown => None,
         }
+    }
+}
+
+pub struct ExternalImportProofPath;
+
+impl ExternalImportProofPath {
+    #[must_use]
+    pub fn exact_hint(
+        package_name: &str,
+        package_version: &str,
+        quality: &str,
+        semantic_path: &str,
+    ) -> String {
+        format!(
+            "exact-hint:{}@{}:quality={}:semantic_path={}",
+            package_name.trim(),
+            package_version.trim(),
+            quality.trim(),
+            semantic_path.trim()
+        )
+    }
+
+    #[must_use]
+    pub fn normalized_source_export(source_path: &str) -> String {
+        format!("normalized-source-export:{}", source_path.trim())
+    }
+
+    #[must_use]
+    pub fn semantic_path(source_path: &str) -> String {
+        Self::forced_external("semantic-path", source_path)
+    }
+
+    #[must_use]
+    pub fn semantic_source(label: &str, source_path: &str) -> String {
+        Self::forced_external(label, source_path)
+    }
+
+    #[must_use]
+    pub fn semantic_build_variant(label: &str, source_path: &str) -> String {
+        Self::forced_external(
+            label,
+            format!("build-variant:{}", source_path.trim()).as_str(),
+        )
+    }
+
+    #[must_use]
+    pub fn source_match(source_path: &str) -> String {
+        Self::forced_external("source-match", source_path)
+    }
+
+    #[must_use]
+    pub fn canonical_subpath(source_path: &str) -> String {
+        Self::forced_external("canonical-subpath", source_path)
+    }
+
+    #[must_use]
+    pub fn dependency_graph_source(
+        proof_label: &str,
+        matched_edges: usize,
+        known_edges: usize,
+        function_matches: usize,
+        string_matches: usize,
+        source_path: &str,
+    ) -> String {
+        Self::forced_external(
+            "dependency-graph-source",
+            format!(
+                "{}:graph={}/{}:functions={}:strings={}:{}",
+                proof_label.trim(),
+                matched_edges,
+                known_edges,
+                function_matches,
+                string_matches,
+                source_path.trim()
+            )
+            .as_str(),
+        )
+    }
+
+    #[must_use]
+    pub fn dependency_edge_path(
+        dependent_id: impl std::fmt::Display,
+        entry: &str,
+        from_source_path: &str,
+        source_path: &str,
+    ) -> String {
+        Self::forced_external(
+            "dependency-edge-path",
+            format!(
+                "dependent={}:entry={}:from={}:{}",
+                dependent_id,
+                entry.trim(),
+                from_source_path.trim(),
+                source_path.trim()
+            )
+            .as_str(),
+        )
+    }
+
+    #[must_use]
+    pub fn cross_version_source(strategy: &str, from_version: &str, source_path: &str) -> String {
+        Self::forced_external(
+            "cross-version-source",
+            format!(
+                "{}:from={}:{}",
+                strategy.trim(),
+                from_version.trim(),
+                source_path.trim()
+            )
+            .as_str(),
+        )
+    }
+
+    #[must_use]
+    pub fn cross_package_source(
+        hinted_package_name: &str,
+        hinted_package_version: &str,
+        matched_edges: usize,
+        known_edges: usize,
+        function_matches: usize,
+        string_matches: usize,
+        source_path: &str,
+    ) -> String {
+        Self::forced_external(
+            "cross-package-source",
+            format!(
+                "source-hash:hint={}@{}:graph={}/{}:functions={}:strings={}:{}",
+                hinted_package_name.trim(),
+                hinted_package_version.trim(),
+                matched_edges,
+                known_edges,
+                function_matches,
+                string_matches,
+                source_path.trim()
+            )
+            .as_str(),
+        )
+    }
+
+    #[must_use]
+    pub fn export_members(
+        proof_label: &str,
+        members: &str,
+        aliases: Option<&str>,
+        source_path: &str,
+    ) -> String {
+        match aliases.map(str::trim).filter(|aliases| !aliases.is_empty()) {
+            Some(aliases) => Self::forced_external(
+                "export-members",
+                format!(
+                    "{}:{}:aliases={}:{}",
+                    proof_label.trim(),
+                    members.trim(),
+                    aliases,
+                    source_path.trim()
+                )
+                .as_str(),
+            ),
+            None => Self::forced_external(
+                "export-members",
+                format!(
+                    "{}:{}:{}",
+                    proof_label.trim(),
+                    members.trim(),
+                    source_path.trim()
+                )
+                .as_str(),
+            ),
+        }
+    }
+
+    #[must_use]
+    pub fn public_export_members(members: &str, source_path: &str) -> String {
+        Self::forced_external(
+            "public-export-members",
+            format!("members={}:{}", members.trim(), source_path.trim()).as_str(),
+        )
+    }
+
+    #[must_use]
+    fn forced_external(kind: &str, tail: &str) -> String {
+        format!("forced-external:{}:{}", kind.trim(), tail.trim())
     }
 }
 

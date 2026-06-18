@@ -47,7 +47,8 @@ pub use facts::{
 pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,
     is_identifier_part, is_identifier_start, is_js_keyword, is_valid_static_member_property_name,
-    read_quoted_string_at, sanitize_identifier, skip_block_comment, skip_line_comment,
+    read_identifier_at, read_identifier_with_end_at, read_quoted_string_at, sanitize_identifier,
+    skip_block_comment, skip_line_comment,
 };
 pub use lazy::{
     LazyBodyClassification, classify_lazy_module_body, extract_lazy_module_eager_value,

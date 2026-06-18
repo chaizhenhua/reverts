@@ -94,6 +94,29 @@ pub fn is_valid_static_member_property_name(value: &str) -> bool {
 }
 
 #[must_use]
+pub fn read_identifier_at(source: &str, start: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    let first = *bytes.get(start)?;
+    if !is_ascii_identifier_start(first) {
+        return None;
+    }
+    let mut end = start + 1;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| is_ascii_identifier_continue(*byte))
+    {
+        end += 1;
+    }
+    source.get(start..end)
+}
+
+#[must_use]
+pub fn read_identifier_with_end_at(source: &str, start: usize) -> Option<(&str, usize)> {
+    let identifier = read_identifier_at(source, start)?;
+    Some((identifier, start + identifier.len()))
+}
+
+#[must_use]
 pub fn skip_line_comment(bytes: &[u8], mut cursor: usize) -> usize {
     while cursor < bytes.len() && bytes[cursor] != b'\n' {
         cursor += 1;

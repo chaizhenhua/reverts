@@ -7,10 +7,7 @@
 
 mod externalization;
 
-pub(crate) use externalization::{
-    externalization_hint_candidates_from_cache, hint_export_specifier_matches_package,
-    promote_package_sources_with_externalization_hints,
-};
+pub(crate) use externalization::promote_package_sources_with_externalization_hints;
 pub(crate) use reverts_package::{clean_package_entry_path, package_export_specifier};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,13 +21,12 @@ use reverts_package_matcher::{
     has_accepted_external_attribution, is_exact_package_version_hint,
     package_import_names_from_sources, package_module_source_quality, strip_source_extension,
 };
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::Connection;
 use semver::Version;
 
 use crate::errors::MatchPackagesError;
 use crate::persistence::source_cache::{
-    PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION, package_source_from_row,
-    persist_package_source_cache, stale_package_source_cache_versions,
+    load_cached_package_sources, persist_package_source_cache, stale_package_source_cache_versions,
 };
 use crate::pkg_sources;
 use crate::pkg_sources::filtering::{
@@ -38,9 +34,7 @@ use crate::pkg_sources::filtering::{
     filter_package_sources_to_relevant_path_hints,
 };
 use crate::pkg_sources::version_resolution::materialize_package_sources_from_hints;
-use crate::{
-    collect_sqlite_rows, sqlite_placeholders, sqlite_table_exists, sqlite_table_has_column,
-};
+use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PackageModuleSourceQualityCounts {
@@ -449,135 +443,6 @@ pub(crate) fn load_package_sources(
     // on any prior run, on any project.
     crate::persistence::fingerprint_cache::attach_global_fingerprints(&mut package_sources);
     Ok(package_sources)
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PackageSourceCacheColumns {
-    has_external_importable: bool,
-    has_external_import_policy_version: bool,
-    has_export_specifier: bool,
-}
-
-impl PackageSourceCacheColumns {
-    fn load(connection: &Connection) -> Result<Self, MatchPackagesError> {
-        Ok(Self {
-            has_external_importable: sqlite_table_has_column(
-                connection,
-                "package_source_cache",
-                "external_importable",
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?,
-            has_external_import_policy_version: sqlite_table_has_column(
-                connection,
-                "package_source_cache",
-                "external_import_policy_version",
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?,
-            has_export_specifier: sqlite_table_has_column(
-                connection,
-                "package_source_cache",
-                "export_specifier",
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?,
-        })
-    }
-
-    fn has_current_external_import_policy(self) -> bool {
-        self.has_external_import_policy_version && self.has_export_specifier
-    }
-
-    fn cache_import_policy_predicate(self, materialize_package_sources: bool) -> String {
-        if materialize_package_sources {
-            self.current_import_policy_predicate()
-        } else {
-            "1".to_string()
-        }
-    }
-
-    fn current_import_policy_predicate(self) -> String {
-        if self.has_current_external_import_policy() {
-            format!(
-                "external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION}"
-            )
-        } else {
-            "0".to_string()
-        }
-    }
-
-    fn external_importable_select_expr(self) -> String {
-        if self.has_external_importable && self.has_current_external_import_policy() {
-            format!(
-                "CASE WHEN external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} THEN external_importable ELSE 0 END"
-            )
-        } else {
-            "0".to_string()
-        }
-    }
-
-    fn export_specifier_select_expr(self) -> String {
-        if self.has_current_external_import_policy() {
-            format!(
-                "CASE WHEN external_import_policy_version = {PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION} AND TRIM(COALESCE(export_specifier, '')) != '' THEN export_specifier ELSE '' END"
-            )
-        } else {
-            "''".to_string()
-        }
-    }
-}
-
-fn load_cached_package_sources(
-    connection: &Connection,
-    package_names: &BTreeSet<String>,
-    materialize_package_sources: bool,
-) -> Result<Vec<PackageSource>, MatchPackagesError> {
-    let columns = PackageSourceCacheColumns::load(connection)?;
-    let cache_import_policy_predicate =
-        columns.cache_import_policy_predicate(materialize_package_sources);
-    let external_importable_expr = columns.external_importable_select_expr();
-    let export_specifier_expr = columns.export_specifier_select_expr();
-    let mut sql = String::from(
-        format!(
-            r"
-        SELECT package_name, package_version, entry_path, source_content,
-               {external_importable_expr},
-               {export_specifier_expr}
-          FROM package_source_cache
-         WHERE TRIM(COALESCE(package_name, '')) != ''
-           AND TRIM(COALESCE(package_version, '')) != ''
-           AND TRIM(COALESCE(entry_path, '')) != ''
-           AND TRIM(COALESCE(source_content, '')) != ''
-           AND ({cache_import_policy_predicate})
-        "
-        )
-        .as_str(),
-    );
-    if !package_names.is_empty() {
-        use std::fmt::Write as _;
-        let _ = write!(
-            sql,
-            " AND package_name IN ({})",
-            sqlite_placeholders(package_names.len())
-        );
-    }
-    sql.push_str(" ORDER BY package_name, package_version, entry_path");
-
-    let mut statement = connection
-        .prepare(sql.as_str())
-        .map_err(MatchPackagesError::QueryPackageSources)?;
-    if package_names.is_empty() {
-        let rows = statement
-            .query_map([], package_source_from_row)
-            .map_err(MatchPackagesError::QueryPackageSources)?;
-        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
-    } else {
-        let rows = statement
-            .query_map(
-                params_from_iter(package_names.iter()),
-                package_source_from_row,
-            )
-            .map_err(MatchPackagesError::QueryPackageSources)?;
-        collect_sqlite_rows(rows).map_err(MatchPackagesError::QueryPackageSources)
-    }
 }
 
 pub(crate) fn filter_package_sources_to_referenced_package_versions(
