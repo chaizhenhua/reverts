@@ -109,16 +109,13 @@ fn build_symbol_index(
     // (module_id, emitted/semantic name) -> original DB name, for bindings with
     // an accepted semantic name, so index keys map back to the symbols table and
     // downstream coverage can distinguish explicit names from preserved text.
-    //
-    // Unnamed entries must still be backed by a DB/source symbol. Do not fall
-    // back from an arbitrary emitted binding to `original_name = emitted_name`:
-    // late readability passes may introduce emitted-only names from property
-    // hints (for example `{ value: H }` can rename `H` to `value`). Treating
-    // those as actionable source symbols sends the Agent a bogus work item that
-    // cannot be applied through `symbol-names`.
+    // Unnamed emitted bindings still enter the worklist using their emitted
+    // name as the original key; `symbol-names accept` can create missing symbol
+    // rows from that generated plan, but they do not count as named until an
+    // explicit semantic name is accepted.
     let mut original_for_semantic_emitted: std::collections::BTreeMap<(ModuleId, &str), &str> =
         std::collections::BTreeMap::new();
-    let mut unnamed_source_symbols: std::collections::BTreeSet<(ModuleId, &str)> =
+    let mut accepted_source_symbols: std::collections::BTreeSet<(ModuleId, &str)> =
         std::collections::BTreeSet::new();
     for symbol in program.model().symbols() {
         if let Some(semantic) = program
@@ -127,8 +124,7 @@ fn build_symbol_index(
         {
             original_for_semantic_emitted
                 .insert((symbol.module_id, semantic.as_str()), symbol.name.as_str());
-        } else {
-            unnamed_source_symbols.insert((symbol.module_id, symbol.name.as_str()));
+            accepted_source_symbols.insert((symbol.module_id, symbol.name.as_str()));
         }
     }
 
@@ -168,14 +164,15 @@ fn build_symbol_index(
                 let semantic_original = original_for_semantic_emitted
                     .get(&(module_id, emitted_name.as_str()))
                     .copied();
-                let (original_name, semantic_named) =
-                    if let Some(semantic_original) = semantic_original {
-                        (semantic_original.to_string(), true)
-                    } else if unnamed_source_symbols.contains(&(module_id, emitted_name.as_str())) {
-                        (emitted_name.clone(), false)
-                    } else {
-                        continue;
-                    };
+                let (original_name, semantic_named) = if let Some(semantic_original) =
+                    semantic_original
+                {
+                    (semantic_original.to_string(), true)
+                } else if accepted_source_symbols.contains(&(module_id, emitted_name.as_str())) {
+                    continue;
+                } else {
+                    (emitted_name.clone(), false)
+                };
                 entries.push(SymbolIndexEntry {
                     module_id,
                     original_name,
