@@ -3,13 +3,15 @@
 //! historical first-party source tree. Tier-gated: only provable matches are
 //! auto-accepted; everything else is left for an agent.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
+use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
+use crate::input_externalization::load_project_bundle_with_package_externalization;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MinTier {
@@ -56,6 +58,56 @@ pub(crate) fn run(_args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
 }
 
 use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
+
+/// One subject emitted module: its DB module id, emitted path, fingerprint,
+/// and the (original_name → emitted_name) bindings that land in it.
+struct SubjectModule {
+    module_id: u32,
+    file_path: String,
+    fingerprint: SourceFingerprint,
+    bindings: Vec<(String, String)>, // (original_name, emitted_name)
+}
+
+fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>, CliRunError> {
+    let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
+        .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
+    let prepared = prepare_and_enrich(bundle)
+        .map_err(|error| CliRunError::ReferenceSourceNames(format!("prepare: {error}")))?;
+    let run = generate_project_from_prepared(prepared)
+        .map_err(|error| CliRunError::ReferenceSourceNames(format!("generate: {error}")))?;
+
+    // Group symbol_index bindings by emitted file path, capturing module id.
+    let mut module_for_path: BTreeMap<String, u32> = BTreeMap::new();
+    let mut bindings_for_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for entry in &run.symbol_index {
+        module_for_path
+            .entry(entry.file_path.clone())
+            .or_insert(entry.module_id.0);
+        bindings_for_path
+            .entry(entry.file_path.clone())
+            .or_default()
+            .push((entry.original_name.clone(), entry.emitted_name.clone()));
+    }
+
+    let mut modules = Vec::new();
+    for file in &run.project.files {
+        let Some(&module_id) = module_for_path.get(file.path.as_str()) else {
+            continue; // scaffold/runtime file with no owning module
+        };
+        let Ok(fingerprint) = fingerprint_source(file.path.as_str(), file.source.as_str()) else {
+            continue;
+        };
+        modules.push(SubjectModule {
+            module_id,
+            file_path: file.path.clone(),
+            fingerprint,
+            bindings: bindings_for_path
+                .remove(file.path.as_str())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(modules)
+}
 
 /// One source file from the reference tree, fingerprinted for matching.
 #[derive(Debug, Clone)]
