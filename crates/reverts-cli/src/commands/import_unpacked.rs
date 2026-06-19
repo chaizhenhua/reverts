@@ -11,6 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use reverts_js::{ParseGoal, collect_static_module_specifiers};
 use rusqlite::{Connection, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::args::ImportUnpackedArgs;
 use crate::errors::CliRunError;
@@ -32,6 +33,7 @@ pub struct ImportUnpackedOutcome {
 struct ImportFile {
     relative_path: String,
     physical_path: PathBuf,
+    size: u64,
     kind: ImportFileKind,
     package: Option<PackageOwner>,
     executable: bool,
@@ -58,9 +60,27 @@ struct SourceRecord {
     id: u32,
     relative_path: String,
     physical_path: PathBuf,
+    size: u64,
     stored_path: PathBuf,
     package: Option<PackageOwner>,
     bundle_source: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportEvidence {
+    source_root: PathBuf,
+    sources: Vec<EvidenceFile>,
+    assets: Vec<EvidenceFile>,
+    native_assets: Vec<EvidenceFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EvidenceFile {
+    path: String,
+    size: Option<u64>,
+    sha256: Option<String>,
+    executable: bool,
+    package: Option<PackageOwner>,
 }
 
 pub(crate) fn run(args: ImportUnpackedArgs) -> Result<(), CliRunError> {
@@ -94,7 +114,8 @@ pub fn import_unpacked_to_sqlite(
     if !input_root.is_dir() {
         return Err(ImportUnpackedError::InputRootNotDirectory(input_root));
     }
-    read_manifest(args.manifest.as_path())?;
+    let evidence = read_manifest(args.manifest.as_path())?;
+    validate_evidence_source_root(&evidence, input_root.as_path(), args.manifest.as_path())?;
     if args.output_db.exists() {
         return Err(ImportUnpackedError::OutputDatabaseExists {
             path: args.output_db.clone(),
@@ -111,6 +132,7 @@ pub fn import_unpacked_to_sqlite(
 
     let files = collect_import_files(
         input_root.as_path(),
+        &evidence,
         args.ignore_native_assets,
         args.max_source_bytes,
         args.bundle_source_bytes,
@@ -163,7 +185,7 @@ pub fn import_unpacked_to_sqlite(
     })
 }
 
-fn read_manifest(path: &Path) -> Result<Value, ImportUnpackedError> {
+fn read_manifest(path: &Path) -> Result<ImportEvidence, ImportUnpackedError> {
     let content = fs::read_to_string(path).map_err(|source| ImportUnpackedError::ReadManifest {
         path: path.to_path_buf(),
         source,
@@ -174,68 +196,282 @@ fn read_manifest(path: &Path) -> Result<Value, ImportUnpackedError> {
             source,
         }
     })?;
-    let is_supported = value
-        .get("schema")
-        .and_then(Value::as_str)
-        .is_some_and(|schema| schema == "reverts.import_evidence.v1")
-        || value.get("reverts_import_evidence").is_some()
-        || value.get("target_kind").and_then(Value::as_str) == Some("electron_app")
-        || (value.get("asar_meta").is_some() && value.get("entries").is_some());
-    if is_supported {
-        Ok(value)
-    } else {
-        Err(ImportUnpackedError::UnsupportedManifest {
+    if value.get("schema").and_then(Value::as_str) != Some("reverts.import_evidence.v1") {
+        return Err(ImportUnpackedError::UnsupportedManifest {
             path: path.to_path_buf(),
+        });
+    }
+    let source_root = required_string(&value, "source_root", path)?;
+    Ok(ImportEvidence {
+        source_root: PathBuf::from(source_root),
+        sources: parse_evidence_files(&value, "sources", path)?,
+        assets: parse_evidence_files(&value, "assets", path)?,
+        native_assets: parse_evidence_files(&value, "native_assets", path)?,
+    })
+}
+
+fn required_string(
+    value: &Value,
+    field: &'static str,
+    manifest: &Path,
+) -> Result<String, ImportUnpackedError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| ImportUnpackedError::InvalidManifest {
+            path: manifest.to_path_buf(),
+            message: format!("missing string field {field}"),
+        })
+}
+
+fn parse_evidence_files(
+    value: &Value,
+    field: &'static str,
+    manifest: &Path,
+) -> Result<Vec<EvidenceFile>, ImportUnpackedError> {
+    let entries = value.get(field).and_then(Value::as_array).ok_or_else(|| {
+        ImportUnpackedError::InvalidManifest {
+            path: manifest.to_path_buf(),
+            message: format!("missing array field {field}"),
+        }
+    })?;
+    entries
+        .iter()
+        .map(|entry| parse_evidence_file(entry, field, manifest))
+        .collect()
+}
+
+fn parse_evidence_file(
+    value: &Value,
+    field: &'static str,
+    manifest: &Path,
+) -> Result<EvidenceFile, ImportUnpackedError> {
+    let Some(object) = value.as_object() else {
+        return Err(ImportUnpackedError::InvalidManifest {
+            path: manifest.to_path_buf(),
+            message: format!("{field} entry is not an object"),
+        });
+    };
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ImportUnpackedError::InvalidManifest {
+            path: manifest.to_path_buf(),
+            message: format!("{field} entry missing string path"),
+        })?
+        .to_string();
+    let size = object.get("size").and_then(Value::as_u64);
+    let sha256 = object
+        .get("sha256")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    let executable = object
+        .get("executable")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let package = object
+        .get("package")
+        .and_then(parse_package_owner_value)
+        .transpose()
+        .map_err(|message| ImportUnpackedError::InvalidManifest {
+            path: manifest.to_path_buf(),
+            message,
+        })?;
+    Ok(EvidenceFile {
+        path,
+        size,
+        sha256,
+        executable,
+        package,
+    })
+}
+
+fn parse_package_owner_value(value: &Value) -> Option<Result<PackageOwner, String>> {
+    if value.is_null() {
+        return None;
+    }
+    let object = match value.as_object() {
+        Some(object) => object,
+        None => return Some(Err("package field is not an object".to_string())),
+    };
+    let package_name = match object.get("package_name").and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => return Some(Err("package field missing package_name".to_string())),
+    };
+    let package_root = match object.get("package_root").and_then(Value::as_str) {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => return Some(Err("package field missing package_root".to_string())),
+    };
+    let package_version = object
+        .get("package_version")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
+    Some(Ok(PackageOwner {
+        package_name,
+        package_version,
+        package_root,
+    }))
+}
+
+fn validate_evidence_source_root(
+    evidence: &ImportEvidence,
+    input_root: &Path,
+    manifest: &Path,
+) -> Result<(), ImportUnpackedError> {
+    let source_root = evidence.source_root.canonicalize().map_err(|source| {
+        ImportUnpackedError::ReadManifestSourceRoot {
+            path: evidence.source_root.clone(),
+            source,
+        }
+    })?;
+    if source_root == input_root {
+        Ok(())
+    } else {
+        Err(ImportUnpackedError::EvidenceInputMismatch {
+            manifest: manifest.to_path_buf(),
+            manifest_source_root: source_root,
+            input_root: input_root.to_path_buf(),
         })
     }
 }
 
 fn collect_import_files(
     input_root: &Path,
+    evidence: &ImportEvidence,
     ignore_native_assets: bool,
     max_source_bytes: Option<u64>,
     bundle_source_bytes: Option<u64>,
 ) -> Result<Vec<ImportFile>, ImportUnpackedError> {
-    let mut paths = Vec::new();
-    collect_file_paths(input_root, &mut paths)?;
-    paths.sort();
+    let disk_paths = collect_relative_disk_paths(input_root)?;
+    let mut evidence_paths = BTreeSet::new();
 
     let mut files = Vec::new();
-    for physical_path in paths {
-        let relative_path = relative_path(input_root, physical_path.as_path())?;
-        let mut kind = classify_file(relative_path.as_str(), physical_path.as_path());
-        let source_size = if kind == ImportFileKind::Source {
-            file_size(physical_path.as_path())
-        } else {
-            None
-        };
+    for (evidence_file, mut kind) in evidence
+        .sources
+        .iter()
+        .map(|file| (file, ImportFileKind::Source))
+        .chain(
+            evidence
+                .assets
+                .iter()
+                .map(|file| (file, ImportFileKind::Asset)),
+        )
+        .chain(
+            evidence
+                .native_assets
+                .iter()
+                .map(|file| (file, ImportFileKind::NativeAsset)),
+        )
+    {
+        validate_evidence_relative_path(evidence_file.path.as_str())?;
+        if !evidence_paths.insert(evidence_file.path.clone()) {
+            return Err(ImportUnpackedError::DuplicateManifestPath {
+                path: evidence_file.path.clone(),
+            });
+        }
+        let physical_path = input_root.join(Path::new(evidence_file.path.as_str()));
+        let metadata = fs::metadata(physical_path.as_path()).map_err(|source| {
+            ImportUnpackedError::EvidencePathMissing {
+                path: physical_path.clone(),
+                source,
+            }
+        })?;
+        if !metadata.is_file() {
+            return Err(ImportUnpackedError::EvidencePathNotFile {
+                path: physical_path,
+            });
+        }
+        let size = metadata.len();
+        if let Some(expected_size) = evidence_file.size
+            && size != expected_size
+        {
+            return Err(ImportUnpackedError::EvidenceSizeMismatch {
+                path: evidence_file.path.clone(),
+                expected: expected_size,
+                actual: size,
+            });
+        }
+        if let Some(expected_sha256) = &evidence_file.sha256 {
+            let actual_sha256 = sha256_path(physical_path.as_path())?;
+            if !expected_sha256.eq_ignore_ascii_case(actual_sha256.as_str()) {
+                return Err(ImportUnpackedError::EvidenceHashMismatch {
+                    path: evidence_file.path.clone(),
+                    expected: expected_sha256.clone(),
+                    actual: actual_sha256,
+                });
+            }
+        }
         if ignore_native_assets && kind == ImportFileKind::NativeAsset {
             continue;
         }
-        let package = package_owner(relative_path.as_str(), input_root)?;
+        let package = evidence_file.package.clone();
         let bundle_source = package.is_none()
-            && source_size
-                .is_some_and(|size| bundle_source_bytes.is_some_and(|limit| size > limit));
+            && kind == ImportFileKind::Source
+            && bundle_source_bytes.is_some_and(|limit| size > limit);
         let deferred_source = !bundle_source
-            && source_size.is_some_and(|size| max_source_bytes.is_some_and(|limit| size > limit));
+            && kind == ImportFileKind::Source
+            && max_source_bytes.is_some_and(|limit| size > limit);
         if deferred_source {
             kind = ImportFileKind::Asset;
         }
+        let executable = evidence_file.executable || is_executable(physical_path.as_path());
         files.push(ImportFile {
-            relative_path,
-            physical_path: physical_path.clone(),
+            relative_path: evidence_file.path.clone(),
+            physical_path,
+            size,
             kind,
             package,
-            executable: is_executable(physical_path.as_path()),
+            executable,
             deferred_source,
             bundle_source,
+        });
+    }
+    if let Some(missing) = disk_paths.difference(&evidence_paths).next() {
+        return Err(ImportUnpackedError::ManifestMissingDiskFile {
+            path: missing.clone(),
         });
     }
     Ok(files)
 }
 
-fn file_size(path: &Path) -> Option<u64> {
-    fs::metadata(path).map(|metadata| metadata.len()).ok()
+fn validate_evidence_relative_path(path: &str) -> Result<(), ImportUnpackedError> {
+    let relative = Path::new(path);
+    if path.is_empty() || relative.is_absolute() {
+        return Err(ImportUnpackedError::InvalidEvidencePath {
+            path: path.to_string(),
+        });
+    }
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) => {}
+            _ => {
+                return Err(ImportUnpackedError::InvalidEvidencePath {
+                    path: path.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_relative_disk_paths(input_root: &Path) -> Result<BTreeSet<String>, ImportUnpackedError> {
+    let mut paths = Vec::new();
+    collect_file_paths(input_root, &mut paths)?;
+    paths
+        .iter()
+        .map(|path| relative_path(input_root, path.as_path()))
+        .collect()
+}
+
+fn sha256_path(path: &Path) -> Result<String, ImportUnpackedError> {
+    let bytes = fs::read(path).map_err(|source| ImportUnpackedError::ReadEvidenceFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn collect_file_paths(root: &Path, output: &mut Vec<PathBuf>) -> Result<(), ImportUnpackedError> {
@@ -283,103 +519,6 @@ fn relative_path(root: &Path, path: &Path) -> Result<String, ImportUnpackedError
     Ok(parts.join("/"))
 }
 
-fn classify_file(relative_path: &str, physical_path: &Path) -> ImportFileKind {
-    let extension = Path::new(relative_path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(str::to_ascii_lowercase);
-    if matches!(
-        extension.as_deref(),
-        Some("js" | "mjs" | "cjs" | "jsx" | "ts" | "tsx" | "mts" | "cts")
-    ) {
-        return ImportFileKind::Source;
-    }
-    if matches!(
-        extension.as_deref(),
-        Some("node" | "dylib" | "so" | "dll" | "exe")
-    ) || Path::new(relative_path)
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        == Some("spawn-helper")
-    {
-        return ImportFileKind::NativeAsset;
-    }
-    if is_probably_macho(physical_path) {
-        return ImportFileKind::NativeAsset;
-    }
-    ImportFileKind::Asset
-}
-
-fn is_probably_macho(path: &Path) -> bool {
-    let Ok(bytes) = fs::read(path) else {
-        return false;
-    };
-    matches!(
-        bytes.get(0..4),
-        Some(
-            b"\xfe\xed\xfa\xce"
-                | b"\xce\xfa\xed\xfe"
-                | b"\xfe\xed\xfa\xcf"
-                | b"\xcf\xfa\xed\xfe"
-                | b"\xca\xfe\xba\xbe"
-                | b"\xbe\xba\xfe\xca"
-                | b"\xca\xfe\xba\xbf"
-                | b"\xbf\xba\xfe\xca"
-        )
-    )
-}
-
-fn package_owner(
-    relative_path: &str,
-    input_root: &Path,
-) -> Result<Option<PackageOwner>, ImportUnpackedError> {
-    let parts = relative_path.split('/').collect::<Vec<_>>();
-    if parts.len() < 2 || parts.first() != Some(&"node_modules") {
-        return Ok(None);
-    }
-    let (package_name, package_root) = if parts.get(1).is_some_and(|part| part.starts_with('@')) {
-        let (Some(scope), Some(name)) = (parts.get(1), parts.get(2)) else {
-            return Ok(None);
-        };
-        (format!("{scope}/{name}"), format!("{scope}/{name}"))
-    } else {
-        let Some(name) = parts.get(1) else {
-            return Ok(None);
-        };
-        ((*name).to_string(), (*name).to_string())
-    };
-    let package_root = format!("node_modules/{package_root}");
-    let package_version = read_package_version(input_root.join(&package_root).as_path())?;
-    Ok(Some(PackageOwner {
-        package_name,
-        package_version,
-        package_root,
-    }))
-}
-
-fn read_package_version(package_root: &Path) -> Result<Option<String>, ImportUnpackedError> {
-    let package_json = package_root.join("package.json");
-    if !package_json.exists() {
-        return Ok(None);
-    }
-    let content = fs::read_to_string(package_json.as_path()).map_err(|source| {
-        ImportUnpackedError::ReadPackageJson {
-            path: package_json.clone(),
-            source,
-        }
-    })?;
-    let value = serde_json::from_str::<Value>(content.as_str()).map_err(|source| {
-        ImportUnpackedError::ParsePackageJson {
-            path: package_json,
-            source,
-        }
-    })?;
-    Ok(value
-        .get("version")
-        .and_then(Value::as_str)
-        .map(ToString::to_string))
-}
-
 fn materialize_source_records(
     files: &[ImportFile],
     args: &ImportUnpackedArgs,
@@ -399,6 +538,7 @@ fn materialize_source_records(
             id,
             relative_path: file.relative_path.clone(),
             physical_path: file.physical_path.clone(),
+            size: file.size,
             stored_path,
             package: file.package.clone(),
             bundle_source: file.bundle_source,
@@ -525,7 +665,11 @@ fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
         r"
         CREATE TABLE projects (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
-        CREATE TABLE source_files (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL);
+        CREATE TABLE source_files (
+            id INTEGER PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL
+        );
         CREATE TABLE project_files (project_id INTEGER NOT NULL, file_id INTEGER NOT NULL);
         CREATE TABLE modules (
             id INTEGER PRIMARY KEY,
@@ -609,8 +753,17 @@ fn persist_import(
     for source in sources {
         transaction
             .execute(
-                "INSERT INTO source_files (id, file_path) VALUES (?1, ?2)",
-                params![source.id, source.stored_path.to_string_lossy()],
+                "INSERT INTO source_files (id, file_path, file_size) VALUES (?1, ?2, ?3)",
+                params![
+                    source.id,
+                    source.stored_path.to_string_lossy(),
+                    i64::try_from(source.size).map_err(|_source| {
+                        ImportUnpackedError::FileTooLarge {
+                            path: source.relative_path.clone(),
+                            size: source.size,
+                        }
+                    })?
+                ],
             )
             .map_err(ImportUnpackedError::WriteDatabase)?;
         transaction
@@ -815,12 +968,55 @@ pub enum ImportUnpackedError {
         path: PathBuf,
         source: io::Error,
     },
+    ReadManifestSourceRoot {
+        path: PathBuf,
+        source: io::Error,
+    },
     ParseManifest {
         path: PathBuf,
         source: serde_json::Error,
     },
     UnsupportedManifest {
         path: PathBuf,
+    },
+    InvalidManifest {
+        path: PathBuf,
+        message: String,
+    },
+    EvidenceInputMismatch {
+        manifest: PathBuf,
+        manifest_source_root: PathBuf,
+        input_root: PathBuf,
+    },
+    InvalidEvidencePath {
+        path: String,
+    },
+    DuplicateManifestPath {
+        path: String,
+    },
+    ManifestMissingDiskFile {
+        path: String,
+    },
+    EvidencePathMissing {
+        path: PathBuf,
+        source: io::Error,
+    },
+    EvidencePathNotFile {
+        path: PathBuf,
+    },
+    EvidenceSizeMismatch {
+        path: String,
+        expected: u64,
+        actual: u64,
+    },
+    EvidenceHashMismatch {
+        path: String,
+        expected: String,
+        actual: String,
+    },
+    ReadEvidenceFile {
+        path: PathBuf,
+        source: io::Error,
     },
     OutputDatabaseExists {
         path: PathBuf,
@@ -845,14 +1041,6 @@ pub enum ImportUnpackedError {
     InvalidPath {
         path: PathBuf,
     },
-    ReadPackageJson {
-        path: PathBuf,
-        source: io::Error,
-    },
-    ParsePackageJson {
-        path: PathBuf,
-        source: serde_json::Error,
-    },
     ReadSource {
         path: PathBuf,
         source: io::Error,
@@ -866,6 +1054,10 @@ pub enum ImportUnpackedError {
     },
     TooManyFiles {
         count: usize,
+    },
+    FileTooLarge {
+        path: String,
+        size: u64,
     },
     WriteDatabase(rusqlite::Error),
 }
@@ -894,6 +1086,13 @@ impl fmt::Display for ImportUnpackedError {
                     path.display()
                 )
             }
+            Self::ReadManifestSourceRoot { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read manifest source_root {}: {source}",
+                    path.display()
+                )
+            }
             Self::ParseManifest { path, source } => {
                 write!(
                     formatter,
@@ -904,7 +1103,73 @@ impl fmt::Display for ImportUnpackedError {
             Self::UnsupportedManifest { path } => {
                 write!(
                     formatter,
-                    "unsupported unpack manifest {}; expected reverts.import_evidence.v1 or Electron evidence",
+                    "unsupported unpack manifest {}; expected reverts.import_evidence.v1",
+                    path.display()
+                )
+            }
+            Self::InvalidManifest { path, message } => {
+                write!(formatter, "invalid manifest {}: {message}", path.display())
+            }
+            Self::EvidenceInputMismatch {
+                manifest,
+                manifest_source_root,
+                input_root,
+            } => {
+                write!(
+                    formatter,
+                    "manifest {} source_root {} does not match --input {}",
+                    manifest.display(),
+                    manifest_source_root.display(),
+                    input_root.display()
+                )
+            }
+            Self::InvalidEvidencePath { path } => {
+                write!(formatter, "invalid evidence path {path}")
+            }
+            Self::DuplicateManifestPath { path } => {
+                write!(formatter, "duplicate path in import evidence: {path}")
+            }
+            Self::ManifestMissingDiskFile { path } => {
+                write!(formatter, "manifest does not cover input file: {path}")
+            }
+            Self::EvidencePathMissing { path, source } => {
+                write!(
+                    formatter,
+                    "manifest evidence file {} is missing: {source}",
+                    path.display()
+                )
+            }
+            Self::EvidencePathNotFile { path } => {
+                write!(
+                    formatter,
+                    "manifest evidence path is not a file: {}",
+                    path.display()
+                )
+            }
+            Self::EvidenceSizeMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "manifest evidence size mismatch for {path}: expected {expected}, got {actual}"
+                )
+            }
+            Self::EvidenceHashMismatch {
+                path,
+                expected,
+                actual,
+            } => {
+                write!(
+                    formatter,
+                    "manifest evidence sha256 mismatch for {path}: expected {expected}, got {actual}"
+                )
+            }
+            Self::ReadEvidenceFile { path, source } => {
+                write!(
+                    formatter,
+                    "failed to read evidence file {}: {source}",
                     path.display()
                 )
             }
@@ -949,20 +1214,6 @@ impl fmt::Display for ImportUnpackedError {
             Self::InvalidPath { path } => {
                 write!(formatter, "invalid input path {}", path.display())
             }
-            Self::ReadPackageJson { path, source } => {
-                write!(
-                    formatter,
-                    "failed to read package.json {}: {source}",
-                    path.display()
-                )
-            }
-            Self::ParsePackageJson { path, source } => {
-                write!(
-                    formatter,
-                    "failed to parse package.json {}: {source}",
-                    path.display()
-                )
-            }
             Self::ReadSource { path, source } => {
                 write!(
                     formatter,
@@ -983,6 +1234,12 @@ impl fmt::Display for ImportUnpackedError {
             Self::TooManyFiles { count } => {
                 write!(formatter, "too many import files: {count}")
             }
+            Self::FileTooLarge { path, size } => {
+                write!(
+                    formatter,
+                    "source file {path} is too large for SQLite file_size: {size}"
+                )
+            }
             Self::WriteDatabase(source) => write!(formatter, "failed to write SQLite: {source}"),
         }
     }
@@ -993,24 +1250,33 @@ impl Error for ImportUnpackedError {
         match self {
             Self::ReadInputRoot { source, .. }
             | Self::ReadManifest { source, .. }
+            | Self::ReadManifestSourceRoot { source, .. }
+            | Self::EvidencePathMissing { source, .. }
+            | Self::ReadEvidenceFile { source, .. }
             | Self::CreateOutputParent { source, .. }
             | Self::ReadDirectory { source, .. }
             | Self::ReadMetadata { source, .. }
-            | Self::ReadPackageJson { source, .. }
             | Self::ReadSource { source, .. }
             | Self::WriteSource { source, .. } => Some(source),
-            Self::ParseManifest { source, .. } | Self::ParsePackageJson { source, .. } => {
-                Some(source)
-            }
+            Self::ParseManifest { source, .. } => Some(source),
             Self::OpenOutputDatabase { source, .. }
             | Self::ConfigureDatabase(source)
             | Self::WriteDatabase(source) => Some(source),
             Self::InputRootNotDirectory(_)
             | Self::UnsupportedManifest { .. }
+            | Self::InvalidManifest { .. }
+            | Self::EvidenceInputMismatch { .. }
+            | Self::InvalidEvidencePath { .. }
+            | Self::DuplicateManifestPath { .. }
+            | Self::ManifestMissingDiskFile { .. }
+            | Self::EvidencePathNotFile { .. }
+            | Self::EvidenceSizeMismatch { .. }
+            | Self::EvidenceHashMismatch { .. }
             | Self::OutputDatabaseExists { .. }
             | Self::InvalidPath { .. }
             | Self::NoSourceFiles { .. }
-            | Self::TooManyFiles { .. } => None,
+            | Self::TooManyFiles { .. }
+            | Self::FileTooLarge { .. } => None,
         }
     }
 }
@@ -1018,11 +1284,56 @@ impl Error for ImportUnpackedError {
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::path::Path;
 
     use rusqlite::Connection;
+    use serde_json::json;
     use tempfile::tempdir;
 
     use super::*;
+
+    fn evidence_file(root: &Path, relative_path: &str, package: Option<Value>) -> Value {
+        let path = root.join(relative_path);
+        json!({
+            "path": relative_path,
+            "physical_path": path.to_string_lossy(),
+            "size": fs::metadata(path.as_path()).expect("fixture metadata").len(),
+            "sha256": sha256_path(path.as_path()).expect("fixture hash"),
+            "executable": is_executable(path.as_path()),
+            "package": package,
+        })
+    }
+
+    fn package(package_name: &str, package_version: &str, package_root: &str) -> Value {
+        json!({
+            "package_name": package_name,
+            "package_version": package_version,
+            "package_root": package_root,
+        })
+    }
+
+    fn write_evidence(
+        root: &Path,
+        manifest: &Path,
+        sources: Vec<Value>,
+        assets: Vec<Value>,
+        native_assets: Vec<Value>,
+    ) -> Result<(), Box<dyn Error>> {
+        fs::write(
+            manifest,
+            serde_json::to_string_pretty(&json!({
+                "schema": "reverts.import_evidence.v1",
+                "target_kind": "electron_app",
+                "source_root": root.to_string_lossy(),
+                "entrypoints": [{"role": "electron_main", "path": "a.js"}],
+                "sources": sources,
+                "assets": assets,
+                "native_assets": native_assets,
+                "packages": [],
+            }))?,
+        )?;
+        Ok(())
+    }
 
     #[test]
     fn import_unpacked_writes_sources_edges_assets_and_package_ownership()
@@ -1043,9 +1354,28 @@ mod tests {
         fs::write(root.join("style.css"), "body{}\n")?;
         fs::write(root.join("native.node"), b"\xcf\xfa\xed\xfe")?;
         let manifest = temp.path().join("reverts-import-evidence.json");
-        fs::write(
+        let ws_package = package("ws", "8.0.0", "node_modules/ws");
+        write_evidence(
+            root.as_path(),
             manifest.as_path(),
-            r#"{"schema":"reverts.import_evidence.v1","target_kind":"electron_app"}"#,
+            vec![
+                evidence_file(root.as_path(), "a.js", None),
+                evidence_file(root.as_path(), "b.js", None),
+                evidence_file(
+                    root.as_path(),
+                    "node_modules/ws/index.js",
+                    Some(ws_package.clone()),
+                ),
+            ],
+            vec![
+                evidence_file(
+                    root.as_path(),
+                    "node_modules/ws/package.json",
+                    Some(ws_package),
+                ),
+                evidence_file(root.as_path(), "style.css", None),
+            ],
+            vec![evidence_file(root.as_path(), "native.node", None)],
         )?;
         let output_db = temp.path().join("project.sqlite");
         let args = ImportUnpackedArgs {
@@ -1069,6 +1399,11 @@ mod tests {
         assert_eq!(outcome.package_attributions, 1);
 
         let connection = Connection::open(output_db.as_path())?;
+        let source_size = connection.query_row(
+            "SELECT file_size FROM source_files WHERE id = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?;
         let package_modules = connection.query_row(
             "SELECT COUNT(*) FROM modules WHERE module_category = 'package'",
             [],
@@ -1081,6 +1416,7 @@ mod tests {
         let assets = connection.query_row("SELECT COUNT(*) FROM project_assets", [], |row| {
             row.get::<_, i64>(0)
         })?;
+        assert_eq!(source_size, 26);
         assert_eq!(package_modules, 1);
         assert_eq!(dependency_edges, 1);
         assert_eq!(assets, 2);
@@ -1091,6 +1427,20 @@ mod tests {
         assert_eq!(bundle.dependencies.len(), 1);
         assert_eq!(bundle.assets.len(), 2);
         assert_eq!(bundle.package_attributions.len(), 1);
+        let selections = crate::commands::runtime_inventory::runtime_inventory_project_selections(
+            &crate::args::RuntimeInventoryArgs {
+                project_id: Some(1),
+                all_projects: false,
+                limit: None,
+                newest: false,
+                max_source_bytes: None,
+                setter_blockers: false,
+                runtime_attribution: false,
+                package_source_blockers: false,
+                input: output_db,
+            },
+        )?;
+        assert_eq!(selections[0].source_bytes, 71);
         Ok(())
     }
 
@@ -1102,9 +1452,15 @@ mod tests {
         fs::write(root.join("small.js"), "export const ok = true;\n")?;
         fs::write(root.join("large.js"), "export const large = 'too long';\n")?;
         let manifest = temp.path().join("reverts-import-evidence.json");
-        fs::write(
+        write_evidence(
+            root.as_path(),
             manifest.as_path(),
-            r#"{"schema":"reverts.import_evidence.v1","target_kind":"electron_app"}"#,
+            vec![
+                evidence_file(root.as_path(), "small.js", None),
+                evidence_file(root.as_path(), "large.js", None),
+            ],
+            Vec::new(),
+            Vec::new(),
         )?;
         let output_db = temp.path().join("project.sqlite");
         let args = ImportUnpackedArgs {
@@ -1148,9 +1504,12 @@ mod tests {
             "var __commonJS=(cb,mod)=>function(){return mod||(mod={exports:{}},cb(mod.exports,mod)),mod.exports};\nvar dep=__commonJS({\"src/dep.js\":(exports,module)=>{module.exports=1;}});\n",
         )?;
         let manifest = temp.path().join("reverts-import-evidence.json");
-        fs::write(
+        write_evidence(
+            root.as_path(),
             manifest.as_path(),
-            r#"{"schema":"reverts.import_evidence.v1","target_kind":"electron_app"}"#,
+            vec![evidence_file(root.as_path(), "bundle.js", None)],
+            Vec::new(),
+            Vec::new(),
         )?;
         let output_db = temp.path().join("project.sqlite");
         let args = ImportUnpackedArgs {
@@ -1184,6 +1543,50 @@ mod tests {
             reverts_input::sqlite::load_project_bundle_from_sqlite(output_db.as_path(), 1)?;
         assert_eq!(bundle.source_files.len(), 1);
         assert!(bundle.modules.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn import_unpacked_rejects_manifest_hash_mismatch() -> Result<(), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let root = temp.path().join("app");
+        fs::create_dir_all(root.as_path())?;
+        fs::write(root.join("main.js"), "export const ok = true;\n")?;
+        let manifest = temp.path().join("reverts-import-evidence.json");
+        fs::write(
+            manifest.as_path(),
+            serde_json::to_string_pretty(&json!({
+                "schema": "reverts.import_evidence.v1",
+                "target_kind": "electron_app",
+                "source_root": root.to_string_lossy(),
+                "sources": [{
+                    "path": "main.js",
+                    "size": fs::metadata(root.join("main.js"))?.len(),
+                    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "executable": false,
+                    "package": null,
+                }],
+                "assets": [],
+                "native_assets": [],
+            }))?,
+        )?;
+        let output_db = temp.path().join("project.sqlite");
+        let args = ImportUnpackedArgs {
+            input: root,
+            manifest,
+            project_name: "fixture".to_string(),
+            output_db,
+            ignore_native_assets: true,
+            max_source_bytes: None,
+            bundle_source_bytes: None,
+        };
+
+        let error = import_unpacked_to_sqlite(&args).expect_err("hash mismatch must fail");
+
+        assert!(matches!(
+            error,
+            ImportUnpackedError::EvidenceHashMismatch { .. }
+        ));
         Ok(())
     }
 }
