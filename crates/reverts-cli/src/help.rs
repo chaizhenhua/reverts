@@ -17,6 +17,7 @@ pub enum HelpTopic {
     RuntimeInventory,
     SymbolNames,
     NamingProgress,
+    NamingPlan,
     ModuleClassify,
     MatchModulesRecall,
 }
@@ -40,6 +41,7 @@ pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
+pub const NAMING_PLAN_COMMAND: &str = "naming-plan";
 pub const MODULE_CLASSIFY_COMMAND: &str = "module-classify";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
@@ -105,6 +107,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Report semantic-naming completion across public-surface/declarations/full tiers",
     },
     CommandSpec {
+        name: NAMING_PLAN_COMMAND,
+        topic: HelpTopic::NamingPlan,
+        summary: "Emit the JSON work list of unnamed symbols (by tier) for a naming agent",
+    },
+    CommandSpec {
         name: MODULE_CLASSIFY_COMMAND,
         topic: HelpTopic::ModuleClassify,
         summary: "Classify modules (application/third-party/runtime-glue) to refine the naming denominator",
@@ -133,7 +140,7 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    import-unpacked                  Import unpack Skill evidence into Reverts SQLite facts\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    module-classify                  Classify modules (application/third-party/runtime-glue) to refine the naming denominator\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    import-unpacked                  Import unpack Skill evidence into Reverts SQLite facts\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    naming-plan                      Emit the JSON work list of unnamed symbols (by tier) for a naming agent\n    module-classify                  Classify modules (application/third-party/runtime-glue) to refine the naming denominator\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
         }
         HelpTopic::ImportUnpacked => {
             "reverts-cli import-unpacked\n\nUSAGE:\n    reverts-cli import-unpacked --input <UNPACKED_ROOT> --manifest <MANIFEST> --project-name <NAME> --output-db <DB> [--ignore-native-assets] [--max-source-bytes <N>] [--bundle-source-bytes <N>]\n\nOPTIONS:\n    --input <UNPACKED_ROOT>       Unpacked source root, for Electron usually Contents/Resources/app\n    --manifest <MANIFEST>         Skill evidence manifest, e.g. reverts-import-evidence.json\n    --project-name <NAME>         Project name stored in Reverts SQLite\n    --output-db <DB>              SQLite database to create\n    --ignore-native-assets        Do not write native .node/Mach-O assets into project_assets\n    --max-source-bytes <N>        Defer source files larger than N bytes as project_assets instead of modules\n    --bundle-source-bytes <N>     Keep source files larger than N bytes as source_files without module rows so the pipeline can extract bundled modules\n\nOUTPUT:\n    Creates canonical Reverts facts: projects, source_files, project_files, modules, module_dependencies, project_assets, and package_attributions."
@@ -170,6 +177,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::NamingProgress => {
             "reverts-cli naming-progress\n\nUSAGE:\n    reverts-cli naming-progress --input <DB> --project-id <ID> [--target-level <LEVEL>]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   Headline tier: public-surface | declarations | full (default: full)\n\nTIERS (cumulative, first-party modules only):\n    public-surface   Exported symbols\n    declarations     + non-exported function/class declarations\n    full             + remaining module-level value/const symbols"
+        }
+        HelpTopic::NamingPlan => {
+            "reverts-cli naming-plan\n\nUSAGE:\n    reverts-cli naming-plan --input <DB> --project-id <ID> [--target-level <LEVEL>]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   public-surface | declarations | full (default: full)\n\nEmits JSON: unnamed (minified, no semantic name) module-level bindings up to the\ntarget tier, grouped by first-party module. Join with symbol-index.json (from\ngenerate-project-v2) on (module_id, original_name) for file locations."
         }
         HelpTopic::ModuleClassify => {
             "reverts-cli module-classify\n\nUSAGE:\n    reverts-cli module-classify --input <DB> --project-id <ID> [--auto] [--batch <TSV>] [--list] [--apply]\n\nOPTIONS:\n    --input <DB>        SQLite input database\n    --project-id <ID>   Positive project id\n    --auto              Classify vendored node_modules paths as third-party (deterministic)\n    --batch <TSV>       Agent verdicts: MODULE_ID<TAB>CLASSIFICATION[<TAB>EVIDENCE]\n    --list              List recorded classifications\n    --apply             Persist (otherwise dry-run)\n\nCLASSIFICATIONS:\n    application | third-party-library | runtime-glue\n\nNOTE: classification only refines the naming denominator; it never emits a bare import. Real externalization stays with the fingerprint matcher."

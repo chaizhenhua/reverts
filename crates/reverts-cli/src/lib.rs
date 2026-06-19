@@ -14,8 +14,8 @@ mod tests;
 
 pub use args::{
     ExtractAssetsArgs, ImportUnpackedArgs, MatchPackagesArgs, MatchPackagesReportArgs,
-    ModuleClassifyArgs, NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
-    PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
+    ModuleClassifyArgs, NamingPlanArgs, NamingProgressArgs, PackageCacheArgs,
+    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
@@ -27,6 +27,7 @@ pub use commands::module_classify::{
     ModuleClassification, ModuleClassificationRow, ModuleClassifyOutcome,
     excluded_module_ids_from_sqlite, module_classify_from_sqlite,
 };
+pub use commands::naming_plan::naming_plan_json;
 pub use commands::naming_progress::{
     ModuleNamingProgress, NamingKind, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
     compute_naming_progress, naming_progress_from_sqlite,
@@ -109,6 +110,7 @@ pub enum CliCommand {
     RuntimeInventory(RuntimeInventoryArgs),
     SymbolNames(SymbolNamesArgs),
     NamingProgress(NamingProgressArgs),
+    NamingPlan(NamingPlanArgs),
     ModuleClassify(ModuleClassifyArgs),
     MatchModulesRecall(MatchModulesRecallArgs),
 }
@@ -197,6 +199,8 @@ enum ClapCommand {
     SymbolNames(SymbolNamesArgs),
     #[command(name = "naming-progress", disable_help_flag = true)]
     NamingProgress(NamingProgressArgs),
+    #[command(name = "naming-plan", disable_help_flag = true)]
+    NamingPlan(NamingPlanArgs),
     #[command(name = "module-classify", disable_help_flag = true)]
     ModuleClassify(ModuleClassifyArgs),
     #[command(name = "match-modules-recall", disable_help_flag = true)]
@@ -230,6 +234,7 @@ impl ClapCli {
                 CliCommand::SymbolNames(validate_symbol_names_for_cli(args)?)
             }
             Some(ClapCommand::NamingProgress(args)) => CliCommand::NamingProgress(args),
+            Some(ClapCommand::NamingPlan(args)) => CliCommand::NamingPlan(args),
             Some(ClapCommand::ModuleClassify(args)) => CliCommand::ModuleClassify(args),
             Some(ClapCommand::MatchModulesRecall(args)) => CliCommand::MatchModulesRecall(args),
             None => CliCommand::Help(HelpTopic::TopLevel),
@@ -355,6 +360,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
         CliCommand::NamingProgress(args) => commands::naming_progress::run(args),
+        CliCommand::NamingPlan(args) => commands::naming_plan::run(args),
         CliCommand::ModuleClassify(args) => commands::module_classify::run(args),
         CliCommand::MatchModulesRecall(args) => commands::match_modules::run(args),
     }

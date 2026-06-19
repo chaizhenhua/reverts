@@ -10,6 +10,7 @@ pub(crate) mod import_unpacked;
 pub(crate) mod match_modules;
 pub(crate) mod match_packages;
 pub(crate) mod module_classify;
+pub(crate) mod naming_plan;
 pub(crate) mod naming_progress;
 pub(crate) mod package_cache;
 pub(crate) mod package_version_diagnostics;

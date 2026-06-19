@@ -1,0 +1,164 @@
+//! `naming-plan` command: emit the JSON work list a naming agent consumes —
+//! the unnamed (minified, no semantic name) bindings up to a target tier, each
+//! carrying the emitted file it lives in so the agent can open and rename it.
+//!
+//! The work list is the intersection of two views: tier/named status from the
+//! graph (`module_naming_facts`) and location from the emitted `symbol_index`
+//! (`generate-project-v2`'s sidecar). Only bindings that actually land in an
+//! emitted file are offered — a target with no readable file is not actionable.
+
+use std::collections::BTreeMap;
+
+use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
+
+use crate::args::{NamingPlanArgs, NamingProgressTier};
+use crate::commands::module_classify::excluded_module_ids_from_sqlite;
+use crate::commands::naming_progress::{Tier, module_naming_facts};
+use crate::errors::{CliRunError, NamingProgressError};
+use crate::input_externalization::load_project_bundle_with_package_externalization;
+
+pub(crate) fn run(args: NamingPlanArgs) -> Result<(), CliRunError> {
+    let json = naming_plan_json(&args).map_err(CliRunError::NamingProgress)?;
+    println!("{json}");
+    Ok(())
+}
+
+pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressError> {
+    let excluded = excluded_module_ids_from_sqlite(args.input.as_path(), args.project_id)
+        .map_err(NamingProgressError::Classification)?;
+    let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
+        .map_err(NamingProgressError::LoadInput)?;
+    let prepared = prepare_and_enrich(bundle).map_err(NamingProgressError::Pipeline)?;
+
+    // Tier + named status per (module_id, original_name), borrowed before the
+    // emit consumes `prepared`.
+    let facts = module_naming_facts(&prepared.program, &excluded);
+    let mut detail: BTreeMap<(u32, String), (Tier, bool)> = BTreeMap::new();
+    for module in &facts {
+        for symbol in &module.symbols {
+            detail.insert(
+                (module.module_id.0, symbol.original_name.clone()),
+                (symbol.tier, symbol.named),
+            );
+        }
+    }
+
+    // Emit to learn where each binding actually lands. Only bindings present in
+    // an emitted file (the `symbol_index`) are actionable naming targets.
+    let run = generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
+
+    let mut by_module: BTreeMap<u32, (String, Vec<serde_json::Value>)> = BTreeMap::new();
+    let mut target_count = 0_usize;
+    for entry in &run.symbol_index {
+        let Some((tier, named)) = detail.get(&(entry.module_id.0, entry.original_name.clone()))
+        else {
+            continue;
+        };
+        if *named || !tier_in_scope(*tier, args.target_level) {
+            continue;
+        }
+        let slot = by_module
+            .entry(entry.module_id.0)
+            .or_insert_with(|| (entry.file_path.clone(), Vec::new()));
+        slot.1.push(serde_json::json!({
+            "original_name": entry.original_name,
+            "emitted_name": entry.emitted_name,
+            "tier": tier_str(*tier),
+        }));
+        target_count += 1;
+    }
+
+    let modules: Vec<serde_json::Value> = by_module
+        .into_iter()
+        .map(|(module_id, (file_path, targets))| {
+            serde_json::json!({
+                "module_id": module_id,
+                "file_path": file_path,
+                "targets": targets,
+            })
+        })
+        .collect();
+
+    let plan = serde_json::json!({
+        "project_id": args.project_id,
+        "target_level": target_label(args.target_level),
+        "target_count": target_count,
+        "module_count": modules.len(),
+        "modules": modules,
+    });
+    Ok(serde_json::to_string_pretty(&plan)
+        .expect("serializing a JSON object of plain values is infallible"))
+}
+
+fn tier_rank(tier: Tier) -> u8 {
+    match tier {
+        Tier::PublicSurface => 0,
+        Tier::Declarations => 1,
+        Tier::Full => 2,
+    }
+}
+
+fn target_rank(target: NamingProgressTier) -> u8 {
+    match target {
+        NamingProgressTier::PublicSurface => 0,
+        NamingProgressTier::Declarations => 1,
+        NamingProgressTier::Full => 2,
+    }
+}
+
+/// A binding is in scope for a target level when its tier is at or below it
+/// (tiers are cumulative: `PublicSurface ⊆ Declarations ⊆ Full`).
+fn tier_in_scope(tier: Tier, target: NamingProgressTier) -> bool {
+    tier_rank(tier) <= target_rank(target)
+}
+
+fn tier_str(tier: Tier) -> &'static str {
+    match tier {
+        Tier::PublicSurface => "public-surface",
+        Tier::Declarations => "declarations",
+        Tier::Full => "full",
+    }
+}
+
+fn target_label(target: NamingProgressTier) -> &'static str {
+    match target {
+        NamingProgressTier::PublicSurface => "public-surface",
+        NamingProgressTier::Declarations => "declarations",
+        NamingProgressTier::Full => "full",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tier_in_scope, tier_str};
+    use crate::args::NamingProgressTier;
+    use crate::commands::naming_progress::Tier;
+
+    #[test]
+    fn target_scope_is_cumulative() {
+        // public-surface target includes only L1.
+        assert!(tier_in_scope(
+            Tier::PublicSurface,
+            NamingProgressTier::PublicSurface
+        ));
+        assert!(!tier_in_scope(
+            Tier::Declarations,
+            NamingProgressTier::PublicSurface
+        ));
+        assert!(!tier_in_scope(
+            Tier::Full,
+            NamingProgressTier::PublicSurface
+        ));
+        // full target includes every tier.
+        assert!(tier_in_scope(Tier::PublicSurface, NamingProgressTier::Full));
+        assert!(tier_in_scope(Tier::Declarations, NamingProgressTier::Full));
+        assert!(tier_in_scope(Tier::Full, NamingProgressTier::Full));
+    }
+
+    #[test]
+    fn tier_labels_are_stable() {
+        assert_eq!(tier_str(Tier::PublicSurface), "public-surface");
+        assert_eq!(tier_str(Tier::Declarations), "declarations");
+        assert_eq!(tier_str(Tier::Full), "full");
+    }
+}

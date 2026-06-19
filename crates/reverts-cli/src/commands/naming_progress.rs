@@ -35,11 +35,21 @@ pub enum Tier {
     Full,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SymbolFact {
-    named: bool,
-    exported: bool,
-    kind: NamingKind,
+/// One module-level binding with its computed tier and whether it is already
+/// named. Shared by `naming-progress` (counts) and `naming-plan` (work list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymbolDetail {
+    pub original_name: String,
+    pub tier: Tier,
+    pub named: bool,
+}
+
+/// All measured bindings of one first-party module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModuleNamingFacts {
+    pub module_id: ModuleId,
+    pub semantic_path: String,
+    pub symbols: Vec<SymbolDetail>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -97,12 +107,12 @@ fn symbol_tier(exported: bool, kind: NamingKind) -> Tier {
     }
 }
 
-fn tier_breakdown(facts: &[SymbolFact]) -> TierBreakdown {
+fn tier_breakdown(facts: &[SymbolDetail]) -> TierBreakdown {
     let mut public_surface = TierCoverage::default();
     let mut declarations = TierCoverage::default();
     let mut full = TierCoverage::default();
     for fact in facts {
-        let tier = symbol_tier(fact.exported, fact.kind);
+        let tier = fact.tier;
         full.universe += 1;
         if fact.named {
             full.named += 1;
@@ -181,12 +191,13 @@ fn is_vendored_path(path: &str) -> bool {
     path.contains("node_modules/") || path.starts_with("node_modules")
 }
 
-#[must_use]
-pub fn compute_naming_progress(
-    project_id: u32,
+/// Walks the graph for every first-party module and classifies each
+/// module-level binding into a tier with its named status. The single source of
+/// truth for both the progress report and the naming plan.
+pub(crate) fn module_naming_facts(
     program: &EnrichedProgram,
     excluded: &BTreeSet<ModuleId>,
-) -> NamingProgressReport {
+) -> Vec<ModuleNamingFacts> {
     let model = program.model();
     let first_party = first_party_module_ids(model.input(), excluded);
     let graph = model.graph();
@@ -206,8 +217,7 @@ pub fn compute_naming_progress(
         }
     }
 
-    let mut all_facts: Vec<SymbolFact> = Vec::new();
-    let mut modules: Vec<ModuleNamingProgress> = Vec::new();
+    let mut facts = Vec::new();
     for module_id in &first_party {
         let exported: BTreeSet<String> = graph
             .import_export()
@@ -215,30 +225,53 @@ pub fn compute_naming_progress(
             .into_iter()
             .map(|binding| binding.as_str().to_string())
             .collect();
-        let mut facts: Vec<SymbolFact> = Vec::new();
+        let mut symbols = Vec::new();
         for binding in graph.definitions_for(*module_id) {
             let name = binding.as_str();
             // "Named" = an Agent semantic name exists, or the original name is
             // already a meaningful identifier (e.g. preserved vendored source).
             let named =
                 named_overlay.contains(&(*module_id, name)) || !is_minified_identifier(name);
-            facts.push(SymbolFact {
+            let tier = symbol_tier(
+                exported.contains(name),
+                naming_kind(program.binding_shape(*module_id, name)),
+            );
+            symbols.push(SymbolDetail {
+                original_name: name.to_string(),
+                tier,
                 named,
-                exported: exported.contains(name),
-                kind: naming_kind(program.binding_shape(*module_id, name)),
             });
         }
-        all_facts.extend_from_slice(&facts);
-        modules.push(ModuleNamingProgress {
+        facts.push(ModuleNamingFacts {
             module_id: *module_id,
             semantic_path: paths.get(module_id).copied().unwrap_or("").to_string(),
-            breakdown: tier_breakdown(&facts),
+            symbols,
+        });
+    }
+    facts
+}
+
+#[must_use]
+pub fn compute_naming_progress(
+    project_id: u32,
+    program: &EnrichedProgram,
+    excluded: &BTreeSet<ModuleId>,
+) -> NamingProgressReport {
+    let facts = module_naming_facts(program, excluded);
+    let mut all_symbols: Vec<SymbolDetail> = Vec::new();
+    let mut modules: Vec<ModuleNamingProgress> = Vec::new();
+    for module in &facts {
+        all_symbols.extend_from_slice(&module.symbols);
+        modules.push(ModuleNamingProgress {
+            module_id: module.module_id,
+            semantic_path: module.semantic_path.clone(),
+            breakdown: tier_breakdown(&module.symbols),
         });
     }
     NamingProgressReport {
         project_id,
         modules,
-        totals: tier_breakdown(&all_facts),
+        totals: tier_breakdown(&all_symbols),
     }
 }
 
@@ -335,16 +368,16 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NamingKind, NamingProgressReport, SymbolFact, Tier, compute_naming_progress, naming_kind,
+        NamingKind, NamingProgressReport, SymbolDetail, Tier, compute_naming_progress, naming_kind,
         symbol_tier, tier_breakdown,
     };
     use reverts_ir::BindingShape;
 
-    fn fact(named: bool, exported: bool, kind: NamingKind) -> SymbolFact {
-        SymbolFact {
+    fn fact(named: bool, exported: bool, kind: NamingKind) -> SymbolDetail {
+        SymbolDetail {
+            original_name: String::new(),
+            tier: symbol_tier(exported, kind),
             named,
-            exported,
-            kind,
         }
     }
 
