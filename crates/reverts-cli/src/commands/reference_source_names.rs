@@ -26,6 +26,77 @@ pub(crate) struct ReferenceSourceIndex {
     pub modules: Vec<ReferenceSourceModule>,
 }
 
+use std::path::Path;
+
+const SOURCE_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mjs", "cjs", "mts", "cts"];
+const SKIP_DIRS: &[&str] = &["node_modules", "test", "tests", "__tests__", "coverage"];
+
+pub(crate) fn build_reference_source_index(
+    root: &Path,
+    version: &str,
+) -> Result<ReferenceSourceIndex, String> {
+    let mut files = Vec::new();
+    collect_source_files(root, root, &mut files)?;
+    files.sort();
+    let mut modules = Vec::new();
+    for absolute in files {
+        let relative = absolute
+            .strip_prefix(root)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&absolute)
+            .map_err(|error| format!("read {}: {error}", absolute.display()))?;
+        let Ok(fingerprint) = fingerprint_source(relative.as_str(), source.as_str()) else {
+            continue; // unparseable reference file — skip, do not guess
+        };
+        let (export_names, asset_literals) = classify_anchors(&fingerprint);
+        modules.push(ReferenceSourceModule {
+            file_path: relative,
+            fingerprint,
+            export_names,
+            asset_literals,
+        });
+    }
+    Ok(ReferenceSourceIndex {
+        version: version.to_string(),
+        modules,
+    })
+}
+
+fn collect_source_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("read_dir {}: {error}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if file_type.is_dir() {
+            if SKIP_DIRS.contains(&name.as_str()) {
+                continue;
+            }
+            collect_source_files(root, &path, out)?;
+        } else if file_type.is_file() {
+            if name.ends_with(".d.ts") {
+                continue;
+            }
+            let is_source = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| SOURCE_EXTENSIONS.contains(&ext));
+            if is_source {
+                out.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn classify_anchors(fingerprint: &SourceFingerprint) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut exports = BTreeSet::new();
     let mut assets = BTreeSet::new();
@@ -42,6 +113,33 @@ fn classify_anchors(fingerprint: &SourceFingerprint) -> (BTreeSet<String>, BTree
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_index_fingerprints_source_files_and_skips_dts_and_node_modules() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("features")).expect("mkdir");
+        std::fs::create_dir_all(root.join("node_modules/x")).expect("mkdir");
+        std::fs::write(
+            root.join("features/audio-capture.ts"),
+            "export var _HL = require('/$bunfs/root/audio-capture.node');",
+        )
+        .expect("write ts");
+        std::fs::write(root.join("features/types.d.ts"), "export type T = number;")
+            .expect("write dts");
+        std::fs::write(root.join("node_modules/x/index.js"), "module.exports = 1;")
+            .expect("write nm");
+
+        let index = build_reference_source_index(root, "2.1.76").expect("index");
+        assert_eq!(index.version, "2.1.76");
+        let paths: Vec<&str> = index.modules.iter().map(|m| m.file_path.as_str()).collect();
+        assert_eq!(paths, vec!["features/audio-capture.ts"]);
+        assert!(
+            index.modules[0]
+                .asset_literals
+                .contains("/$bunfs/root/audio-capture.node")
+        );
+    }
 
     #[test]
     fn classify_anchors_splits_exports_and_native_assets() {
