@@ -32,6 +32,7 @@ pub struct ImportUnpackedOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ImportFile {
     relative_path: String,
+    logical_path: String,
     physical_path: PathBuf,
     size: u64,
     kind: ImportFileKind,
@@ -77,6 +78,7 @@ struct ImportEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvidenceFile {
     path: String,
+    logical_path: Option<String>,
     size: Option<u64>,
     sha256: Option<String>,
     executable: bool,
@@ -268,6 +270,10 @@ fn parse_evidence_file(
         })?
         .to_string();
     let size = object.get("size").and_then(Value::as_u64);
+    let logical_path = object
+        .get("logical_path")
+        .and_then(Value::as_str)
+        .map(ToString::to_string);
     let sha256 = object
         .get("sha256")
         .and_then(Value::as_str)
@@ -286,6 +292,7 @@ fn parse_evidence_file(
         })?;
     Ok(EvidenceFile {
         path,
+        logical_path,
         size,
         sha256,
         executable,
@@ -412,6 +419,10 @@ fn collect_import_files(
             continue;
         }
         let package = evidence_file.package.clone();
+        let logical_path = evidence_file
+            .logical_path
+            .clone()
+            .unwrap_or_else(|| evidence_file.path.clone());
         let bundle_source = package.is_none()
             && kind == ImportFileKind::Source
             && bundle_source_bytes.is_some_and(|limit| size > limit);
@@ -424,6 +435,7 @@ fn collect_import_files(
         let executable = evidence_file.executable || is_executable(physical_path.as_path());
         files.push(ImportFile {
             relative_path: evidence_file.path.clone(),
+            logical_path,
             physical_path,
             size,
             kind,
@@ -914,7 +926,7 @@ fn persist_import(
                 ",
                 params![
                     asset_id,
-                    file.relative_path,
+                    file.logical_path,
                     format!("assets/{}", file.relative_path),
                     file.physical_path.to_string_lossy(),
                     asset_kind(file),
@@ -1370,6 +1382,17 @@ mod tests {
         })
     }
 
+    fn evidence_file_with_logical_path(
+        root: &Path,
+        relative_path: &str,
+        logical_path: &str,
+        package: Option<Value>,
+    ) -> Value {
+        let mut value = evidence_file(root, relative_path, package);
+        value["logical_path"] = json!(logical_path);
+        value
+    }
+
     fn package(package_name: &str, package_version: &str, package_root: &str) -> Value {
         json!({
             "package_name": package_name,
@@ -1508,6 +1531,56 @@ mod tests {
             },
         )?;
         assert_eq!(selections[0].source_bytes, 71);
+        Ok(())
+    }
+
+    #[test]
+    fn import_unpacked_preserves_manifest_asset_logical_path() -> Result<(), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let root = temp.path().join("app");
+        fs::create_dir_all(root.as_path())?;
+        fs::write(
+            root.join("addon.js"),
+            "module.exports = require('/$bunfs/root/native.node');\n",
+        )?;
+        fs::write(root.join("native.node"), b"\x7fELFnative")?;
+        let manifest = temp.path().join("reverts-import-evidence.json");
+        write_evidence(
+            root.as_path(),
+            manifest.as_path(),
+            vec![evidence_file(root.as_path(), "addon.js", None)],
+            Vec::new(),
+            vec![evidence_file_with_logical_path(
+                root.as_path(),
+                "native.node",
+                "/$bunfs/root/native.node",
+                None,
+            )],
+        )?;
+        let output_db = temp.path().join("project.sqlite");
+        let args = ImportUnpackedArgs {
+            input: root,
+            manifest,
+            project_name: "fixture".to_string(),
+            output_db: output_db.clone(),
+            ignore_native_assets: false,
+            max_source_bytes: None,
+            bundle_source_bytes: None,
+        };
+
+        let outcome = import_unpacked_to_sqlite(&args)?;
+
+        assert_eq!(outcome.native_assets, 1);
+        let connection = Connection::open(output_db.as_path())?;
+        let logical_path = connection.query_row(
+            "SELECT logical_path FROM project_assets WHERE output_path = 'assets/native.node'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        assert_eq!(logical_path, "/$bunfs/root/native.node");
+        let bundle =
+            reverts_input::sqlite::load_project_bundle_from_sqlite(output_db.as_path(), 1)?;
+        assert_eq!(bundle.assets[0].logical_path, "/$bunfs/root/native.node");
         Ok(())
     }
 

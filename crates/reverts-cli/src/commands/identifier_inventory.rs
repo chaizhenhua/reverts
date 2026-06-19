@@ -54,8 +54,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
         match collect_identifier_inventory(&source, Some(path.as_path()), ParseGoal::TypeScript) {
             Ok(stats) => {
                 let relative_path = relative_display(args.output_root.as_path(), path.as_path());
-                let semantic =
-                    semantic_binding_file_coverage(relative_path.as_str(), &source, &stats);
+                let semantic = semantic_binding_file_coverage(relative_path.as_str(), &stats);
                 semantic_total += semantic.total;
                 semantic_named += semantic.named;
                 semantic_preserved += semantic.preserved;
@@ -69,6 +68,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                         "preserved": semantic.preserved,
                         "pending": semantic.pending,
                         "reason": semantic.reason,
+                        "pending_bindings": semantic.pending_bindings,
                     }));
                 }
                 totals.binding_identifiers += stats.binding_identifiers;
@@ -98,6 +98,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                         "percent": percent(semantic.named + semantic.preserved, semantic.total),
                         "complete": semantic.pending == 0,
                         "reason": semantic.reason,
+                        "pending_bindings": semantic.pending_bindings,
                     },
                 }));
             }
@@ -153,11 +154,11 @@ struct SemanticBindingCoverage {
     excluded: usize,
     pending: usize,
     reason: &'static str,
+    pending_bindings: Vec<Value>,
 }
 
 fn semantic_binding_file_coverage(
     relative_path: &str,
-    source: &str,
     stats: &IdentifierInventoryStats,
 ) -> SemanticBindingCoverage {
     if !is_semantic_binding_target_path(relative_path) {
@@ -168,33 +169,31 @@ fn semantic_binding_file_coverage(
             excluded: stats.binding_identifiers,
             pending: 0,
             reason: "generated_scaffold_not_decompiled_target",
+            pending_bindings: Vec::new(),
         };
     }
-    if source.contains('`') {
-        return SemanticBindingCoverage {
-            total: stats.binding_identifiers,
-            named: stats.semantic_named_bindings,
-            preserved: stats.semantic_pending_bindings,
-            excluded: 0,
-            pending: 0,
-            reason: "source_preserved_for_runtime_observable_template_literals",
-        };
-    }
-    let import_surface_pending = stats.semantic_pending_import_bindings;
     SemanticBindingCoverage {
         total: stats.binding_identifiers,
         named: stats.semantic_named_bindings,
-        preserved: import_surface_pending,
+        preserved: 0,
         excluded: 0,
-        pending: stats
-            .semantic_pending_bindings
-            .saturating_sub(import_surface_pending),
+        pending: stats.semantic_pending_bindings,
         reason: "semantic_binding_names_and_import_surface_bindings",
+        pending_bindings: stats
+            .semantic_pending_binding_names
+            .iter()
+            .map(|(name, count)| {
+                serde_json::json!({
+                    "original_name": name,
+                    "count": count,
+                })
+            })
+            .collect(),
     }
 }
 
 fn is_semantic_binding_target_path(relative_path: &str) -> bool {
-    relative_path == "cli.ts" || relative_path.starts_with("modules/")
+    !relative_path.is_empty()
 }
 
 fn percent(numerator: usize, denominator: usize) -> f64 {
@@ -244,7 +243,7 @@ fn should_skip_dir(root: &Path, path: &Path) -> bool {
     let relative = path.strip_prefix(root).unwrap_or(path);
     relative.components().any(|component| {
         let component = component.as_os_str().to_string_lossy();
-        matches!(component.as_ref(), "node_modules" | "dist" | ".git")
+        component.as_ref() == ".git"
     })
 }
 
@@ -275,7 +274,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scans_emitted_code_but_skips_dependency_and_dist_trees() {
+    fn scans_all_emitted_code_including_dependency_and_dist_trees() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path();
         fs::create_dir(root.join("modules")).expect("mkdir modules");
@@ -285,9 +284,9 @@ mod tests {
         )
         .expect("write index");
         fs::create_dir(root.join("node_modules")).expect("mkdir node_modules");
-        fs::write(root.join("node_modules/pkg.js"), "const ignored = 1;").expect("write package");
+        fs::write(root.join("node_modules/pkg.js"), "const a = 1;").expect("write package");
         fs::create_dir(root.join("dist")).expect("mkdir dist");
-        fs::write(root.join("dist/bundle.js"), "const ignored = 1;").expect("write dist");
+        fs::write(root.join("dist/bundle.js"), "const b = 1;").expect("write dist");
 
         let report = identifier_inventory_report(&IdentifierInventoryArgs {
             output_root: root.to_path_buf(),
@@ -300,7 +299,7 @@ mod tests {
                 .get("files")
                 .and_then(|files| files.get("scanned"))
                 .and_then(Value::as_u64),
-            Some(1)
+            Some(3)
         );
         assert_eq!(
             report
@@ -328,7 +327,7 @@ mod tests {
                 .get("semantic_bindings")
                 .and_then(|bindings| bindings.get("files_with_pending"))
                 .and_then(Value::as_u64),
-            Some(0)
+            Some(2)
         );
     }
 
@@ -363,5 +362,79 @@ mod tests {
             .expect("pending files should be listed");
         assert_eq!(pending_files[0]["path"], "modules/minified.ts");
         assert_eq!(pending_files[0]["pending"], 3);
+    }
+
+    #[test]
+    fn template_literal_files_still_count_minified_bindings_as_pending() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        fs::write(
+            root.join("modules/template.ts"),
+            "const a = `literal`; function b(c) { return `${a}${c}`; }",
+        )
+        .expect("write module");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        assert_eq!(
+            report
+                .get("semantic_bindings")
+                .and_then(|bindings| bindings.get("pending"))
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+        let pending_files = report
+            .get("semantic_bindings")
+            .and_then(|bindings| bindings.get("pending_files"))
+            .and_then(Value::as_array)
+            .expect("pending files should be listed");
+        assert_eq!(pending_files[0]["path"], "modules/template.ts");
+        assert_eq!(
+            pending_files[0]["reason"],
+            "semantic_binding_names_and_import_surface_bindings"
+        );
+    }
+
+    #[test]
+    fn reports_pending_binding_names_per_file() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        fs::write(
+            root.join("modules/minified.ts"),
+            "const a = 1; function b(a) { return a; }",
+        )
+        .expect("write module");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        let pending_files = report
+            .get("semantic_bindings")
+            .and_then(|bindings| bindings.get("pending_files"))
+            .and_then(Value::as_array)
+            .expect("pending files should be listed");
+        let bindings = pending_files[0]["pending_bindings"]
+            .as_array()
+            .expect("pending binding names should be listed");
+
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| { binding["original_name"] == "a" && binding["count"] == 2 })
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| { binding["original_name"] == "b" && binding["count"] == 1 })
+        );
     }
 }

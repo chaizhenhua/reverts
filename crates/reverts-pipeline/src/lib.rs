@@ -1145,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn alias_semantic_name_hint_is_renamed_late_before_emit() {
+    fn alias_source_binding_is_preserved_when_unhinted() {
         let mut rows =
             rows_with_application_source("var a = 1; var b = a; console.log(b); export { b };");
         rows.symbols
@@ -1157,9 +1157,9 @@ mod tests {
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
         assert!(source.contains("var settings: number = 1;"));
-        assert!(source.contains("var settingsAlias = settings;"));
-        assert!(source.contains("console.log(settingsAlias);"));
-        assert!(source.contains("export { settingsAlias as b };"));
+        assert!(source.contains("var b = settings;"));
+        assert!(source.contains("console.log(b);"));
+        assert!(source.contains("export { b };"));
     }
 
     #[test]

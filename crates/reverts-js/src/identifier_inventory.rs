@@ -4,7 +4,7 @@
 //! decompile session how many AST identifier sites exist beyond the
 //! module-scope symbol denominator without mutating source.
 
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
@@ -37,6 +37,7 @@ pub struct IdentifierInventoryStats {
     pub semantic_named_bindings: usize,
     pub semantic_pending_bindings: usize,
     pub semantic_pending_import_bindings: usize,
+    pub semantic_pending_binding_names: BTreeMap<String, usize>,
 }
 
 impl IdentifierInventoryStats {
@@ -96,6 +97,11 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
             self.stats.semantic_named_bindings += 1;
         } else {
             self.stats.semantic_pending_bindings += 1;
+            *self
+                .stats
+                .semantic_pending_binding_names
+                .entry(name.to_string())
+                .or_default() += 1;
         }
     }
 
