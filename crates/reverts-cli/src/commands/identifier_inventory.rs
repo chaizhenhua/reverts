@@ -43,6 +43,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
     let mut semantic_preserved = 0_usize;
     let mut semantic_pending = 0_usize;
     let mut semantic_excluded = 0_usize;
+    let mut semantic_pending_files = Vec::new();
     let mut scanned_files = Vec::new();
     let mut parse_errors = Vec::new();
 
@@ -60,6 +61,16 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                 semantic_preserved += semantic.preserved;
                 semantic_pending += semantic.pending;
                 semantic_excluded += semantic.excluded;
+                if semantic.pending > 0 {
+                    semantic_pending_files.push(serde_json::json!({
+                        "path": relative_path,
+                        "total": semantic.total,
+                        "named": semantic.named,
+                        "preserved": semantic.preserved,
+                        "pending": semantic.pending,
+                        "reason": semantic.reason,
+                    }));
+                }
                 totals.binding_identifiers += stats.binding_identifiers;
                 totals.identifier_references += stats.identifier_references;
                 totals.static_member_properties += stats.static_member_properties;
@@ -124,6 +135,8 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
             "excluded": semantic_excluded,
             "complete_count": semantic_named + semantic_preserved,
             "pending": semantic_pending,
+            "files_with_pending": semantic_pending_files.len(),
+            "pending_files": semantic_pending_files,
             "percent": percent(semantic_named + semantic_preserved, semantic_total),
             "complete": parse_errors.is_empty() && semantic_pending == 0,
         },
@@ -310,5 +323,45 @@ mod tests {
                 .and_then(Value::as_u64)
                 .is_some_and(|count| count > 0)
         );
+        assert_eq!(
+            report
+                .get("semantic_bindings")
+                .and_then(|bindings| bindings.get("files_with_pending"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn reports_pending_semantic_binding_files() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        fs::write(
+            root.join("modules/minified.ts"),
+            "const a = 1; function b(c) { return a + c; }",
+        )
+        .expect("write module");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        assert_eq!(
+            report
+                .get("semantic_bindings")
+                .and_then(|bindings| bindings.get("files_with_pending"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        let pending_files = report
+            .get("semantic_bindings")
+            .and_then(|bindings| bindings.get("pending_files"))
+            .and_then(Value::as_array)
+            .expect("pending files should be listed");
+        assert_eq!(pending_files[0]["path"], "modules/minified.ts");
+        assert_eq!(pending_files[0]["pending"], 3);
     }
 }
