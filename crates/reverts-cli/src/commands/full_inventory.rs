@@ -118,6 +118,26 @@ pub fn full_inventory_report(args: &FullInventoryArgs) -> Result<Value, CliRunEr
         "SELECT COUNT(*) FROM package_attributions WHERE ?1 > 0",
         args.project_id,
     )?;
+    let package_attributions_accepted = scalar(
+        &connection,
+        "SELECT COUNT(*) FROM package_attributions WHERE ?1 > 0 AND status = 'accepted'",
+        args.project_id,
+    )?;
+    let package_attributions_rejected = scalar(
+        &connection,
+        "SELECT COUNT(*) FROM package_attributions WHERE ?1 > 0 AND status = 'rejected'",
+        args.project_id,
+    )?;
+    let package_externalized = scalar(
+        &connection,
+        "SELECT COUNT(*) FROM package_attributions WHERE ?1 > 0 AND status = 'accepted' AND emission_mode = 'external_import'",
+        args.project_id,
+    )?;
+    let package_source_preserved = scalar(
+        &connection,
+        "SELECT COUNT(*) FROM package_attributions WHERE ?1 > 0 AND emission_mode = 'application_source'",
+        args.project_id,
+    )?;
     let package_surfaces = scalar(
         &connection,
         "SELECT COUNT(*) FROM package_surfaces WHERE project_id = ?1",
@@ -198,6 +218,10 @@ pub fn full_inventory_report(args: &FullInventoryArgs) -> Result<Value, CliRunEr
             "matched": package_modules.saturating_sub(unmatched_package_modules),
             "unmatched": unmatched_package_modules,
             "attributions": package_attributions,
+            "accepted": package_attributions_accepted,
+            "rejected": package_attributions_rejected,
+            "externalized": package_externalized,
+            "source_preserved": package_source_preserved,
             "surfaces": package_surfaces,
         },
         "symbols": {
@@ -438,6 +462,8 @@ fn json_usize(value: &Value, path: &[&str]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use serde_json::json;
 
     #[test]
@@ -469,5 +495,68 @@ mod tests {
             std::path::Path::new("assets/node_modules/pkg/readme.txt"),
             "node_modules"
         ));
+    }
+
+    #[test]
+    fn full_inventory_reports_package_emission_counts() {
+        use rusqlite::Connection;
+        use tempfile::tempdir;
+
+        let temp = tempdir().expect("temp dir");
+        let db_path = temp.path().join("project.sqlite");
+        let connection = Connection::open(&db_path).expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE project_files (project_id INTEGER NOT NULL);
+                CREATE TABLE project_assets (project_id INTEGER NOT NULL);
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY,
+                    package_name TEXT,
+                    module_category TEXT
+                );
+                CREATE TABLE package_attributions (
+                    module_id INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    emission_mode TEXT NOT NULL
+                );
+                CREATE TABLE package_surfaces (project_id INTEGER NOT NULL);
+                INSERT INTO modules (id, package_name, module_category) VALUES
+                    (1, 'pkg-a', 'package'),
+                    (2, 'pkg-b', 'package'),
+                    (3, NULL, 'application');
+                INSERT INTO package_attributions (module_id, status, emission_mode) VALUES
+                    (1, 'accepted', 'external_import'),
+                    (2, 'rejected', 'application_source');
+                INSERT INTO package_surfaces (project_id) VALUES (1), (1);
+                ",
+            )
+            .expect("create schema");
+
+        let progress_path = temp.path().join("naming-progress.json");
+        fs::write(
+            &progress_path,
+            r#"{"total":0,"named":0,"pending":0,"complete":true}"#,
+        )
+        .expect("write progress");
+
+        let report = super::full_inventory_report(&crate::args::FullInventoryArgs {
+            input: db_path,
+            project_id: 1,
+            manifest: None,
+            source_root: None,
+            output_root: None,
+            naming_progress: Some(progress_path),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        assert_eq!(report["packages"]["package_modules"], 2);
+        assert_eq!(report["packages"]["matched"], 2);
+        assert_eq!(report["packages"]["accepted"], 1);
+        assert_eq!(report["packages"]["rejected"], 1);
+        assert_eq!(report["packages"]["externalized"], 1);
+        assert_eq!(report["packages"]["source_preserved"], 1);
+        assert_eq!(report["packages"]["surfaces"], 2);
     }
 }
