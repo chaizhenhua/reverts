@@ -11,6 +11,9 @@ use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 use rusqlite::{Connection, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
+use crate::commands::symbol_names::{
+    ensure_semantic_name_source_column, ensure_symbol_name_proposals_table,
+};
 use crate::errors::{CliError, CliRunError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
 
@@ -57,6 +60,8 @@ struct ModulePlan {
     subject_path: String,
     matched: ModuleMatch,
     module_semantic_name: String,
+    subject_bindings: Vec<(String, String)>,
+    reference_exports: std::collections::BTreeSet<String>,
 }
 
 fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliRunError> {
@@ -68,11 +73,19 @@ fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliR
         let Some(matched) = best_module_match(&subject.fingerprint, &index) else {
             continue;
         };
+        let reference_exports = index
+            .modules
+            .iter()
+            .find(|m| m.file_path == matched.file_path)
+            .map(|m| m.export_names.clone())
+            .unwrap_or_default();
         plans.push(ModulePlan {
             module_id: subject.module_id,
             subject_path: subject.file_path,
             module_semantic_name: strip_source_extension(&matched.file_path),
             matched,
+            subject_bindings: subject.bindings,
+            reference_exports,
         });
     }
     plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
@@ -115,6 +128,10 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     if args.apply {
         let connection = Connection::open(&args.input)
             .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+        ensure_semantic_name_source_column(&connection)
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+        ensure_symbol_name_proposals_table(&connection)
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
         let module_count = write_module_names(
             &connection,
             &plans,
@@ -122,7 +139,25 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             &args.origin_prefix,
             &args.reference_version,
         )?;
-        println!("applied: {module_count} module name(s) written");
+        let mut export_count = 0;
+        for plan in &plans {
+            if !tier_passes(plan.matched.tier, args.min_tier) {
+                continue;
+            }
+            let origin = format!(
+                "{}:{}:{}",
+                args.origin_prefix, args.reference_version, plan.matched.file_path
+            );
+            export_count += write_export_names(
+                &connection,
+                args.project_id,
+                plan.module_id,
+                &plan.reference_exports,
+                &plan.subject_bindings,
+                &origin,
+            )?;
+        }
+        println!("applied: {module_count} module name(s), {export_count} export name(s) written");
     } else {
         println!(
             "dry-run: {} module match(es); pass --apply to write",
@@ -552,6 +587,8 @@ mod tests {
                 anchor_overlap: 0,
                 score: 1000,
             },
+            subject_bindings: Vec::new(),
+            reference_exports: std::collections::BTreeSet::new(),
         }
     }
     fn high_plan(id: u32, name: &str) -> ModulePlan {

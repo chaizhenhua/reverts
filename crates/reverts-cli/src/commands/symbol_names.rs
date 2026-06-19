@@ -697,7 +697,9 @@ fn load_symbol_name_states(
     Ok(states)
 }
 
-fn ensure_semantic_name_source_column(connection: &Connection) -> Result<(), SymbolNamesError> {
+pub(crate) fn ensure_semantic_name_source_column(
+    connection: &Connection,
+) -> Result<(), SymbolNamesError> {
     if sqlite_table_has_column(connection, "symbols", "semantic_name_source")
         .map_err(SymbolNamesError::QuerySymbolNames)?
     {
@@ -708,7 +710,9 @@ fn ensure_semantic_name_source_column(connection: &Connection) -> Result<(), Sym
         .map_err(SymbolNamesError::WriteSymbolName)
 }
 
-fn ensure_symbol_name_proposals_table(connection: &Connection) -> Result<(), SymbolNamesError> {
+pub(crate) fn ensure_symbol_name_proposals_table(
+    connection: &Connection,
+) -> Result<(), SymbolNamesError> {
     connection
         .execute_batch(
             r"
