@@ -6,10 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use reverts_input::PackageSurfaceInput;
 use reverts_input::sqlite::load_project_rows_from_connection;
+use reverts_input::{InputRows, PackageAttributionStatus, PackageSurfaceInput};
 use reverts_ir::{is_valid_package_name, split_bare_specifier};
-use reverts_package_matcher::{PackageImportSite, package_import_sites_from_sources};
+use reverts_observe::{AuditFinding, AuditReport, FindingCode};
+use reverts_package::is_accepted_external_attribution;
+use reverts_package_matcher::{
+    PackageImportSite, VersionedPackageMatchReport, package_import_sites_from_sources,
+};
 use rusqlite::{Connection, OpenFlags, params};
 use semver::Version;
 
@@ -18,6 +22,7 @@ use crate::errors::{CliRunError, MatchPackagesError};
 use crate::persistence::package_surfaces::{
     ensure_package_surfaces_table, persist_package_surface,
 };
+use crate::sqlite_table_exists;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageSurfaceDecisionOutcome {
@@ -49,6 +54,14 @@ enum PackageSurfaceDecision {
         export_specifier: String,
         evidence: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LatestPackageSurfaceDecision {
+    pub package_name: String,
+    pub package_version: Option<String>,
+    pub decision: String,
+    pub evidence_json: String,
 }
 
 impl PackageSurfaceDecision {
@@ -162,7 +175,7 @@ pub(crate) fn package_surface_decisions_from_connection(
     })?;
 
     let listed = if args.list {
-        print_agent_worklist(&rows.package_surfaces, &sites)
+        print_agent_worklist(connection, args.project_id, &rows, &sites)?
     } else {
         0
     };
@@ -171,7 +184,12 @@ pub(crate) fn package_surface_decisions_from_connection(
     } else {
         Vec::new()
     };
-    validate_decisions(&decisions, &sites)?;
+    validate_decisions(
+        &decisions,
+        &sites,
+        &rows.package_surfaces,
+        args.replace_existing,
+    )?;
 
     let mut accepted = 0usize;
     let mut rejected = 0usize;
@@ -228,19 +246,19 @@ pub(crate) fn package_surface_decisions_from_connection(
 }
 
 fn print_agent_worklist(
-    accepted_surfaces: &[PackageSurfaceInput],
+    connection: &Connection,
+    project_id: u32,
+    rows: &InputRows,
     sites: &BTreeSet<PackageImportSite>,
-) -> usize {
-    let accepted_by_specifier = accepted_surfaces
+) -> Result<usize, MatchPackagesError> {
+    let accepted_by_specifier = rows
+        .package_surfaces
         .iter()
-        .filter(|surface| {
-            matches!(
-                surface.status,
-                reverts_input::PackageAttributionStatus::Accepted
-            )
-        })
+        .filter(|surface| matches!(surface.status, PackageAttributionStatus::Accepted))
         .map(|surface| (surface.export_specifier.as_str(), surface))
         .collect::<BTreeMap<_, _>>();
+    let candidate_versions = package_version_candidates(connection, rows)?;
+    let latest_decisions = latest_package_surface_decisions(connection, project_id)?;
     let mut grouped = BTreeMap::<(&str, &str), BTreeSet<&str>>::new();
     for site in sites {
         grouped
@@ -248,11 +266,21 @@ fn print_agent_worklist(
             .or_default()
             .insert(site.source_file_path.as_str());
     }
-    println!("package_name\texport_specifier\tsource_files\tstatus\taccepted_version");
+    println!(
+        "package_name\texport_specifier\tsource_files\tstatus\taccepted_version\tcandidate_versions\tagent_decision"
+    );
     for ((package_name, specifier), source_files) in grouped {
         let accepted = accepted_by_specifier.get(specifier);
+        let candidates = candidate_versions
+            .get(package_name)
+            .map(|versions| versions.iter().cloned().collect::<Vec<_>>().join(","))
+            .unwrap_or_default();
+        let agent_decision = latest_decisions
+            .get(specifier)
+            .map(|decision| decision.decision.as_str())
+            .unwrap_or("-");
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             package_name,
             specifier,
             source_files.iter().copied().collect::<Vec<_>>().join(","),
@@ -260,13 +288,15 @@ fn print_agent_worklist(
             accepted
                 .and_then(|surface| surface.package_version.as_deref())
                 .unwrap_or(""),
+            candidates,
+            agent_decision,
         );
     }
-    sites
+    Ok(sites
         .iter()
         .map(|site| site.specifier.as_str())
         .collect::<BTreeSet<_>>()
-        .len()
+        .len())
 }
 
 fn parse_batch(path: &PathBuf) -> Result<Vec<PackageSurfaceDecision>, MatchPackagesError> {
@@ -342,10 +372,17 @@ fn parse_decision_line(
 fn validate_decisions(
     decisions: &[PackageSurfaceDecision],
     sites: &BTreeSet<PackageImportSite>,
+    accepted_surfaces: &[PackageSurfaceInput],
+    replace_existing: bool,
 ) -> Result<(), MatchPackagesError> {
     let sites_by_specifier = sites
         .iter()
         .map(|site| (site.specifier.as_str(), site.package_name.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let accepted_by_specifier = accepted_surfaces
+        .iter()
+        .filter(|surface| surface.status == PackageAttributionStatus::Accepted)
+        .map(|surface| (surface.export_specifier.as_str(), surface))
         .collect::<BTreeMap<_, _>>();
     let mut accepted_specifiers = BTreeSet::new();
     for decision in decisions {
@@ -387,11 +424,26 @@ fn validate_decisions(
                 "multiple accept_surface rows target the same specifier",
             );
         }
+        if let PackageSurfaceDecision::Accept {
+            package_name,
+            package_version,
+            ..
+        } = decision
+            && let Some(existing) = accepted_by_specifier.get(export_specifier)
+            && (existing.package_name != *package_name
+                || existing.package_version.as_deref() != Some(package_version.as_str()))
+            && !replace_existing
+        {
+            return invalid_surface(
+                export_specifier,
+                "conflicting accepted package surface already exists; rerun with --replace-existing after Agent conflict resolution",
+            );
+        }
     }
     Ok(())
 }
 
-fn ensure_package_surface_decisions_table(
+pub(crate) fn ensure_package_surface_decisions_table(
     connection: &Connection,
 ) -> Result<(), MatchPackagesError> {
     connection
@@ -413,6 +465,119 @@ fn ensure_package_surface_decisions_table(
             ",
         )
         .map_err(MatchPackagesError::WritePackageSurface)
+}
+
+pub(crate) fn latest_package_surface_decisions(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<BTreeMap<String, LatestPackageSurfaceDecision>, MatchPackagesError> {
+    if !sqlite_table_exists(connection, "package_surface_decisions")
+        .map_err(MatchPackagesError::WritePackageSurface)?
+    {
+        return Ok(BTreeMap::new());
+    }
+    let mut statement = connection
+        .prepare(
+            r"
+            SELECT export_specifier, package_name, package_version, decision, evidence_json
+              FROM package_surface_decisions
+             WHERE project_id = ?1
+             ORDER BY id ASC
+            ",
+        )
+        .map_err(MatchPackagesError::WritePackageSurface)?;
+    let rows = statement
+        .query_map([i64::from(project_id)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                LatestPackageSurfaceDecision {
+                    package_name: row.get(1)?,
+                    package_version: row.get(2)?,
+                    decision: row.get(3)?,
+                    evidence_json: row.get(4)?,
+                },
+            ))
+        })
+        .map_err(MatchPackagesError::WritePackageSurface)?;
+    let mut decisions = BTreeMap::new();
+    for row in rows {
+        let (specifier, decision) = row.map_err(MatchPackagesError::WritePackageSurface)?;
+        decisions.insert(specifier, decision);
+    }
+    Ok(decisions)
+}
+
+pub(crate) fn suppress_rejected_or_blocked_surfaces(
+    connection: &Connection,
+    project_id: u32,
+    report: &mut VersionedPackageMatchReport,
+) -> Result<usize, MatchPackagesError> {
+    let decisions = latest_package_surface_decisions(connection, project_id)?;
+    if decisions.is_empty() || report.surfaces.is_empty() {
+        return Ok(0);
+    }
+    let mut suppressed = 0usize;
+    let mut audit = AuditReport::default();
+    report.surfaces.retain(|surface| {
+        let Some(decision) = decisions.get(surface.export_specifier.as_str()) else {
+            return true;
+        };
+        if decision.decision != "reject_surface" && decision.decision != "block_surface" {
+            return true;
+        }
+        suppressed += 1;
+        audit.push(
+            AuditFinding::warning(
+                FindingCode::PackageSurfaceDecisionBlocked,
+                format!(
+                    "package surface {} was suppressed by Agent {} decision",
+                    surface.export_specifier, decision.decision
+                ),
+            )
+            .with_binding(surface.export_specifier.clone()),
+        );
+        false
+    });
+    report.audit.extend(audit);
+    Ok(suppressed)
+}
+
+pub(crate) fn reconcile_cache_surfaces_after_attribution_safety(
+    rows: &InputRows,
+    report: &mut VersionedPackageMatchReport,
+) -> usize {
+    let accepted_specifiers = rows
+        .package_attributions
+        .iter()
+        .chain(report.attributions.iter())
+        .filter(|attribution| is_accepted_external_attribution(attribution))
+        .filter_map(|attribution| {
+            Some((
+                attribution.package_name.as_str(),
+                attribution.package_version.as_deref()?,
+                attribution.export_specifier.as_deref()?,
+            ))
+        })
+        .collect::<BTreeSet<_>>();
+    let before = report.surfaces.len();
+    report.surfaces.retain(|surface| {
+        let is_cache_surface = surface
+            .evidence
+            .as_deref()
+            .is_some_and(|evidence| evidence.starts_with("cache-anchored-public-export:"));
+        if !is_cache_surface {
+            return true;
+        }
+        let Some(package_version) = surface.package_version.as_deref() else {
+            return false;
+        };
+        accepted_specifiers.contains(&(
+            surface.package_name.as_str(),
+            package_version,
+            surface.export_specifier.as_str(),
+        ))
+    });
+    before.saturating_sub(report.surfaces.len())
 }
 
 fn persist_decision(
@@ -459,6 +624,55 @@ fn agent_surface_evidence(
     .to_string()
 }
 
+fn package_version_candidates(
+    connection: &Connection,
+    rows: &InputRows,
+) -> Result<BTreeMap<String, BTreeSet<String>>, MatchPackagesError> {
+    let mut candidates = BTreeMap::<String, BTreeSet<String>>::new();
+    for module in &rows.modules {
+        if let (Some(package_name), Some(package_version)) = (
+            module.package_name.as_deref(),
+            module.package_version.as_deref(),
+        ) {
+            candidates
+                .entry(package_name.to_string())
+                .or_default()
+                .insert(package_version.to_string());
+        }
+    }
+    for attribution in &rows.package_attributions {
+        if attribution.status == PackageAttributionStatus::Accepted
+            && let Some(package_version) = attribution.package_version.as_deref()
+        {
+            candidates
+                .entry(attribution.package_name.clone())
+                .or_default()
+                .insert(package_version.to_string());
+        }
+    }
+    if sqlite_table_exists(connection, "package_source_cache")
+        .map_err(MatchPackagesError::WritePackageSurface)?
+    {
+        let mut statement = connection
+            .prepare("SELECT DISTINCT package_name, package_version FROM package_source_cache")
+            .map_err(MatchPackagesError::WritePackageSurface)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(MatchPackagesError::WritePackageSurface)?;
+        for row in rows {
+            let (package_name, package_version) =
+                row.map_err(MatchPackagesError::WritePackageSurface)?;
+            candidates
+                .entry(package_name)
+                .or_default()
+                .insert(package_version);
+        }
+    }
+    Ok(candidates)
+}
+
 fn invalid_line<T>(line: usize, message: &str) -> Result<T, MatchPackagesError> {
     Err(MatchPackagesError::InvalidPackageSurface {
         export_specifier: format!("line {line}"),
@@ -476,6 +690,8 @@ fn invalid_surface<T>(export_specifier: &str, message: &str) -> Result<T, MatchP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use reverts_input::{PackageAttributionInput, ProjectInput};
+    use reverts_ir::ModuleId;
     use rusqlite::Connection;
     use tempfile::tempdir;
 
@@ -551,6 +767,7 @@ mod tests {
             list: false,
             batch: Some(batch),
             apply: true,
+            replace_existing: false,
         };
 
         let outcome = package_surface_decisions_from_sqlite(&args).expect("apply");
@@ -597,10 +814,221 @@ mod tests {
             list: false,
             batch: Some(batch),
             apply: false,
+            replace_existing: false,
         };
 
         let error = package_surface_decisions_from_sqlite(&args).expect_err("must reject");
 
         assert!(error.to_string().contains("no matching source import site"));
+    }
+
+    #[test]
+    fn agent_reject_and_block_surface_write_latest_decision_without_surface() {
+        let (_temp, db) = fixture_db("const ws = require('ws');\n");
+        let batch = db.with_extension("tsv");
+        fs::write(
+            batch.as_path(),
+            "reject_surface\tws\t-\tws\twrong package candidate\n\
+             block_surface\tws\t8.18.3\tws\tAgent found a runtime conflict\n",
+        )
+        .expect("batch");
+        let args = PackageSurfaceDecisionsArgs {
+            input: db.clone(),
+            project_id: 1,
+            list: false,
+            batch: Some(batch),
+            apply: true,
+            replace_existing: false,
+        };
+
+        let outcome = package_surface_decisions_from_sqlite(&args).expect("apply");
+
+        assert_eq!(outcome.rejected, 1);
+        assert_eq!(outcome.blocked, 1);
+        let connection = Connection::open(db.as_path()).expect("open");
+        let decisions = latest_package_surface_decisions(&connection, 1).expect("latest");
+        assert_eq!(
+            decisions
+                .get("ws")
+                .map(|decision| decision.decision.as_str()),
+            Some("block_surface")
+        );
+        let surfaces = connection
+            .query_row("SELECT COUNT(*) FROM package_surfaces", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .expect("surface count");
+        assert_eq!(surfaces, 0);
+    }
+
+    #[test]
+    fn agent_accept_surface_rejects_invalid_rows() {
+        let cases = [
+            (
+                "accept_surface\tws\tlatest\tws\tevidence\n",
+                "package version must be exact semver",
+            ),
+            (
+                "accept_surface\tleft-pad\t1.0.0\tws\tevidence\n",
+                "package name must match the bare import specifier package",
+            ),
+            (
+                "accept_surface\tws\t1.0.0\tws\tfirst\naccept_surface\tws\t1.0.1\tws\tsecond\n",
+                "multiple accept_surface rows target the same specifier",
+            ),
+        ];
+        for (content, message) in cases {
+            let (_temp, db) = fixture_db("const ws = require('ws');\n");
+            let batch = db.with_extension("tsv");
+            fs::write(batch.as_path(), content).expect("batch");
+            let args = PackageSurfaceDecisionsArgs {
+                input: db,
+                project_id: 1,
+                list: false,
+                batch: Some(batch),
+                apply: false,
+                replace_existing: false,
+            };
+
+            let error = package_surface_decisions_from_sqlite(&args).expect_err("must reject");
+
+            assert!(
+                error.to_string().contains(message),
+                "{error} should contain {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_accept_surface_requires_explicit_replace_for_existing_conflict() {
+        let (_temp, db) = fixture_db("const ws = require('ws');\n");
+        let connection = Connection::open(db.as_path()).expect("open");
+        connection
+            .execute(
+                r"
+                INSERT INTO package_surfaces
+                    (project_id, package_name, package_version, export_specifier,
+                     status, evidence_json, created_at, updated_at)
+                VALUES (1, 'ws', '7.0.0', 'ws', 'accepted', '{}', 'old', 'old')
+                ",
+                [],
+            )
+            .expect("seed existing surface");
+        drop(connection);
+        let batch = db.with_extension("tsv");
+        fs::write(
+            batch.as_path(),
+            "accept_surface\tws\t8.18.3\tws\tAgent resolved version conflict\n",
+        )
+        .expect("batch");
+        let args = PackageSurfaceDecisionsArgs {
+            input: db.clone(),
+            project_id: 1,
+            list: false,
+            batch: Some(batch.clone()),
+            apply: true,
+            replace_existing: false,
+        };
+
+        let error = package_surface_decisions_from_sqlite(&args).expect_err("must conflict");
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting accepted package surface")
+        );
+
+        let replace_args = PackageSurfaceDecisionsArgs {
+            replace_existing: true,
+            ..args
+        };
+        package_surface_decisions_from_sqlite(&replace_args).expect("replace should apply");
+        let connection = Connection::open(db.as_path()).expect("open");
+        let package_version = connection
+            .query_row(
+                "SELECT package_version FROM package_surfaces WHERE export_specifier='ws'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("surface version");
+        assert_eq!(package_version, "8.18.3");
+    }
+
+    #[test]
+    fn rejected_or_blocked_decision_suppresses_generated_surface() {
+        let (_temp, db) = fixture_db("const ws = require('ws');\n");
+        let batch = db.with_extension("tsv");
+        fs::write(batch.as_path(), "block_surface\tws\t-\tws\tblocked\n").expect("batch");
+        let args = PackageSurfaceDecisionsArgs {
+            input: db.clone(),
+            project_id: 1,
+            list: false,
+            batch: Some(batch),
+            apply: true,
+            replace_existing: false,
+        };
+        package_surface_decisions_from_sqlite(&args).expect("apply");
+        let connection = Connection::open(db.as_path()).expect("open");
+        let mut report = VersionedPackageMatchReport {
+            attributions: Vec::new(),
+            surfaces: vec![PackageSurfaceInput::accepted_external("ws", "8.18.3", "ws")],
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let suppressed =
+            suppress_rejected_or_blocked_surfaces(&connection, 1, &mut report).expect("suppress");
+
+        assert_eq!(suppressed, 1);
+        assert!(report.surfaces.is_empty());
+        assert!(report.audit.has(FindingCode::PackageSurfaceDecisionBlocked));
+    }
+
+    #[test]
+    fn cache_surface_without_remaining_safe_attribution_is_removed() {
+        let rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let mut report = VersionedPackageMatchReport {
+            attributions: Vec::new(),
+            surfaces: vec![
+                PackageSurfaceInput::accepted_external("pkg", "1.0.0", "pkg")
+                    .with_evidence("cache-anchored-public-export:pkg"),
+            ],
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let removed = reconcile_cache_surfaces_after_attribution_safety(&rows, &mut report);
+
+        assert_eq!(removed, 1);
+        assert!(report.surfaces.is_empty());
+
+        let mut supported_rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        supported_rows
+            .package_attributions
+            .push(PackageAttributionInput::accepted_external(
+                ModuleId(1),
+                "pkg",
+                "1.0.0",
+                "pkg",
+            ));
+        let mut supported_report = VersionedPackageMatchReport {
+            attributions: Vec::new(),
+            surfaces: vec![
+                PackageSurfaceInput::accepted_external("pkg", "1.0.0", "pkg")
+                    .with_evidence("cache-anchored-public-export:pkg"),
+            ],
+            matches: Vec::new(),
+            version_matches: Vec::new(),
+            audit: AuditReport::default(),
+        };
+
+        let removed = reconcile_cache_surfaces_after_attribution_safety(
+            &supported_rows,
+            &mut supported_report,
+        );
+
+        assert_eq!(removed, 0);
+        assert_eq!(supported_report.surfaces.len(), 1);
     }
 }

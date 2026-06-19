@@ -36,6 +36,10 @@ pub enum FindingCode {
     OverlappingFunctionAttribution,
     UnreachableTopLevelCode,
     MissingRequiredAsset,
+    /// A source-backed package surface was discovered, but an explicit
+    /// Agent-authored `package-surface-decisions` reject/block row suppresses
+    /// the deterministic matcher from accepting it.
+    PackageSurfaceDecisionBlocked,
     /// Paper #7 downstream: a planned `NamespaceObject` binding records
     /// member accesses (e.g. `ns.foo`, `ns.bar`) that the emitted source no
     /// longer mentions. Fires when emit machinery drops or shadows a known

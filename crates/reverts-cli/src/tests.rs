@@ -222,6 +222,7 @@ fn parses_package_surface_decisions_command() {
         Some(PathBuf::from("agent/package-surfaces.tsv"))
     );
     assert!(args.apply);
+    assert!(!args.replace_existing);
 
     let command = CliCommand::parse([
         "package-surface-decisions".to_string(),
@@ -262,6 +263,19 @@ fn parses_package_surface_decisions_command() {
     ]);
     assert!(
         matches!(apply_without_batch, Err(CliError::MissingArgument(argument)) if argument == "--batch")
+    );
+
+    let replace_without_apply = CliCommand::parse([
+        "package-surface-decisions".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "1".to_string(),
+        "--list".to_string(),
+        "--replace-existing".to_string(),
+    ]);
+    assert!(
+        matches!(replace_without_apply, Err(CliError::UnknownArgument(argument)) if argument == "--replace-existing requires --apply")
     );
 }
 
@@ -464,6 +478,7 @@ fn help_text_documents_commands_and_options() {
     assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("--batch <TSV>"));
     assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("accept_surface"));
     assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("--apply"));
+    assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("--replace-existing"));
     assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
     assert!(help_text(HelpTopic::RuntimeInventory).contains("--all-projects"));
     assert!(version_text().starts_with("reverts-cli "));
@@ -5648,6 +5663,52 @@ fn match_packages_apply_writes_source_import_package_surface() {
     assert_eq!(outcome.written_surfaces, 1);
     assert_eq!(package_version, "2.2.1");
     assert!(evidence.contains("source_package_import_surface"));
+}
+
+#[test]
+fn match_packages_respects_agent_rejected_package_surface_decision() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let source_path = tempdir.path().join("bundle.js");
+    fs::write(
+        source_path.as_path(),
+        "const client = require('undici'); export { client };",
+    )
+    .expect("write source fixture");
+    let mut connection = Connection::open_in_memory().expect("open in-memory database");
+    create_source_surface_schema(&connection);
+    insert_source_surface_rows(&connection, source_path.to_string_lossy().as_ref());
+    super::commands::package_surface_decisions::ensure_package_surface_decisions_table(&connection)
+        .expect("decision table");
+    connection
+        .execute(
+            r#"
+            INSERT INTO package_surface_decisions
+                (project_id, package_name, package_version, export_specifier,
+                 decision, origin, evidence_json, created_at)
+            VALUES (1, 'undici', '2.2.1', 'undici',
+                    'reject_surface', 'agent', '{"agent_evidence":"not runtime-safe"}', 'now')
+            "#,
+            [],
+        )
+        .expect("insert decision");
+    let args = MatchPackagesArgs {
+        input: PathBuf::from("unused.db"),
+        project_id: 1,
+        apply: true,
+        package_names: Vec::new(),
+        package_source_roots: Vec::new(),
+        materialize_package_sources: false,
+    };
+
+    let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+    assert_eq!(outcome.matched_package_surfaces, 0);
+    assert_eq!(outcome.written_surfaces, 0);
+    assert!(
+        outcome
+            .audit
+            .has(FindingCode::PackageSurfaceDecisionBlocked)
+    );
 }
 
 #[test]

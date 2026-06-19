@@ -128,12 +128,18 @@ crate tests / integration tests
   `EnrichedProgram`: semantic names, package decisions, shape solutions, and
   pure rollup projection/oracle/report logic. It must not own SQLite adapters
   or command-line binaries.
-- `reverts-package` owns package-surface decisions and constructs the
-  `PackageSurfaceIndex` from input attributions. It may accept, reject, or
-  classify package imports, but it must not generate import statements.
+- `reverts-package` owns package-surface resolution and constructs the
+  `PackageSurfaceIndex` from accepted input attributions/surfaces. It may
+  accept, reject, or classify package imports, but it must not generate import
+  statements. Agent-authored package-surface decisions are recorded and applied
+  through the CLI gate described in
+  [package-surface-decisions.md](package-surface-decisions.md); rejected or
+  blocked latest decisions suppress future matcher-generated surfaces before
+  persistence.
 - `reverts-package-matcher` owns AST-fingerprint matching between bundle modules
-  and cached package sources. Its results land in `package_attributions` rows
-  that the pipeline reads as input — it must not call the planner or emitter.
+  and cached package sources. Its results land in `package_attributions` and
+  candidate `package_surfaces` rows that the CLI validates/reconciles before
+  persistence — it must not call the planner or emitter.
 - `reverts-planner` owns output plans. It decides which imports, exports, local
   declarations, and synthetic bindings are needed before emission.
 - `reverts-emitter` owns AST-backed source generation and emitted project

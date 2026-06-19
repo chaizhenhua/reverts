@@ -134,6 +134,8 @@ pub struct PackageSurfaceDecisionsArgs {
     pub batch: Option<PathBuf>,
     #[arg(long)]
     pub apply: bool,
+    #[arg(long = "replace-existing")]
+    pub replace_existing: bool,
 }
 
 impl PackageSurfaceDecisionsArgs {
@@ -513,6 +515,11 @@ pub(crate) fn validate_package_surface_decisions_args(
     }
     if args.apply && args.batch.is_none() {
         return Err(CliError::MissingArgument("--batch"));
+    }
+    if args.replace_existing && !args.apply {
+        return Err(CliError::UnknownArgument(
+            "--replace-existing requires --apply".to_string(),
+        ));
     }
     Ok(args)
 }

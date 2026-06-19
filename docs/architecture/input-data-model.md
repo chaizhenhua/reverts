@@ -17,7 +17,8 @@ construction starts:
 - which bundle modules exist;
 - which symbols are known inside those modules;
 - which module and package dependencies are known;
-- which package attribution contracts are available.
+- which package attribution contracts are available;
+- which accepted package surfaces are already available for bare-import resolution.
 
 `InputBundle` is not a database schema, an output plan, an audit report, or a
 repair layer. It is the normalized input contract consumed by later crates.
@@ -152,6 +153,25 @@ Invariants:
 - accepted `ExternalImport` attributions must include `export_specifier`.
 - rejected attributions must include `rejection_reason`.
 
+### PackageSurfaceInput
+
+`PackageSurfaceInput` records accepted project-level import surfaces such as
+`ws` or `rxjs/operators`. These rows are consumed by package-surface resolution
+and must not be inferred from emitted strings after writing output. Agent
+`accept_surface` proposals may create these rows only through the
+`package-surface-decisions --apply` CLI gate. Agent `reject_surface` and
+`block_surface` proposals remain in the `package_surface_decisions` ledger and
+are consumed by `match-packages` before new surfaces are persisted. See
+[package-surface-decisions.md](package-surface-decisions.md).
+
+Invariants:
+
+- package names must be valid.
+- accepted surfaces must include an exact package version.
+- `export_specifier` must be a valid bare package specifier whose package
+  segment matches `package_name`.
+- rejected/blocked Agent decisions do not become `PackageSurfaceInput` rows.
+
 ## Package Emission Modes
 
 | Mode | Meaning | Runtime dependency |
@@ -195,6 +215,8 @@ Current validation covers:
 - missing package attribution for package modules;
 - accepted package attribution without package version;
 - accepted external import attribution without export specifier;
+- accepted package surface without package version;
+- unsafe or mismatched package-surface specifiers;
 - rejected package attribution without rejection reason;
 - unsupported stored module kind.
 

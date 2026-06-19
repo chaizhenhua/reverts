@@ -14,6 +14,9 @@ use reverts_pipeline::prepare_input_rows_for_pipeline;
 use rusqlite::Connection;
 
 use crate::args::MatchPackagesArgs;
+use crate::commands::package_surface_decisions::{
+    reconcile_cache_surfaces_after_attribution_safety, suppress_rejected_or_blocked_surfaces,
+};
 use crate::errors::MatchPackagesError;
 use crate::persistence::attributions;
 use crate::persistence::repository::{MatchPackagePersistence, SqliteMatchPackagePersistence};
@@ -102,9 +105,11 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("match_pipeline");
     let mut report = pipeline_report.package_report;
     report.audit.extend(source_import_audit);
+    suppress_rejected_or_blocked_surfaces(connection, args.project_id, &mut report)?;
     let external_import_candidates = report.attributions.len();
     let external_import_safety =
         attributions::filter_unsafe_interpackage_external_attributions(&rows, &mut report);
+    reconcile_cache_surfaces_after_attribution_safety(&rows, &mut report);
     let function_attributions = pipeline_report.function_attributions;
     let function_ownership_matches = pipeline_report.function_ownership_matches;
 
