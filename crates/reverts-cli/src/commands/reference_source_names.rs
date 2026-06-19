@@ -51,10 +51,73 @@ impl ReferenceSourceNamesArgs {
     }
 }
 
-pub(crate) fn run(_args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
-    Err(CliRunError::ReferenceSourceNames(
-        "not yet implemented".to_string(),
-    ))
+struct ModulePlan {
+    module_id: u32,
+    subject_path: String,
+    matched: ModuleMatch,
+    module_semantic_name: String,
+}
+
+fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliRunError> {
+    let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
+        .map_err(CliRunError::ReferenceSourceNames)?;
+    let subjects = subject_modules(args)?;
+    let mut plans = Vec::new();
+    for subject in subjects {
+        let Some(matched) = best_module_match(&subject.fingerprint, &index) else {
+            continue;
+        };
+        plans.push(ModulePlan {
+            module_id: subject.module_id,
+            subject_path: subject.file_path,
+            module_semantic_name: strip_source_extension(&matched.file_path),
+            matched,
+        });
+    }
+    plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
+    Ok(plans)
+}
+
+fn strip_source_extension(path: &str) -> String {
+    for ext in SOURCE_EXTENSIONS {
+        if let Some(stripped) = path.strip_suffix(&format!(".{ext}")) {
+            return stripped.to_string();
+        }
+    }
+    path.to_string()
+}
+
+fn tier_str(tier: MatchTier) -> &'static str {
+    match tier {
+        MatchTier::High => "high",
+        MatchTier::Medium => "medium",
+        MatchTier::Low => "low",
+    }
+}
+
+pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
+    let plans = plan_modules(&args)?;
+    println!("module_id\tsubject_path\tref_file\ttier\tsemantic_name\tasset\texport\tfn");
+    for plan in &plans {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            plan.module_id,
+            plan.subject_path,
+            plan.matched.file_path,
+            tier_str(plan.matched.tier),
+            plan.module_semantic_name,
+            plan.matched.asset_overlap,
+            plan.matched.export_overlap,
+            plan.matched.function_overlap,
+        );
+    }
+    if !args.apply {
+        println!(
+            "dry-run: {} module match(es); pass --apply to write",
+            plans.len()
+        );
+    }
+    Ok(())
 }
 
 use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
@@ -361,6 +424,16 @@ mod tests {
         let matched = best_module_match(&subject, &index).expect("match");
         assert_eq!(matched.file_path, "features/audio-capture.ts");
         assert_eq!(matched.tier, MatchTier::High);
+    }
+
+    #[test]
+    fn strip_source_extension_drops_known_suffixes() {
+        assert_eq!(
+            strip_source_extension("features/audio-capture.ts"),
+            "features/audio-capture"
+        );
+        assert_eq!(strip_source_extension("a/b.mjs"), "a/b");
+        assert_eq!(strip_source_extension("noext"), "noext");
     }
 
     #[test]
