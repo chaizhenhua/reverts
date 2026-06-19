@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
+use rusqlite::{Connection, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
 use crate::errors::{CliError, CliRunError};
@@ -353,6 +354,39 @@ pub(crate) fn best_module_match(
     best
 }
 
+fn tier_passes(tier: MatchTier, min: MinTier) -> bool {
+    match min {
+        MinTier::High => matches!(tier, MatchTier::High),
+        MinTier::Medium => matches!(tier, MatchTier::High | MatchTier::Medium),
+    }
+}
+
+fn write_module_names(
+    connection: &Connection,
+    plans: &[ModulePlan],
+    min_tier: MinTier,
+    origin_prefix: &str,
+    reference_version: &str,
+) -> Result<usize, CliRunError> {
+    let mut written = 0;
+    for plan in plans {
+        if !tier_passes(plan.matched.tier, min_tier) {
+            continue;
+        }
+        let _origin = format!(
+            "{origin_prefix}:{reference_version}:{}",
+            plan.matched.file_path
+        );
+        written += connection
+            .execute(
+                "UPDATE modules SET semantic_name = ?1 WHERE id = ?2",
+                params![plan.module_semantic_name, i64::from(plan.module_id)],
+            )
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+    }
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +468,65 @@ mod tests {
         );
         assert_eq!(strip_source_extension("a/b.mjs"), "a/b");
         assert_eq!(strip_source_extension("noext"), "noext");
+    }
+
+    fn make_plan(module_id: u32, name: &str, tier: MatchTier) -> ModulePlan {
+        ModulePlan {
+            module_id,
+            subject_path: format!("modules/m{module_id}.ts"),
+            module_semantic_name: name.to_string(),
+            matched: ModuleMatch {
+                file_path: format!("{name}.ts"),
+                tier,
+                asset_overlap: if tier == MatchTier::High { 1 } else { 0 },
+                export_overlap: 0,
+                function_overlap: 0,
+                anchor_overlap: 0,
+                score: 1000,
+            },
+        }
+    }
+    fn high_plan(id: u32, name: &str) -> ModulePlan {
+        make_plan(id, name, MatchTier::High)
+    }
+    fn low_plan(id: u32, name: &str) -> ModulePlan {
+        make_plan(id, name, MatchTier::Low)
+    }
+
+    #[test]
+    fn write_module_names_updates_high_tier_only() {
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY, file_id INTEGER, original_name TEXT NOT NULL,
+                    semantic_name TEXT, module_category TEXT, package_name TEXT,
+                    package_version TEXT, byte_start INTEGER, byte_end INTEGER
+                );
+                INSERT INTO modules (id, original_name) VALUES (10, 'm10'), (11, 'm11');
+                ",
+            )
+            .expect("schema");
+        let plans = vec![
+            high_plan(10, "features/audio-capture"),
+            low_plan(11, "misc/maybe"),
+        ];
+        let written = write_module_names(&connection, &plans, MinTier::High, "source", "2.1.76")
+            .expect("write");
+        assert_eq!(written, 1);
+        let name10: Option<String> = connection
+            .query_row("SELECT semantic_name FROM modules WHERE id = 10", [], |r| {
+                r.get(0)
+            })
+            .expect("q10");
+        let name11: Option<String> = connection
+            .query_row("SELECT semantic_name FROM modules WHERE id = 11", [], |r| {
+                r.get(0)
+            })
+            .expect("q11");
+        assert_eq!(name10.as_deref(), Some("features/audio-capture"));
+        assert_eq!(name11, None, "low tier must not be written");
     }
 
     #[test]
