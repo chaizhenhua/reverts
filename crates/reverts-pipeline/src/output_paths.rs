@@ -23,14 +23,75 @@ pub(crate) fn module_output_paths(program: &EnrichedProgram) -> BTreeMap<ModuleI
         .modules()
         .iter()
         .map(|module| {
-            let path = program
-                .semantic_names()
-                .module_path(module.id)
-                .unwrap_or(module.semantic_path.as_str())
-                .to_string();
+            let path = normalized_module_output_path(
+                module.id,
+                program
+                    .semantic_names()
+                    .module_path(module.id)
+                    .unwrap_or(module.semantic_path.as_str()),
+            );
             (module.id, path)
         })
         .collect()
+}
+
+fn normalized_module_output_path(module_id: ModuleId, raw_path: &str) -> String {
+    let raw_path = raw_path.trim();
+    if is_safe_typescript_module_path(raw_path) {
+        return raw_path.to_string();
+    }
+    let slug = output_path_slug(strip_source_extension(raw_path));
+    format!("modules/{}-{slug}.ts", module_id.0)
+}
+
+fn is_safe_typescript_module_path(path: &str) -> bool {
+    if !path.ends_with(".ts") {
+        return false;
+    }
+    path.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    })
+}
+
+fn strip_source_extension(path: &str) -> &str {
+    for extension in [".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
+        if let Some(stripped) = path.strip_suffix(extension) {
+            return stripped;
+        }
+    }
+    path
+}
+
+fn output_path_slug(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '/') {
+            ch
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if last_was_separator {
+                continue;
+            }
+            last_was_separator = true;
+        } else {
+            last_was_separator = false;
+        }
+        output.push(mapped);
+    }
+    let trimmed = output.trim_matches(|ch| matches!(ch, '-' | '/' | '.'));
+    if trimmed.is_empty() {
+        "module".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 pub(crate) fn relative_asset_specifier(from_file: &str, to_asset: &str) -> String {

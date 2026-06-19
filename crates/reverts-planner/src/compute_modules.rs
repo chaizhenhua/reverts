@@ -147,10 +147,9 @@ pub(crate) fn plan_one_module(
         return Ok(());
     }
 
-    let path = program
-        .semantic_names()
-        .module_path(module.id)
-        .unwrap_or(module.semantic_path.as_str());
+    let path = crate::module_output_path(program, module.id)
+        .expect("module from program must have an output path");
+    let path = path.as_str();
     let package_runtime_owner =
         package_runtime_owner_for_module(module, source_suppressed_packages);
     let compiler_profile = program.compiler_profile().module(module.id);

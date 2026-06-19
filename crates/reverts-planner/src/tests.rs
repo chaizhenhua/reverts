@@ -73,6 +73,25 @@ fn runtime_source_module_import_scan_skips_helper_local_bindings() {
 }
 
 #[test]
+fn module_output_path_normalizes_virtual_bundle_ids_to_typescript_modules() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some("export const value = 1;".into()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(55), "esbuild:H0", "esbuild:H0").with_source_file(1),
+    );
+    let enriched = enriched_from_rows(rows);
+
+    let path = super::module_output_path(&enriched, ModuleId(55))
+        .expect("fixture module should have an output path");
+
+    assert_eq!(path, "modules/55-esbuild-H0.ts");
+}
+
+#[test]
 fn rewritable_externalized_package_init_shim_calls_are_erased() {
     let mut shims = BTreeSet::from([BindingName::new("packageInit")]);
     let rewritten = super::erase_rewritable_package_init_shim_calls(
