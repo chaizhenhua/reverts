@@ -1,7 +1,7 @@
 use oxc_ast::Visit;
 use oxc_ast::ast::{
     Argument, BindingPatternKind, CallExpression, Expression, ObjectPropertyKind, Program,
-    PropertyKey, Statement,
+    PropertyKey, Statement, VariableDeclarator,
 };
 use oxc_span::GetSpan;
 use reverts_ir::{ByteRange, ModuleId};
@@ -78,6 +78,20 @@ fn detect_var_assignment_modules(
         let Statement::VariableDeclaration(vd) = stmt else {
             continue;
         };
+        // esbuild scope-hoisting declares a module's top-level vars in the same
+        // `var` statement as its init handle (`var a,b,X=helper(()=>{...})`),
+        // with only initializer code in the arrow body. When the statement has
+        // exactly one handle declarator we own the WHOLE statement, so the
+        // hoisted sibling declarators and the handle become definitions rather
+        // than free variables. With multiple handles in one statement there is
+        // no single contiguous owning unit, so we fall back to per-handle
+        // arrow-body spans (the hoisted vars stay unowned — a measured residual).
+        let handle_count = vd
+            .declarations
+            .iter()
+            .filter(|decl| is_helper_init_declarator(decl, aliases))
+            .count();
+        let statement_span = ByteRange::new(vd.span().start, vd.span().end);
         for decl in &vd.declarations {
             let BindingPatternKind::BindingIdentifier(binding) = &decl.id.kind else {
                 continue;
@@ -94,7 +108,7 @@ fn detect_var_assignment_modules(
             let Some(arg) = call.arguments.first() else {
                 continue;
             };
-            let body_span = match arg {
+            let arrow_body_span = match arg {
                 Argument::ArrowFunctionExpression(a) => {
                     let s = a.body.span();
                     ByteRange::new(s.start, s.end)
@@ -108,6 +122,11 @@ fn detect_var_assignment_modules(
                 }
                 _ => continue,
             };
+            let body_span = if handle_count == 1 {
+                statement_span
+            } else {
+                arrow_body_span
+            };
             out.push(InnerModule {
                 virtual_id: format!("esbuild:{}", binding.name.as_str()),
                 body_span,
@@ -118,6 +137,21 @@ fn detect_var_assignment_modules(
         }
     }
     out
+}
+
+/// A `var` declarator whose initializer is a call to a proven `__commonJS` /
+/// `__esm` helper alias — i.e. an esbuild module init handle.
+fn is_helper_init_declarator(decl: &VariableDeclarator<'_>, aliases: &[String]) -> bool {
+    let BindingPatternKind::BindingIdentifier(_) = &decl.id.kind else {
+        return false;
+    };
+    let Some(Expression::CallExpression(call)) = decl.init.as_ref() else {
+        return false;
+    };
+    let Expression::Identifier(callee_id) = &call.callee else {
+        return false;
+    };
+    aliases.iter().any(|a| a == callee_id.name.as_str())
 }
 
 struct NamedRegistryVisitor<'a, 'n> {
@@ -288,6 +322,34 @@ mod tests {
     fn detect_esm_ignores_non_esm_calls() {
         let src = r#"var x = __notEsm({ "a": () => {} });"#;
         assert!(extract_esm(src).is_empty());
+    }
+
+    #[test]
+    fn var_assignment_module_owns_full_hoisted_statement() {
+        // esbuild scope-hoisting puts a module's top-level vars + init handle
+        // in the `var` statement, with only the initializer code in the arrow
+        // body. The inner module must own the WHOLE statement so the hoisted
+        // declarators (`a`, `b`) and the handle (`X`) become definitions,
+        // not free variables.
+        let src = r#"var st=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
+var a,b,X=st(()=>{a=1;b=2});"#;
+        let modules = extract_esm(src);
+        assert_eq!(modules.len(), 1, "got: {modules:#?}");
+        let m = &modules[0];
+        assert_eq!(m.virtual_id, "esbuild:X");
+        let owned = &src[m.body_span.start as usize..m.body_span.end as usize];
+        assert!(
+            owned.starts_with("var "),
+            "owned span must be the full statement: {owned}"
+        );
+        assert!(
+            owned.contains("a,b,X="),
+            "must include hoisted declarators: {owned}"
+        );
+        assert!(
+            owned.contains("a=1;b=2"),
+            "must include the init body: {owned}"
+        );
     }
 
     #[test]
