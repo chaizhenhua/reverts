@@ -5070,6 +5070,49 @@ fn source_backed_symbol_plans_late_readability_rename() {
 }
 
 #[test]
+fn generated_overlay_symbol_plans_rename_without_synthetic_binding() {
+    let planner = ImportExportPlanner;
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "src/index.ts",
+        Some("console.log('generated temp appears after lowering');".to_string()),
+    ));
+    rows.modules
+        .push(ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1));
+    rows.symbols
+        .push(SymbolInput::new(ModuleId(1), "_a").with_semantic_name("generatedTemp"));
+    let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+    let model = ProgramModel::from_input(input);
+    let mut semantic_names = reverts_model::SemanticNameMap::default();
+    semantic_names.insert_binding(ModuleId(1), "_a", "generatedTemp");
+    let enriched = reverts_model::EnrichedProgram::new(
+        model,
+        semantic_names,
+        Vec::new(),
+        reverts_ir::BindingShapeSolution::default(),
+    );
+
+    let plan = planner
+        .plan_enriched_program(&enriched)
+        .expect("fixture should normalize");
+
+    assert!(
+        !plan.files[0]
+            .bindings
+            .iter()
+            .any(|binding| binding.original.as_str() == "_a")
+    );
+    assert!(
+        plan.files[0]
+            .readability_renames
+            .iter()
+            .any(|rename| rename.original.as_str() == "_a"
+                && rename.renamed.as_str() == "generatedTemp")
+    );
+}
+
+#[test]
 fn source_backed_import_plans_late_readability_rename() {
     let planner = ImportExportPlanner;
     let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));

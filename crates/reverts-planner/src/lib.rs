@@ -1312,6 +1312,11 @@ pub(crate) fn emit_module_definition_bindings(
     lowered_source: Option<&LoweredRuntimeModuleSource>,
 ) {
     let source_definitions = program.model().graph().ast_definitions_for(module_id);
+    let module_has_source = program
+        .model()
+        .input()
+        .module_source_slice(module_id)
+        .is_some();
     let reshaped_bindings = lowered_source
         .map(|src| src.reshaped_bindings.clone())
         .unwrap_or_default();
@@ -1322,8 +1327,11 @@ pub(crate) fn emit_module_definition_bindings(
             .binding_name(module_id, original.as_str())
             .cloned()
             .unwrap_or_else(|| original.clone());
-        if source_backed && emitted != original {
+        if emitted != original {
             file.add_readability_rename(PlannedRename::new(original.clone(), emitted.clone()));
+        }
+        if module_has_source && !source_backed {
+            continue;
         }
         let shape_override = if reshaped_bindings.contains(&original) {
             Some(BindingShape::Unknown)

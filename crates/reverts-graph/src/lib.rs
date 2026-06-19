@@ -457,9 +457,13 @@ impl RevertsGraph {
             .map(|module| module.id)
             .collect::<BTreeSet<_>>();
         for symbol in &input.symbols {
-            if symbol.scope != SymbolScope::Module
-                || source_backed_modules.contains(&symbol.module_id)
-            {
+            if symbol.scope != SymbolScope::Module {
+                continue;
+            }
+            let is_source_backed = source_backed_modules.contains(&symbol.module_id);
+            let has_readability_hint =
+                symbol.semantic_name.is_some() || symbol.export_name.is_some();
+            if is_source_backed && !has_readability_hint {
                 continue;
             }
             def_use.define(symbol.module_id, symbol.name.clone());
@@ -2600,6 +2604,28 @@ mod tests {
         let graph = RevertsGraph::from_input(&input);
 
         assert_eq!(graph.definitions_for(ModuleId(1))[0].as_str(), "main");
+    }
+
+    #[test]
+    fn semantic_name_overlay_symbols_on_source_modules_become_graph_definitions() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "src/index.ts",
+            Some("console.log('source backed');".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/index.ts").with_source_file(1));
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "_a").with_semantic_name("workerProcess"));
+        rows.symbols.push(SymbolInput::new(ModuleId(1), "_b"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let definitions = graph.definitions_for(ModuleId(1));
+
+        assert!(definitions.iter().any(|binding| binding.as_str() == "_a"));
+        assert!(!definitions.iter().any(|binding| binding.as_str() == "_b"));
     }
 
     #[test]
