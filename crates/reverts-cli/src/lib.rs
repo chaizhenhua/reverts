@@ -121,6 +121,7 @@ pub enum CliCommand {
     FullInventory(FullInventoryArgs),
     RuntimeInventory(RuntimeInventoryArgs),
     BindingNames(BindingNamesArgs),
+    ReferenceSourceNames(commands::reference_source_names::ReferenceSourceNamesArgs),
     SymbolNames(SymbolNamesArgs),
     NamingProgress(NamingProgressArgs),
     NamingPlan(NamingPlanArgs),
@@ -218,6 +219,8 @@ enum ClapCommand {
     RuntimeInventory(RuntimeInventoryArgs),
     #[command(name = "binding-names", disable_help_flag = true)]
     BindingNames(BindingNamesArgs),
+    #[command(name = "reference-source-names", disable_help_flag = true)]
+    ReferenceSourceNames(commands::reference_source_names::ReferenceSourceNamesArgs),
     #[command(name = "symbol-names", disable_help_flag = true)]
     SymbolNames(SymbolNamesArgs),
     #[command(name = "naming-progress", disable_help_flag = true)]
@@ -264,6 +267,7 @@ impl ClapCli {
             Some(ClapCommand::BindingNames(args)) => {
                 CliCommand::BindingNames(commands::binding_names::validate_args(args)?)
             }
+            Some(ClapCommand::ReferenceSourceNames(args)) => CliCommand::ReferenceSourceNames(args),
             Some(ClapCommand::SymbolNames(args)) => {
                 CliCommand::SymbolNames(validate_symbol_names_for_cli(args)?)
             }
@@ -403,6 +407,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::FullInventory(args) => commands::full_inventory::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::BindingNames(args) => commands::binding_names::run(args),
+        CliCommand::ReferenceSourceNames(args) => commands::reference_source_names::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
         CliCommand::NamingProgress(args) => commands::naming_progress::run(args),
         CliCommand::NamingPlan(args) => commands::naming_plan::run(args),

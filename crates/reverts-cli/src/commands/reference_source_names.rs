@@ -4,6 +4,56 @@
 //! auto-accepted; everything else is left for an agent.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
+
+use clap::{Args, ValueEnum};
+
+use crate::args::{parse_args_with_name, parse_project_id};
+use crate::errors::{CliError, CliRunError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum MinTier {
+    High,
+    Medium,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct ReferenceSourceNamesArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long)]
+    pub reference_source_root: PathBuf,
+    #[arg(long)]
+    pub reference_version: String,
+    #[arg(long, default_value_t = false)]
+    pub apply: bool,
+    #[arg(long, value_enum, default_value_t = MinTier::High)]
+    pub min_tier: MinTier,
+    #[arg(long, default_value = "source")]
+    pub origin_prefix: String,
+}
+
+impl ReferenceSourceNamesArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let mut args = args.into_iter().collect::<Vec<_>>();
+        if args
+            .first()
+            .is_some_and(|a| a == crate::help::REFERENCE_SOURCE_NAMES_COMMAND)
+        {
+            args.remove(0);
+        }
+        parse_args_with_name(crate::help::REFERENCE_SOURCE_NAMES_COMMAND, args)
+    }
+}
+
+pub(crate) fn run(_args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
+    Err(CliRunError::ReferenceSourceNames(
+        "not yet implemented".to_string(),
+    ))
+}
 
 use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
 
