@@ -59,42 +59,91 @@ pub struct SymbolIndexEntry {
     pub emitted_name: String,
     /// Emitted file the binding lands in.
     pub file_path: String,
+    /// Whether the emitted declaration is a function or class (vs a value/const).
+    pub function_like: bool,
 }
 
-/// Builds [`SymbolIndexEntry`] rows for every module-level binding that lands in
-/// an emitted file. Derived from the graph (the real binding universe), the
-/// planner's `module_output_paths`, and the semantic-name overlay.
+/// Builds [`SymbolIndexEntry`] rows for the top-level bindings that actually
+/// appear in each emitted file.
+///
+/// The universe is parsed from the *emitted* TypeScript, not the input graph:
+/// reconstruction un-wraps bundle-scoped bindings (e.g. esbuild modules whose
+/// `var U$, sG` sit inside a wrapper in the minified input) up to module top
+/// level, so input-graph `definitions_for` would miss them. `original_name` is
+/// recovered from the semantic-name overlay so already-renamed bindings still
+/// map back to their `(module_id, original)` DB key; unnamed bindings key by
+/// their own (still-minified) identifier.
 fn build_symbol_index(
     program: &EnrichedProgram,
     module_output_paths: &std::collections::BTreeMap<ModuleId, String>,
     emitted: &reverts_emitter::EmittedProject,
 ) -> Vec<SymbolIndexEntry> {
-    let emitted_paths: std::collections::BTreeSet<&str> = emitted
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .collect();
-    let graph = program.model().graph();
-    let semantic = program.semantic_names();
+    use std::path::Path;
+
+    use reverts_js::{ParseGoal, TopLevelStatementKind, collect_top_level_statement_facts};
+
+    // Emitted file path -> owning module. Merged modules collapse to the last
+    // writer, which is acceptable for binding attribution.
+    let mut module_for_path: std::collections::BTreeMap<&str, ModuleId> =
+        std::collections::BTreeMap::new();
+    for (module_id, path) in module_output_paths {
+        module_for_path.insert(path.as_str(), *module_id);
+    }
+
+    // (module_id, emitted/semantic name) -> original DB name, for bindings the
+    // Agent already renamed, so index keys map back to the symbols table.
+    let mut original_for_emitted: std::collections::BTreeMap<(ModuleId, &str), &str> =
+        std::collections::BTreeMap::new();
+    for symbol in program.model().symbols() {
+        if let Some(semantic) = symbol.semantic_name.as_deref() {
+            original_for_emitted.insert((symbol.module_id, semantic), symbol.name.as_str());
+        }
+    }
+
     let mut entries = Vec::new();
-    for module in program.model().modules() {
-        let Some(path) = module_output_paths.get(&module.id) else {
+    for file in &emitted.files {
+        let Some(module_id) = module_for_path.get(file.path.as_str()).copied() else {
+            continue; // scaffold / runtime files with no owning module
+        };
+        let Ok(facts) = collect_top_level_statement_facts(
+            &file.source,
+            Some(Path::new(&file.path)),
+            ParseGoal::TypeScript,
+        ) else {
             continue;
         };
-        if !emitted_paths.contains(path.as_str()) {
-            continue;
-        }
-        for binding in graph.definitions_for(module.id) {
-            let original = binding.as_str();
-            let emitted_name = semantic
-                .binding_name(module.id, original)
-                .map_or_else(|| original.to_string(), |name| name.as_str().to_string());
-            entries.push(SymbolIndexEntry {
-                module_id: module.id,
-                original_name: original.to_string(),
-                emitted_name,
-                file_path: path.clone(),
-            });
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for fact in facts {
+            if !matches!(
+                fact.kind,
+                TopLevelStatementKind::Function
+                    | TopLevelStatementKind::Class
+                    | TopLevelStatementKind::Variable
+                    | TopLevelStatementKind::LazyValue
+                    | TopLevelStatementKind::LazyModule
+                    | TopLevelStatementKind::Export
+            ) {
+                continue;
+            }
+            let function_like = matches!(
+                fact.kind,
+                TopLevelStatementKind::Function | TopLevelStatementKind::Class
+            );
+            for emitted_name in fact.bindings {
+                if !seen.insert(emitted_name.clone()) {
+                    continue;
+                }
+                let original_name = original_for_emitted
+                    .get(&(module_id, emitted_name.as_str()))
+                    .map_or_else(|| emitted_name.clone(), |original| (*original).to_string());
+                entries.push(SymbolIndexEntry {
+                    module_id,
+                    original_name,
+                    emitted_name,
+                    file_path: file.path.clone(),
+                    function_like,
+                });
+            }
         }
     }
     entries

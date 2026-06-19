@@ -97,7 +97,7 @@ pub fn naming_kind(shape: BindingShape) -> NamingKind {
     }
 }
 
-fn symbol_tier(exported: bool, kind: NamingKind) -> Tier {
+pub(crate) fn symbol_tier(exported: bool, kind: NamingKind) -> Tier {
     if exported {
         Tier::PublicSurface
     } else if kind == NamingKind::FunctionLike {

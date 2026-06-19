@@ -2595,6 +2595,29 @@ mod tests {
     }
 
     #[test]
+    fn top_level_uninitialized_vars_become_definitions() {
+        let source = "var alpha, beta;\n{ alpha = 1; beta = 2; }\n";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let defs: Vec<String> = graph
+            .definitions_for(ModuleId(1))
+            .iter()
+            .map(|binding| binding.as_str().to_string())
+            .collect();
+        assert!(defs.contains(&"alpha".to_string()), "defs: {defs:?}");
+        assert!(defs.contains(&"beta".to_string()), "defs: {defs:?}");
+    }
+
+    #[test]
     fn unresolved_reads_remain_visible_in_def_use_graph() {
         let mut rows = InputRows::new(ProjectInput {
             id: 1,
