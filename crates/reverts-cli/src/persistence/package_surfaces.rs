@@ -31,7 +31,9 @@ pub(crate) fn persist_package_surfaces(
     Ok(written)
 }
 
-fn ensure_package_surfaces_table(connection: &Connection) -> Result<(), MatchPackagesError> {
+pub(crate) fn ensure_package_surfaces_table(
+    connection: &Connection,
+) -> Result<(), MatchPackagesError> {
     connection
         .execute_batch(
             r"
@@ -52,7 +54,7 @@ fn ensure_package_surfaces_table(connection: &Connection) -> Result<(), MatchPac
         .map_err(MatchPackagesError::WritePackageSurface)
 }
 
-fn persist_package_surface(
+pub(crate) fn persist_package_surface(
     connection: &Connection,
     project_id: u32,
     surface: &PackageSurfaceInput,

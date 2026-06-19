@@ -99,6 +99,7 @@ pub enum MatchPackagesError {
     },
     WritePackageSourceCache(rusqlite::Error),
     WritePackageExternalizationHints(rusqlite::Error),
+    ReadPackageSurfaceDecisionBatch(io::Error),
     WriteAttribution(rusqlite::Error),
     WritePackageSurface(rusqlite::Error),
     MissingTable(&'static str),
@@ -224,6 +225,12 @@ impl fmt::Display for MatchPackagesError {
                     "failed to write package externalization hints: {source}"
                 )
             }
+            Self::ReadPackageSurfaceDecisionBatch(source) => {
+                write!(
+                    formatter,
+                    "failed to read package surface decision batch: {source}"
+                )
+            }
             Self::WritePackageSurface(source) => {
                 write!(formatter, "failed to write package surface: {source}")
             }
@@ -274,6 +281,7 @@ impl Error for MatchPackagesError {
             | Self::WritePackageExternalizationHints(source)
             | Self::WriteAttribution(source)
             | Self::WritePackageSurface(source) => Some(source),
+            Self::ReadPackageSurfaceDecisionBatch(source) => Some(source),
             Self::NormalizePackageSource { source, .. } => Some(source),
             Self::ReadPackageSourceRoot { source, .. } => Some(source),
             Self::InvalidPackageMetadata { source, .. } => Some(source),

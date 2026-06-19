@@ -16,7 +16,7 @@ pub use args::{
     CoverageLedgerArgs, ExtractAssetsArgs, FullInventoryArgs, IdentifierInventoryArgs,
     ImportUnpackedArgs, MatchPackagesArgs, MatchPackagesReportArgs, ModuleClassifyArgs,
     NamingPlanArgs, NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
-    PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
+    PackageSurfaceDecisionsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
 pub use commands::coverage_ledger::{coverage_ledger_json, coverage_ledger_report};
 pub use commands::extract_assets::{
@@ -37,6 +37,9 @@ pub use commands::naming_progress::{
     naming_progress_from_sqlite,
 };
 pub use commands::package_cache::{PackageCacheAuditOutcome, package_cache_audit_from_sqlite};
+pub use commands::package_surface_decisions::{
+    PackageSurfaceDecisionOutcome, package_surface_decisions_from_sqlite,
+};
 pub use commands::runtime_inventory::{
     RuntimeInventoryCounts, RuntimeInventoryOutcome, RuntimeInventoryProject,
     RuntimeLineAttributionBucket, RuntimeLineAttributionItem, RuntimeLineAttributionReport,
@@ -110,6 +113,7 @@ pub enum CliCommand {
     PackageCacheAudit(PackageCacheArgs),
     PackageCachePruneStale(PackageCacheArgs),
     PackageExternalizationHints(PackageExternalizationHintsArgs),
+    PackageSurfaceDecisions(PackageSurfaceDecisionsArgs),
     ExtractAssets(ExtractAssetsArgs),
     CoverageLedger(CoverageLedgerArgs),
     IdentifierInventory(IdentifierInventoryArgs),
@@ -198,6 +202,8 @@ enum ClapCommand {
     PackageCachePruneStale(PackageCacheArgs),
     #[command(name = "package-externalization-hints", disable_help_flag = true)]
     PackageExternalizationHints(PackageExternalizationHintsArgs),
+    #[command(name = "package-surface-decisions", disable_help_flag = true)]
+    PackageSurfaceDecisions(PackageSurfaceDecisionsArgs),
     #[command(name = "extract-assets", disable_help_flag = true)]
     ExtractAssets(ExtractAssetsArgs),
     #[command(name = "coverage-ledger", disable_help_flag = true)]
@@ -238,6 +244,11 @@ impl ClapCli {
             }
             Some(ClapCommand::PackageExternalizationHints(args)) => {
                 CliCommand::PackageExternalizationHints(args)
+            }
+            Some(ClapCommand::PackageSurfaceDecisions(args)) => {
+                CliCommand::PackageSurfaceDecisions(validate_package_surface_decisions_for_cli(
+                    args,
+                )?)
             }
             Some(ClapCommand::ExtractAssets(args)) => CliCommand::ExtractAssets(args),
             Some(ClapCommand::CoverageLedger(args)) => CliCommand::CoverageLedger(args),
@@ -308,6 +319,12 @@ fn validate_symbol_names_for_cli(args: SymbolNamesArgs) -> Result<SymbolNamesArg
     Ok(args)
 }
 
+fn validate_package_surface_decisions_for_cli(
+    args: PackageSurfaceDecisionsArgs,
+) -> Result<PackageSurfaceDecisionsArgs, CliError> {
+    args::validate_package_surface_decisions_args(args)
+}
+
 fn parse_top_level_help(args: &[String]) -> Result<CliCommand, CliError> {
     match args {
         [_] => Ok(CliCommand::Help(HelpTopic::TopLevel)),
@@ -372,6 +389,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::PackageExternalizationHints(args) => {
             commands::package_cache::run_externalization_hints(args)
         }
+        CliCommand::PackageSurfaceDecisions(args) => commands::package_surface_decisions::run(args),
         CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
         CliCommand::CoverageLedger(args) => commands::coverage_ledger::run(args),
         CliCommand::IdentifierInventory(args) => commands::identifier_inventory::run(args),

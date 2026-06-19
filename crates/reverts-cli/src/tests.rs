@@ -38,8 +38,9 @@ use super::pkg_sources::{
 use super::{
     CliCommand, CliError, ExtractAssetsArgs, GenerateProjectV2Args, HelpTopic, MatchPackagesArgs,
     MatchPackagesError, PACKAGE_SOURCE_CACHE_EXTERNAL_IMPORT_POLICY_VERSION,
-    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, PackageVersionResolutionPlan,
-    RuntimeInventoryArgs, best_matching_package_version_by_binary_search, dedup_audit_report,
+    PackageExternalizationHintsArgs, PackageSurfaceDecisionsArgs, PackageVersionDiagnosticsArgs,
+    PackageVersionResolutionPlan, RuntimeInventoryArgs,
+    best_matching_package_version_by_binary_search, dedup_audit_report,
     filter_package_sources_to_best_build_variants, filter_package_sources_to_relevant_path_hints,
     help_text, load_package_sources, match_packages_from_connection,
     network_package_version_resolution_hints, package_export_specifier,
@@ -201,6 +202,70 @@ fn parses_package_externalization_hints_command() {
 }
 
 #[test]
+fn parses_package_surface_decisions_command() {
+    let args = PackageSurfaceDecisionsArgs::parse([
+        "package-surface-decisions".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "13495".to_string(),
+        "--batch".to_string(),
+        "agent/package-surfaces.tsv".to_string(),
+        "--apply".to_string(),
+    ])
+    .expect("args should parse");
+
+    assert_eq!(args.input, PathBuf::from("input.db"));
+    assert_eq!(args.project_id, 13495);
+    assert_eq!(
+        args.batch,
+        Some(PathBuf::from("agent/package-surfaces.tsv"))
+    );
+    assert!(args.apply);
+
+    let command = CliCommand::parse([
+        "package-surface-decisions".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "13495".to_string(),
+        "--list".to_string(),
+    ])
+    .expect("command should parse");
+    assert!(matches!(
+        command,
+        CliCommand::PackageSurfaceDecisions(parsed)
+            if parsed.input.as_path() == Path::new("input.db")
+                && parsed.project_id == 13495
+                && parsed.list
+    ));
+
+    let missing_action = PackageSurfaceDecisionsArgs::parse([
+        "package-surface-decisions".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "1".to_string(),
+    ]);
+    assert!(
+        matches!(missing_action, Err(CliError::MissingArgument(argument)) if argument == "--list | --batch")
+    );
+
+    let apply_without_batch = CliCommand::parse([
+        "package-surface-decisions".to_string(),
+        "--input".to_string(),
+        "input.db".to_string(),
+        "--project-id".to_string(),
+        "1".to_string(),
+        "--list".to_string(),
+        "--apply".to_string(),
+    ]);
+    assert!(
+        matches!(apply_without_batch, Err(CliError::MissingArgument(argument)) if argument == "--batch")
+    );
+}
+
+#[test]
 fn parses_package_version_diagnostics_command() {
     let args = PackageVersionDiagnosticsArgs::parse([
         "package-version-diagnostics".to_string(),
@@ -359,6 +424,19 @@ fn parses_command_specific_help_without_running_command() {
         CliCommand::Help(HelpTopic::ExtractAssets)
     );
     assert_eq!(
+        CliCommand::parse([
+            "package-surface-decisions".to_string(),
+            "--help".to_string()
+        ])
+        .expect("surface decisions help should parse"),
+        CliCommand::Help(HelpTopic::PackageSurfaceDecisions)
+    );
+    assert_eq!(
+        CliCommand::parse(["help".to_string(), "package-surface-decisions".to_string()])
+            .expect("surface decisions help should parse"),
+        CliCommand::Help(HelpTopic::PackageSurfaceDecisions)
+    );
+    assert_eq!(
         CliCommand::parse(["runtime-inventory".to_string(), "--help".to_string()])
             .expect("inventory help should parse"),
         CliCommand::Help(HelpTopic::RuntimeInventory)
@@ -376,12 +454,16 @@ fn help_and_version_commands_return_ok() {
 #[test]
 fn help_text_documents_commands_and_options() {
     assert!(help_text(HelpTopic::TopLevel).contains("extract-assets"));
+    assert!(help_text(HelpTopic::TopLevel).contains("package-surface-decisions"));
     assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
     assert!(help_text(HelpTopic::MatchPackagesReport).contains("source_eliminated"));
     assert!(help_text(HelpTopic::PackageVersionDiagnostics).contains("--top <N>"));
+    assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("--batch <TSV>"));
+    assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("accept_surface"));
+    assert!(help_text(HelpTopic::PackageSurfaceDecisions).contains("--apply"));
     assert!(help_text(HelpTopic::ExtractAssets).contains("--asset-root <DIR-OR-BUN-EXE>"));
     assert!(help_text(HelpTopic::RuntimeInventory).contains("--all-projects"));
     assert!(version_text().starts_with("reverts-cli "));

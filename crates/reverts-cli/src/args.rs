@@ -123,6 +123,28 @@ impl PackageExternalizationHintsArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct PackageSurfaceDecisionsArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long)]
+    pub list: bool,
+    #[arg(long)]
+    pub batch: Option<PathBuf>,
+    #[arg(long)]
+    pub apply: bool,
+}
+
+impl PackageSurfaceDecisionsArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        let parsed = parse_subcommand_args(args, help::PACKAGE_SURFACE_DECISIONS_COMMAND)?;
+        validate_package_surface_decisions_args(parsed)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct ExtractAssetsArgs {
     #[arg(long)]
     pub input: PathBuf,
@@ -481,6 +503,18 @@ fn validate_runtime_inventory_args(
         (None, false) => Err(CliError::MissingArgument("--project-id")),
         _ => Ok(args),
     }
+}
+
+pub(crate) fn validate_package_surface_decisions_args(
+    args: PackageSurfaceDecisionsArgs,
+) -> Result<PackageSurfaceDecisionsArgs, CliError> {
+    if !args.list && args.batch.is_none() {
+        return Err(CliError::MissingArgument("--list | --batch"));
+    }
+    if args.apply && args.batch.is_none() {
+        return Err(CliError::MissingArgument("--batch"));
+    }
+    Ok(args)
 }
 
 #[cfg(test)]
