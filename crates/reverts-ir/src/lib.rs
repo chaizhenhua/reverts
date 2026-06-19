@@ -95,6 +95,76 @@ pub enum BindingShape {
     ClassLike,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum InferredType {
+    Unknown,
+    Never,
+    String,
+    Number,
+    Boolean,
+    BigInt,
+    Null,
+    Undefined,
+}
+
+impl InferredType {
+    #[must_use]
+    pub const fn is_unknown(self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        if self == other {
+            self
+        } else if self == Self::Never {
+            other
+        } else if other == Self::Never {
+            self
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TypeSolution {
+    types: BTreeMap<(ModuleId, BindingName), InferredType>,
+}
+
+impl TypeSolution {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, module_id: ModuleId, binding: impl Into<String>, ty: InferredType) {
+        let key = (module_id, BindingName::new(binding));
+        self.types
+            .entry(key)
+            .and_modify(|existing| *existing = existing.join(ty))
+            .or_insert(ty);
+    }
+
+    #[must_use]
+    pub fn type_of(&self, module_id: ModuleId, binding: &str) -> InferredType {
+        self.types
+            .get(&(module_id, BindingName::new(binding)))
+            .copied()
+            .unwrap_or(InferredType::Unknown)
+    }
+
+    #[must_use]
+    pub fn types_for_module(&self, module_id: ModuleId) -> Vec<(BindingName, InferredType)> {
+        self.types
+            .iter()
+            .filter_map(|((typed_module, binding), ty)| {
+                (*typed_module == module_id).then_some((binding.clone(), *ty))
+            })
+            .collect()
+    }
+}
+
 impl BindingShape {
     #[must_use]
     pub fn merge(self, other: Self) -> Self {

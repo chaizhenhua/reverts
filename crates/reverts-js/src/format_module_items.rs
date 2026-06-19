@@ -31,7 +31,23 @@ use crate::rename_apply::{
     apply_readability_renames, resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
-use crate::{GeneratedExport, GeneratedImport, GeneratedRename, ReadabilityReport};
+use crate::type_annotations::apply_type_annotations_to_program;
+use crate::{
+    GeneratedExport, GeneratedImport, GeneratedRename, GeneratedTypeAnnotation, ReadabilityReport,
+};
+
+#[derive(Debug, Clone, Copy)]
+pub struct FormatSourceRequest<'a> {
+    pub body_source: &'a str,
+    pub generated_imports: &'a [GeneratedImport],
+    pub generated_exports: &'a [GeneratedExport],
+    pub readability_renames: &'a [GeneratedRename],
+    pub type_annotations: &'a [GeneratedTypeAnnotation],
+    pub infer_literal_types: bool,
+    pub path_hint: Option<&'a Path>,
+    pub goal: ParseGoal,
+    pub lowering: CompilerLowering,
+}
 
 pub fn format_source_with_module_items(
     body_source: &str,
@@ -61,16 +77,21 @@ pub fn format_source_with_module_items_and_renames(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> Result<String> {
-    format_source_with_module_items_and_renames_with_report(
+    format_source_with_module_items_request(FormatSourceRequest {
         body_source,
         generated_imports,
         generated_exports,
         readability_renames,
+        type_annotations: &[],
+        infer_literal_types: false,
         path_hint,
         goal,
         lowering,
-    )
-    .map(|(source, _)| source)
+    })
+}
+
+pub fn format_source_with_module_items_request(request: FormatSourceRequest<'_>) -> Result<String> {
+    format_source_with_module_items_request_with_report(request).map(|(source, _)| source)
 }
 
 pub fn format_source_with_module_items_and_renames_with_report(
@@ -82,6 +103,33 @@ pub fn format_source_with_module_items_and_renames_with_report(
     goal: ParseGoal,
     lowering: CompilerLowering,
 ) -> Result<(String, ReadabilityReport)> {
+    format_source_with_module_items_request_with_report(FormatSourceRequest {
+        body_source,
+        generated_imports,
+        generated_exports,
+        readability_renames,
+        type_annotations: &[],
+        infer_literal_types: false,
+        path_hint,
+        goal,
+        lowering,
+    })
+}
+
+pub fn format_source_with_module_items_request_with_report(
+    request: FormatSourceRequest<'_>,
+) -> Result<(String, ReadabilityReport)> {
+    let FormatSourceRequest {
+        body_source,
+        generated_imports,
+        generated_exports,
+        readability_renames,
+        type_annotations,
+        infer_literal_types,
+        path_hint,
+        goal,
+        lowering,
+    } = request;
     // Source-level pre-rewrites: applied before the main parse/codegen path so
     // that subsequent steps (audit, codegen) see the lowered form. The
     // rewriter parses once, collects span-aware edits, and returns the
@@ -153,6 +201,12 @@ pub fn format_source_with_module_items_and_renames_with_report(
                 .body
                 .push(generated_export_statement(&builder, generated_export));
         }
+        apply_type_annotations_to_program(
+            &allocator,
+            &mut parsed.program,
+            type_annotations,
+            infer_literal_types,
+        );
         let mut readability_hints = collect_late_readability_rename_hints(&parsed.program);
         readability_hints.extend(readability_renames.iter().map(|rename| {
             ReadabilityRenameHint::new(

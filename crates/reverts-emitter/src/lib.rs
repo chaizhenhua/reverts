@@ -1,10 +1,11 @@
 use std::error::Error;
 use std::fmt;
 
-use reverts_ir::BindingName;
+use reverts_ir::{BindingName, InferredType};
 use reverts_js::{
-    CompilerLowering, GeneratedExport, GeneratedImport, GeneratedRename,
-    format_source_with_module_items_and_renames, sanitize_identifier,
+    CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
+    GeneratedTypeAnnotation, GeneratedTypeKind, format_source_with_module_items_request,
+    sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
 use reverts_planner::{CompilerPreservationAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
@@ -102,6 +103,15 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             )
         })
         .collect::<Vec<_>>();
+    let generated_type_annotations = file
+        .type_annotations
+        .iter()
+        .filter_map(|annotation| {
+            generated_type_kind(annotation.ty).map(|kind| {
+                GeneratedTypeAnnotation::new(emit_binding_name(&annotation.binding), kind)
+            })
+        })
+        .collect::<Vec<_>>();
     let lowering = compiler_lowering(file.compiler_preservation.action);
 
     // Per ADR 0002 the emitter is faithful, not corrective. Two paths reach
@@ -120,19 +130,22 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
         &generated_imports,
         &generated_exports,
         &generated_renames,
+        &generated_type_annotations,
         lowering,
     ) {
         (body_source, None)
     } else {
-        match format_source_with_module_items_and_renames(
-            &body_source,
-            &generated_imports,
-            &generated_exports,
-            &generated_renames,
-            file.source_strategy().path_hint(file.path.as_str()),
-            file.source_strategy().parse_goal(),
+        match format_source_with_module_items_request(FormatSourceRequest {
+            body_source: &body_source,
+            generated_imports: &generated_imports,
+            generated_exports: &generated_exports,
+            readability_renames: &generated_renames,
+            type_annotations: &generated_type_annotations,
+            infer_literal_types: true,
+            path_hint: file.source_strategy().path_hint(file.path.as_str()),
+            goal: file.source_strategy().parse_goal(),
             lowering,
-        ) {
+        }) {
             Ok(formatted) => (formatted, None),
             Err(error) => {
                 let finding = AuditFinding::warning(
@@ -167,6 +180,7 @@ fn should_preserve_raw_source_body(
     generated_imports: &[GeneratedImport],
     generated_exports: &[GeneratedExport],
     generated_renames: &[GeneratedRename],
+    generated_type_annotations: &[GeneratedTypeAnnotation],
     lowering: CompilerLowering,
 ) -> bool {
     // Template literal raw chunks are runtime-observable. OXC codegen
@@ -179,11 +193,25 @@ fn should_preserve_raw_source_body(
         && generated_imports.is_empty()
         && generated_exports.is_empty()
         && generated_renames.is_empty()
+        && generated_type_annotations.is_empty()
         && lowering == CompilerLowering::None
 }
 
 fn emit_binding_name(binding: &BindingName) -> String {
     sanitize_identifier(binding.as_str())
+}
+
+const fn generated_type_kind(ty: InferredType) -> Option<GeneratedTypeKind> {
+    match ty {
+        InferredType::Unknown => None,
+        InferredType::Never => Some(GeneratedTypeKind::Never),
+        InferredType::String => Some(GeneratedTypeKind::String),
+        InferredType::Number => Some(GeneratedTypeKind::Number),
+        InferredType::Boolean => Some(GeneratedTypeKind::Boolean),
+        InferredType::BigInt => Some(GeneratedTypeKind::BigInt),
+        InferredType::Null => Some(GeneratedTypeKind::Null),
+        InferredType::Undefined => Some(GeneratedTypeKind::Undefined),
+    }
 }
 
 const fn compiler_lowering(action: CompilerPreservationAction) -> CompilerLowering {
@@ -261,7 +289,11 @@ mod tests {
 
         assert_eq!(project.files[0].path, "src/index.ts");
         assert!(project.files[0].source.starts_with("// @ts-nocheck"));
-        assert!(project.files[0].source.contains("export const answer = 42"));
+        assert!(
+            project.files[0]
+                .source
+                .contains("export const answer: number = 42")
+        );
         assert!(!project.files[0].source.contains("undefined as any"));
     }
 

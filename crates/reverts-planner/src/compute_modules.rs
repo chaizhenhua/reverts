@@ -30,7 +30,7 @@ use crate::{
     LoweredRuntimeHelperImportArgs, LoweredRuntimeHelperUsageArgs, LoweredRuntimeModuleSource,
     MigratedExtraOwnerImportArgs, MigratedExtraRuntimeReexportImportArgs,
     MigratedRuntimeExtraAliasImportArgs, OwnerMigrationState, PlanError, PlannedFile,
-    PostInlineLazyValueLocalizationArgs, RemainingHelpersWriteRewriteArgs,
+    PlannedTypeAnnotation, PostInlineLazyValueLocalizationArgs, RemainingHelpersWriteRewriteArgs,
     RuntimeExtraDepsImportArgs, RuntimeImportPartitionArgs, RuntimeImportPartitionEmitArgs,
     RuntimeLazyFoldPlan, RuntimePreludeDirectImport, SourceModuleImportEmitArgs,
     SourceModuleWiring, add_migrated_local_binding_declarations, adjust_remaining_runtime_helpers,
@@ -258,6 +258,8 @@ pub(crate) fn plan_one_module(
     }
     .run(&mut file, &mut planned_bindings)?;
 
+    add_inferred_type_annotations(program, module.id, &mut file);
+
     emit_normal_module_exports(
         program,
         module.id,
@@ -271,6 +273,16 @@ pub(crate) fn plan_one_module(
     plan.push_file(file);
 
     Ok(())
+}
+
+fn add_inferred_type_annotations(
+    program: &EnrichedProgram,
+    module_id: ModuleId,
+    file: &mut PlannedFile,
+) {
+    for (binding, ty) in program.inferred_types_for_module(module_id) {
+        file.add_type_annotation(PlannedTypeAnnotation::new(binding, ty));
+    }
 }
 
 struct FoldedModulePass<'a> {

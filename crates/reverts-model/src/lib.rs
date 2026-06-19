@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstWrapperKind, RevertsGraph};
 use reverts_input::{InputBundle, ModuleInput, SymbolInput};
-use reverts_ir::{BindingName, BindingShape, BindingShapeSolution, FunctionFingerprint, ModuleId};
+use reverts_ir::{
+    BindingName, BindingShape, BindingShapeSolution, FunctionFingerprint, InferredType, ModuleId,
+    TypeSolution,
+};
 use reverts_package::PackageResolution;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +117,7 @@ pub struct EnrichedProgram {
     semantic_names: SemanticNameMap,
     package_imports: Vec<PackageImportDecision>,
     binding_shapes: BindingShapeSolution,
+    type_solution: TypeSolution,
     compiler_profile: CompilerProfile,
     function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
 }
@@ -131,6 +135,7 @@ impl EnrichedProgram {
             semantic_names,
             package_imports,
             binding_shapes,
+            type_solution: TypeSolution::default(),
             compiler_profile: CompilerProfile::default(),
             function_fingerprints: BTreeMap::default(),
         }
@@ -148,6 +153,12 @@ impl EnrichedProgram {
         function_fingerprints: BTreeMap<ModuleId, Vec<FunctionFingerprint>>,
     ) -> Self {
         self.function_fingerprints = function_fingerprints;
+        self
+    }
+
+    #[must_use]
+    pub fn with_type_solution(mut self, type_solution: TypeSolution) -> Self {
+        self.type_solution = type_solution;
         self
     }
 
@@ -182,6 +193,19 @@ impl EnrichedProgram {
     #[must_use]
     pub fn binding_shape(&self, module_id: ModuleId, original_name: &str) -> BindingShape {
         self.binding_shapes.shape_of(module_id, original_name)
+    }
+
+    #[must_use]
+    pub fn inferred_type(&self, module_id: ModuleId, original_name: &str) -> InferredType {
+        self.type_solution.type_of(module_id, original_name)
+    }
+
+    #[must_use]
+    pub fn inferred_types_for_module(
+        &self,
+        module_id: ModuleId,
+    ) -> Vec<(BindingName, InferredType)> {
+        self.type_solution.types_for_module(module_id)
     }
 
     /// Property names recorded on `(module_id, original_name)` member-access

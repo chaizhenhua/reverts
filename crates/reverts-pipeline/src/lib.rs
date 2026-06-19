@@ -572,6 +572,26 @@ mod tests {
     }
 
     #[test]
+    fn literal_type_solution_annotates_top_level_const_output() {
+        let rows = rows_with_application_source("export const answer = 42;");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        let source = run.project.files[0].source.as_str();
+        assert!(
+            source.contains("export const answer: number = 42;"),
+            "{source}"
+        );
+        parse_source(
+            source,
+            Some(Path::new("src/index.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("annotated output must remain parseable TypeScript");
+    }
+
+    #[test]
     fn package_surface_contributes_runtime_dependency_without_package_module() {
         let mut rows =
             rows_with_application_source("const undici = require('undici'); export { undici };");
@@ -1113,7 +1133,7 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("var lodashGlobalObjectInit = 1;"));
+        assert!(source.contains("var lodashGlobalObjectInit: number = 1;"));
         assert!(source.contains("console.log(lodashGlobalObjectInit);"));
         assert!(source.contains("export { lodashGlobalObjectInit as $F1 };"));
         assert!(!source.contains("console.log($F1);"));
@@ -1131,7 +1151,7 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("var settings = 1;"));
+        assert!(source.contains("var settings: number = 1;"));
         assert!(source.contains("var settingsAlias = settings;"));
         assert!(source.contains("console.log(settingsAlias);"));
         assert!(source.contains("export { settingsAlias as b };"));
@@ -1196,7 +1216,7 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("const createClient = 1;"));
+        assert!(source.contains("const createClient: number = 1;"));
         assert!(source.contains("module.exports = { createClient };"));
     }
 
@@ -1211,7 +1231,7 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("const createClient = 1;"));
+        assert!(source.contains("const createClient: number = 1;"));
         assert!(source.contains("export { createClient };"));
         assert!(source.contains("const obj = { internalName: createClient };"));
         assert!(!source.contains("const internalName = 1;"));
@@ -1278,8 +1298,8 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("var a = 1;"));
-        assert!(source.contains("var settings = 2;"));
+        assert!(source.contains("var a: number = 1;"));
+        assert!(source.contains("var settings: number = 2;"));
         assert!(source.contains("console.log(a, settings);"));
         assert!(source.contains("export { a };"));
     }
@@ -1679,8 +1699,16 @@ mod tests {
 
         assert!(run.audit.is_clean());
         assert_eq!(run.project.files.len(), 2);
-        assert!(run.project.files[0].source.contains("export const one = 1"));
-        assert!(run.project.files[1].source.contains("export const two = 2"));
+        assert!(
+            run.project.files[0]
+                .source
+                .contains("export const one: number = 1")
+        );
+        assert!(
+            run.project.files[1]
+                .source
+                .contains("export const two: number = 2")
+        );
     }
 
     #[test]
@@ -2533,7 +2561,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
             );
         }
         assert!(
-            emitted.contains("var entry = 42"),
+            emitted.contains("var entry: number = 42"),
             "unrelated declarations must be preserved; got:\n{emitted}",
         );
     }
@@ -2609,7 +2637,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
             );
         }
         assert!(
-            emitted.contains("var entry = 42"),
+            emitted.contains("var entry: number = 42"),
             "unrelated declarations must be preserved; got:\n{emitted}",
         );
     }
@@ -2781,7 +2809,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
             "var declaration must be preserved; got:\n{emitted}",
         );
         assert!(
-            emitted.contains("var label = 'ready'"),
+            emitted.contains("var label: string = 'ready'"),
             "string literal initializer must be preserved; got:\n{emitted}",
         );
     }
@@ -2846,7 +2874,7 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
             );
         }
         assert!(
-            emitted.contains("var entry = 42"),
+            emitted.contains("var entry: number = 42"),
             "unrelated IIFE-internal declarations must be preserved; got:\n{emitted}",
         );
     }

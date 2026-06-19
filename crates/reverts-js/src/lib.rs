@@ -17,6 +17,7 @@ mod parse;
 mod recover;
 mod rename_apply;
 mod rename_hints;
+mod type_annotations;
 
 pub use classify::{
     DeclarationCallability, ImportUsageScope, classify_import_usage_scope,
@@ -30,8 +31,10 @@ pub use commonjs_exports::{
 };
 pub use format::{format_source_minified, format_source_pretty, normalize_source_for_pipeline};
 pub use format_module_items::{
-    format_source_with_module_items, format_source_with_module_items_and_renames,
+    FormatSourceRequest, format_source_with_module_items,
+    format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
+    format_source_with_module_items_request,
 };
 pub use lowering::CompilerLowering;
 
@@ -57,6 +60,10 @@ pub use lazy::{
 };
 pub(crate) use local_named_exports::module_export_name_text;
 pub use parse::{parse_options_for, parse_source, source_type_candidates, source_type_for_parse};
+pub use type_annotations::{
+    GeneratedTypeAnnotation, GeneratedTypeKind, apply_type_annotations_to_program,
+    collect_top_level_literal_type_annotations,
+};
 
 use oxc_ast::ast::Expression;
 

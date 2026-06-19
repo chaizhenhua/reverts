@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use reverts_ir::{BindingName, BindingShape};
+use reverts_ir::{BindingName, BindingShape, InferredType};
 use reverts_package::PackageResolution;
 
 use crate::compiler_preservation::{CompilerPreservationDecision, SourceCompilerStrategy};
@@ -167,6 +167,7 @@ pub struct PlannedFile {
     /// final codegen and parse audit, so graph/planner facts stay keyed by
     /// original recovered names.
     pub readability_renames: Vec<PlannedRename>,
+    pub type_annotations: Vec<PlannedTypeAnnotation>,
     pub body: Vec<String>,
     pub compiler_preservation: CompilerPreservationDecision,
 }
@@ -180,6 +181,7 @@ impl PlannedFile {
             bindings: Vec::new(),
             exports: Vec::new(),
             readability_renames: Vec::new(),
+            type_annotations: Vec::new(),
             body: Vec::new(),
             compiler_preservation: CompilerPreservationDecision::default(),
         }
@@ -228,6 +230,20 @@ impl PlannedFile {
         self.readability_renames.push(rename);
     }
 
+    pub fn add_type_annotation(&mut self, annotation: PlannedTypeAnnotation) {
+        if annotation.ty.is_unknown() {
+            return;
+        }
+        if self
+            .type_annotations
+            .iter()
+            .any(|existing| existing.binding == annotation.binding)
+        {
+            return;
+        }
+        self.type_annotations.push(annotation);
+    }
+
     pub fn set_compiler_preservation(
         &mut self,
         compiler_preservation: CompilerPreservationDecision,
@@ -258,6 +274,19 @@ impl PlannedRename {
     #[must_use]
     pub fn new(original: BindingName, renamed: BindingName) -> Self {
         Self { original, renamed }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedTypeAnnotation {
+    pub binding: BindingName,
+    pub ty: InferredType,
+}
+
+impl PlannedTypeAnnotation {
+    #[must_use]
+    pub fn new(binding: BindingName, ty: InferredType) -> Self {
+        Self { binding, ty }
     }
 }
 

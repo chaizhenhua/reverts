@@ -6,9 +6,11 @@ use reverts_graph::{AstFactKind, AstWrapperKind, FunctionExtractor};
 use reverts_input::{ModuleDependencyTarget, SymbolScope};
 use reverts_ir::{
     BindingConstraintKind, BindingName, BindingShapeSolution, ControlFlowEdgeKind,
-    ControlFlowNodeKind, FunctionFingerprint, ModuleId,
+    ControlFlowNodeKind, FunctionFingerprint, InferredType, ModuleId, TypeSolution,
 };
-use reverts_js::sanitize_identifier;
+use reverts_js::{
+    GeneratedTypeKind, collect_top_level_literal_type_annotations, sanitize_identifier,
+};
 pub use reverts_model::CompilerKind;
 use reverts_model::{
     CompilerEvidence, CompilerProfile, EnrichedProgram, ModuleCompilerProfile,
@@ -27,6 +29,7 @@ pub struct EnrichmentOutput {
 pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let semantic_names = assign_semantic_names(&model);
     let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
+    let type_solution = infer_type_solution(&model);
     let compiler_profile = detect_compiler_profile(&model);
     let package_index = PackageSurfaceIndex::from_attributions(
         model.input().package_attributions.as_slice(),
@@ -55,9 +58,48 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
 
     EnrichmentOutput {
         program: EnrichedProgram::new(model, semantic_names, package_imports, binding_shapes)
+            .with_type_solution(type_solution)
             .with_compiler_profile(compiler_profile)
             .with_function_fingerprints(function_fingerprints),
         audit,
+    }
+}
+
+fn infer_type_solution(model: &ProgramModel) -> TypeSolution {
+    let mut solution = TypeSolution::new();
+    for module in model.modules() {
+        let Some(slice) = model.input().module_source_slice(module.id) else {
+            continue;
+        };
+        let path = std::path::Path::new(slice.source_file_path);
+        let Ok(annotations) = collect_top_level_literal_type_annotations(
+            slice.source,
+            Some(path),
+            reverts_js::ParseGoal::TypeScript,
+        ) else {
+            continue;
+        };
+        for annotation in annotations {
+            solution.insert(
+                module.id,
+                annotation.binding,
+                inferred_type_from_generated(annotation.kind),
+            );
+        }
+    }
+    solution
+}
+
+const fn inferred_type_from_generated(kind: GeneratedTypeKind) -> InferredType {
+    match kind {
+        GeneratedTypeKind::Unknown => InferredType::Unknown,
+        GeneratedTypeKind::Never => InferredType::Never,
+        GeneratedTypeKind::String => InferredType::String,
+        GeneratedTypeKind::Number => InferredType::Number,
+        GeneratedTypeKind::Boolean => InferredType::Boolean,
+        GeneratedTypeKind::BigInt => InferredType::BigInt,
+        GeneratedTypeKind::Null => InferredType::Null,
+        GeneratedTypeKind::Undefined => InferredType::Undefined,
     }
 }
 
