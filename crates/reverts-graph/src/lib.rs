@@ -512,8 +512,17 @@ impl RevertsGraph {
                 }),
             }
         }
-        let runtime_imports =
-            resolve_runtime_prelude_imports(&modules, &runtime_preludes, &mut def_use);
+        let source_paths_by_id = input
+            .source_files
+            .iter()
+            .map(|source_file| (source_file.id, source_file.path.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let runtime_imports = resolve_runtime_prelude_imports(
+            &modules,
+            &source_paths_by_id,
+            &runtime_preludes,
+            &mut def_use,
+        );
 
         Self {
             modules,
@@ -704,24 +713,48 @@ fn apply_ast_fact(
 
 fn extract_runtime_preludes(input: &InputBundle) -> BTreeMap<u32, RuntimePrelude> {
     let mut preludes = BTreeMap::new();
+    let synthetic_parent_source_file_ids = synthetic_parent_source_file_ids(input);
     for source_file in &input.source_files {
         let Some(source) = source_file.source.as_deref() else {
             continue;
         };
         let module_spans = runtime_scope_module_spans(input, source_file.id);
-        if module_spans.is_empty() {
+        if module_spans.is_empty() && !synthetic_parent_source_file_ids.contains(&source_file.id) {
             continue;
         }
-        if let Some(prelude) = parse_runtime_prelude(
-            source_file.id,
-            source_file.path.as_str(),
-            source,
-            &module_spans,
-        ) {
+        let prelude = if module_spans.is_empty() {
+            parse_synthetic_parent_runtime_helper_prelude(
+                source_file.id,
+                source_file.path.as_str(),
+                source,
+            )
+        } else {
+            parse_runtime_prelude(
+                source_file.id,
+                source_file.path.as_str(),
+                source,
+                &module_spans,
+            )
+        };
+        if let Some(prelude) = prelude {
             preludes.insert(source_file.id, prelude);
         }
     }
     preludes
+}
+
+fn synthetic_parent_source_file_ids(input: &InputBundle) -> BTreeSet<u32> {
+    input
+        .source_files
+        .iter()
+        .filter_map(|source_file| synthetic_parent_source_file_id(source_file.path.as_str()))
+        .collect()
+}
+
+fn synthetic_parent_source_file_id(path: &str) -> Option<u32> {
+    path.strip_prefix("__reverts_synthetic__/")?
+        .split_once('/')
+        .and_then(|(parent, _rest)| parent.parse::<u32>().ok())
 }
 
 fn runtime_scope_module_spans(input: &InputBundle, source_file_id: u32) -> Vec<(u32, u32)> {
@@ -773,6 +806,88 @@ fn parse_runtime_prelude(
     }
 
     None
+}
+
+fn parse_synthetic_parent_runtime_helper_prelude(
+    source_file_id: u32,
+    source_file_path: &str,
+    source: &str,
+) -> Option<RuntimePrelude> {
+    let allocator = Allocator::default();
+    for source_type in source_type_candidates(
+        Some(std::path::Path::new(source_file_path)),
+        ParseGoal::TypeScript,
+    ) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if parsed.errors.is_empty() && !parsed.panicked {
+            let collection = collect_runtime_helper_declarations(&parsed.program, source);
+            if collection.bindings.is_empty() {
+                return None;
+            }
+            return Some(RuntimePrelude {
+                source_file_id,
+                source_file_path: source_file_path.to_string(),
+                source: collection.source,
+                bindings: collection.bindings,
+                snippets: collection.snippets,
+                namespace_exports: Vec::new(),
+                entrypoint: None,
+            });
+        }
+    }
+
+    None
+}
+
+fn collect_runtime_helper_declarations(
+    program: &Program<'_>,
+    source: &str,
+) -> RuntimePreludeCollection {
+    let mut bindings = BTreeMap::new();
+    let mut snippets = BTreeMap::new();
+    let mut sources = Vec::new();
+    for statement in &program.body {
+        let Statement::VariableDeclaration(declaration) = statement else {
+            continue;
+        };
+        let keyword = variable_declaration_keyword(declaration, source);
+        for declarator in &declaration.declarations {
+            let Some(init) = declarator.init.as_ref() else {
+                continue;
+            };
+            let kind = runtime_binding_kind_from_initializer(init, source);
+            if !matches!(
+                kind,
+                RuntimePreludeBindingKind::CommonJsWrapper
+                    | RuntimePreludeBindingKind::LazyInitializer
+            ) {
+                continue;
+            }
+            let snippet = variable_declarator_snippet(keyword.as_str(), declarator, source);
+            for binding in binding_pattern_names(&declarator.id) {
+                let binding = BindingName::new(binding);
+                bindings.insert(binding.clone(), kind);
+                snippets.insert(
+                    binding,
+                    RuntimePreludeSnippet {
+                        source: snippet.clone(),
+                        byte_start: declarator.span.start,
+                        sub_snippets: Vec::new(),
+                    },
+                );
+            }
+            sources.push(snippet);
+        }
+    }
+    RuntimePreludeCollection {
+        bindings,
+        snippets,
+        namespace_exports: Vec::new(),
+        source: sources.join("\n"),
+        entrypoint: None,
+    }
 }
 
 struct RuntimePreludeCollection {
@@ -1286,6 +1401,7 @@ fn looks_like_lazy_initializer(compact: &str) -> bool {
 
 fn resolve_runtime_prelude_imports(
     modules: &BTreeMap<ModuleId, ModuleInput>,
+    source_paths_by_id: &BTreeMap<u32, String>,
     runtime_preludes: &BTreeMap<u32, RuntimePrelude>,
     def_use: &mut DefUseGraph,
 ) -> BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>> {
@@ -1305,7 +1421,19 @@ fn resolve_runtime_prelude_imports(
         let Some(source_file_id) = module.source_file_id else {
             continue;
         };
-        let Some(prelude) = runtime_preludes.get(&source_file_id) else {
+        let prelude_source_file_id = runtime_preludes
+            .contains_key(&source_file_id)
+            .then_some(source_file_id)
+            .or_else(|| {
+                source_paths_by_id
+                    .get(&source_file_id)
+                    .and_then(|path| synthetic_parent_source_file_id(path.as_str()))
+                    .filter(|parent_id| runtime_preludes.contains_key(parent_id))
+            });
+        let Some(prelude_source_file_id) = prelude_source_file_id else {
+            continue;
+        };
+        let Some(prelude) = runtime_preludes.get(&prelude_source_file_id) else {
             continue;
         };
         if !prelude.defines(&binding) {
@@ -1317,7 +1445,7 @@ fn resolve_runtime_prelude_imports(
             .entry(module_id)
             .or_default()
             .insert(RuntimePreludeImport {
-                source_file_id,
+                source_file_id: prelude_source_file_id,
                 binding,
             });
     }
@@ -3649,6 +3777,53 @@ mod tests {
         );
         assert_eq!(runtime_binding_names, vec!["$wrap7", "_lazy9"]);
         assert!(graph.def_use().unresolved_reads().is_empty());
+    }
+
+    #[test]
+    fn graph_resolves_synthetic_parent_runtime_helpers_without_module_spans() {
+        let parent = concat!(
+            "var d = (factory, cache) => () => ",
+            "(cache || factory((cache = { exports: {} }).exports, cache), cache.exports);\n",
+            "var v = d((exports) => { exports.value = 1; });\n",
+        );
+        let synthetic = "var v = d((exports) => { exports.value = 1; });";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(parent.to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "__reverts_synthetic__/1/esbuild:v.js",
+            Some(synthetic.to_string()),
+        ));
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "esbuild:v", "esbuild:v")
+                .with_source_file(2)
+                .with_source_span(SourceSpan::new(0, synthetic.len() as u32)),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let parent_prelude = graph
+            .runtime_prelude(1)
+            .expect("synthetic parent helper prelude should be recovered");
+        let runtime_imports = graph.runtime_imports_for(ModuleId(10));
+
+        assert_eq!(
+            parent_prelude.binding_kind(&BindingName::new("d")),
+            Some(RuntimePreludeBindingKind::CommonJsWrapper)
+        );
+        assert_eq!(runtime_imports.len(), 1);
+        assert_eq!(runtime_imports[0].source_file_id, 1);
+        assert_eq!(runtime_imports[0].binding.as_str(), "d");
+        assert!(
+            !graph
+                .def_use()
+                .unresolved_reads()
+                .contains(&(ModuleId(10), BindingName::new("d")))
+        );
     }
 
     #[test]
