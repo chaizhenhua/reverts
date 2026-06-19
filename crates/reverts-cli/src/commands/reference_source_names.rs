@@ -112,7 +112,18 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             plan.matched.function_overlap,
         );
     }
-    if !args.apply {
+    if args.apply {
+        let connection = Connection::open(&args.input)
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
+        let module_count = write_module_names(
+            &connection,
+            &plans,
+            args.min_tier,
+            &args.origin_prefix,
+            &args.reference_version,
+        )?;
+        println!("applied: {module_count} module name(s) written");
+    } else {
         println!(
             "dry-run: {} module match(es); pass --apply to write",
             plans.len()
@@ -373,6 +384,8 @@ fn write_module_names(
         if !tier_passes(plan.matched.tier, min_tier) {
             continue;
         }
+        // _origin documents the provenance schema (prefix:version:file); symbol/binding
+        // writers in later tasks record it — modules has no origin column.
         let _origin = format!(
             "{origin_prefix}:{reference_version}:{}",
             plan.matched.file_path
