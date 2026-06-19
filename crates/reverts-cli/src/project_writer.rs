@@ -4,6 +4,7 @@
 //! this module is the only place that materialises an `AcceptedProject` plus
 //! scaffold/assets onto the filesystem.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -69,11 +70,10 @@ fn write_project_files(
                 source,
             })?;
         }
-        fs::write(path.as_path(), asset.bytes.as_slice()).map_err(|source| {
-            CliRunError::WriteOutput {
-                path: path.clone(),
-                source,
-            }
+        let bytes = output_asset_bytes(asset);
+        fs::write(path.as_path(), bytes.as_slice()).map_err(|source| CliRunError::WriteOutput {
+            path: path.clone(),
+            source,
         })?;
         set_executable_bit(path.as_path(), asset.executable)?;
     }
@@ -87,8 +87,12 @@ fn write_typescript_project_scaffold(
     has_cli_entrypoint: bool,
     assets: &[EmittedAsset],
 ) -> Result<(), CliRunError> {
-    let package_json =
-        typescript_package_json(runtime_dependencies, has_cli_entrypoint, !assets.is_empty());
+    let package_json = typescript_package_json(
+        runtime_dependencies,
+        has_cli_entrypoint,
+        !assets.is_empty(),
+        assets,
+    );
     write_project_file(output, "package.json", package_json.as_str())?;
     write_package_compat_shims(output, runtime_dependencies)?;
     if should_write_legacy_peer_deps_npmrc(runtime_dependencies) {
@@ -170,12 +174,18 @@ fn typescript_package_json(
     runtime_dependencies: &[RuntimeDependency],
     has_cli_entrypoint: bool,
     has_assets: bool,
+    assets: &[EmittedAsset],
 ) -> String {
+    let local_private_packages = local_private_package_dependencies(assets);
     let mut dependencies = serde_json::Map::new();
     for dependency in runtime_dependencies {
+        let specifier = local_private_packages
+            .get(dependency.package_name.as_str())
+            .cloned()
+            .unwrap_or_else(|| dependency.package_version.clone());
         dependencies.insert(
             dependency.package_name.clone(),
-            serde_json::Value::String(dependency.package_version.clone()),
+            serde_json::Value::String(specifier),
         );
     }
     for shim in package_compat_shims(runtime_dependencies) {
@@ -258,6 +268,110 @@ fn insert_dependency_if_absent(
     dependencies
         .entry(package_name.to_string())
         .or_insert_with(|| serde_json::Value::String(package_version.to_string()));
+}
+
+fn local_private_package_dependencies(assets: &[EmittedAsset]) -> BTreeMap<String, String> {
+    let mut dependencies = BTreeMap::new();
+    for asset in assets {
+        let Some(package_dir) = asset
+            .path
+            .strip_prefix("assets/node_modules/")
+            .and_then(|path| path.strip_suffix("/package.json"))
+        else {
+            continue;
+        };
+        let Some(package_json) = local_private_package_manifest(asset) else {
+            continue;
+        };
+        let Some(package_name) = package_json.get("name").and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if package_name != package_dir {
+            continue;
+        }
+        dependencies.insert(
+            package_name.to_string(),
+            format!("file:./assets/node_modules/{package_name}"),
+        );
+    }
+    dependencies
+}
+
+fn is_valid_local_package_name(package_name: &str) -> bool {
+    if package_name.is_empty() || package_name.contains("..") {
+        return false;
+    }
+    let segments = package_name.split('/').collect::<Vec<_>>();
+    if package_name.starts_with('@') {
+        segments.len() == 2
+            && segments
+                .iter()
+                .all(|segment| !segment.is_empty() && is_valid_npm_path_segment(segment))
+    } else {
+        segments.len() == 1 && is_valid_npm_path_segment(segments[0])
+    }
+}
+
+fn is_valid_npm_path_segment(segment: &str) -> bool {
+    segment
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'-' | b'_'))
+}
+
+fn output_asset_bytes(asset: &EmittedAsset) -> Vec<u8> {
+    let Some(mut package_json) = local_private_package_manifest(asset) else {
+        return asset.bytes.clone();
+    };
+    remove_workspace_protocol_dependencies(&mut package_json);
+    let Ok(mut bytes) = serde_json::to_vec_pretty(&package_json) else {
+        return asset.bytes.clone();
+    };
+    bytes.push(b'\n');
+    bytes
+}
+
+fn local_private_package_manifest(asset: &EmittedAsset) -> Option<serde_json::Value> {
+    let package_dir = asset
+        .path
+        .strip_prefix("assets/node_modules/")
+        .and_then(|path| path.strip_suffix("/package.json"))?;
+    let package_json = serde_json::from_slice::<serde_json::Value>(&asset.bytes).ok()?;
+    if package_json
+        .get("private")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    let package_name = package_json
+        .get("name")
+        .and_then(serde_json::Value::as_str)?;
+    if package_name != package_dir || !is_valid_local_package_name(package_name) {
+        return None;
+    }
+    Some(package_json)
+}
+
+fn remove_workspace_protocol_dependencies(package_json: &mut serde_json::Value) {
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        let Some(dependencies) = package_json
+            .get_mut(field)
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        dependencies.retain(|_name, version| {
+            !version
+                .as_str()
+                .is_some_and(|version| version.trim().starts_with("workspace:"))
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3092,6 +3092,54 @@ fn project_writer_adds_sentry_opentelemetry_peer_dependencies() {
 }
 
 #[test]
+fn project_writer_uses_local_file_dependency_for_private_package_assets() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let files = vec![EmittedFile {
+        path: "modules/1-entry.ts".to_string(),
+        source: "// @ts-nocheck\nrequire('@ant/private-native');".to_string(),
+    }];
+    let assets = vec![EmittedAsset {
+        path: "assets/node_modules/@ant/private-native/package.json".to_string(),
+        bytes: br#"{"name":"@ant/private-native","version":"0.0.0","private":true,"devDependencies":{"workspace-only":"workspace:*","node-gyp":"^11.0.0"}}"#.to_vec(),
+        executable: false,
+    }];
+
+    write_emitted_project(
+        &files,
+        &assets,
+        tempdir.path(),
+        &[
+            RuntimeDependency {
+                package_name: "@ant/private-native".to_string(),
+                package_version: "0.0.0".to_string(),
+            },
+            RuntimeDependency {
+                package_name: "ws".to_string(),
+                package_version: "8.18.3".to_string(),
+            },
+        ],
+    )
+    .expect("project should be written");
+
+    let package_json = fs::read_to_string(tempdir.path().join("package.json"))
+        .expect("package json should be written");
+    assert!(
+        package_json.contains(
+            "\"@ant/private-native\": \"file:./assets/node_modules/@ant/private-native\""
+        )
+    );
+    assert!(package_json.contains("\"ws\": \"8.18.3\""));
+    let private_package_json = fs::read_to_string(
+        tempdir
+            .path()
+            .join("assets/node_modules/@ant/private-native/package.json"),
+    )
+    .expect("private package asset should be written");
+    assert!(!private_package_json.contains("workspace:*"));
+    assert!(private_package_json.contains("node-gyp"));
+}
+
+#[test]
 fn project_writer_exposes_cli_entrypoint_when_planned() {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let files = vec![EmittedFile {

@@ -157,10 +157,16 @@ pub fn import_unpacked_to_sqlite(
     create_schema(&connection).map_err(ImportUnpackedError::WriteDatabase)?;
     persist_import(&mut connection, args, &files, &sources, &dependencies)?;
 
+    let private_package_roots = private_package_roots(&files);
+    let private_package_source_assets = sources
+        .iter()
+        .filter(|source| is_private_package_source_asset(source, &private_package_roots))
+        .count();
     let assets = files
         .iter()
         .filter(|file| file.kind == ImportFileKind::Asset)
-        .count();
+        .count()
+        + private_package_source_assets;
     let native_assets = files
         .iter()
         .filter(|file| file.kind == ImportFileKind::NativeAsset)
@@ -625,6 +631,36 @@ fn collect_module_dependencies(
     dependencies
 }
 
+fn private_package_roots(files: &[ImportFile]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter(|file| file.kind != ImportFileKind::Source)
+        .filter(|file| file.relative_path.ends_with("/package.json"))
+        .filter_map(|file| {
+            let package = file.package.as_ref()?;
+            let manifest = fs::read(file.physical_path.as_path()).ok()?;
+            let value = serde_json::from_slice::<Value>(manifest.as_slice()).ok()?;
+            if value.get("private").and_then(Value::as_bool) == Some(true)
+                && value.get("name").and_then(Value::as_str) == Some(package.package_name.as_str())
+            {
+                Some(package.package_root.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn is_private_package_source_asset(
+    source: &SourceRecord,
+    private_package_roots: &BTreeSet<String>,
+) -> bool {
+    source
+        .package
+        .as_ref()
+        .is_some_and(|package| private_package_roots.contains(package.package_root.as_str()))
+}
+
 fn resolve_local_specifier(
     from_path: &str,
     specifier: &str,
@@ -862,6 +898,7 @@ fn persist_import(
             .map_err(ImportUnpackedError::WriteDatabase)?;
     }
 
+    let private_package_roots = private_package_roots(files);
     let mut asset_id = 1_u32;
     for file in files
         .iter()
@@ -882,6 +919,31 @@ fn persist_import(
                     file.physical_path.to_string_lossy(),
                     asset_kind(file),
                     if file.executable { 1_i64 } else { 0_i64 }
+                ],
+            )
+            .map_err(ImportUnpackedError::WriteDatabase)?;
+        asset_id = asset_id
+            .checked_add(1)
+            .ok_or(ImportUnpackedError::TooManyFiles { count: usize::MAX })?;
+    }
+
+    for source in sources
+        .iter()
+        .filter(|source| is_private_package_source_asset(source, &private_package_roots))
+    {
+        transaction
+            .execute(
+                r"
+                INSERT INTO project_assets
+                    (id, project_id, logical_path, output_path, source_path, kind, executable,
+                     platform, arch)
+                VALUES (?1, 1, ?2, ?3, ?4, 'data', 0, NULL, NULL)
+                ",
+                params![
+                    asset_id,
+                    source.relative_path,
+                    format!("assets/{}", source.relative_path),
+                    source.physical_path.to_string_lossy()
                 ],
             )
             .map_err(ImportUnpackedError::WriteDatabase)?;
@@ -1446,6 +1508,84 @@ mod tests {
             },
         )?;
         assert_eq!(selections[0].source_bytes, 71);
+        Ok(())
+    }
+
+    #[test]
+    fn import_unpacked_materializes_private_package_sources_as_assets() -> Result<(), Box<dyn Error>>
+    {
+        let temp = tempdir()?;
+        let root = temp.path().join("app");
+        fs::create_dir_all(root.join("node_modules/@ant/private-native"))?;
+        fs::write(root.join("main.js"), "require('@ant/private-native');\n")?;
+        fs::write(
+            root.join("node_modules/@ant/private-native/package.json"),
+            r#"{"name":"@ant/private-native","version":"0.0.0","private":true,"main":"index.js"}"#,
+        )?;
+        fs::write(
+            root.join("node_modules/@ant/private-native/index.js"),
+            "module.exports = require('./binding.node');\n",
+        )?;
+        fs::write(
+            root.join("node_modules/@ant/private-native/binding.node"),
+            b"native",
+        )?;
+        let package = package(
+            "@ant/private-native",
+            "0.0.0",
+            "node_modules/@ant/private-native",
+        );
+        let manifest = temp.path().join("reverts-import-evidence.json");
+        write_evidence(
+            root.as_path(),
+            manifest.as_path(),
+            vec![
+                evidence_file(root.as_path(), "main.js", None),
+                evidence_file(
+                    root.as_path(),
+                    "node_modules/@ant/private-native/index.js",
+                    Some(package.clone()),
+                ),
+            ],
+            vec![evidence_file(
+                root.as_path(),
+                "node_modules/@ant/private-native/package.json",
+                Some(package.clone()),
+            )],
+            vec![evidence_file(
+                root.as_path(),
+                "node_modules/@ant/private-native/binding.node",
+                Some(package),
+            )],
+        )?;
+        let output_db = temp.path().join("project.sqlite");
+        let args = ImportUnpackedArgs {
+            input: root,
+            manifest,
+            project_name: "fixture".to_string(),
+            output_db: output_db.clone(),
+            ignore_native_assets: false,
+            max_source_bytes: None,
+            bundle_source_bytes: None,
+        };
+
+        let outcome = import_unpacked_to_sqlite(&args)?;
+
+        assert_eq!(outcome.assets, 2);
+        assert_eq!(outcome.native_assets, 1);
+        let connection = Connection::open(output_db.as_path())?;
+        let source_asset = connection.query_row(
+            "SELECT kind FROM project_assets WHERE logical_path = ?1",
+            ["node_modules/@ant/private-native/index.js"],
+            |row| row.get::<_, String>(0),
+        )?;
+        assert_eq!(source_asset, "data");
+        let bundle =
+            reverts_input::sqlite::load_project_bundle_from_sqlite(output_db.as_path(), 1)?;
+        assert!(bundle.assets.iter().any(|asset| {
+            asset.output_path == "assets/node_modules/@ant/private-native/index.js"
+                && asset.bytes == b"module.exports = require('./binding.node');\n"
+        }));
         Ok(())
     }
 
