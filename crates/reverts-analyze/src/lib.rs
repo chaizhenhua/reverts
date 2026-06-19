@@ -216,7 +216,8 @@ fn is_ambient_binding(binding: &str) -> bool {
     matches!(
         binding,
         // --- ECMAScript built-ins (constructors + namespaces) ---
-        "Array"
+        "AggregateError"
+            | "Array"
             | "ArrayBuffer"
             | "AsyncFunction"
             | "AsyncGenerator"
@@ -1137,6 +1138,11 @@ mod tests {
         rows.modules
             .push(ModuleInput::application(ModuleId(1), "app", "src/index.ts"));
         rows
+    }
+
+    #[test]
+    fn aggregate_error_is_ambient() {
+        assert!(super::is_ambient_binding("AggregateError"));
     }
 
     fn rows_with_application_source(source: &str) -> InputRows {
