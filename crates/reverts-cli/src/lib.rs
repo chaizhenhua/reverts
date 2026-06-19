@@ -13,9 +13,9 @@ mod runtime_dependency_coherence;
 mod tests;
 
 pub use args::{
-    CoverageLedgerArgs, ExtractAssetsArgs, FullInventoryArgs, ImportUnpackedArgs,
-    MatchPackagesArgs, MatchPackagesReportArgs, ModuleClassifyArgs, NamingPlanArgs,
-    NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
+    CoverageLedgerArgs, ExtractAssetsArgs, FullInventoryArgs, IdentifierInventoryArgs,
+    ImportUnpackedArgs, MatchPackagesArgs, MatchPackagesReportArgs, ModuleClassifyArgs,
+    NamingPlanArgs, NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
     PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
 pub use commands::coverage_ledger::{coverage_ledger_json, coverage_ledger_report};
@@ -24,6 +24,7 @@ pub use commands::extract_assets::{
 };
 pub use commands::full_inventory::{full_inventory_json, full_inventory_report};
 pub use commands::generate_project::GenerateProjectV2Args;
+pub use commands::identifier_inventory::{identifier_inventory_json, identifier_inventory_report};
 pub use commands::import_unpacked::{ImportUnpackedOutcome, import_unpacked_to_sqlite};
 pub use commands::match_modules::MatchModulesRecallArgs;
 pub use commands::module_classify::{
@@ -111,6 +112,7 @@ pub enum CliCommand {
     PackageExternalizationHints(PackageExternalizationHintsArgs),
     ExtractAssets(ExtractAssetsArgs),
     CoverageLedger(CoverageLedgerArgs),
+    IdentifierInventory(IdentifierInventoryArgs),
     FullInventory(FullInventoryArgs),
     RuntimeInventory(RuntimeInventoryArgs),
     SymbolNames(SymbolNamesArgs),
@@ -200,6 +202,8 @@ enum ClapCommand {
     ExtractAssets(ExtractAssetsArgs),
     #[command(name = "coverage-ledger", disable_help_flag = true)]
     CoverageLedger(CoverageLedgerArgs),
+    #[command(name = "identifier-inventory", disable_help_flag = true)]
+    IdentifierInventory(IdentifierInventoryArgs),
     #[command(name = "full-inventory", disable_help_flag = true)]
     FullInventory(FullInventoryArgs),
     #[command(name = "runtime-inventory", disable_help_flag = true)]
@@ -237,6 +241,7 @@ impl ClapCli {
             }
             Some(ClapCommand::ExtractAssets(args)) => CliCommand::ExtractAssets(args),
             Some(ClapCommand::CoverageLedger(args)) => CliCommand::CoverageLedger(args),
+            Some(ClapCommand::IdentifierInventory(args)) => CliCommand::IdentifierInventory(args),
             Some(ClapCommand::FullInventory(args)) => CliCommand::FullInventory(args),
             Some(ClapCommand::RuntimeInventory(args)) => {
                 CliCommand::RuntimeInventory(validate_runtime_inventory_for_cli(args)?)
@@ -369,6 +374,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         }
         CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
         CliCommand::CoverageLedger(args) => commands::coverage_ledger::run(args),
+        CliCommand::IdentifierInventory(args) => commands::identifier_inventory::run(args),
         CliCommand::FullInventory(args) => commands::full_inventory::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),

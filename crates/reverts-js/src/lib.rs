@@ -6,6 +6,7 @@ mod format;
 mod format_module_items;
 mod generated_statements;
 mod identifier;
+mod identifier_inventory;
 mod import_coalesce;
 mod lazy;
 mod local_named_exports;
@@ -54,6 +55,7 @@ pub use identifier::{
     is_valid_static_member_property_name, read_identifier_at, read_identifier_with_end_at,
     read_quoted_string_at, sanitize_identifier, skip_block_comment, skip_line_comment,
 };
+pub use identifier_inventory::{IdentifierInventoryStats, collect_identifier_inventory};
 pub use lazy::{
     LazyBodyClassification, classify_lazy_module_body, extract_lazy_module_eager_value,
     extract_lazy_module_eager_value_with_safe_deps,

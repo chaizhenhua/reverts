@@ -320,6 +320,8 @@ pub struct CoverageLedgerArgs {
     pub output_root: Option<PathBuf>,
     #[arg(long = "naming-progress")]
     pub naming_progress: Option<PathBuf>,
+    #[arg(long = "identifier-inventory")]
+    pub identifier_inventory: Option<PathBuf>,
     #[arg(long)]
     pub json: Option<PathBuf>,
 }
@@ -327,6 +329,21 @@ pub struct CoverageLedgerArgs {
 impl CoverageLedgerArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         parse_subcommand_args(args, help::COVERAGE_LEDGER_COMMAND)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct IdentifierInventoryArgs {
+    #[arg(long = "output-root")]
+    pub output_root: PathBuf,
+    #[arg(long)]
+    pub json: Option<PathBuf>,
+}
+
+impl IdentifierInventoryArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::IDENTIFIER_INVENTORY_COMMAND)
     }
 }
 
@@ -435,6 +452,7 @@ fn missing_required_argument(message: &str) -> &'static str {
         "--input",
         "--project-id",
         "--output",
+        "--output-root",
         "--all-projects",
         "--list | --set | --clear | --batch",
     ] {

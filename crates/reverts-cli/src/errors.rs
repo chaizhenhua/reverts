@@ -667,6 +667,7 @@ pub enum CliRunError {
     SymbolNames(SymbolNamesError),
     FullInventory(String),
     CoverageLedger(String),
+    IdentifierInventory(String),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -688,6 +689,9 @@ impl fmt::Display for CliRunError {
             Self::SymbolNames(source) => write!(formatter, "{source}"),
             Self::FullInventory(message) => write!(formatter, "full-inventory: {message}"),
             Self::CoverageLedger(message) => write!(formatter, "coverage-ledger: {message}"),
+            Self::IdentifierInventory(message) => {
+                write!(formatter, "identifier-inventory: {message}")
+            }
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -729,7 +733,8 @@ impl Error for CliRunError {
             | Self::UnsafeOutputPath(_)
             | Self::MatchModulesRecall(_)
             | Self::FullInventory(_)
-            | Self::CoverageLedger(_) => None,
+            | Self::CoverageLedger(_)
+            | Self::IdentifierInventory(_) => None,
         }
     }
 }
