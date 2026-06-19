@@ -48,6 +48,28 @@ pub struct GeneratedTypeAnnotation {
     pub kind: GeneratedTypeKind,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TypeCoverageStats {
+    pub variable_candidates: usize,
+    pub variable_annotated: usize,
+    pub parameter_candidates: usize,
+    pub parameter_annotated: usize,
+    pub return_candidates: usize,
+    pub return_annotated: usize,
+}
+
+impl TypeCoverageStats {
+    #[must_use]
+    pub const fn total_candidates(self) -> usize {
+        self.variable_candidates + self.parameter_candidates + self.return_candidates
+    }
+
+    #[must_use]
+    pub const fn total_annotated(self) -> usize {
+        self.variable_annotated + self.parameter_annotated + self.return_annotated
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InferredExpressionType {
     Primitive(GeneratedTypeKind),
@@ -91,6 +113,34 @@ pub fn collect_top_level_literal_type_annotations(
             collect_statement_literal_annotations(statement, &mut annotations);
         }
         return Ok(annotations);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_type_coverage_stats(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<TypeCoverageStats> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = TypeCoverageCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.stats);
     }
 
     Err(JsError::ParseFailed(errors))
@@ -506,6 +556,74 @@ impl<'a> Visit<'a> for ReturnTypeCollector {
     fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}
 
     fn visit_arrow_function_expression(&mut self, _arrow: &ArrowFunctionExpression<'a>) {}
+}
+
+#[derive(Default)]
+struct TypeCoverageCollector {
+    stats: TypeCoverageStats,
+}
+
+impl<'a> Visit<'a> for TypeCoverageCollector {
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        for declarator in &declaration.declarations {
+            if declarator.init.is_none() || binding_pattern_identifier(&declarator.id).is_none() {
+                continue;
+            }
+            self.stats.variable_candidates += 1;
+            if declarator.id.type_annotation.is_some() {
+                self.stats.variable_annotated += 1;
+            }
+        }
+        walk_variable_declaration_read(self, declaration);
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        self.record_parameters(&function.params);
+        if function.body.is_some() {
+            self.stats.return_candidates += 1;
+            if function.return_type.is_some() {
+                self.stats.return_annotated += 1;
+            }
+        }
+        walk_function_read(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        self.record_parameters(&arrow.params);
+        self.stats.return_candidates += 1;
+        if arrow.return_type.is_some() {
+            self.stats.return_annotated += 1;
+        }
+        walk_arrow_function_expression_read(self, arrow);
+    }
+}
+
+impl TypeCoverageCollector {
+    fn record_parameters(&mut self, parameters: &FormalParameters<'_>) {
+        for parameter in &parameters.items {
+            let Some(annotated) = simple_parameter_annotation_state(&parameter.pattern) else {
+                continue;
+            };
+            self.stats.parameter_candidates += 1;
+            if annotated {
+                self.stats.parameter_annotated += 1;
+            }
+        }
+    }
+}
+
+fn simple_parameter_annotation_state(pattern: &BindingPattern<'_>) -> Option<bool> {
+    match &pattern.kind {
+        BindingPatternKind::BindingIdentifier(_) => Some(pattern.type_annotation.is_some()),
+        BindingPatternKind::AssignmentPattern(assignment)
+            if binding_pattern_identifier(&assignment.left).is_some() =>
+        {
+            Some(assignment.left.type_annotation.is_some())
+        }
+        BindingPatternKind::ObjectPattern(_)
+        | BindingPatternKind::ArrayPattern(_)
+        | BindingPatternKind::AssignmentPattern(_) => None,
+    }
 }
 
 struct ImportMemberTypeQueryAnnotator<'b, 'a> {

@@ -61,8 +61,9 @@ pub use lazy::{
 pub(crate) use local_named_exports::module_export_name_text;
 pub use parse::{parse_options_for, parse_source, source_type_candidates, source_type_for_parse};
 pub use type_annotations::{
-    GeneratedTypeAnnotation, GeneratedTypeKind, apply_import_member_type_queries_to_program,
-    apply_type_annotations_to_program, collect_top_level_literal_type_annotations,
+    GeneratedTypeAnnotation, GeneratedTypeKind, TypeCoverageStats,
+    apply_import_member_type_queries_to_program, apply_type_annotations_to_program,
+    collect_top_level_literal_type_annotations, collect_type_coverage_stats,
 };
 
 use oxc_ast::ast::Expression;

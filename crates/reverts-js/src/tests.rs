@@ -7,9 +7,9 @@ use super::{
     collect_file_url_source_location_rewrites, collect_identifier_read_facts,
     collect_path_builder_calls, collect_static_resource_specifiers,
     collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
-    collect_void_zero_expression_statements, extract_lazy_module_eager_value,
-    format_source_minified, format_source_pretty, format_source_with_module_items,
-    format_source_with_module_items_and_renames,
+    collect_type_coverage_stats, collect_void_zero_expression_statements,
+    extract_lazy_module_eager_value, format_source_minified, format_source_pretty,
+    format_source_with_module_items, format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
     format_source_with_module_items_request, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
@@ -471,6 +471,25 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
 
     assert!(formatted.contains("function greet(name: string): string"));
     assert!(formatted.contains("const double = (value: number) =>"));
+}
+
+#[test]
+fn type_coverage_stats_count_annotatable_boundaries() {
+    let stats = collect_type_coverage_stats(
+        "const typed: string = 'x'; let plain = 1; function f(a: number, b) { return a; } const g = (x: boolean): boolean => x;",
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("fixture should parse");
+
+    assert_eq!(stats.variable_candidates, 3);
+    assert_eq!(stats.variable_annotated, 1);
+    assert_eq!(stats.parameter_candidates, 3);
+    assert_eq!(stats.parameter_annotated, 2);
+    assert_eq!(stats.return_candidates, 2);
+    assert_eq!(stats.return_annotated, 1);
+    assert_eq!(stats.total_candidates(), 8);
+    assert_eq!(stats.total_annotated(), 4);
 }
 
 #[test]
