@@ -6866,6 +6866,14 @@ pub(crate) fn lowered_runtime_sources(
                 source.source,
             ));
         }
+        if let Some(imports_by_target) = source_module_wiring.imports_by_module.get(&module.id) {
+            for binding in imports_by_target
+                .values()
+                .flat_map(|bindings| bindings.iter())
+            {
+                helper_kinds.insert(binding.clone(), RuntimePreludeBindingKind::SourceBacked);
+            }
+        }
         // Cross-module export set: any binding this module exports stays
         // observable from other modules' call sites. Pass them to the
         // lowering pass so delazify / namespace decomposition refuse to
@@ -7731,7 +7739,17 @@ pub(crate) fn source_definition_bindings(
     let mut bindings = program.model().graph().ast_definitions_for(module_id);
     if let Some(source) = program.model().input().module_source_slice(module_id) {
         bindings.extend(top_level_definitions_in_source(source.source));
-        bindings.extend(implicit_global_writes_in_source(source.source));
+        // A bare assignment to a host runtime global (`onmessage = …`,
+        // `self = …`) is a side effect, not a module definition. Treating it
+        // as a definition makes the module the apparent owner of that name, so
+        // another module referencing the same global resolves to an import of
+        // it — which dangles once lowering prunes the write from the owner's
+        // emitted body. Host globals resolve at runtime; no module owns them.
+        bindings.extend(
+            implicit_global_writes_in_source(source.source)
+                .into_iter()
+                .filter(|binding| !is_runtime_global_identifier(binding.as_str())),
+        );
     }
     bindings
 }

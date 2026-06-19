@@ -353,6 +353,11 @@ pub(crate) fn emit_runtime_helper_files(
             &module_owned_bindings_for_source,
             helper_imports,
         );
+        // Local binding aliases the helper source's own `import` statements
+        // introduce, e.g. `import { constants as Mh5 } from "node:os"`. Captured
+        // before the source is moved into `file` below; used to make those
+        // aliases re-exportable when a consumer routes through this helper.
+        let helper_local_bindings = import_alias_local_bindings(helper_closure.source.as_str());
         for binding in &public_helper_bindings {
             if helper_closure.emitted_bindings.contains(binding) {
                 continue;
@@ -463,6 +468,18 @@ pub(crate) fn emit_runtime_helper_files(
         exportable_helper_bindings.extend(helper_imported_bindings.iter().cloned());
         exportable_helper_bindings.extend(owner_public_reexport_bindings.iter().cloned());
         exportable_helper_bindings.extend(package_init_shims.iter().cloned());
+        // External-import aliases the helper source brings in are re-exportable:
+        // a consumer routed through this helper imports the alias from here. Only
+        // those a consumer actually demands (`public_helper_bindings`) are added,
+        // so private helper imports are not leaked. Without this the alias is an
+        // unused import that tsc elides, and the consumer's `import { X }` fails
+        // at module instantiation.
+        exportable_helper_bindings.extend(
+            public_helper_bindings
+                .iter()
+                .filter(|binding| helper_local_bindings.contains(*binding))
+                .cloned(),
+        );
         let mut exported_bindings = public_helper_bindings
             .intersection(&exportable_helper_bindings)
             .cloned()
@@ -519,6 +536,76 @@ pub(crate) fn emit_runtime_helper_files(
         plan.push_file(file);
     }
     Ok(())
+}
+
+/// Local binding names introduced by `import` statements in `source`, tolerant
+/// of the lowered bundle's minified syntax (`import{a as b}from"m"`,
+/// `import*as n from"m"`, `import d from"m"`). The spaced-syntax import parsers
+/// elsewhere skip these, so a helper's own external-import aliases (e.g.
+/// `import{constants as Mh5}from"node:os"`) are invisible to the re-export
+/// computation — leaving the alias an unused import that tsc elides, which
+/// breaks any consumer routed through the helper for that binding.
+fn import_alias_local_bindings(source: &str) -> BTreeSet<BindingName> {
+    fn is_ident_continue(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_' || c == '$'
+    }
+    fn is_ident(s: &str) -> bool {
+        let mut chars = s.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$')
+            && chars.all(is_ident_continue)
+    }
+    let mut bindings = BTreeSet::<BindingName>::new();
+    for raw in source.lines() {
+        let line = raw.trim();
+        let Some(rest) = line.strip_prefix("import") else {
+            continue;
+        };
+        // Require `import` to be a complete keyword token.
+        if rest.starts_with(is_ident_continue) {
+            continue;
+        }
+        let rest = rest.trim_start();
+        if rest.starts_with("type ") || rest.starts_with("type{") {
+            continue;
+        }
+        // Named clause `{ a as b, c }`.
+        if let Some(open) = rest.find('{')
+            && let Some(rel_close) = rest[open + 1..].find('}')
+        {
+            for tok in rest[open + 1..open + 1 + rel_close].split(',') {
+                let tok = tok.trim();
+                if tok.is_empty() || tok.starts_with("type ") {
+                    continue;
+                }
+                let local = tok.rsplit(" as ").next().unwrap_or(tok).trim();
+                if is_ident(local) {
+                    bindings.insert(BindingName::new(local.to_string()));
+                }
+            }
+        }
+        // Namespace clause `* as ns` / `*as ns`.
+        if let Some((_, after_star)) = rest.split_once('*') {
+            if let Some(after_as) = after_star.trim_start().strip_prefix("as") {
+                let name: String = after_as
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| is_ident_continue(*c))
+                    .collect();
+                if is_ident(&name) {
+                    bindings.insert(BindingName::new(name));
+                }
+            }
+        }
+        // Default import `d` (followed by `from` or `,`).
+        let head: String = rest.chars().take_while(|c| is_ident_continue(*c)).collect();
+        if is_ident(&head) && head != "from" {
+            let after_head = rest[head.len()..].trim_start();
+            if after_head.starts_with("from") || after_head.starts_with(',') {
+                bindings.insert(BindingName::new(head));
+            }
+        }
+    }
+    bindings
 }
 
 fn planned_public_export_imports(

@@ -112,52 +112,60 @@ fn module_backed_names(file: &PlannedFile) -> BTreeSet<String> {
 
 /// Local binding names introduced by an import statement: `* as ns`, the
 /// right-hand side of `{ a as b }` (or bare `{ a }`), and a default import.
+///
+/// Tolerant of the lowered bundle's minified syntax (`import{a as b}from"m"`,
+/// `import*as n from"m"`) — coalesced runtime-helper imports keep that
+/// no-space form, and a space-requiring parser would treat their external
+/// aliases as unbacked, pruning a legitimately re-exported alias as "invalid".
 fn import_local_names(statement: &str) -> Vec<String> {
-    if !statement.starts_with("import ") {
+    fn is_ident_continue(character: char) -> bool {
+        character == '_' || character == '$' || character.is_ascii_alphanumeric()
+    }
+    let Some(rest) = statement.strip_prefix("import") else {
+        return Vec::new();
+    };
+    // Require `import` to be a complete keyword token (not `imported`, etc.).
+    if rest.starts_with(is_ident_continue) {
         return Vec::new();
     }
+    let rest = rest.trim_start();
     let mut names = Vec::new();
-    if let Some((_, after)) = statement.split_once("* as ") {
-        let ns = after
+    // Namespace clause `* as ns` / `*as ns`.
+    if let Some((_, after_star)) = rest.split_once('*')
+        && let Some(after_as) = after_star.trim_start().strip_prefix("as")
+    {
+        let ns = after_as
             .trim_start()
             .chars()
-            .take_while(|character| {
-                *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
-            })
+            .take_while(|character| is_ident_continue(*character))
             .collect::<String>();
         if is_identifier_like_ascii(ns.as_str()) {
             names.push(ns);
         }
     }
-    if let Some(open) = statement.find('{')
-        && let Some(close) = statement[open..].find('}').map(|index| open + index)
+    // Named clause `{ a as b, c }`.
+    if let Some(open) = rest.find('{')
+        && let Some(close) = rest[open..].find('}').map(|index| open + index)
     {
-        for part in statement[open + 1..close].split(',') {
+        for part in rest[open + 1..close].split(',') {
             let part = part.trim();
             if part.is_empty() {
                 continue;
             }
-            let local = part
-                .split_once(" as ")
-                .map(|(_, right)| right.trim())
-                .unwrap_or(part);
+            let local = part.rsplit(" as ").next().map(str::trim).unwrap_or(part);
             if is_identifier_like_ascii(local) {
                 names.push(local.to_string());
             }
         }
     }
-    if let Some(rest) = statement.strip_prefix("import ") {
-        let head = rest.trim_start();
-        if !head.starts_with(['{', '*', '\'', '"']) {
-            let default = head
-                .chars()
-                .take_while(|character| {
-                    *character == '_' || *character == '$' || character.is_ascii_alphanumeric()
-                })
-                .collect::<String>();
-            if is_identifier_like_ascii(default.as_str()) {
-                names.push(default);
-            }
+    // Default import `d` (followed by `,` or `from`).
+    if !rest.starts_with(['{', '*', '\'', '"']) {
+        let default = rest
+            .chars()
+            .take_while(|character| is_ident_continue(*character))
+            .collect::<String>();
+        if is_identifier_like_ascii(default.as_str()) && default != "from" {
+            names.push(default);
         }
     }
     names

@@ -108,6 +108,7 @@ pub(crate) fn is_runtime_global_identifier(identifier: &str) -> bool {
             | "location"
             | "module"
             | "navigator"
+            | "onmessage"
             | "parseFloat"
             | "parseInt"
             | "performance"
