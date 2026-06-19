@@ -11,7 +11,8 @@ use oxc_ast::{
     Visit,
     ast::{
         BindingIdentifier, ExportAllDeclaration, ExportNamedDeclaration, IdentifierReference,
-        ImportDeclaration, ObjectProperty, Program, StaticMemberExpression,
+        ImportDeclaration, ImportDeclarationSpecifier, ObjectProperty, Program,
+        StaticMemberExpression,
     },
     visit::walk::{
         walk_export_all_declaration, walk_export_named_declaration, walk_import_declaration,
@@ -35,6 +36,7 @@ pub struct IdentifierInventoryStats {
     pub export_specifiers: usize,
     pub semantic_named_bindings: usize,
     pub semantic_pending_bindings: usize,
+    pub semantic_pending_import_bindings: usize,
 }
 
 impl IdentifierInventoryStats {
@@ -118,6 +120,24 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
             .specifiers
             .as_ref()
             .map_or(0, |specifiers| specifiers.len());
+        if let Some(specifiers) = &declaration.specifiers {
+            for specifier in specifiers {
+                let name = match specifier {
+                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
+                        specifier.local.name.as_str()
+                    }
+                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
+                        specifier.local.name.as_str()
+                    }
+                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
+                        specifier.local.name.as_str()
+                    }
+                };
+                if !is_meaningful_preserved_binding_name(name) {
+                    self.stats.semantic_pending_import_bindings += 1;
+                }
+            }
+        }
         walk_import_declaration(self, declaration);
     }
 

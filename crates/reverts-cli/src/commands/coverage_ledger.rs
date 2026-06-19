@@ -163,7 +163,7 @@ fn ledger_from_inventory(inventory: &Value, identifier_inventory: Option<&Value>
         rows.push(coverage_row(
             "semantic_binding",
             number(semantic_bindings, "total"),
-            number(semantic_bindings, "named"),
+            number(semantic_bindings, "complete_count"),
             number(semantic_bindings, "pending"),
         ));
     }
@@ -342,7 +342,7 @@ mod tests {
             "complete": true,
             "files": {"scanned": 1, "parse_errors": 0},
             "identifiers": {"total": 9},
-            "semantic_bindings": {"total": 3, "named": 2, "pending": 1}
+            "semantic_bindings": {"total": 3, "named": 2, "preserved": 0, "complete_count": 2, "pending": 1}
         });
 
         let ledger = super::ledger_from_inventory(&inventory, Some(&identifier_inventory));

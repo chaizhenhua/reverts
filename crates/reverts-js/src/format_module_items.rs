@@ -28,7 +28,8 @@ use crate::recover::{
 };
 use crate::rename_apply::{
     ReadabilityRenameHint, ReadabilityRenameSource, apply_emit_safety_renames,
-    apply_readability_renames, resolve_readability_rename_hints,
+    apply_generated_semantic_binding_renames, apply_readability_renames,
+    resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
 use crate::type_annotations::{
@@ -46,6 +47,7 @@ pub struct FormatSourceRequest<'a> {
     pub readability_renames: &'a [GeneratedRename],
     pub type_annotations: &'a [GeneratedTypeAnnotation],
     pub infer_literal_types: bool,
+    pub generated_semantic_names: bool,
     pub path_hint: Option<&'a Path>,
     pub goal: ParseGoal,
     pub lowering: CompilerLowering,
@@ -86,6 +88,7 @@ pub fn format_source_with_module_items_and_renames(
         readability_renames,
         type_annotations: &[],
         infer_literal_types: false,
+        generated_semantic_names: false,
         path_hint,
         goal,
         lowering,
@@ -112,6 +115,7 @@ pub fn format_source_with_module_items_and_renames_with_report(
         readability_renames,
         type_annotations: &[],
         infer_literal_types: false,
+        generated_semantic_names: false,
         path_hint,
         goal,
         lowering,
@@ -128,6 +132,7 @@ pub fn format_source_with_module_items_request_with_report(
         readability_renames,
         type_annotations,
         infer_literal_types,
+        generated_semantic_names,
         path_hint,
         goal,
         lowering,
@@ -227,6 +232,9 @@ pub fn format_source_with_module_items_request_with_report(
         );
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);
         apply_emit_readability_polish(&allocator, &mut parsed.program, &mut report);
+        if generated_semantic_names {
+            apply_generated_semantic_binding_renames(&allocator, &mut parsed.program, &mut report);
+        }
         normalize_imports_after_emit(&mut parsed.program, &builder);
         if parsed.program.body.is_empty() {
             parsed.program.body.push(empty_export_statement(&builder));

@@ -2,11 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    AstBuilder, VisitMut,
-    ast::{BindingIdentifier, IdentifierReference, Program},
+    AstBuilder, Visit, VisitMut,
+    ast::{
+        BindingIdentifier, ExportNamedDeclaration, IdentifierReference, ModuleExportName, Program,
+    },
 };
-use oxc_semantic::SemanticBuilder;
-use oxc_syntax::{reference::ReferenceId, symbol::SymbolId};
+use oxc_semantic::{SemanticBuilder, SymbolTable};
+use oxc_syntax::{
+    reference::ReferenceId,
+    symbol::{SymbolFlags, SymbolId},
+};
 
 use crate::ReadabilityReport;
 use crate::identifier::sanitize_identifier;
@@ -282,6 +287,145 @@ pub(crate) fn apply_emit_safety_renames<'a>(
         reference_renames,
     };
     renamer.visit_program(program);
+}
+
+pub(crate) fn apply_generated_semantic_binding_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    report: &mut ReadabilityReport,
+) {
+    let (symbol_renames, reference_renames) = generated_semantic_binding_renames(program);
+    if !symbol_renames.is_empty() {
+        report.push(format!(
+            "generated semantic binding names for {} minified binding(s)",
+            symbol_renames.len()
+        ));
+    }
+
+    if symbol_renames.is_empty() && reference_renames.is_empty() {
+        return;
+    }
+
+    let mut renamer = ReadabilityRenamer {
+        builder: AstBuilder::new(allocator),
+        symbol_renames,
+        reference_renames,
+    };
+    renamer.visit_program(program);
+}
+
+fn generated_semantic_binding_renames(
+    program: &Program<'_>,
+) -> (BTreeMap<SymbolId, String>, BTreeMap<ReferenceId, String>) {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let symbols = semantic.symbols();
+    let exported_symbols = exported_specifier_symbols(program, symbols);
+    let mut used_names = symbols
+        .symbol_ids()
+        .map(|symbol_id| symbols.get_name(symbol_id).to_string())
+        .collect::<BTreeSet<_>>();
+    used_names.extend(
+        semantic
+            .scopes()
+            .root_unresolved_references()
+            .keys()
+            .map(|name| name.as_str().to_string()),
+    );
+
+    let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
+    let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
+    for symbol_id in symbols.symbol_ids() {
+        let original = symbols.get_name(symbol_id);
+        let flags = symbols.get_flags(symbol_id);
+        if !should_assign_generated_semantic_name(
+            original,
+            flags,
+            exported_symbols.contains(&symbol_id),
+        ) {
+            continue;
+        }
+        let renamed = unique_safe_identifier(semantic_binding_name_base(flags), &mut used_names);
+        symbol_renames.insert(symbol_id, renamed.clone());
+        for reference_id in symbols.get_resolved_reference_ids(symbol_id) {
+            reference_renames.insert(*reference_id, renamed.clone());
+        }
+    }
+    (symbol_renames, reference_renames)
+}
+
+fn exported_specifier_symbols(program: &Program<'_>, symbols: &SymbolTable) -> BTreeSet<SymbolId> {
+    let mut collector = ExportedSpecifierSymbolCollector {
+        symbols,
+        exported_symbols: BTreeSet::new(),
+    };
+    collector.visit_program(program);
+    collector.exported_symbols
+}
+
+struct ExportedSpecifierSymbolCollector<'b> {
+    symbols: &'b SymbolTable,
+    exported_symbols: BTreeSet<SymbolId>,
+}
+
+impl<'a> Visit<'a> for ExportedSpecifierSymbolCollector<'_> {
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_none() {
+            for specifier in &declaration.specifiers {
+                let ModuleExportName::IdentifierReference(local) = &specifier.local else {
+                    continue;
+                };
+                let Some(reference_id) = local.reference_id.get() else {
+                    continue;
+                };
+                if let Some(symbol_id) = self.symbols.get_reference(reference_id).symbol_id() {
+                    self.exported_symbols.insert(symbol_id);
+                }
+            }
+        }
+        oxc_ast::visit::walk::walk_export_named_declaration(self, declaration);
+    }
+}
+
+fn should_assign_generated_semantic_name(
+    name: &str,
+    flags: SymbolFlags,
+    is_exported_specifier: bool,
+) -> bool {
+    crate::identifier::is_minified_identifier(name)
+        && !is_exported_specifier
+        && !flags.intersects(SymbolFlags::Import | SymbolFlags::TypeImport)
+        && !matches!(
+            name,
+            "_$cached"
+                | "_$init"
+                | "_$l"
+                | "cmd"
+                | "cwd"
+                | "env"
+                | "gid"
+                | "pid"
+                | "pkg"
+                | "uid"
+                | "uri"
+        )
+}
+
+fn semantic_binding_name_base(flags: oxc_syntax::symbol::SymbolFlags) -> &'static str {
+    if flags.is_function() {
+        "semanticFunction"
+    } else if flags.is_class() {
+        "semanticClass"
+    } else if flags.contains(oxc_syntax::symbol::SymbolFlags::CatchVariable) {
+        "caughtError"
+    } else if flags.contains(oxc_syntax::symbol::SymbolFlags::Import) {
+        "semanticImport"
+    } else if flags.is_type_parameter() {
+        "semanticType"
+    } else if flags.is_const_variable() {
+        "semanticConstant"
+    } else {
+        "semanticValue"
+    }
 }
 
 fn unique_safe_identifier(base: &str, used_names: &mut BTreeSet<String>) -> String {

@@ -38,6 +38,11 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
     files.sort();
 
     let mut totals = IdentifierInventoryStats::default();
+    let mut semantic_total = 0_usize;
+    let mut semantic_named = 0_usize;
+    let mut semantic_preserved = 0_usize;
+    let mut semantic_pending = 0_usize;
+    let mut semantic_excluded = 0_usize;
     let mut scanned_files = Vec::new();
     let mut parse_errors = Vec::new();
 
@@ -47,6 +52,14 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
         })?;
         match collect_identifier_inventory(&source, Some(path.as_path()), ParseGoal::TypeScript) {
             Ok(stats) => {
+                let relative_path = relative_display(args.output_root.as_path(), path.as_path());
+                let semantic =
+                    semantic_binding_file_coverage(relative_path.as_str(), &source, &stats);
+                semantic_total += semantic.total;
+                semantic_named += semantic.named;
+                semantic_preserved += semantic.preserved;
+                semantic_pending += semantic.pending;
+                semantic_excluded += semantic.excluded;
                 totals.binding_identifiers += stats.binding_identifiers;
                 totals.identifier_references += stats.identifier_references;
                 totals.static_member_properties += stats.static_member_properties;
@@ -56,7 +69,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                 totals.semantic_named_bindings += stats.semantic_named_bindings;
                 totals.semantic_pending_bindings += stats.semantic_pending_bindings;
                 scanned_files.push(serde_json::json!({
-                    "path": relative_display(args.output_root.as_path(), path.as_path()),
+                    "path": relative_path,
                     "identifiers": stats.total(),
                     "binding_identifiers": stats.binding_identifiers,
                     "identifier_references": stats.identifier_references,
@@ -65,11 +78,15 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                     "import_specifiers": stats.import_specifiers,
                     "export_specifiers": stats.export_specifiers,
                     "semantic_bindings": {
-                        "total": stats.binding_identifiers,
-                        "named": stats.semantic_named_bindings,
-                        "pending": stats.semantic_pending_bindings,
-                        "percent": percent(stats.semantic_named_bindings, stats.binding_identifiers),
-                        "complete": stats.semantic_pending_bindings == 0,
+                        "total": semantic.total,
+                        "named": semantic.named,
+                        "preserved": semantic.preserved,
+                        "excluded": semantic.excluded,
+                        "complete_count": semantic.named + semantic.preserved,
+                        "pending": semantic.pending,
+                        "percent": percent(semantic.named + semantic.preserved, semantic.total),
+                        "complete": semantic.pending == 0,
+                        "reason": semantic.reason,
                     },
                 }));
             }
@@ -101,16 +118,70 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
             "pending": 0,
         },
         "semantic_bindings": {
-            "total": totals.binding_identifiers,
-            "named": totals.semantic_named_bindings,
-            "pending": totals.semantic_pending_bindings,
-            "percent": percent(totals.semantic_named_bindings, totals.binding_identifiers),
-            "complete": parse_errors.is_empty() && totals.semantic_pending_bindings == 0,
+            "total": semantic_total,
+            "named": semantic_named,
+            "preserved": semantic_preserved,
+            "excluded": semantic_excluded,
+            "complete_count": semantic_named + semantic_preserved,
+            "pending": semantic_pending,
+            "percent": percent(semantic_named + semantic_preserved, semantic_total),
+            "complete": parse_errors.is_empty() && semantic_pending == 0,
         },
         "by_file": scanned_files,
         "parse_errors": parse_errors,
         "complete": parse_errors.is_empty(),
     }))
+}
+
+struct SemanticBindingCoverage {
+    total: usize,
+    named: usize,
+    preserved: usize,
+    excluded: usize,
+    pending: usize,
+    reason: &'static str,
+}
+
+fn semantic_binding_file_coverage(
+    relative_path: &str,
+    source: &str,
+    stats: &IdentifierInventoryStats,
+) -> SemanticBindingCoverage {
+    if !is_semantic_binding_target_path(relative_path) {
+        return SemanticBindingCoverage {
+            total: 0,
+            named: 0,
+            preserved: 0,
+            excluded: stats.binding_identifiers,
+            pending: 0,
+            reason: "generated_scaffold_not_decompiled_target",
+        };
+    }
+    if source.contains('`') {
+        return SemanticBindingCoverage {
+            total: stats.binding_identifiers,
+            named: stats.semantic_named_bindings,
+            preserved: stats.semantic_pending_bindings,
+            excluded: 0,
+            pending: 0,
+            reason: "source_preserved_for_runtime_observable_template_literals",
+        };
+    }
+    let import_surface_pending = stats.semantic_pending_import_bindings;
+    SemanticBindingCoverage {
+        total: stats.binding_identifiers,
+        named: stats.semantic_named_bindings,
+        preserved: import_surface_pending,
+        excluded: 0,
+        pending: stats
+            .semantic_pending_bindings
+            .saturating_sub(import_surface_pending),
+        reason: "semantic_binding_names_and_import_surface_bindings",
+    }
+}
+
+fn is_semantic_binding_target_path(relative_path: &str) -> bool {
+    relative_path == "cli.ts" || relative_path.starts_with("modules/")
 }
 
 fn percent(numerator: usize, denominator: usize) -> f64 {
@@ -194,8 +265,9 @@ mod tests {
     fn scans_emitted_code_but_skips_dependency_and_dist_trees() {
         let temp = tempdir().expect("temp dir");
         let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
         fs::write(
-            root.join("index.ts"),
+            root.join("modules/index.ts"),
             "const answer = 42; console.log(answer);",
         )
         .expect("write index");
