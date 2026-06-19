@@ -353,6 +353,53 @@ var a,b,X=st(()=>{a=1;b=2});"#;
     }
 
     #[test]
+    #[ignore = "KNOWN GAP (reality-based repro): multi-handle esbuild var \
+statements (`var a,X=st(()=>{...}),b,c,Y=st(()=>{...})`) own only per-handle \
+arrow bodies, so handle names X/Y are owned by nobody → cross-module X()/Y() \
+dangle (the oCt/ECt-class residual). NOT fixable by a contained span tweak \
+(InnerModule.body_span must be a parseable unit, not the fragment `X=...`); \
+needs whole-statement ownership done safely or synthetic per-handle source. \
+Supersedes the mis-simplified planner repro. See memory \
+project-finding-clusters-diagnosis."]
+    fn var_assignment_multi_handle_owns_handle_names() {
+        // REAL esbuild scope-hoisting shape, grepped from the Claude index.js
+        // (`...WLA}),Uu,oCt=st(()=>{HM...`, `...}),coA,n_A,mNe,ECt=st(()=>{Ra...`):
+        // INIT-LESS hoisted declarators (`a`,`b`,`c`) interspersed with multiple
+        // `st`(=__esm) lazy-init handles (`X`,`Y`) in ONE `var` statement. Each
+        // handle NAME must end up owned by some module so it becomes a
+        // definition/export — otherwise cross-module `X()`/`Y()` calls dangle
+        // with no import (the oCt/ECt-class residual; the emitted `DNe.ts` calls
+        // `oCt()`/`ECt()` that no module defines or exports).
+        //
+        // This currently FAILS: `detect_var_assignment_modules` owns only the
+        // per-handle ARROW BODY for multi-handle statements (handle_count>1),
+        // so the handle names live in the unowned parent `var` shell. A correct
+        // fix cannot carve a per-handle span (`InnerModule.body_span` must be a
+        // parseable program unit, never the mid-expression fragment
+        // `X=st(()=>{...})`), so it requires either owning the whole statement
+        // as one module (a prior attempt regressed single-handle imports
+        // globally — see memory project-finding-clusters-diagnosis) or adding
+        // synthetic per-handle module source. A dedicated, carefully-mapped
+        // effort with emit-verification, NOT a contained tweak.
+        let src = r#"var st=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
+var a,X=st(()=>{a=1}),b,c,Y=st(()=>{b=2;c=3});"#;
+        let modules = extract_esm(src);
+        let owns = |needle: &str| {
+            modules
+                .iter()
+                .any(|m| src[m.body_span.start as usize..m.body_span.end as usize].contains(needle))
+        };
+        assert!(
+            owns("X="),
+            "handle name X must be owned (a definition): {modules:#?}"
+        );
+        assert!(
+            owns("Y="),
+            "handle name Y must be owned (a definition): {modules:#?}"
+        );
+    }
+
+    #[test]
     fn detect_commonjs_extracts_minified_var_assignment_modules() {
         // Production esbuild output: helper renamed to `U`, per-module
         // form is `var <name> = U((exports) => { ... })`.
