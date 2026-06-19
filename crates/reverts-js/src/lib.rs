@@ -50,10 +50,11 @@ pub use facts::{
     lazy_value_sub_snippets,
 };
 pub use identifier::{
-    is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,
-    is_identifier_part, is_identifier_start, is_js_keyword, is_minified_identifier,
-    is_valid_static_member_property_name, read_identifier_at, read_identifier_with_end_at,
-    read_quoted_string_at, sanitize_identifier, skip_block_comment, skip_line_comment,
+    is_ascii_identifier_continue, is_ascii_identifier_start, is_generated_placeholder_identifier,
+    is_identifier_like_ascii, is_identifier_part, is_identifier_start, is_js_keyword,
+    is_minified_identifier, is_valid_static_member_property_name, read_identifier_at,
+    read_identifier_with_end_at, read_quoted_string_at, sanitize_identifier, skip_block_comment,
+    skip_line_comment,
 };
 pub use identifier_inventory::{IdentifierInventoryStats, collect_identifier_inventory};
 pub use lazy::{
@@ -62,7 +63,6 @@ pub use lazy::{
 };
 pub(crate) use local_named_exports::module_export_name_text;
 pub use parse::{parse_options_for, parse_source, source_type_candidates, source_type_for_parse};
-pub use rename_apply::apply_generated_semantic_binding_renames_preserving_source;
 pub use type_annotations::{
     GeneratedTypeAnnotation, GeneratedTypeKind, TypeCoverageStats,
     apply_import_member_type_queries_to_program, apply_type_annotations_to_program,

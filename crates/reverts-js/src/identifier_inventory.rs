@@ -23,7 +23,7 @@ use oxc_parser::Parser;
 
 use crate::commonjs_exports::static_property_key_name_ref;
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
-use crate::identifier::is_minified_identifier;
+use crate::identifier::{is_generated_placeholder_identifier, is_minified_identifier};
 use crate::parse::{parse_options_for, source_type_candidates};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -153,8 +153,9 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
 }
 
 fn is_meaningful_preserved_binding_name(name: &str) -> bool {
-    !is_minified_identifier(name)
-        || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri")
+    !is_generated_placeholder_identifier(name)
+        && (!is_minified_identifier(name)
+            || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri"))
 }
 
 #[cfg(test)]
@@ -201,5 +202,19 @@ mod tests {
         assert_eq!(stats.binding_identifiers, 3);
         assert_eq!(stats.semantic_named_bindings, 0);
         assert_eq!(stats.semantic_pending_bindings, 3);
+    }
+
+    #[test]
+    fn marks_placeholder_names_as_semantic_pending() {
+        let stats = collect_identifier_inventory(
+            "const semanticValue25 = 1; function semanticFunction2() { return semanticValue25; }",
+            Some(Path::new("fixture.ts")),
+            ParseGoal::TypeScript,
+        )
+        .expect("fixture should parse");
+
+        assert_eq!(stats.binding_identifiers, 2);
+        assert_eq!(stats.semantic_named_bindings, 0);
+        assert_eq!(stats.semantic_pending_bindings, 2);
     }
 }

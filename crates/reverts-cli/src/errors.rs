@@ -547,6 +547,9 @@ pub enum SymbolNamesError {
     InvalidSemanticName {
         semantic_name: String,
     },
+    PlaceholderSemanticName {
+        semantic_name: String,
+    },
     ConflictingOperation {
         module_id: u32,
         original_name: String,
@@ -605,6 +608,10 @@ impl fmt::Display for SymbolNamesError {
                 formatter,
                 "semantic name {semantic_name} is not a valid JavaScript identifier"
             ),
+            Self::PlaceholderSemanticName { semantic_name } => write!(
+                formatter,
+                "semantic name {semantic_name} is a generated placeholder, not an accepted semantic name"
+            ),
             Self::ConflictingOperation {
                 module_id,
                 original_name,
@@ -645,6 +652,7 @@ impl Error for SymbolNamesError {
             | Self::UnknownModule { .. }
             | Self::UnknownSymbol { .. }
             | Self::InvalidSemanticName { .. }
+            | Self::PlaceholderSemanticName { .. }
             | Self::ConflictingOperation { .. }
             | Self::NameCollision { .. }
             | Self::InvalidBatchLine { .. }

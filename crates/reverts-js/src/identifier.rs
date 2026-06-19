@@ -62,6 +62,52 @@ pub fn is_minified_identifier(name: &str) -> bool {
     len <= 4 && (!has_vowel || has_digit)
 }
 
+/// Returns true for deterministic placeholder names that are useful only as
+/// mechanical fallbacks, not as accepted semantic names.
+#[must_use]
+pub fn is_generated_placeholder_identifier(name: &str) -> bool {
+    let name = name.trim();
+    placeholder_base(name).is_some_and(|base| {
+        matches!(
+            base,
+            "semanticFunction"
+                | "semanticClass"
+                | "semanticImport"
+                | "semanticConstant"
+                | "semanticType"
+                | "semanticValue"
+        )
+    }) || is_module_semantic_symbol_placeholder(name)
+}
+
+fn placeholder_base(name: &str) -> Option<&str> {
+    let base_end = name
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (!ch.is_ascii_digit()).then_some(index + ch.len_utf8()))?;
+    if base_end == name.len() {
+        return Some(name);
+    }
+    let suffix = &name[base_end..];
+    if suffix.is_empty() || suffix.starts_with('0') {
+        return None;
+    }
+    Some(&name[..base_end])
+}
+
+fn is_module_semantic_symbol_placeholder(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("module") else {
+        return false;
+    };
+    let Some((module_digits, symbol_digits)) = rest.split_once("SemanticSymbol") else {
+        return false;
+    };
+    !module_digits.is_empty()
+        && !symbol_digits.is_empty()
+        && module_digits.chars().all(|ch| ch.is_ascii_digit())
+        && symbol_digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
 #[must_use]
 pub fn is_identifier_start(ch: char) -> bool {
     u8::try_from(ch).is_ok_and(is_ascii_identifier_start)
@@ -246,7 +292,7 @@ fn is_reserved_word(value: &str) -> bool {
 
 #[cfg(test)]
 mod minified_tests {
-    use super::is_minified_identifier;
+    use super::{is_generated_placeholder_identifier, is_minified_identifier};
 
     #[test]
     fn flags_machine_generated_names() {
@@ -271,6 +317,32 @@ mod minified_tests {
             "key",
         ] {
             assert!(!is_minified_identifier(name), "{name} should be meaningful");
+        }
+    }
+
+    #[test]
+    fn flags_generated_placeholder_names() {
+        for name in [
+            "semanticFunction",
+            "semanticFunction2",
+            "semanticClass",
+            "semanticImport25",
+            "semanticConstant",
+            "semanticType3",
+            "semanticValue26",
+            "module247SemanticSymbol001",
+        ] {
+            assert!(
+                is_generated_placeholder_identifier(name),
+                "{name} should be a placeholder"
+            );
+        }
+
+        for name in ["createClient", "semanticSearchResult", "moduleLoader"] {
+            assert!(
+                !is_generated_placeholder_identifier(name),
+                "{name} should be meaningful"
+            );
         }
     }
 }

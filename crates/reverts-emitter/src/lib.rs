@@ -4,9 +4,8 @@ use std::fmt;
 use reverts_ir::{BindingName, InferredType};
 use reverts_js::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
-    GeneratedTypeAnnotation, GeneratedTypeKind,
-    apply_generated_semantic_binding_renames_preserving_source,
-    format_source_with_module_items_request, sanitize_identifier,
+    GeneratedTypeAnnotation, GeneratedTypeKind, format_source_with_module_items_request,
+    sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
 use reverts_planner::{CompilerPreservationAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
@@ -137,15 +136,7 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
         &generated_type_annotations,
         lowering,
     ) {
-        let renamed = apply_generated_semantic_binding_renames_preserving_source(
-            body_source.as_str(),
-            file.source_strategy().path_hint(file.path.as_str()),
-            file.source_strategy().parse_goal(),
-        )
-        .ok()
-        .flatten()
-        .unwrap_or(body_source);
-        (renamed, None)
+        (body_source, None)
     } else {
         match format_source_with_module_items_request(FormatSourceRequest {
             body_source: &body_source,
@@ -154,7 +145,6 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
             readability_renames: &generated_renames,
             type_annotations: &generated_type_annotations,
             infer_literal_types: true,
-            generated_semantic_names: true,
             path_hint: file.source_strategy().path_hint(file.path.as_str()),
             goal: file.source_strategy().parse_goal(),
             lowering,

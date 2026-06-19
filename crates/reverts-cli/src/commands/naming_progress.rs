@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{ModuleId, ModuleKind};
-use reverts_js::is_minified_identifier;
+use reverts_js::{is_generated_placeholder_identifier, is_minified_identifier};
 use reverts_model::EnrichedProgram;
 use reverts_pipeline::{SymbolIndexEntry, generate_project_from_prepared, prepare_and_enrich};
 
@@ -215,8 +215,9 @@ pub(crate) fn classify_emitted_entry(
     }
     // Named = renamed by the Agent (emitted != original) or already a meaningful
     // identifier (preserved vendored source).
-    let named = entry.emitted_name != entry.original_name
-        || is_meaningful_preserved_identifier(&entry.original_name);
+    let named = !is_generated_placeholder_identifier(&entry.emitted_name)
+        && (entry.emitted_name != entry.original_name
+            || is_meaningful_preserved_identifier(&entry.original_name));
     let exported = universe
         .exported_by_module
         .get(&entry.module_id.0)
@@ -234,8 +235,9 @@ pub(crate) fn classify_emitted_entry(
 }
 
 fn is_meaningful_preserved_identifier(name: &str) -> bool {
-    !is_minified_identifier(name)
-        || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri")
+    !is_generated_placeholder_identifier(name)
+        && (!is_minified_identifier(name)
+            || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri"))
 }
 
 #[must_use]
@@ -558,6 +560,25 @@ mod tests {
             classify_emitted_entry(&entry(1, "tokenize", "tokenize", true), &universe)
                 .expect("first-party")
                 .named
+        );
+    }
+
+    #[test]
+    fn classify_does_not_count_generated_placeholders_as_named() {
+        let universe = universe(&[1], &[]);
+
+        assert!(
+            !classify_emitted_entry(&entry(1, "aB", "semanticValue25", false), &universe)
+                .expect("first-party")
+                .named
+        );
+        assert!(
+            !classify_emitted_entry(
+                &entry(1, "Rdr", "module247SemanticSymbol001", false),
+                &universe
+            )
+            .expect("first-party")
+            .named
         );
     }
 

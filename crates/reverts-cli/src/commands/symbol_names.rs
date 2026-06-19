@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
-use reverts_js::sanitize_identifier;
+use reverts_js::{is_generated_placeholder_identifier, sanitize_identifier};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
@@ -457,13 +457,17 @@ fn validate_unique_operations(operations: &[SymbolNameOperation]) -> Result<(), 
 }
 
 fn validate_semantic_identifier(name: &str) -> Result<(), SymbolNamesError> {
-    if sanitize_identifier(name) == name {
-        Ok(())
-    } else {
-        Err(SymbolNamesError::InvalidSemanticName {
+    if sanitize_identifier(name) != name {
+        return Err(SymbolNamesError::InvalidSemanticName {
             semantic_name: name.to_string(),
-        })
+        });
     }
+    if is_generated_placeholder_identifier(name) {
+        return Err(SymbolNamesError::PlaceholderSemanticName {
+            semantic_name: name.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn ensure_project_exists(connection: &Connection, project_id: u32) -> Result<(), SymbolNamesError> {
@@ -1107,6 +1111,21 @@ mod tests {
             )
             .expect("query proposal");
         assert_eq!(accepted, 1);
+    }
+
+    #[test]
+    fn accept_rejects_generated_placeholder_semantic_name() {
+        let mut connection = create_fixture();
+        let mut args = args_with_accept(true);
+        args.accepts[0].semantic_name = "semanticValue25".to_string();
+
+        let error = symbol_names_from_connection(&mut connection, &args)
+            .expect_err("placeholder names should be rejected");
+
+        assert!(matches!(
+            error,
+            SymbolNamesError::PlaceholderSemanticName { .. }
+        ));
     }
 
     #[test]

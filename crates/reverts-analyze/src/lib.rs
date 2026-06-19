@@ -9,7 +9,8 @@ use reverts_ir::{
     ControlFlowNodeKind, FunctionFingerprint, InferredType, ModuleId, TypeSolution,
 };
 use reverts_js::{
-    GeneratedTypeKind, collect_top_level_literal_type_annotations, sanitize_identifier,
+    GeneratedTypeKind, collect_top_level_literal_type_annotations,
+    is_generated_placeholder_identifier, sanitize_identifier,
 };
 pub use reverts_model::CompilerKind;
 use reverts_model::{
@@ -950,7 +951,9 @@ fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
         let naming_hint = symbol
             .semantic_name
             .as_deref()
+            .filter(|name| !is_generated_placeholder_identifier(name))
             .or(symbol.export_name.as_deref())
+            .filter(|name| !is_generated_placeholder_identifier(name))
             .unwrap_or(symbol.name.as_str());
         let base = sanitize_identifier(naming_hint);
         let semantic = reserve_unique_name(&mut used_by_module, symbol.module_id, &base);
@@ -1404,6 +1407,24 @@ mod tests {
                 .binding_name(ModuleId(1), "lodashGlobalObjectInit")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn semantic_naming_ignores_generated_placeholder_hints() {
+        let mut rows = valid_rows();
+        rows.symbols.push(
+            SymbolInput::new(ModuleId(1), "Rdr").with_semantic_name("module247SemanticSymbol001"),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let output = enrich_program(ProgramModel::from_input(input));
+        let binding = output
+            .program
+            .semantic_names()
+            .binding_name(ModuleId(1), "Rdr")
+            .expect("semantic binding should still exist");
+
+        assert_eq!(binding.as_str(), "Rdr");
     }
 
     #[test]

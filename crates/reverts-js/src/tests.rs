@@ -3,14 +3,13 @@ use std::path::Path;
 use super::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
     ImportUsageScope, JsError, LazyBodyClassification, ParseGoal, TopLevelStatementKind,
-    apply_generated_semantic_binding_renames_preserving_source, classify_import_usage_scope,
-    classify_lazy_module_body, collect_file_url_source_location_rewrites,
-    collect_identifier_inventory, collect_identifier_read_facts, collect_path_builder_calls,
-    collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
-    collect_top_level_statement_facts, collect_type_coverage_stats,
-    collect_void_zero_expression_statements, extract_lazy_module_eager_value,
-    format_source_minified, format_source_pretty, format_source_with_module_items,
-    format_source_with_module_items_and_renames,
+    classify_import_usage_scope, classify_lazy_module_body,
+    collect_file_url_source_location_rewrites, collect_identifier_inventory,
+    collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
+    collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
+    collect_type_coverage_stats, collect_void_zero_expression_statements,
+    extract_lazy_module_eager_value, format_source_minified, format_source_pretty,
+    format_source_with_module_items, format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
     format_source_with_module_items_request, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
@@ -342,7 +341,6 @@ fn module_item_formatting_infers_safe_literal_variable_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -363,7 +361,6 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -383,7 +380,6 @@ fn module_item_formatting_infers_minified_unary_literal_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -404,7 +400,6 @@ fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -426,7 +421,6 @@ fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -454,7 +448,6 @@ fn module_item_formatting_infers_default_parameter_and_return_types_when_request
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -474,7 +467,6 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -494,7 +486,6 @@ fn module_item_formatting_propagates_identifier_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -537,7 +528,6 @@ fn module_item_formatting_infers_union_call_site_parameters_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -556,7 +546,6 @@ fn module_item_formatting_infers_union_return_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -576,7 +565,6 @@ fn module_item_formatting_infers_structural_return_types_when_requested() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -597,7 +585,6 @@ fn module_item_formatting_infers_object_and_array_literal_types_when_requested()
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -619,7 +606,6 @@ fn module_item_formatting_infers_structural_array_literal_types_when_requested()
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -642,7 +628,6 @@ fn module_item_formatting_recovers_package_member_type_query() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: true,
-        generated_semantic_names: false,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
@@ -671,7 +656,7 @@ fn module_item_formatting_builds_imports_and_exports_as_ast_nodes() {
 }
 
 #[test]
-fn generated_semantic_names_rename_minified_bindings_ast_first() {
+fn formatting_does_not_generate_placeholder_semantic_names() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function a(b) { const c = b + 1; return c; }",
         generated_imports: &[],
@@ -679,86 +664,22 @@ fn generated_semantic_names_rename_minified_bindings_ast_first() {
         readability_renames: &[],
         type_annotations: &[],
         infer_literal_types: false,
-        generated_semantic_names: true,
         path_hint: Some(Path::new("fixture.ts")),
         goal: ParseGoal::TypeScript,
         lowering: CompilerLowering::None,
     })
     .expect("fixture should format");
 
-    assert!(formatted.contains("function semanticFunction("));
-    assert!(formatted.contains("semanticValue"));
+    assert!(formatted.contains("function a(b)"));
+    assert!(!formatted.contains("semanticFunction"));
+    assert!(!formatted.contains("semanticValue"));
     let stats = collect_identifier_inventory(
         formatted.as_str(),
         Some(Path::new("fixture.ts")),
         ParseGoal::TypeScript,
     )
     .expect("formatted source should parse");
-    assert_eq!(stats.semantic_pending_bindings, 0);
-}
-
-#[test]
-fn generated_semantic_names_preserve_template_raw_source() {
-    let source = "let b = 1; const a = `keep ${b}\\n raw`; function c(d) { return a + d; }";
-    let renamed = apply_generated_semantic_binding_renames_preserving_source(
-        source,
-        Some(Path::new("fixture.ts")),
-        ParseGoal::TypeScript,
-    )
-    .expect("fixture should parse")
-    .expect("minified bindings should be renamed");
-
-    assert!(renamed.contains("`keep ${semantic"));
-    assert!(renamed.contains("\\n raw`"));
-    assert!(renamed.contains("function semanticFunction("));
-    let stats = collect_identifier_inventory(
-        renamed.as_str(),
-        Some(Path::new("fixture.ts")),
-        ParseGoal::TypeScript,
-    )
-    .expect("renamed source should parse");
-    assert_eq!(stats.semantic_pending_bindings, 0);
-}
-
-#[test]
-fn generated_semantic_names_preserving_source_expands_shorthand_symbols() {
-    let source = "const a = 1; const b = { a }; const { c } = b; console.log(a, c);";
-    let renamed = apply_generated_semantic_binding_renames_preserving_source(
-        source,
-        Some(Path::new("fixture.ts")),
-        ParseGoal::TypeScript,
-    )
-    .expect("fixture should parse")
-    .expect("safe minified bindings should be renamed");
-
-    assert!(renamed.contains("{ a: semantic"));
-    assert!(renamed.contains("{ c: semantic"));
-    assert!(!renamed.contains("{ a }"));
-    assert!(!renamed.contains("{ c }"));
-    assert!(renamed.contains("semantic"));
-}
-
-#[test]
-fn generated_semantic_names_preserving_source_expands_import_export_surface() {
-    let source = "import { a } from './a'; const b = a; export { b };";
-    let renamed = apply_generated_semantic_binding_renames_preserving_source(
-        source,
-        Some(Path::new("fixture.ts")),
-        ParseGoal::TypeScript,
-    )
-    .expect("fixture should parse")
-    .expect("surface bindings should be renamed");
-
-    assert!(renamed.contains("import { a as semanticImport"));
-    assert!(renamed.contains("export { semantic"));
-    assert!(renamed.contains(" as b }"));
-    let stats = collect_identifier_inventory(
-        renamed.as_str(),
-        Some(Path::new("fixture.ts")),
-        ParseGoal::TypeScript,
-    )
-    .expect("renamed source should parse");
-    assert_eq!(stats.semantic_pending_bindings, 0);
+    assert_eq!(stats.semantic_pending_bindings, stats.binding_identifiers);
 }
 
 #[test]
