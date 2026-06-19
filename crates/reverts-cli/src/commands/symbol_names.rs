@@ -223,6 +223,7 @@ pub fn symbol_names_from_connection(
             .transaction()
             .map_err(SymbolNamesError::ConfigureDatabase)?;
         validate_operation_targets(&transaction, args.project_id, &operations)?;
+        ensure_operation_symbol_rows(&transaction, &operations)?;
         validate_final_names(&transaction, args.project_id, &operations)?;
         let mut written = 0_usize;
         for operation in &operations {
@@ -513,12 +514,43 @@ fn validate_operation_targets(
                 |row| row.get::<_, i64>(0),
             )
             .map_err(SymbolNamesError::QuerySymbolNames)?;
-        if count == 0 {
+        if count == 0 && matches!(operation, SymbolNameOperation::ClearActive(_)) {
             return Err(SymbolNamesError::UnknownSymbol {
                 module_id,
                 original_name: original_name.to_string(),
             });
         }
+    }
+    Ok(())
+}
+
+fn ensure_operation_symbol_rows(
+    connection: &Connection,
+    operations: &[SymbolNameOperation],
+) -> Result<(), SymbolNamesError> {
+    for operation in operations {
+        let SymbolNameOperation::Accept(spec) = operation else {
+            continue;
+        };
+        connection
+            .execute(
+                r"
+                INSERT INTO symbols (
+                    module_id, original_name, semantic_name, semantic_name_source,
+                    export_name, scope_level
+                )
+                SELECT ?1, ?2, NULL, NULL, NULL, 'module'
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM symbols
+                    WHERE module_id = ?1
+                      AND original_name = ?2
+                      AND scope_level = 'module'
+                )
+                ",
+                params![i64::from(spec.module_id), spec.original_name.as_str()],
+            )
+            .map_err(SymbolNamesError::WriteSymbolName)?;
     }
     Ok(())
 }
@@ -560,11 +592,16 @@ fn validate_final_names(
     for operation in operations {
         match operation {
             SymbolNameOperation::Accept(spec) => {
-                if let Some(state) = states.get_mut(&spec.module_id) {
-                    state
-                        .semantic_names
-                        .insert(spec.original_name.clone(), Some(spec.semantic_name.clone()));
-                }
+                let state = states
+                    .entry(spec.module_id)
+                    .or_insert_with(|| SymbolNameState {
+                        original_names: BTreeSet::new(),
+                        semantic_names: BTreeMap::new(),
+                    });
+                state.original_names.insert(spec.original_name.clone());
+                state
+                    .semantic_names
+                    .insert(spec.original_name.clone(), Some(spec.semantic_name.clone()));
             }
             SymbolNameOperation::ClearActive(spec) => {
                 if let Some(state) = states.get_mut(&spec.module_id) {
@@ -1070,6 +1107,32 @@ mod tests {
             )
             .expect("query proposal");
         assert_eq!(accepted, 1);
+    }
+
+    #[test]
+    fn accept_can_create_missing_module_symbol_from_generated_plan() {
+        let mut connection = create_fixture();
+        let mut args = args_with_accept(true);
+        args.accepts = vec![SymbolNameSpec {
+            module_id: 10,
+            original_name: "_a".to_string(),
+            semantic_name: "workerMessage".to_string(),
+        }];
+
+        let outcome = symbol_names_from_connection(&mut connection, &args)
+            .expect("generated symbol-index target should be accepted");
+
+        assert_eq!(outcome.written_changes, 1);
+        let (name, source, scope): (String, String, String) = connection
+            .query_row(
+                "SELECT semantic_name, semantic_name_source, scope_level FROM symbols WHERE module_id = 10 AND original_name = '_a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("query synthesized symbol");
+        assert_eq!(name, "workerMessage");
+        assert_eq!(source, "agent");
+        assert_eq!(scope, "module");
     }
 
     #[test]
