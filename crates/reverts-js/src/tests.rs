@@ -451,6 +451,28 @@ fn module_item_formatting_infers_object_and_array_literal_types_when_requested()
 }
 
 #[test]
+fn module_item_formatting_infers_structural_array_literal_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const variants = [1, 'x']; const rows = [{ id: 1, name: 'a' }, { id: 2, name: 'b' }];",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("const variants: (number | string)[] = ["));
+    assert!(formatted.contains("const rows: {"));
+    assert!(formatted.contains("id: number;"));
+    assert!(formatted.contains("name: string;"));
+    assert!(formatted.contains("}[] = ["));
+}
+
+#[test]
 fn module_item_formatting_recovers_package_member_type_query() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "const createClient = __pkg.createClient;",

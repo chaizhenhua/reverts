@@ -42,6 +42,14 @@ pub struct GeneratedTypeAnnotation {
     pub kind: GeneratedTypeKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InferredExpressionType {
+    Primitive(GeneratedTypeKind),
+    Object(Vec<(String, InferredExpressionType)>),
+    Array(Box<InferredExpressionType>),
+    Union(Vec<InferredExpressionType>),
+}
+
 impl GeneratedTypeAnnotation {
     #[must_use]
     pub fn new(binding: impl Into<String>, kind: GeneratedTypeKind) -> Self {
@@ -531,55 +539,62 @@ fn inferred_type_annotation_for_expression<'a>(
     expression: &Expression<'_>,
     depth: usize,
 ) -> Option<TSType<'a>> {
+    let inferred = inferred_expression_type(expression, depth)?;
+    type_annotation_for_inferred_expression_type(builder, &inferred)
+}
+
+fn inferred_expression_type(
+    expression: &Expression<'_>,
+    depth: usize,
+) -> Option<InferredExpressionType> {
     if depth > 2 {
         return None;
     }
     if let Some(kind) = literal_type_kind(expression) {
-        return type_annotation_for_kind(builder, kind);
+        return Some(InferredExpressionType::Primitive(kind));
     }
     match expression {
-        Expression::ArrayExpression(array) => array_type_annotation(builder, array, depth),
-        Expression::ObjectExpression(object) => {
-            if object.properties.is_empty() || object.properties.len() > 12 {
-                return None;
-            }
-            let mut members = builder.vec();
-            for property in &object.properties {
-                let ObjectPropertyKind::ObjectProperty(property) = property else {
-                    return None;
-                };
-                if property.method || property.computed {
-                    return None;
-                }
-                let PropertyKey::StaticIdentifier(identifier) = &property.key else {
-                    return None;
-                };
-                let value_type =
-                    inferred_type_annotation_for_expression(builder, &property.value, depth + 1)?;
-                members.push(builder.ts_signature_property_signature(
-                    SPAN,
-                    false,
-                    false,
-                    false,
-                    builder.property_key_identifier_name(SPAN, identifier.name.as_str()),
-                    Some(builder.alloc_ts_type_annotation(SPAN, value_type)),
-                ));
-            }
-            Some(builder.ts_type_type_literal(SPAN, members))
-        }
+        Expression::ArrayExpression(array) => array_expression_type(array, depth),
+        Expression::ObjectExpression(object) => object_expression_type(object, depth),
         _ => None,
     }
 }
 
-fn array_type_annotation<'a>(
-    builder: &AstBuilder<'a>,
+fn object_expression_type(
+    object: &oxc_ast::ast::ObjectExpression<'_>,
+    depth: usize,
+) -> Option<InferredExpressionType> {
+    if object.properties.is_empty() || object.properties.len() > 12 {
+        return None;
+    }
+    let mut members = Vec::new();
+    for property in &object.properties {
+        let ObjectPropertyKind::ObjectProperty(property) = property else {
+            return None;
+        };
+        if property.method || property.computed {
+            return None;
+        }
+        let PropertyKey::StaticIdentifier(identifier) = &property.key else {
+            return None;
+        };
+        let value_type = inferred_expression_type(&property.value, depth + 1)?;
+        members.push((identifier.name.as_str().to_string(), value_type));
+    }
+    Some(InferredExpressionType::Object(members))
+}
+
+fn array_expression_type(
     array: &oxc_ast::ast::ArrayExpression<'_>,
     depth: usize,
-) -> Option<TSType<'a>> {
+) -> Option<InferredExpressionType> {
     if array.elements.is_empty() {
         return None;
     }
-    let mut kind = None;
+    if depth > 1 {
+        return None;
+    }
+    let mut element_types = Vec::<InferredExpressionType>::new();
     for element in &array.elements {
         let element_expression = match element {
             ArrayExpressionElement::SpreadElement(_) | ArrayExpressionElement::Elision(_) => {
@@ -587,20 +602,64 @@ fn array_type_annotation<'a>(
             }
             other => other.to_expression(),
         };
-        let element_kind = literal_type_kind(element_expression)?;
-        if let Some(existing) = kind {
-            if existing != element_kind {
-                return None;
-            }
-        } else {
-            kind = Some(element_kind);
+        let element_type = inferred_expression_type(element_expression, depth + 1)?;
+        if !element_types.contains(&element_type) {
+            element_types.push(element_type);
         }
     }
-    let element_type = type_annotation_for_kind(builder, kind?)?;
-    if depth > 1 {
+    if element_types.len() == 1 {
+        return Some(InferredExpressionType::Array(Box::new(
+            element_types.remove(0),
+        )));
+    }
+    if element_types.len() > 3
+        || !element_types
+            .iter()
+            .all(|ty| matches!(ty, InferredExpressionType::Primitive(_)))
+    {
         return None;
     }
-    Some(builder.ts_type_array_type(SPAN, element_type))
+    Some(InferredExpressionType::Array(Box::new(
+        InferredExpressionType::Union(element_types),
+    )))
+}
+
+fn type_annotation_for_inferred_expression_type<'a>(
+    builder: &AstBuilder<'a>,
+    inferred: &InferredExpressionType,
+) -> Option<TSType<'a>> {
+    match inferred {
+        InferredExpressionType::Primitive(kind) => type_annotation_for_kind(builder, *kind),
+        InferredExpressionType::Object(properties) => {
+            let mut members = builder.vec();
+            for (name, value_type) in properties {
+                let value_type = type_annotation_for_inferred_expression_type(builder, value_type)?;
+                members.push(builder.ts_signature_property_signature(
+                    SPAN,
+                    false,
+                    false,
+                    false,
+                    builder.property_key_identifier_name(SPAN, name.as_str()),
+                    Some(builder.alloc_ts_type_annotation(SPAN, value_type)),
+                ));
+            }
+            Some(builder.ts_type_type_literal(SPAN, members))
+        }
+        InferredExpressionType::Array(element) => {
+            let mut element_type = type_annotation_for_inferred_expression_type(builder, element)?;
+            if matches!(element.as_ref(), InferredExpressionType::Union(_)) {
+                element_type = builder.ts_type_parenthesized_type(SPAN, element_type);
+            }
+            Some(builder.ts_type_array_type(SPAN, element_type))
+        }
+        InferredExpressionType::Union(types) => {
+            let mut members = builder.vec();
+            for ty in types {
+                members.push(type_annotation_for_inferred_expression_type(builder, ty)?);
+            }
+            Some(builder.ts_type_union_type(SPAN, members))
+        }
+    }
 }
 
 fn import_member_type_query<'a>(
