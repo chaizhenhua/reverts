@@ -201,9 +201,16 @@ fn push_new_from_inner(
             byte_start: 0,
             byte_end: text.len() as u32,
         };
+        // Encode the PARENT source file id in the path so the planner can
+        // inherit the parent's runtime-prelude helper classification for the
+        // reconstructed body (its nested `helper(()=>{...})` calls must lower
+        // like the parent's, not read the raw alias as a free var).
         new_source_files.push(SourceFileInput::new(
             sf_id,
-            format!("{SYNTHETIC_SOURCE_PREFIX}{}.js", inner.virtual_id),
+            format!(
+                "{SYNTHETIC_SOURCE_PREFIX}{source_file_id}/{}.js",
+                inner.virtual_id
+            ),
             Some(text.clone()),
         ));
         (sf_id, span)
@@ -414,7 +421,8 @@ mod tests {
         let sf = &result.new_source_files[0];
         assert_eq!(sf.id, 9000);
         assert_eq!(sf.source.as_deref(), Some(synthetic));
-        assert!(sf.path.starts_with("__reverts_synthetic__/"));
+        // Path encodes the parent source file id (1) for prelude inheritance.
+        assert_eq!(sf.path, "__reverts_synthetic__/1/esbuild:X.js");
         let m = &result.new_modules[0];
         assert_eq!(m.original_name, "esbuild:X");
         assert_eq!(m.source_file_id, Some(9000));

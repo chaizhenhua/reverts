@@ -6843,6 +6843,21 @@ pub(crate) fn lowered_runtime_sources(
             source.source_file_id,
             source.source,
         ));
+        // A reconstructed esbuild multi-handle module (synthetic source) carries
+        // its parent bundle's nested `helper(()=>{...})` calls. The synthetic
+        // source file has no prelude of its own, so inherit the PARENT source
+        // file's helper classification (encoded in the synthetic path) — else
+        // the raw helper aliases (`We`/`St` = __commonJS) survive the rename and
+        // read as unresolved free vars.
+        if let Some(parent_source_file_id) =
+            synthetic_parent_source_file_id(source.source_file_path)
+        {
+            helper_kinds.extend(runtime_helper_kinds_for_source(
+                program.model().graph(),
+                parent_source_file_id,
+                source.source,
+            ));
+        }
         // Cross-module export set: any binding this module exports stays
         // observable from other modules' call sites. Pass them to the
         // lowering pass so delazify / namespace decomposition refuse to
@@ -7985,6 +8000,16 @@ pub(crate) fn runtime_helper_kinds(
         helpers.insert(import.binding.clone(), kind);
     }
     helpers
+}
+
+/// Parse the parent source file id from a synthetic source path of the form
+/// `__reverts_synthetic__/<parent_id>/<name>.js` (produced by reverts-bundle
+/// for reconstructed esbuild multi-handle modules). Returns `None` for any
+/// non-synthetic path.
+pub(crate) fn synthetic_parent_source_file_id(path: &str) -> Option<u32> {
+    path.strip_prefix("__reverts_synthetic__/")?
+        .split_once('/')
+        .and_then(|(parent, _rest)| parent.parse::<u32>().ok())
 }
 
 pub(crate) fn runtime_helper_kinds_for_source(
