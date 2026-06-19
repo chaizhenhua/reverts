@@ -12,8 +12,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode, SymbolScope};
+use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{BindingShape, ModuleId, ModuleKind};
+use reverts_js::is_minified_identifier;
 use reverts_model::EnrichedProgram;
 use reverts_pipeline::prepare_and_enrich;
 
@@ -119,7 +120,10 @@ fn tier_breakdown(facts: &[SymbolFact]) -> TierBreakdown {
             }
         }
     }
-    let reached_level = if full.named == full.universe {
+    let reached_level = if full.universe == 0 {
+        // No bindings in scope: nothing extracted, not "fully named".
+        None
+    } else if full.named == full.universe {
         Some(Tier::Full)
     } else if declarations.named == declarations.universe {
         Some(Tier::Declarations)
@@ -162,36 +166,50 @@ fn first_party_module_ids(input: &InputBundle) -> BTreeSet<ModuleId> {
 pub fn compute_naming_progress(project_id: u32, program: &EnrichedProgram) -> NamingProgressReport {
     let model = program.model();
     let first_party = first_party_module_ids(model.input());
+    let graph = model.graph();
     let paths: BTreeMap<ModuleId, &str> = model
         .modules()
         .iter()
         .map(|module| (module.id, module.semantic_path.as_str()))
         .collect();
 
-    let mut facts_by_module: BTreeMap<ModuleId, Vec<SymbolFact>> =
-        first_party.iter().map(|id| (*id, Vec::new())).collect();
+    // Overlay: which (module, original_name) already carry an Agent-written
+    // semantic name. The *universe* comes from the graph (the bindings actually
+    // present in the emitted code); this table only marks what has been named.
+    let mut named_overlay: BTreeSet<(ModuleId, &str)> = BTreeSet::new();
     for symbol in model.symbols() {
-        if symbol.scope != SymbolScope::Module {
-            continue;
+        if symbol.semantic_name.is_some() {
+            named_overlay.insert((symbol.module_id, symbol.name.as_str()));
         }
-        let Some(facts) = facts_by_module.get_mut(&symbol.module_id) else {
-            continue;
-        };
-        facts.push(SymbolFact {
-            named: symbol.semantic_name.is_some(),
-            exported: symbol.export_name.is_some(),
-            kind: naming_kind(program.binding_shape(symbol.module_id, &symbol.name)),
-        });
     }
 
     let mut all_facts: Vec<SymbolFact> = Vec::new();
     let mut modules: Vec<ModuleNamingProgress> = Vec::new();
-    for (module_id, facts) in &facts_by_module {
-        all_facts.extend_from_slice(facts);
+    for module_id in &first_party {
+        let exported: BTreeSet<String> = graph
+            .import_export()
+            .exports_for(*module_id)
+            .into_iter()
+            .map(|binding| binding.as_str().to_string())
+            .collect();
+        let mut facts: Vec<SymbolFact> = Vec::new();
+        for binding in graph.definitions_for(*module_id) {
+            let name = binding.as_str();
+            // "Named" = an Agent semantic name exists, or the original name is
+            // already a meaningful identifier (e.g. preserved vendored source).
+            let named =
+                named_overlay.contains(&(*module_id, name)) || !is_minified_identifier(name);
+            facts.push(SymbolFact {
+                named,
+                exported: exported.contains(name),
+                kind: naming_kind(program.binding_shape(*module_id, name)),
+            });
+        }
+        all_facts.extend_from_slice(&facts);
         modules.push(ModuleNamingProgress {
             module_id: *module_id,
             semantic_path: paths.get(module_id).copied().unwrap_or("").to_string(),
-            breakdown: tier_breakdown(facts),
+            breakdown: tier_breakdown(&facts),
         });
     }
     NamingProgressReport {
@@ -364,23 +382,31 @@ mod tests {
     }
 
     #[test]
-    fn empty_facts_report_full_reached() {
+    fn empty_universe_reports_no_reached_level() {
         let breakdown = tier_breakdown(&[]);
         assert_eq!(breakdown.full.universe, 0);
-        assert_eq!(breakdown.reached_level, Some(Tier::Full));
+        assert_eq!(breakdown.reached_level, None);
     }
 
     #[test]
-    fn compute_excludes_external_modules_and_classifies_tiers() {
+    fn compute_is_graph_driven_and_excludes_external_modules() {
         use reverts_analyze::enrich_program;
         use reverts_input::{
             InputBundle, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-            PackageEmissionMode, ProjectInput, SymbolInput,
+            PackageEmissionMode, ProjectInput, SourceFileInput, SymbolInput,
         };
         use reverts_ir::ModuleId;
         use reverts_model::ProgramModel;
 
-        let app = ModuleInput::application(ModuleId(1), "entry", "src/index.ts");
+        // First-party module with: exported function `parse`, internal function
+        // `help`, minified value `aB` (no overlay), minified value `cV` (Agent
+        // semantic name overlay). `dep` is externalized -> excluded.
+        let source = "export function parse(a){ return help(a) + aB + cV; }\n\
+                      function help(x){ return x + 1; }\n\
+                      var aB = 1;\n\
+                      var cV = 2;\n";
+        let app =
+            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1);
         let pkg = ModuleInput::package(
             ModuleId(2),
             "dep",
@@ -390,14 +416,13 @@ mod tests {
         );
 
         let mut rows = InputRows::new(ProjectInput::new(7, "fixture".to_string()));
+        rows.source_files = vec![SourceFileInput {
+            id: 1,
+            path: "src/index.ts".to_string(),
+            source: Some(source.to_string()),
+        }];
         rows.modules = vec![app, pkg];
-        rows.symbols = vec![
-            SymbolInput::new(ModuleId(1), "parse")
-                .with_export_name("parse")
-                .with_semantic_name("parse"),
-            SymbolInput::new(ModuleId(1), "help"),
-            SymbolInput::new(ModuleId(2), "z"),
-        ];
+        rows.symbols = vec![SymbolInput::new(ModuleId(1), "cV").with_semantic_name("counter")];
         rows.package_attributions = vec![PackageAttributionInput {
             module_id: ModuleId(2),
             package_name: "dep".into(),
@@ -417,11 +442,17 @@ mod tests {
         let report: NamingProgressReport = compute_naming_progress(7, &program);
 
         assert_eq!(report.project_id, 7);
+        // Only the first-party module is measured; `dep` is excluded.
         assert_eq!(report.modules.len(), 1);
         assert_eq!(report.modules[0].module_id, ModuleId(1));
-        assert_eq!(report.totals.full.universe, 2);
-        assert_eq!(report.totals.full.named, 1);
+        // Universe = 4 graph definitions (parse, help, aB, cV).
+        assert_eq!(report.totals.full.universe, 4);
+        // Named = parse + help (meaningful) + cV (overlay); aB stays minified.
+        assert_eq!(report.totals.full.named, 3);
+        // Public surface = the exported `parse`.
         assert_eq!(report.totals.public_surface.universe, 1);
         assert_eq!(report.totals.public_surface.named, 1);
+        // L1 and L2 fully named, L3 has the unnamed `aB`.
+        assert_eq!(report.totals.reached_level, Some(Tier::Declarations));
     }
 }

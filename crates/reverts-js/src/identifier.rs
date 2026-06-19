@@ -33,6 +33,35 @@ pub fn sanitize_identifier(value: &str) -> String {
     output
 }
 
+/// Heuristic: does this identifier look machine-generated / minified (and thus
+/// a semantic-naming target), rather than an already-meaningful name?
+///
+/// Conservative and tunable. Evidence from real esbuild bundles: minified
+/// bindings look like `a`, `e`, `U$`, `sG`, `Whr`, `m3A`, `K3A`, `t1`;
+/// meaningful names look like `emitClose`, `WebSocket`, `Duplex`, `Map`, `get`.
+#[must_use]
+pub fn is_minified_identifier(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    let len = name.chars().count();
+    if len <= 2 {
+        return true;
+    }
+    // Minifier sigils (esbuild/terser emit `$`-laden names).
+    if name.contains('$') {
+        return true;
+    }
+    let has_vowel = name
+        .chars()
+        .any(|ch| matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u'));
+    let has_digit = name.chars().any(|ch| ch.is_ascii_digit());
+    // Short names that lack a vowel or splice in a digit read as machine names
+    // (`Whr`, `jhr`, `m3A`), while short real words keep a vowel (`Map`, `get`).
+    len <= 4 && (!has_vowel || has_digit)
+}
+
 #[must_use]
 pub fn is_identifier_start(ch: char) -> bool {
     u8::try_from(ch).is_ok_and(is_ascii_identifier_start)
@@ -213,4 +242,35 @@ fn is_reserved_word(value: &str) -> bool {
             | "with"
             | "yield"
     )
+}
+
+#[cfg(test)]
+mod minified_tests {
+    use super::is_minified_identifier;
+
+    #[test]
+    fn flags_machine_generated_names() {
+        for name in [
+            "a", "e", "t1", "U$", "sG", "ND", "hx", "Whr", "jhr", "m3A", "K3A",
+        ] {
+            assert!(is_minified_identifier(name), "{name} should be minified");
+        }
+    }
+
+    #[test]
+    fn keeps_meaningful_names() {
+        for name in [
+            "emitClose",
+            "duplexOnEnd",
+            "WebSocket",
+            "Duplex",
+            "createRequire",
+            "tokenize",
+            "Map",
+            "get",
+            "key",
+        ] {
+            assert!(!is_minified_identifier(name), "{name} should be meaningful");
+        }
+    }
 }
