@@ -72,6 +72,15 @@ The architectural consequences are:
 
 ## Target Pipeline
 
+The stage names below are **conceptual phases**, not a one-to-one map to Rust
+type names. Some are concrete types (`RevertsGraph`, `DefUseGraph`,
+`ControlFlowGraph`, `ImportExportGraph`, `ProgramModel`, `EnrichedProgram`,
+`ImportExportPlanner`); others name a responsibility implemented across
+functions in a crate (e.g. `BindingShapeSolver`, `PackageSurfaceResolver`,
+`AstEmitter`, `ParseAudit` / `SynthesisAudit`, `ProjectWriter`). The
+authoritative mapping from responsibility to crate is in
+[module-boundaries.md](module-boundaries.md).
+
 ```text
 InputBundle
   -> AstFactExtractor
@@ -130,10 +139,11 @@ objects; constructors and class-like usage must not collapse into plain values.
 
 ### PackageSurfaceResolver
 
-The resolver converts package attribution into `ImportDecision` records. A bare
-import is allowed only when the package name is valid and the requested subpath
-is present in the package surface. Otherwise the planner must choose a local
-module, local shim, or rejected decision with an audit finding.
+The resolver converts package attribution into `PackageImportDecision` records
+(each carrying a `PackageResolution`: builtin, external, local, or rejected). A
+bare import is allowed only when the package name is valid and the requested
+subpath is present in the package surface. Otherwise the planner must choose a
+local module, local shim, or rejected decision with an audit finding.
 
 ### EnrichedProgram
 
@@ -188,7 +198,7 @@ missing declarations, patch imports, or run repair passes.
 | `BindingConstraint` | Usage-derived shape evidence | Call/member/construct/class/enum usage is not lost |
 | `BindingShapeSolution` | Solved shape per binding | Materialization follows the strongest required shape |
 | `PackageSurface` | Known legal package subpaths | Bare imports are accepted only against this surface |
-| `ImportDecision` | External, local, shim, or rejected import choice | Rejected imports cannot be emitted as bare imports |
+| `PackageImportDecision` | Builtin, external, local, or rejected import choice (via `PackageResolution`) | Rejected imports cannot be emitted as bare imports |
 | `EmitPlan` | File-level declarations, imports, exports, and body plan | Usage and declaration/import are atomic |
 | `AuditReport` | Structured acceptance and diagnostic output | Audit findings decide whether output is accepted |
 
