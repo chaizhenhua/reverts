@@ -7,14 +7,13 @@
 //! (`generate-project-v2`'s sidecar). Only bindings that actually land in an
 //! emitted file are offered — a target with no readable file is not actionable.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
-use reverts_js::is_minified_identifier;
 use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 
 use crate::args::{NamingPlanArgs, NamingProgressTier};
 use crate::commands::module_classify::excluded_module_ids_from_sqlite;
-use crate::commands::naming_progress::{NamingKind, Tier, module_naming_facts, symbol_tier};
+use crate::commands::naming_progress::{Tier, classify_emitted_entry, emitted_universe};
 use crate::errors::{CliRunError, NamingProgressError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
 
@@ -31,51 +30,20 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
         .map_err(NamingProgressError::LoadInput)?;
     let prepared = prepare_and_enrich(bundle).map_err(NamingProgressError::Pipeline)?;
 
-    // First-party module set (after path/classification/emission exclusion) and
-    // exported binding names per module, from the graph. Export *names* are
-    // preserved across reconstruction, so they are reliable even though the
-    // emitted binding universe (below) comes from the output. Borrowed before
-    // the emit consumes `prepared`.
-    let facts = module_naming_facts(&prepared.program, &excluded);
-    let mut first_party: BTreeSet<u32> = BTreeSet::new();
-    let mut exported_by_module: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
-    for module in &facts {
-        first_party.insert(module.module_id.0);
-        let exported = exported_by_module.entry(module.module_id.0).or_default();
-        for symbol in &module.symbols {
-            if symbol.tier == Tier::PublicSurface {
-                exported.insert(symbol.original_name.clone());
-            }
-        }
-    }
-
-    // The actionable universe is the *emitted* symbol index (bindings the agent
-    // can actually open and rename). Tier/named are computed from it directly.
+    // First-party + export view, built before the emit consumes `prepared`. The
+    // actionable universe is the emitted symbol index (bindings the agent can
+    // open and rename); tier/named come from the same classifier as
+    // `naming-progress`, so plan and progress stay coherent.
+    let universe = emitted_universe(&prepared.program, &excluded);
     let run = generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
 
     let mut by_module: BTreeMap<u32, (String, Vec<serde_json::Value>)> = BTreeMap::new();
     let mut target_count = 0_usize;
     for entry in &run.symbol_index {
-        if !first_party.contains(&entry.module_id.0) {
-            continue; // externalized / vendored / classified-out module
-        }
-        // Named = renamed by the Agent (emitted != original) or already a
-        // meaningful identifier (preserved vendored source).
-        let named = entry.emitted_name != entry.original_name
-            || !is_minified_identifier(&entry.original_name);
-        if named {
+        let Some(detail) = classify_emitted_entry(entry, &universe) else {
             continue;
-        }
-        let exported = exported_by_module
-            .get(&entry.module_id.0)
-            .is_some_and(|names| names.contains(&entry.original_name));
-        let kind = if entry.function_like {
-            NamingKind::FunctionLike
-        } else {
-            NamingKind::ValueLike
         };
-        let tier = symbol_tier(exported, kind);
-        if !tier_in_scope(tier, args.target_level) {
+        if detail.named || !tier_in_scope(detail.tier, args.target_level) {
             continue;
         }
         let slot = by_module
@@ -84,7 +52,7 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
         slot.1.push(serde_json::json!({
             "original_name": entry.original_name,
             "emitted_name": entry.emitted_name,
-            "tier": tier_str(tier),
+            "tier": tier_str(detail.tier),
         }));
         target_count += 1;
     }

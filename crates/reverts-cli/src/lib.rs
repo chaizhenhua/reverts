@@ -29,8 +29,8 @@ pub use commands::module_classify::{
 };
 pub use commands::naming_plan::naming_plan_json;
 pub use commands::naming_progress::{
-    ModuleNamingProgress, NamingKind, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
-    compute_naming_progress, naming_progress_from_sqlite,
+    ModuleNamingProgress, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
+    naming_progress_from_sqlite,
 };
 pub use commands::package_cache::{PackageCacheAuditOutcome, package_cache_audit_from_sqlite};
 pub use commands::runtime_inventory::{

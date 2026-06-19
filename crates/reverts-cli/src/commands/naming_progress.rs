@@ -13,17 +13,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode};
-use reverts_ir::{BindingShape, ModuleId, ModuleKind};
+use reverts_ir::{ModuleId, ModuleKind};
 use reverts_js::is_minified_identifier;
 use reverts_model::EnrichedProgram;
-use reverts_pipeline::prepare_and_enrich;
+use reverts_pipeline::{SymbolIndexEntry, generate_project_from_prepared, prepare_and_enrich};
 
 use crate::args::{NamingProgressArgs, NamingProgressTier};
 use crate::errors::{CliRunError, NamingProgressError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NamingKind {
+pub(crate) enum NamingKind {
     FunctionLike,
     ValueLike,
 }
@@ -42,14 +42,6 @@ pub(crate) struct SymbolDetail {
     pub original_name: String,
     pub tier: Tier,
     pub named: bool,
-}
-
-/// All measured bindings of one first-party module.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModuleNamingFacts {
-    pub module_id: ModuleId,
-    pub semantic_path: String,
-    pub symbols: Vec<SymbolDetail>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -81,20 +73,6 @@ pub struct NamingProgressReport {
     pub project_id: u32,
     pub modules: Vec<ModuleNamingProgress>,
     pub totals: TierBreakdown,
-}
-
-#[must_use]
-pub fn naming_kind(shape: BindingShape) -> NamingKind {
-    match shape {
-        BindingShape::Callable | BindingShape::Constructor | BindingShape::ClassLike => {
-            NamingKind::FunctionLike
-        }
-        BindingShape::Unknown
-        | BindingShape::Value
-        | BindingShape::PlainObject
-        | BindingShape::NamespaceObject
-        | BindingShape::EnumObject => NamingKind::ValueLike,
-    }
 }
 
 pub(crate) fn symbol_tier(exported: bool, kind: NamingKind) -> Tier {
@@ -191,83 +169,97 @@ fn is_vendored_path(path: &str) -> bool {
     path.contains("node_modules/") || path.starts_with("node_modules")
 }
 
-/// Walks the graph for every first-party module and classifies each
-/// module-level binding into a tier with its named status. The single source of
-/// truth for both the progress report and the naming plan.
-pub(crate) fn module_naming_facts(
+/// First-party module set (after path/classification/emission exclusion) plus
+/// exported binding names per module. The actionable binding universe comes from
+/// the *emitted* output (`SymbolIndexEntry`); export *names* are preserved across
+/// reconstruction, so the graph supplies them reliably to classify tiers.
+pub(crate) struct EmittedUniverse {
+    pub first_party: BTreeSet<u32>,
+    pub exported_by_module: BTreeMap<u32, BTreeSet<String>>,
+}
+
+pub(crate) fn emitted_universe(
     program: &EnrichedProgram,
     excluded: &BTreeSet<ModuleId>,
-) -> Vec<ModuleNamingFacts> {
+) -> EmittedUniverse {
     let model = program.model();
-    let first_party = first_party_module_ids(model.input(), excluded);
+    let first_party_ids = first_party_module_ids(model.input(), excluded);
     let graph = model.graph();
-    let paths: BTreeMap<ModuleId, &str> = model
-        .modules()
-        .iter()
-        .map(|module| (module.id, module.semantic_path.as_str()))
-        .collect();
-
-    // Overlay: which (module, original_name) already carry an Agent-written
-    // semantic name. The *universe* comes from the graph (the bindings actually
-    // present in the emitted code); this table only marks what has been named.
-    let mut named_overlay: BTreeSet<(ModuleId, &str)> = BTreeSet::new();
-    for symbol in model.symbols() {
-        if symbol.semantic_name.is_some() {
-            named_overlay.insert((symbol.module_id, symbol.name.as_str()));
-        }
-    }
-
-    let mut facts = Vec::new();
-    for module_id in &first_party {
-        let exported: BTreeSet<String> = graph
+    let mut first_party = BTreeSet::new();
+    let mut exported_by_module: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+    for module_id in &first_party_ids {
+        first_party.insert(module_id.0);
+        let exported = graph
             .import_export()
             .exports_for(*module_id)
             .into_iter()
             .map(|binding| binding.as_str().to_string())
             .collect();
-        let mut symbols = Vec::new();
-        for binding in graph.definitions_for(*module_id) {
-            let name = binding.as_str();
-            // "Named" = an Agent semantic name exists, or the original name is
-            // already a meaningful identifier (e.g. preserved vendored source).
-            let named =
-                named_overlay.contains(&(*module_id, name)) || !is_minified_identifier(name);
-            let tier = symbol_tier(
-                exported.contains(name),
-                naming_kind(program.binding_shape(*module_id, name)),
-            );
-            symbols.push(SymbolDetail {
-                original_name: name.to_string(),
-                tier,
-                named,
-            });
-        }
-        facts.push(ModuleNamingFacts {
-            module_id: *module_id,
-            semantic_path: paths.get(module_id).copied().unwrap_or("").to_string(),
-            symbols,
-        });
+        exported_by_module.insert(module_id.0, exported);
     }
-    facts
+    EmittedUniverse {
+        first_party,
+        exported_by_module,
+    }
+}
+
+/// Classifies one emitted symbol-index entry into a tier with named status.
+/// `None` when its module is not first-party (externalized / vendored /
+/// classified out). Single source of truth for both progress and plan.
+pub(crate) fn classify_emitted_entry(
+    entry: &SymbolIndexEntry,
+    universe: &EmittedUniverse,
+) -> Option<SymbolDetail> {
+    if !universe.first_party.contains(&entry.module_id.0) {
+        return None;
+    }
+    // Named = renamed by the Agent (emitted != original) or already a meaningful
+    // identifier (preserved vendored source).
+    let named =
+        entry.emitted_name != entry.original_name || !is_minified_identifier(&entry.original_name);
+    let exported = universe
+        .exported_by_module
+        .get(&entry.module_id.0)
+        .is_some_and(|names| names.contains(&entry.original_name));
+    let kind = if entry.function_like {
+        NamingKind::FunctionLike
+    } else {
+        NamingKind::ValueLike
+    };
+    Some(SymbolDetail {
+        original_name: entry.original_name.clone(),
+        tier: symbol_tier(exported, kind),
+        named,
+    })
 }
 
 #[must_use]
-pub fn compute_naming_progress(
+pub(crate) fn compute_naming_progress(
     project_id: u32,
-    program: &EnrichedProgram,
-    excluded: &BTreeSet<ModuleId>,
+    symbol_index: &[SymbolIndexEntry],
+    universe: &EmittedUniverse,
 ) -> NamingProgressReport {
-    let facts = module_naming_facts(program, excluded);
+    let mut by_module: BTreeMap<u32, (String, Vec<SymbolDetail>)> = BTreeMap::new();
     let mut all_symbols: Vec<SymbolDetail> = Vec::new();
-    let mut modules: Vec<ModuleNamingProgress> = Vec::new();
-    for module in &facts {
-        all_symbols.extend_from_slice(&module.symbols);
-        modules.push(ModuleNamingProgress {
-            module_id: module.module_id,
-            semantic_path: module.semantic_path.clone(),
-            breakdown: tier_breakdown(&module.symbols),
-        });
+    for entry in symbol_index {
+        let Some(detail) = classify_emitted_entry(entry, universe) else {
+            continue;
+        };
+        all_symbols.push(detail.clone());
+        by_module
+            .entry(entry.module_id.0)
+            .or_insert_with(|| (entry.file_path.clone(), Vec::new()))
+            .1
+            .push(detail);
     }
+    let modules = by_module
+        .into_iter()
+        .map(|(module_id, (file_path, symbols))| ModuleNamingProgress {
+            module_id: ModuleId(module_id),
+            semantic_path: file_path,
+            breakdown: tier_breakdown(&symbols),
+        })
+        .collect();
     NamingProgressReport {
         project_id,
         modules,
@@ -286,10 +278,14 @@ pub fn naming_progress_from_sqlite(
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(NamingProgressError::LoadInput)?;
     let prepared = prepare_and_enrich(bundle).map_err(NamingProgressError::Pipeline)?;
+    // The actionable universe is the emitted output; build the export/first-party
+    // view before the emit consumes `prepared`.
+    let universe = emitted_universe(&prepared.program, &excluded);
+    let run = generate_project_from_prepared(prepared).map_err(NamingProgressError::Pipeline)?;
     Ok(compute_naming_progress(
         args.project_id,
-        &prepared.program,
-        &excluded,
+        &run.symbol_index,
+        &universe,
     ))
 }
 
@@ -368,36 +364,15 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        NamingKind, NamingProgressReport, SymbolDetail, Tier, compute_naming_progress, naming_kind,
-        symbol_tier, tier_breakdown,
+        NamingKind, NamingProgressReport, SymbolDetail, SymbolIndexEntry, Tier,
+        classify_emitted_entry, compute_naming_progress, symbol_tier, tier_breakdown,
     };
-    use reverts_ir::BindingShape;
 
     fn fact(named: bool, exported: bool, kind: NamingKind) -> SymbolDetail {
         SymbolDetail {
             original_name: String::new(),
             tier: symbol_tier(exported, kind),
             named,
-        }
-    }
-
-    #[test]
-    fn naming_kind_maps_callable_shapes_to_function_like() {
-        for shape in [
-            BindingShape::Callable,
-            BindingShape::Constructor,
-            BindingShape::ClassLike,
-        ] {
-            assert_eq!(naming_kind(shape), NamingKind::FunctionLike);
-        }
-        for shape in [
-            BindingShape::Unknown,
-            BindingShape::Value,
-            BindingShape::PlainObject,
-            BindingShape::NamespaceObject,
-            BindingShape::EnumObject,
-        ] {
-            assert_eq!(naming_kind(shape), NamingKind::ValueLike);
         }
     }
 
@@ -462,72 +437,88 @@ mod tests {
         assert!(!is_vendored_path("src/index.ts"));
     }
 
+    fn universe(first_party: &[u32], exported: &[(u32, &str)]) -> super::EmittedUniverse {
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut exported_by_module: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+        for (module_id, name) in exported {
+            exported_by_module
+                .entry(*module_id)
+                .or_default()
+                .insert((*name).to_string());
+        }
+        super::EmittedUniverse {
+            first_party: first_party.iter().copied().collect(),
+            exported_by_module,
+        }
+    }
+
+    fn entry(
+        module_id: u32,
+        original: &str,
+        emitted: &str,
+        function_like: bool,
+    ) -> SymbolIndexEntry {
+        SymbolIndexEntry {
+            module_id: reverts_ir::ModuleId(module_id),
+            original_name: original.to_string(),
+            emitted_name: emitted.to_string(),
+            file_path: format!("modules/{module_id}.ts"),
+            function_like,
+        }
+    }
+
     #[test]
-    fn compute_is_graph_driven_and_excludes_external_modules() {
-        use reverts_analyze::enrich_program;
-        use reverts_input::{
-            InputBundle, InputRows, ModuleInput, PackageAttributionInput, PackageAttributionStatus,
-            PackageEmissionMode, ProjectInput, SourceFileInput, SymbolInput,
-        };
-        use reverts_ir::ModuleId;
-        use reverts_model::ProgramModel;
+    fn classify_marks_minified_unnamed_exported_binding() {
+        let universe = universe(&[1], &[(1, "aB")]);
+        let detail = classify_emitted_entry(&entry(1, "aB", "aB", false), &universe)
+            .expect("first-party binding");
+        assert_eq!(detail.tier, Tier::PublicSurface); // exported
+        assert!(!detail.named); // minified, not renamed
+    }
 
-        // First-party module with: exported function `parse`, internal function
-        // `help`, minified value `aB` (no overlay), minified value `cV` (Agent
-        // semantic name overlay). `dep` is externalized -> excluded.
-        let source = "export function parse(a){ return help(a) + aB + cV; }\n\
-                      function help(x){ return x + 1; }\n\
-                      var aB = 1;\n\
-                      var cV = 2;\n";
-        let app =
-            ModuleInput::application(ModuleId(1), "entry", "src/index.ts").with_source_file(1);
-        let pkg = ModuleInput::package(
-            ModuleId(2),
-            "dep",
-            "node_modules/dep",
-            "dep",
-            Some("1.0.0".into()),
+    #[test]
+    fn classify_skips_non_first_party_module() {
+        let universe = universe(&[1], &[]);
+        assert!(classify_emitted_entry(&entry(2, "x", "x", false), &universe).is_none());
+    }
+
+    #[test]
+    fn classify_counts_renamed_or_meaningful_as_named() {
+        let universe = universe(&[1], &[]);
+        // Renamed by the Agent (emitted != original).
+        assert!(
+            classify_emitted_entry(&entry(1, "aB", "createClient", false), &universe)
+                .expect("first-party")
+                .named
         );
+        // Already meaningful original.
+        assert!(
+            classify_emitted_entry(&entry(1, "tokenize", "tokenize", true), &universe)
+                .expect("first-party")
+                .named
+        );
+    }
 
-        let mut rows = InputRows::new(ProjectInput::new(7, "fixture".to_string()));
-        rows.source_files = vec![SourceFileInput {
-            id: 1,
-            path: "src/index.ts".to_string(),
-            source: Some(source.to_string()),
-        }];
-        rows.modules = vec![app, pkg];
-        rows.symbols = vec![SymbolInput::new(ModuleId(1), "cV").with_semantic_name("counter")];
-        rows.package_attributions = vec![PackageAttributionInput {
-            module_id: ModuleId(2),
-            package_name: "dep".into(),
-            package_version: Some("1.0.0".into()),
-            subpath: None,
-            resolved_file: None,
-            export_specifier: Some("dep".into()),
-            emission_mode: PackageEmissionMode::ExternalImport,
-            status: PackageAttributionStatus::Accepted,
-            rejection_reason: None,
-            function_span: None,
-            confidence: None,
-        }];
-
-        let bundle = InputBundle::from_rows(rows).expect("valid bundle");
-        let program = enrich_program(ProgramModel::from_input(bundle)).program;
-        let report: NamingProgressReport =
-            compute_naming_progress(7, &program, &std::collections::BTreeSet::new());
+    #[test]
+    fn compute_aggregates_emitted_index_and_excludes_external() {
+        let universe = universe(&[1], &[(1, "aB")]);
+        let index = [
+            entry(1, "aB", "aB", false),         // exported, minified -> L1 unnamed
+            entry(1, "hL", "hL", true),          // internal fn -> L2 unnamed
+            entry(1, "cD", "cD", false),         // internal value -> L3 unnamed
+            entry(1, "pretty", "pretty", false), // meaningful -> L3 named
+            entry(2, "zz", "zz", false),         // module 2 not first-party -> excluded
+        ];
+        let report: NamingProgressReport = compute_naming_progress(7, &index, &universe);
 
         assert_eq!(report.project_id, 7);
-        // Only the first-party module is measured; `dep` is excluded.
         assert_eq!(report.modules.len(), 1);
-        assert_eq!(report.modules[0].module_id, ModuleId(1));
-        // Universe = 4 graph definitions (parse, help, aB, cV).
-        assert_eq!(report.totals.full.universe, 4);
-        // Named = parse + help (meaningful) + cV (overlay); aB stays minified.
-        assert_eq!(report.totals.full.named, 3);
-        // Public surface = the exported `parse`.
-        assert_eq!(report.totals.public_surface.universe, 1);
-        assert_eq!(report.totals.public_surface.named, 1);
-        // L1 and L2 fully named, L3 has the unnamed `aB`.
-        assert_eq!(report.totals.reached_level, Some(Tier::Declarations));
+        assert_eq!(report.modules[0].module_id, reverts_ir::ModuleId(1));
+        assert_eq!(report.totals.full.universe, 4); // module 2 excluded
+        assert_eq!(report.totals.full.named, 1); // only `pretty`
+        assert_eq!(report.totals.public_surface.universe, 1); // `aB`
+        assert_eq!(report.totals.public_surface.named, 0);
+        assert_eq!(report.totals.declarations.universe, 2); // `aB` + `hL`
+        assert_eq!(report.totals.reached_level, None); // public surface incomplete
     }
 }
