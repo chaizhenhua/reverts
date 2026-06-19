@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
+use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
 use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 use rusqlite::{Connection, params};
 
@@ -58,6 +59,7 @@ impl ReferenceSourceNamesArgs {
 struct ModulePlan {
     module_id: u32,
     subject_path: String,
+    reference_version: String,
     matched: ModuleMatch,
     module_semantic_name: String,
     subject_bindings: Vec<(String, String)>,
@@ -82,6 +84,7 @@ fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliR
         plans.push(ModulePlan {
             module_id: subject.module_id,
             subject_path: subject.file_path,
+            reference_version: index.version.clone(),
             module_semantic_name: strip_source_extension(&matched.file_path),
             matched,
             subject_bindings: subject.bindings,
@@ -111,18 +114,22 @@ fn tier_str(tier: MatchTier) -> &'static str {
 
 pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let plans = plan_modules(&args)?;
-    println!("module_id\tsubject_path\tref_file\ttier\tsemantic_name\tasset\texport\tfn");
+    println!(
+        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tanchor"
+    );
     for plan in &plans {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             plan.module_id,
             plan.subject_path,
+            plan.reference_version,
             plan.matched.file_path,
             tier_str(plan.matched.tier),
             plan.module_semantic_name,
             plan.matched.asset_overlap,
             plan.matched.export_overlap,
             plan.matched.function_overlap,
+            plan.matched.anchor_overlap,
         );
     }
     if args.apply {
@@ -166,8 +173,6 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     }
     Ok(())
 }
-
-use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
 
 /// One subject emitted module: its DB module id, emitted path, fingerprint,
 /// and the (original_name → emitted_name) bindings that land in it.
@@ -316,7 +321,13 @@ fn classify_anchors(fingerprint: &SourceFingerprint) -> (BTreeSet<String>, BTree
         if let Some(name) = anchor.strip_prefix("export:") {
             exports.insert(name.to_string());
         } else if anchor.ends_with(".node") {
-            assets.insert(anchor.clone());
+            // Match native assets by basename: the emitter rewrites the require
+            // path (e.g. `/$bunfs/root/audio-capture.node` in the source tree
+            // becomes `../assets/audio-capture.node` in emitted output), so the
+            // full literal differs while the distinctive `.node` filename is
+            // stable across versions.
+            let basename = anchor.rsplit('/').next().unwrap_or(anchor.as_str());
+            assets.insert(basename.to_string());
         }
     }
     (exports, assets)
@@ -462,6 +473,62 @@ fn write_export_names(
     Ok(written)
 }
 
+/// Reserved for the deferred binding-level naming follow-up (Task 11b): carries
+/// one row to be written into `semantic_binding_names`.
+/// Not yet wired into `run()`.
+#[allow(dead_code)]
+struct BindingNameWrite {
+    original_name: String,
+    semantic_name: String,
+    accepted: bool,
+}
+
+/// Reserved for the deferred binding-level naming follow-up (Task 11b): writes
+/// `semantic_binding_names` rows (accepted=1 for anchored, 0 for agent proposals).
+/// Not yet wired into `run()`.
+#[allow(dead_code)]
+fn write_binding_names(
+    connection: &Connection,
+    project_id: u32,
+    file_path: &str,
+    rows: &[BindingNameWrite],
+    origin: &str,
+) -> Result<usize, CliRunError> {
+    let mut written = 0;
+    for row in rows {
+        let binding_key = row.original_name.clone(); // no binding_index → key on original
+        written += connection
+            .execute(
+                r"
+                INSERT INTO semantic_binding_names (
+                    project_id, file_path, original_name, binding_index, binding_key, semantic_name,
+                    origin, evidence, accepted, created_at, updated_at
+                ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
+                ON CONFLICT(project_id, file_path, original_name, binding_key) DO UPDATE SET
+                    semantic_name = excluded.semantic_name, origin = excluded.origin,
+                    evidence = excluded.evidence, accepted = excluded.accepted,
+                    updated_at = datetime('now')
+                ",
+                params![
+                    i64::from(project_id),
+                    file_path,
+                    row.original_name,
+                    binding_key,
+                    row.semantic_name,
+                    origin,
+                    if row.accepted {
+                        "{\"tier\":\"fn-ast-collision\"}"
+                    } else {
+                        "{\"tier\":\"agent\"}"
+                    },
+                    i64::from(row.accepted),
+                ],
+            )
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+    }
+    Ok(written)
+}
+
 fn write_module_names(
     connection: &Connection,
     plans: &[ModulePlan],
@@ -517,7 +584,7 @@ mod tests {
         assert!(
             index.modules[0]
                 .asset_literals
-                .contains("/$bunfs/root/audio-capture.node")
+                .contains("audio-capture.node")
         );
     }
 
@@ -535,8 +602,8 @@ mod tests {
         let (exports, assets) = classify_anchors(&fingerprint);
         assert!(exports.contains("captureAudio"), "exports: {exports:?}");
         assert!(
-            assets.contains("/$bunfs/root/audio-capture.node"),
-            "assets: {assets:?}"
+            assets.contains("audio-capture.node"),
+            "assets matched by basename: {assets:?}"
         );
     }
 
@@ -577,6 +644,7 @@ mod tests {
         ModulePlan {
             module_id,
             subject_path: format!("modules/m{module_id}.ts"),
+            reference_version: "2.1.76".to_string(),
             module_semantic_name: name.to_string(),
             matched: ModuleMatch {
                 file_path: format!("{name}.ts"),
@@ -679,6 +747,54 @@ mod tests {
     }
 
     #[test]
+    fn binding_names_written_anchored_accepted_unanchored_proposed() {
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE semantic_binding_names (
+                    project_id INTEGER NOT NULL, file_path TEXT NOT NULL,
+                    original_name TEXT NOT NULL, binding_index INTEGER, binding_key TEXT NOT NULL,
+                    semantic_name TEXT NOT NULL, origin TEXT NOT NULL, evidence TEXT,
+                    accepted INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (project_id, file_path, original_name, binding_key)
+                );
+                ",
+            )
+            .expect("schema");
+        let rows = vec![
+            BindingNameWrite {
+                original_name: "x".into(),
+                semantic_name: "decodeFrame".into(),
+                accepted: true,
+            },
+            BindingNameWrite {
+                original_name: "y".into(),
+                semantic_name: "guessName".into(),
+                accepted: false,
+            },
+        ];
+        write_binding_names(&connection, 1, "modules/m.ts", &rows, "source:2.1.76:f.ts")
+            .expect("write");
+        let accepted: i64 = connection
+            .query_row(
+                "SELECT accepted FROM semantic_binding_names WHERE original_name='x'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("qx");
+        let proposed: i64 = connection
+            .query_row(
+                "SELECT accepted FROM semantic_binding_names WHERE original_name='y'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("qy");
+        assert_eq!(accepted, 1);
+        assert_eq!(proposed, 0);
+    }
+
+    #[test]
     fn unrelated_modules_do_not_match() {
         let index = {
             let temp = tempfile::tempdir().expect("temp");
@@ -695,5 +811,263 @@ mod tests {
         )
         .expect("fp");
         assert!(best_module_match(&subject, &index).is_none());
+    }
+
+    // ── Test 1: e2e module match for both wrappers (hermetic) ──────────────────
+
+    #[test]
+    fn e2e_module_match_both_wrappers() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("features")).expect("mkdir features");
+        std::fs::create_dir_all(root.join("init")).expect("mkdir init");
+        std::fs::write(
+            root.join("features/audio-capture.ts"),
+            "export var captureAudio = require('/$bunfs/root/audio-capture.node');",
+        )
+        .expect("write audio-capture.ts");
+        std::fs::write(
+            root.join("init/image-processor-native.ts"),
+            "export var processImage = require('/$bunfs/root/image-processor.node');",
+        )
+        .expect("write image-processor-native.ts");
+
+        let index = build_reference_source_index(root, "2.1.76").expect("index");
+
+        // Subject 1: references the audio-capture .node literal
+        let audio_subject = fingerprint_source(
+            "modules/m1.ts",
+            "export const a = require('/$bunfs/root/audio-capture.node');",
+        )
+        .expect("audio subject fp");
+        let audio_match = best_module_match(&audio_subject, &index).expect("audio match");
+        assert_eq!(
+            audio_match.file_path, "features/audio-capture.ts",
+            "audio subject must match features/audio-capture.ts"
+        );
+        assert_eq!(
+            audio_match.tier,
+            MatchTier::High,
+            "audio match must be High tier"
+        );
+        assert!(
+            audio_match.asset_overlap >= 1,
+            "audio match must have asset_overlap >= 1"
+        );
+        assert_eq!(
+            strip_source_extension(&audio_match.file_path),
+            "features/audio-capture"
+        );
+
+        // Subject 2: references the image-processor .node literal
+        let image_subject = fingerprint_source(
+            "modules/m2.ts",
+            "export const b = require('/$bunfs/root/image-processor.node');",
+        )
+        .expect("image subject fp");
+        let image_match = best_module_match(&image_subject, &index).expect("image match");
+        assert_eq!(
+            image_match.file_path, "init/image-processor-native.ts",
+            "image subject must match init/image-processor-native.ts"
+        );
+        assert_eq!(
+            image_match.tier,
+            MatchTier::High,
+            "image match must be High tier"
+        );
+        assert!(
+            image_match.asset_overlap >= 1,
+            "image match must have asset_overlap >= 1"
+        );
+        assert_eq!(
+            strip_source_extension(&image_match.file_path),
+            "init/image-processor-native"
+        );
+    }
+
+    // ── Test 2: e2e module-name WRITE (in-memory DB) ───────────────────────────
+
+    #[test]
+    fn e2e_write_module_names_two_high_tier() {
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY, file_id INTEGER, original_name TEXT NOT NULL,
+                    semantic_name TEXT, module_category TEXT, package_name TEXT,
+                    package_version TEXT, byte_start INTEGER, byte_end INTEGER
+                );
+                INSERT INTO modules (id, original_name) VALUES (10, 'm10'), (11, 'm11');
+                ",
+            )
+            .expect("schema");
+
+        let plans = vec![
+            make_plan(10, "features/audio-capture", MatchTier::High),
+            make_plan(11, "init/image-processor-native", MatchTier::High),
+        ];
+        let written = write_module_names(&connection, &plans, MinTier::High, "source", "2.1.76")
+            .expect("write");
+        assert_eq!(written, 2, "both High-tier plans must be written");
+
+        let name10: Option<String> = connection
+            .query_row("SELECT semantic_name FROM modules WHERE id = 10", [], |r| {
+                r.get(0)
+            })
+            .expect("q10");
+        let name11: Option<String> = connection
+            .query_row("SELECT semantic_name FROM modules WHERE id = 11", [], |r| {
+                r.get(0)
+            })
+            .expect("q11");
+        assert_eq!(
+            name10.as_deref(),
+            Some("features/audio-capture"),
+            "module 10 semantic_name must be features/audio-capture"
+        );
+        assert_eq!(
+            name11.as_deref(),
+            Some("init/image-processor-native"),
+            "module 11 semantic_name must be init/image-processor-native"
+        );
+    }
+
+    // ── Test 3: export mapping e2e (in-memory DB) ──────────────────────────────
+
+    #[test]
+    fn e2e_export_mapping_exact_match_only() {
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE symbol_name_proposals (
+                    project_id INTEGER NOT NULL, module_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL, semantic_name TEXT NOT NULL,
+                    origin TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, evidence TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_id, module_id, original_name, origin, semantic_name)
+                );
+                CREATE TABLE symbols (
+                    module_id INTEGER, semantic_name TEXT, semantic_name_source TEXT,
+                    export_name TEXT, original_name TEXT, scope_level TEXT
+                );
+                INSERT INTO symbols (module_id, original_name, scope_level)
+                VALUES (10, 'captureAudio', 'module');
+                ",
+            )
+            .expect("schema");
+
+        let reference_exports: BTreeSet<String> =
+            ["captureAudio".to_string(), "somethingMissing".to_string()].into();
+        let subject_bindings = vec![("captureAudio".to_string(), "emittedX".to_string())];
+
+        let written = write_export_names(
+            &connection,
+            1,
+            10,
+            &reference_exports,
+            &subject_bindings,
+            "source:2.1.76:features/audio-capture.ts",
+        )
+        .expect("write");
+
+        assert_eq!(written, 1, "only the exact-match export must be written");
+
+        let sem: Option<String> = connection
+            .query_row(
+                "SELECT semantic_name FROM symbols \
+                 WHERE module_id = 10 AND original_name = 'captureAudio'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("query captureAudio");
+        assert_eq!(
+            sem.as_deref(),
+            Some("captureAudio"),
+            "captureAudio must have semantic_name = captureAudio"
+        );
+
+        // The exact-match export must have an accepted proposal row...
+        let captured_proposals: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM symbol_name_proposals \
+                 WHERE module_id = 10 AND original_name = 'captureAudio' AND accepted = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count captureAudio proposals");
+        assert_eq!(
+            captured_proposals, 1,
+            "captureAudio must have one accepted proposal"
+        );
+
+        // ...and the non-matching export must NOT be written at all.
+        let missing_proposals: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM symbol_name_proposals WHERE original_name = 'somethingMissing'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count somethingMissing proposals");
+        assert_eq!(
+            missing_proposals, 0,
+            "somethingMissing must never be written"
+        );
+    }
+
+    // ── Test 4: precision gate — no false High-tier accept ─────────────────────
+
+    #[test]
+    fn precision_gate_no_false_high_tier() {
+        // Build an index from a single unrelated file.
+        let index = {
+            let temp = tempfile::tempdir().expect("temp");
+            std::fs::write(
+                temp.path().join("a.ts"),
+                "export function alpha(x){ return x + 1; }",
+            )
+            .expect("write a.ts");
+            build_reference_source_index(temp.path(), "v").expect("index")
+        };
+
+        // Subject references a .node literal that is NOT in the index.
+        let subject = fingerprint_source(
+            "modules/m.ts",
+            "export const x = require('/$bunfs/root/other.node'); const zzz_unique_xk9q = 1;",
+        )
+        .expect("subject fp");
+
+        // Zero shared evidence (different .node literal, unique strings, no shared
+        // exports/functions) must yield NO match at all — not merely a non-High one.
+        // (Test 1 proves the matcher DOES return Some+High on real shared evidence, so
+        // this is not vacuously satisfied by a matcher that always returns None.)
+        let matched = best_module_match(&subject, &index);
+        assert!(
+            matched.is_none(),
+            "unshared evidence must never produce a match; got: {matched:?}"
+        );
+
+        // Low-tier plan must not be written at MinTier::High gate.
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY, file_id INTEGER, original_name TEXT NOT NULL,
+                    semantic_name TEXT, module_category TEXT, package_name TEXT,
+                    package_version TEXT, byte_start INTEGER, byte_end INTEGER
+                );
+                INSERT INTO modules (id, original_name) VALUES (99, 'mUnrelated');
+                ",
+            )
+            .expect("schema");
+        let low = make_plan(99, "a", MatchTier::Low);
+        let written =
+            write_module_names(&connection, &[low], MinTier::High, "source", "v").expect("write");
+        assert_eq!(
+            written, 0,
+            "Low-tier plan must not be written at MinTier::High gate"
+        );
     }
 }
