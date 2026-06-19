@@ -6,20 +6,26 @@ use oxc_ast::AstBuilder;
 use oxc_ast::Visit;
 use oxc_ast::VisitMut;
 use oxc_ast::ast::{
-    ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget,
-    BindingPattern, BindingPatternKind, Declaration, ExportNamedDeclaration, Expression,
-    FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier, ObjectPropertyKind,
-    Program, PropertyKey, ReturnStatement, SimpleAssignmentTarget, Statement, TSType, TSTypeName,
-    TSTypeParameterInstantiation, TSTypeQueryExprName, UpdateExpression, VariableDeclaration,
-    VariableDeclarationKind,
+    Argument, ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression,
+    AssignmentTarget, BindingPattern, BindingPatternKind, CallExpression, Declaration,
+    ExportNamedDeclaration, Expression, FormalParameters, Function, FunctionBody,
+    ImportDeclarationSpecifier, ObjectPropertyKind, Program, PropertyKey, ReturnStatement,
+    SimpleAssignmentTarget, Statement, TSType, TSTypeName, TSTypeParameterInstantiation,
+    TSTypeQueryExprName, UpdateExpression, VariableDeclaration, VariableDeclarationKind,
 };
-use oxc_ast::visit::walk::{walk_assignment_expression, walk_update_expression};
+use oxc_ast::visit::walk::{
+    walk_arrow_function_expression as walk_arrow_function_expression_read,
+    walk_assignment_expression, walk_call_expression, walk_function as walk_function_read,
+    walk_update_expression, walk_variable_declaration as walk_variable_declaration_read,
+};
 use oxc_ast::visit::walk_mut::{
     walk_arrow_function_expression, walk_function, walk_variable_declaration,
 };
 use oxc_parser::Parser;
+use oxc_semantic::{SemanticBuilder, SymbolTable};
 use oxc_span::SPAN;
 use oxc_syntax::scope::ScopeFlags;
+use oxc_syntax::symbol::SymbolId;
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
 use crate::parse::{parse_options_for, source_type_candidates};
@@ -119,7 +125,11 @@ pub fn apply_type_annotations_to_program<'a>(
     };
     annotator.visit_program(program);
 
-    let mut function_annotator = FunctionSignatureAnnotator { builder: &builder };
+    let call_site_parameter_types = call_site_parameter_types(program);
+    let mut function_annotator = FunctionSignatureAnnotator {
+        builder: &builder,
+        call_site_parameter_types: &call_site_parameter_types,
+    };
     function_annotator.visit_program(program);
 }
 
@@ -266,11 +276,57 @@ fn annotate_safe_variable_declaration<'a>(
 
 struct FunctionSignatureAnnotator<'b, 'a> {
     builder: &'b AstBuilder<'a>,
+    call_site_parameter_types: &'b BTreeMap<SymbolId, Vec<Option<InferredExpressionType>>>,
 }
 
 impl<'a> VisitMut<'a> for FunctionSignatureAnnotator<'_, 'a> {
+    fn visit_variable_declaration(&mut self, declaration: &mut VariableDeclaration<'a>) {
+        for declarator in declaration.declarations.iter_mut() {
+            let Some(symbol_id) = binding_pattern_symbol_id(&declarator.id) else {
+                continue;
+            };
+            let Some(init) = &mut declarator.init else {
+                continue;
+            };
+            match init {
+                Expression::FunctionExpression(function) => {
+                    annotate_function_parameters(self.builder, &mut function.params);
+                    annotate_call_site_parameters(
+                        self.builder,
+                        self.call_site_parameter_types,
+                        symbol_id,
+                        &mut function.params,
+                    );
+                    annotate_function_return(self.builder, function);
+                }
+                Expression::ArrowFunctionExpression(arrow) => {
+                    annotate_function_parameters(self.builder, &mut arrow.params);
+                    annotate_call_site_parameters(
+                        self.builder,
+                        self.call_site_parameter_types,
+                        symbol_id,
+                        &mut arrow.params,
+                    );
+                    annotate_arrow_return(self.builder, arrow);
+                }
+                _ => {}
+            }
+        }
+        walk_variable_declaration(self, declaration);
+    }
+
     fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
         annotate_function_parameters(self.builder, &mut function.params);
+        if let Some(id) = &function.id
+            && let Some(symbol_id) = id.symbol_id.get()
+        {
+            annotate_call_site_parameters(
+                self.builder,
+                self.call_site_parameter_types,
+                symbol_id,
+                &mut function.params,
+            );
+        }
         annotate_function_return(self.builder, function);
         walk_function(self, function, flags);
     }
@@ -288,6 +344,53 @@ fn annotate_function_parameters<'a>(
 ) {
     for parameter in parameters.items.iter_mut() {
         annotate_defaulted_binding_pattern(builder, &mut parameter.pattern);
+    }
+}
+
+fn annotate_call_site_parameters<'a>(
+    builder: &AstBuilder<'a>,
+    call_site_parameter_types: &BTreeMap<SymbolId, Vec<Option<InferredExpressionType>>>,
+    symbol_id: SymbolId,
+    parameters: &mut FormalParameters<'a>,
+) {
+    let Some(parameter_types) = call_site_parameter_types.get(&symbol_id) else {
+        return;
+    };
+    for (index, parameter) in parameters.items.iter_mut().enumerate() {
+        let Some(Some(inferred)) = parameter_types.get(index) else {
+            continue;
+        };
+        annotate_call_site_binding_pattern(builder, &mut parameter.pattern, inferred);
+    }
+}
+
+fn annotate_call_site_binding_pattern<'a>(
+    builder: &AstBuilder<'a>,
+    pattern: &mut BindingPattern<'a>,
+    inferred: &InferredExpressionType,
+) {
+    match &mut pattern.kind {
+        BindingPatternKind::BindingIdentifier(_) if pattern.type_annotation.is_none() => {
+            let Some(type_annotation) =
+                type_annotation_for_inferred_expression_type(builder, inferred)
+            else {
+                return;
+            };
+            pattern.type_annotation = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+        }
+        BindingPatternKind::AssignmentPattern(assignment)
+            if assignment.left.type_annotation.is_none()
+                && binding_pattern_identifier(&assignment.left).is_some() =>
+        {
+            let Some(type_annotation) =
+                type_annotation_for_inferred_expression_type(builder, inferred)
+            else {
+                return;
+            };
+            assignment.left.type_annotation =
+                Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+        }
+        _ => {}
     }
 }
 
@@ -520,6 +623,184 @@ fn binding_pattern_identifier<'a>(pattern: &'a BindingPattern<'_>) -> Option<&'a
         BindingPatternKind::ObjectPattern(_)
         | BindingPatternKind::ArrayPattern(_)
         | BindingPatternKind::AssignmentPattern(_) => None,
+    }
+}
+
+fn binding_pattern_symbol_id(pattern: &BindingPattern<'_>) -> Option<SymbolId> {
+    match &pattern.kind {
+        BindingPatternKind::BindingIdentifier(identifier) => identifier.symbol_id.get(),
+        BindingPatternKind::ObjectPattern(_)
+        | BindingPatternKind::ArrayPattern(_)
+        | BindingPatternKind::AssignmentPattern(_) => None,
+    }
+}
+
+fn call_site_parameter_types(
+    program: &Program<'_>,
+) -> BTreeMap<SymbolId, Vec<Option<InferredExpressionType>>> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let callable_parameter_counts = callable_parameter_counts(program);
+    if callable_parameter_counts.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut collector = CallSiteArgumentCollector {
+        symbols: semantic.symbols(),
+        callable_parameter_counts: &callable_parameter_counts,
+        evidence: BTreeMap::new(),
+    };
+    collector.visit_program(program);
+
+    collector
+        .evidence
+        .into_iter()
+        .filter_map(|(symbol_id, parameter_evidence)| {
+            let mut parameter_types = Vec::new();
+            for mut evidence in parameter_evidence {
+                if evidence.conflict {
+                    parameter_types.push(None);
+                    continue;
+                }
+                parameter_types.push(merged_expression_type(&mut evidence.types));
+            }
+            if parameter_types.iter().any(Option::is_some) {
+                Some((symbol_id, parameter_types))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn callable_parameter_counts(program: &Program<'_>) -> BTreeMap<SymbolId, usize> {
+    let mut collector = CallableParameterCollector::default();
+    collector.visit_program(program);
+    collector
+        .counts
+        .into_iter()
+        .filter(|(symbol_id, _)| !collector.conflicts.contains(symbol_id))
+        .collect()
+}
+
+#[derive(Default)]
+struct CallableParameterCollector {
+    counts: BTreeMap<SymbolId, usize>,
+    conflicts: BTreeSet<SymbolId>,
+}
+
+impl CallableParameterCollector {
+    fn record(&mut self, symbol_id: SymbolId, parameters: &FormalParameters<'_>) {
+        if parameters.rest.is_some() || parameters.items.is_empty() {
+            return;
+        }
+        let count = parameters.items.len();
+        if let Some(existing) = self.counts.get(&symbol_id)
+            && *existing != count
+        {
+            self.conflicts.insert(symbol_id);
+            return;
+        }
+        self.counts.insert(symbol_id, count);
+    }
+}
+
+impl<'a> Visit<'a> for CallableParameterCollector {
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        for declarator in &declaration.declarations {
+            let Some(symbol_id) = binding_pattern_symbol_id(&declarator.id) else {
+                continue;
+            };
+            let Some(init) = &declarator.init else {
+                continue;
+            };
+            match init {
+                Expression::FunctionExpression(function) => {
+                    self.record(symbol_id, &function.params)
+                }
+                Expression::ArrowFunctionExpression(arrow) => self.record(symbol_id, &arrow.params),
+                _ => {}
+            }
+        }
+        walk_variable_declaration_read(self, declaration);
+    }
+
+    fn visit_function(&mut self, function: &Function<'a>, flags: ScopeFlags) {
+        if let Some(id) = &function.id
+            && let Some(symbol_id) = id.symbol_id.get()
+        {
+            self.record(symbol_id, &function.params);
+        }
+        walk_function_read(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        walk_arrow_function_expression_read(self, arrow);
+    }
+}
+
+#[derive(Default)]
+struct ParameterTypeEvidence {
+    types: Vec<InferredExpressionType>,
+    conflict: bool,
+}
+
+struct CallSiteArgumentCollector<'b> {
+    symbols: &'b SymbolTable,
+    callable_parameter_counts: &'b BTreeMap<SymbolId, usize>,
+    evidence: BTreeMap<SymbolId, Vec<ParameterTypeEvidence>>,
+}
+
+impl<'a> Visit<'a> for CallSiteArgumentCollector<'_> {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        self.record_call(call);
+        walk_call_expression(self, call);
+    }
+}
+
+impl CallSiteArgumentCollector<'_> {
+    fn record_call(&mut self, call: &CallExpression<'_>) {
+        if call.optional
+            || call
+                .arguments
+                .iter()
+                .any(|arg| matches!(arg, Argument::SpreadElement(_)))
+        {
+            return;
+        }
+        let Expression::Identifier(callee) = &call.callee else {
+            return;
+        };
+        let Some(reference_id) = callee.reference_id.get() else {
+            return;
+        };
+        let Some(symbol_id) = self.symbols.get_reference(reference_id).symbol_id() else {
+            return;
+        };
+        let Some(parameter_count) = self.callable_parameter_counts.get(&symbol_id).copied() else {
+            return;
+        };
+        let evidence = self.evidence.entry(symbol_id).or_insert_with(|| {
+            (0..parameter_count)
+                .map(|_| ParameterTypeEvidence::default())
+                .collect()
+        });
+        for (index, argument) in call.arguments.iter().take(parameter_count).enumerate() {
+            let Some(expression) = argument_expression(argument) else {
+                evidence[index].conflict = true;
+                continue;
+            };
+            match inferred_expression_type(expression, 0) {
+                Some(ty) => evidence[index].types.push(ty),
+                None => evidence[index].conflict = true,
+            }
+        }
+    }
+}
+
+fn argument_expression<'a>(argument: &'a Argument<'a>) -> Option<&'a Expression<'a>> {
+    match argument {
+        Argument::SpreadElement(_) => None,
+        other => Some(other.to_expression()),
     }
 }
 

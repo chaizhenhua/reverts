@@ -455,6 +455,43 @@ fn module_item_formatting_infers_default_parameter_and_return_types_when_request
 }
 
 #[test]
+fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function greet(name) { return 'hi'; } greet('Ada'); const double = (value) => value; double(2);",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function greet(name: string): string"));
+    assert!(formatted.contains("const double = (value: number) =>"));
+}
+
+#[test]
+fn module_item_formatting_infers_union_call_site_parameters_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function mixed(value) { return true; } mixed(1); mixed('no');",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function mixed(value: number | string): boolean"));
+}
+
+#[test]
 fn module_item_formatting_infers_union_return_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function mixed(flag) { if (flag) return 1; return 'no'; }",
