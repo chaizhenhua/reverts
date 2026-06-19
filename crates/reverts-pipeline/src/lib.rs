@@ -13,7 +13,8 @@ use assets::{audit_required_assets, collect_emitted_assets};
 pub use assets::{collect_required_asset_references, collect_required_asset_references_from_rows};
 use audit::{
     audit_binding_shape_consistency, audit_emit_plan_synthesis, audit_emitted_project_parse,
-    audit_namespace_object_member_consistency, audit_required_sources,
+    audit_emitted_relative_import_targets, audit_namespace_object_member_consistency,
+    audit_required_sources,
 };
 use output_paths::module_output_paths;
 pub(crate) use output_paths::relative_asset_specifier;
@@ -404,6 +405,12 @@ pub fn generate_project_from_prepared_with_options(
     let pre_accept_report = pre_accept.report.clone();
 
     audit.extend(audit_emitted_project_parse(&emitted_project));
+    audit.extend(audit_emitted_relative_import_targets(
+        &emitted_project,
+        &assets,
+        input,
+        &module_output_paths,
+    ));
     audit.extend(audit_binding_shape_consistency(&plan, &emitted_project));
     audit.extend(audit_namespace_object_member_consistency(
         &plan,

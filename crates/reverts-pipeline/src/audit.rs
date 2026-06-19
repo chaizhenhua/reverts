@@ -13,19 +13,22 @@
 //!     `audit_emitted_project_parse`) — verify the OXC-rendered TS
 //!     output against the plan.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
 
 use reverts_emitter::EmittedProject;
 use reverts_input::InputBundle;
 use reverts_ir::{BindingName, BindingShape, ModuleId, ModuleKind};
 use reverts_js::{
-    DeclarationCallability, ParseGoal, classify_top_level_bindings, parse_error_message,
-    parse_source,
+    DeclarationCallability, ParseGoal, classify_top_level_bindings,
+    collect_static_module_specifiers, parse_error_message, parse_source,
 };
 use reverts_model::EnrichedProgram;
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package::PackageResolution;
 use reverts_planner::{EmitPlan, PlannedFile};
+
+use crate::EmittedAsset;
 
 pub(crate) fn audit_required_sources(program: &EnrichedProgram) -> AuditReport {
     let mut audit = AuditReport::default();
@@ -409,4 +412,349 @@ pub(crate) fn audit_emitted_project_parse(project: &EmittedProject) -> AuditRepo
         }
     }
     audit
+}
+
+pub(crate) fn audit_emitted_relative_import_targets(
+    project: &EmittedProject,
+    assets: &[EmittedAsset],
+    input: &InputBundle,
+    module_output_paths: &BTreeMap<ModuleId, String>,
+) -> AuditReport {
+    let mut audit = AuditReport::default();
+    let emitted_paths = project
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(assets.iter().map(|asset| asset.path.as_str()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let source_paths = input
+        .source_files
+        .iter()
+        .map(|source_file| normalize_path(Path::new(source_file.path.as_str())))
+        .collect::<BTreeSet<_>>();
+    let source_origin_by_output_path =
+        source_origin_by_output_path(project, input, module_output_paths);
+    for file in &project.files {
+        let Ok(specifiers) = collect_static_module_specifiers(
+            file.source.as_str(),
+            Some(Path::new(file.path.as_str())),
+            ParseGoal::TypeScript,
+        ) else {
+            continue;
+        };
+        for specifier in specifiers {
+            let specifier = strip_query_and_fragment(specifier.value.as_str());
+            if !specifier.starts_with('.') {
+                continue;
+            }
+            if !specifier_requires_emitted_module_target(specifier) {
+                continue;
+            }
+            let candidates =
+                emitted_relative_import_target_candidates(file.path.as_str(), specifier);
+            if candidates
+                .iter()
+                .any(|candidate| emitted_paths.contains(candidate.as_str()))
+            {
+                continue;
+            }
+            let Some(source_origin) = source_origin_by_output_path.get(file.path.as_str()) else {
+                continue;
+            };
+            if !source_import_candidates(
+                normalize_join(
+                    Path::new(source_origin)
+                        .parent()
+                        .unwrap_or_else(|| Path::new("")),
+                    specifier,
+                )
+                .as_str(),
+            )
+            .iter()
+            .any(|candidate| source_paths.contains(candidate))
+            {
+                continue;
+            }
+            audit.push(
+                AuditFinding::error(
+                    FindingCode::UnresolvableBareImport,
+                    "emitted relative module specifier does not resolve to an emitted file",
+                )
+                .with_module(file.path.clone())
+                .with_binding(specifier.to_string()),
+            );
+        }
+    }
+    audit
+}
+
+fn source_origin_by_output_path(
+    project: &EmittedProject,
+    input: &InputBundle,
+    module_output_paths: &BTreeMap<ModuleId, String>,
+) -> BTreeMap<String, String> {
+    let source_paths_by_id = input
+        .source_files
+        .iter()
+        .map(|source_file| (source_file.id, source_file.path.as_str()))
+        .collect::<BTreeMap<_, _>>();
+    let mut origins = BTreeMap::<String, String>::new();
+    for module in &input.modules {
+        let Some(output_path) = module_output_paths.get(&module.id) else {
+            continue;
+        };
+        let Some(source_file_id) = module.source_file_id else {
+            continue;
+        };
+        let Some(source_path) = source_paths_by_id.get(&source_file_id) else {
+            continue;
+        };
+        origins.insert(output_path.clone(), (*source_path).to_string());
+    }
+    for file in &project.files {
+        if let Some(source_path) = preserved_source_import_target(file.source.as_str()) {
+            origins.insert(file.path.clone(), source_path.to_string());
+        }
+    }
+    origins
+}
+
+fn preserved_source_import_target(source: &str) -> Option<&str> {
+    source
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("// reverts-preserved-source-import-target: "))
+}
+
+fn specifier_requires_emitted_module_target(specifier: &str) -> bool {
+    match Path::new(specifier)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts") | None => true,
+        Some(_) => false,
+    }
+}
+
+fn source_import_candidates(base: &str) -> Vec<String> {
+    let mut candidates = vec![base.to_string()];
+    if Path::new(base).extension().is_none() {
+        candidates.extend(
+            [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"].map(|ext| format!("{base}{ext}")),
+        );
+        candidates.extend(
+            ["index.ts", "index.tsx", "index.js", "index.jsx"].map(|name| format!("{base}/{name}")),
+        );
+    }
+    candidates
+}
+
+fn emitted_relative_import_target_candidates(from_file: &str, specifier: &str) -> Vec<String> {
+    let base = normalize_join(
+        Path::new(from_file)
+            .parent()
+            .unwrap_or_else(|| Path::new("")),
+        specifier,
+    );
+    let mut candidates = vec![base.clone()];
+    let path = Path::new(base.as_str());
+    match path.extension().and_then(std::ffi::OsStr::to_str) {
+        Some("js") => candidates.push(replace_extension(base.as_str(), "ts")),
+        Some("jsx") => candidates.push(replace_extension(base.as_str(), "tsx")),
+        Some("mjs") => candidates.push(replace_extension(base.as_str(), "mts")),
+        Some("cjs") => candidates.push(replace_extension(base.as_str(), "cts")),
+        None => {
+            candidates.extend(
+                [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts"]
+                    .map(|extension| format!("{base}{extension}")),
+            );
+            candidates
+                .extend(["index.ts", "index.tsx", "index.js"].map(|name| format!("{base}/{name}")));
+        }
+        _ => {}
+    }
+    candidates
+}
+
+fn replace_extension(path: &str, extension: &str) -> String {
+    let mut replaced = Path::new(path).to_path_buf();
+    replaced.set_extension(extension);
+    normalize_path(replaced.as_path())
+}
+
+fn normalize_join(base: &Path, specifier: &str) -> String {
+    normalize_path(base.join(specifier).as_path())
+}
+
+fn normalize_path(path: &Path) -> String {
+    let mut parts = Vec::<String>::new();
+    let mut absolute = false;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => parts.push(prefix.as_os_str().to_string_lossy().into()),
+            Component::RootDir => absolute = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.last().is_some_and(|part| part != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".to_string());
+                }
+            }
+            Component::Normal(part) => parts.push(part.to_string_lossy().into()),
+        }
+    }
+    let joined = parts.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
+fn strip_query_and_fragment(value: &str) -> &str {
+    let query_index = value.find('?').unwrap_or(value.len());
+    let fragment_index = value.find('#').unwrap_or(value.len());
+    &value[..query_index.min(fragment_index)]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use reverts_emitter::{EmittedFile, EmittedProject};
+    use reverts_input::{InputBundle, InputRows, ModuleInput, ProjectInput, SourceFileInput};
+    use reverts_ir::ModuleId;
+    use reverts_observe::FindingCode;
+
+    use crate::EmittedAsset;
+
+    fn empty_input() -> InputBundle {
+        InputBundle::from_rows(InputRows::new(ProjectInput::new(1, "fixture")))
+            .expect("empty fixture input should be valid")
+    }
+
+    fn relative_input() -> (InputBundle, BTreeMap<ModuleId, String>) {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "/app/a.js",
+            Some("import { b } from './b.js';".into()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "/app/b.js",
+            Some("export const b = 1;".into()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "a", "modules/a.ts").with_source_file(1));
+        (
+            InputBundle::from_rows(rows).expect("relative fixture input should be valid"),
+            BTreeMap::from([(ModuleId(1), "modules/a.ts".to_string())]),
+        )
+    }
+
+    #[test]
+    fn relative_js_import_resolves_to_emitted_typescript_source() {
+        let (input, module_output_paths) = relative_input();
+        let project = EmittedProject {
+            files: vec![
+                EmittedFile {
+                    path: "modules/a.ts".into(),
+                    source: "import { b } from './b.js'; export const a = b;".into(),
+                },
+                EmittedFile {
+                    path: "modules/b.ts".into(),
+                    source: "export const b = 1;".into(),
+                },
+            ],
+        };
+
+        let audit = super::audit_emitted_relative_import_targets(
+            &project,
+            &[],
+            &input,
+            &module_output_paths,
+        );
+
+        assert!(!audit.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn relative_native_import_resolves_to_emitted_asset() {
+        let input = empty_input();
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "entrypoint.ts".into(),
+                source: "import './crypto/build/Release/sshcrypto.node';".into(),
+            }],
+        };
+        let assets = vec![EmittedAsset {
+            path: "crypto/build/Release/sshcrypto.node".into(),
+            bytes: vec![1, 2, 3],
+            executable: false,
+        }];
+
+        let audit = super::audit_emitted_relative_import_targets(
+            &project,
+            &assets,
+            &input,
+            &BTreeMap::new(),
+        );
+
+        assert!(!audit.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn relative_native_import_is_not_a_module_target_error() {
+        let input = empty_input();
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "entrypoint.ts".into(),
+                source: "import './crypto/build/Release/sshcrypto.node';".into(),
+            }],
+        };
+
+        let audit =
+            super::audit_emitted_relative_import_targets(&project, &[], &input, &BTreeMap::new());
+
+        assert!(!audit.has(FindingCode::UnresolvableBareImport));
+    }
+
+    #[test]
+    fn missing_relative_import_target_is_an_error() {
+        let (input, module_output_paths) = relative_input();
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "modules/a.ts".into(),
+                source: "import { b } from './b.js'; export const a = b;".into(),
+            }],
+        };
+
+        let audit = super::audit_emitted_relative_import_targets(
+            &project,
+            &[],
+            &input,
+            &module_output_paths,
+        );
+
+        assert!(audit.has(FindingCode::UnresolvableBareImport));
+        assert!(audit.has_errors());
+    }
+
+    #[test]
+    fn unknown_relative_import_target_is_not_a_known_source_error() {
+        let input = empty_input();
+        let project = EmittedProject {
+            files: vec![EmittedFile {
+                path: "src/bundle.ts".into(),
+                source: "const value = require('./foo');".into(),
+            }],
+        };
+
+        let audit =
+            super::audit_emitted_relative_import_targets(&project, &[], &input, &BTreeMap::new());
+
+        assert!(!audit.has(FindingCode::UnresolvableBareImport));
+    }
 }

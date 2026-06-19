@@ -871,13 +871,19 @@ fn dedup_audit_report(audit: AuditReport) -> AuditReport {
 }
 
 pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
-    audit
-        .findings()
+    let mut findings = audit.findings().iter().collect::<Vec<_>>();
+    findings.sort_by_key(|finding| match finding.severity {
+        reverts_observe::Severity::Error => 0,
+        reverts_observe::Severity::Warning => 1,
+        reverts_observe::Severity::Info => 2,
+    });
+    let rendered = findings
         .iter()
         .take(20)
         .map(|finding| {
             format!(
-                "{:?}: {}{}{}",
+                "{:?} {:?}: {}{}{}",
+                finding.severity,
                 finding.code,
                 finding.message,
                 finding
@@ -893,5 +899,11 @@ pub(crate) fn format_audit_findings(audit: &AuditReport) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    let remaining = findings.len().saturating_sub(20);
+    if remaining == 0 {
+        rendered
+    } else {
+        format!("{rendered}\n... {remaining} additional audit finding(s) omitted")
+    }
 }
