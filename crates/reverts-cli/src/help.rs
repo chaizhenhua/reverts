@@ -15,6 +15,7 @@ pub enum HelpTopic {
     PackageExternalizationHints,
     ExtractAssets,
     FullInventory,
+    CoverageLedger,
     RuntimeInventory,
     SymbolNames,
     NamingProgress,
@@ -40,6 +41,7 @@ pub const PACKAGE_CACHE_PRUNE_STALE_COMMAND: &str = "package-cache-prune-stale";
 pub const PACKAGE_EXTERNALIZATION_HINTS_COMMAND: &str = "package-externalization-hints";
 pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
 pub const FULL_INVENTORY_COMMAND: &str = "full-inventory";
+pub const COVERAGE_LEDGER_COMMAND: &str = "coverage-ledger";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
@@ -92,6 +94,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: FULL_INVENTORY_COMMAND,
         topic: HelpTopic::FullInventory,
         summary: "Write a full decompile inventory and coverage report",
+    },
+    CommandSpec {
+        name: COVERAGE_LEDGER_COMMAND,
+        topic: HelpTopic::CoverageLedger,
+        summary: "Write the unified decompile coverage ledger",
     },
     CommandSpec {
         name: GENERATE_PROJECT_V2_COMMAND,
@@ -157,6 +164,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         }
         HelpTopic::FullInventory => {
             "reverts-cli full-inventory\n\nUSAGE:\n    reverts-cli full-inventory --input <DB> --project-id <ID> [--manifest <FILE>] [--source-root <DIR>] [--output-root <DIR>] [--naming-progress <FILE>] [--json <FILE>]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --manifest <FILE>         Optional reverts-import-evidence.json for unpack/source coverage counts\n    --source-root <DIR>       Optional extracted source root for file counts\n    --output-root <DIR>       Optional generated project root for output and symbol-index counts\n    --naming-progress <FILE>  Optional naming-progress JSON to reuse instead of recomputing\n    --json <FILE>             Write JSON report to this file; without it, print JSON to stdout"
+        }
+        HelpTopic::CoverageLedger => {
+            "reverts-cli coverage-ledger\n\nUSAGE:\n    reverts-cli coverage-ledger --input <DB> --project-id <ID> [--full-inventory <FILE>] [--manifest <FILE>] [--source-root <DIR>] [--output-root <DIR>] [--naming-progress <FILE>] [--json <FILE>]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --full-inventory <FILE>   Existing full-inventory JSON to use as the ledger source\n    --manifest <FILE>         Optional reverts-import-evidence.json when full inventory must be computed\n    --source-root <DIR>       Optional extracted source root when full inventory must be computed\n    --output-root <DIR>       Optional generated project root when full inventory must be computed\n    --naming-progress <FILE>  Optional naming-progress JSON when full inventory must be computed\n    --json <FILE>             Write JSON report to this file; without it, print JSON to stdout"
         }
         HelpTopic::MatchPackages => {
             "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--package-source-root <DIR> ...] [--materialize-package-sources] [--apply]\n\nOPTIONS:\n    --input <DB>                     SQLite input database\n    --project-id <ID>                Positive project id\n    --package-name <NAME>            Restrict matching to the package graph component containing this package; repeatable\n    --package-source-root <DIR>      Additional local package source root (package dir, node_modules, or project root containing node_modules); repeatable. Loaded files are source-only unless later proven importable.\n    --materialize-package-sources    Resolve exact/range/missing package version hints and download only concrete, compatible package versions from the npm registry into the on-disk package cache (~/.reverts/package-cache, override REVERTS_PACKAGE_CACHE_DIR) before matching; with --apply, persist collected sources to package_source_cache\n    --apply                          Persist accepted package attributions, surfaces, and materialized package source cache rows"

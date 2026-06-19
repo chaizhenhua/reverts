@@ -303,6 +303,33 @@ impl FullInventoryArgs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct CoverageLedgerArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long = "full-inventory")]
+    pub full_inventory: Option<PathBuf>,
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    #[arg(long = "source-root")]
+    pub source_root: Option<PathBuf>,
+    #[arg(long = "output-root")]
+    pub output_root: Option<PathBuf>,
+    #[arg(long = "naming-progress")]
+    pub naming_progress: Option<PathBuf>,
+    #[arg(long)]
+    pub json: Option<PathBuf>,
+}
+
+impl CoverageLedgerArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::COVERAGE_LEDGER_COMMAND)
+    }
+}
+
 pub(crate) fn parse_subcommand_args<T>(
     args: impl IntoIterator<Item = String>,
     command: &'static str,
