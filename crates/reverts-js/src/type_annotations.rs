@@ -319,10 +319,11 @@ fn annotate_function_return<'a>(builder: &AstBuilder<'a>, function: &mut Functio
     let Some(body) = &function.body else {
         return;
     };
-    let Some(kind) = body_return_type(body) else {
+    let Some(inferred) = body_return_type(body) else {
         return;
     };
-    let Some(type_annotation) = type_annotation_for_kind(builder, kind) else {
+    let Some(type_annotation) = type_annotation_for_inferred_expression_type(builder, &inferred)
+    else {
         return;
     };
     function.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
@@ -332,27 +333,51 @@ fn annotate_arrow_return<'a>(builder: &AstBuilder<'a>, arrow: &mut ArrowFunction
     if arrow.return_type.is_some() || arrow.r#async {
         return;
     }
-    let Some(kind) = body_return_type(&arrow.body) else {
+    let Some(inferred) = body_return_type(&arrow.body) else {
         return;
     };
-    let Some(type_annotation) = type_annotation_for_kind(builder, kind) else {
+    let Some(type_annotation) = type_annotation_for_inferred_expression_type(builder, &inferred)
+    else {
         return;
     };
     arrow.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
 }
 
-fn body_return_type(body: &FunctionBody<'_>) -> Option<GeneratedTypeKind> {
+fn body_return_type(body: &FunctionBody<'_>) -> Option<InferredExpressionType> {
     let mut collector = ReturnTypeCollector::default();
     collector.visit_function_body(body);
     if collector.conflict {
         return None;
     }
-    collector.inferred
+    merged_return_type(collector.inferred)
+}
+
+fn merged_return_type(mut inferred: Vec<InferredExpressionType>) -> Option<InferredExpressionType> {
+    if inferred.is_empty() {
+        return None;
+    }
+    let mut unique = Vec::new();
+    for ty in inferred.drain(..) {
+        if !unique.contains(&ty) {
+            unique.push(ty);
+        }
+    }
+    if unique.len() == 1 {
+        return Some(unique.remove(0));
+    }
+    if unique.len() <= 3
+        && unique
+            .iter()
+            .all(|ty| matches!(ty, InferredExpressionType::Primitive(_)))
+    {
+        return Some(InferredExpressionType::Union(unique));
+    }
+    None
 }
 
 #[derive(Default)]
 struct ReturnTypeCollector {
-    inferred: Option<GeneratedTypeKind>,
+    inferred: Vec<InferredExpressionType>,
     conflict: bool,
 }
 
@@ -362,17 +387,11 @@ impl<'a> Visit<'a> for ReturnTypeCollector {
             self.conflict = true;
             return;
         };
-        let Some(kind) = literal_type_kind(argument) else {
+        let Some(inferred) = inferred_expression_type(argument, 0) else {
             self.conflict = true;
             return;
         };
-        if let Some(existing) = self.inferred {
-            if existing != kind {
-                self.conflict = true;
-            }
-        } else {
-            self.inferred = Some(kind);
-        }
+        self.inferred.push(inferred);
     }
 
     fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}

@@ -411,7 +411,7 @@ fn module_item_formatting_infers_default_parameter_and_return_types_when_request
 }
 
 #[test]
-fn module_item_formatting_skips_conflicting_return_types_when_requested() {
+fn module_item_formatting_infers_union_return_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function mixed(flag) { if (flag) return 1; return 'no'; }",
         generated_imports: &[],
@@ -426,7 +426,27 @@ fn module_item_formatting_skips_conflicting_return_types_when_requested() {
     .expect("fixture should format");
 
     assert!(formatted.contains("function mixed(flag)"));
-    assert!(!formatted.contains("function mixed(flag):"));
+    assert!(formatted.contains("function mixed(flag): number | string"));
+}
+
+#[test]
+fn module_item_formatting_infers_structural_return_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function config() { return { name: 'cli', ports: [80, 443] }; }",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function config(): {"));
+    assert!(formatted.contains("name: string;"));
+    assert!(formatted.contains("ports: number[];"));
 }
 
 #[test]
