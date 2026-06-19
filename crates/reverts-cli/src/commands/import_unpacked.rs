@@ -77,6 +77,7 @@ struct ImportEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EvidenceFile {
     path: String,
+    physical_path: Option<PathBuf>,
     size: Option<u64>,
     sha256: Option<String>,
     executable: bool,
@@ -267,6 +268,10 @@ fn parse_evidence_file(
             message: format!("{field} entry missing string path"),
         })?
         .to_string();
+    let physical_path = object
+        .get("physical_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from);
     let size = object.get("size").and_then(Value::as_u64);
     let sha256 = object
         .get("sha256")
@@ -286,6 +291,7 @@ fn parse_evidence_file(
         })?;
     Ok(EvidenceFile {
         path,
+        physical_path,
         size,
         sha256,
         executable,
@@ -376,7 +382,10 @@ fn collect_import_files(
                 path: evidence_file.path.clone(),
             });
         }
-        let physical_path = input_root.join(Path::new(evidence_file.path.as_str()));
+        let physical_path = evidence_file
+            .physical_path
+            .clone()
+            .unwrap_or_else(|| input_root.join(Path::new(evidence_file.path.as_str())));
         let metadata = fs::metadata(physical_path.as_path()).map_err(|source| {
             ImportUnpackedError::EvidencePathMissing {
                 path: physical_path.clone(),
@@ -1508,6 +1517,57 @@ mod tests {
             },
         )?;
         assert_eq!(selections[0].source_bytes, 71);
+        Ok(())
+    }
+
+    #[test]
+    fn import_unpacked_accepts_manifest_asset_outside_source_root() -> Result<(), Box<dyn Error>> {
+        let temp = tempdir()?;
+        let root = temp.path().join("app");
+        let resource = temp
+            .path()
+            .join("Claude.app/Contents/Resources/ion-dist/assets");
+        fs::create_dir_all(root.as_path())?;
+        fs::create_dir_all(resource.as_path())?;
+        fs::write(root.join("main.js"), "export const value = 1;\n")?;
+        fs::write(resource.join("chunk.js"), "console.log('static chunk');\n")?;
+        let manifest = temp.path().join("reverts-import-evidence.json");
+        write_evidence(
+            root.as_path(),
+            manifest.as_path(),
+            vec![evidence_file(root.as_path(), "main.js", None)],
+            vec![json!({
+                "path": "Contents/Resources/ion-dist/assets/chunk.js",
+                "physical_path": resource.join("chunk.js").to_string_lossy(),
+                "size": fs::metadata(resource.join("chunk.js"))?.len(),
+                "sha256": sha256_path(resource.join("chunk.js").as_path())?,
+                "executable": false,
+                "package": null,
+            })],
+            vec![],
+        )?;
+        let output_db = temp.path().join("project.sqlite");
+        let args = ImportUnpackedArgs {
+            input: root,
+            manifest,
+            project_name: "fixture".to_string(),
+            output_db: output_db.clone(),
+            ignore_native_assets: false,
+            max_source_bytes: None,
+            bundle_source_bytes: None,
+        };
+
+        let outcome = import_unpacked_to_sqlite(&args)?;
+
+        assert_eq!(outcome.source_files, 1);
+        assert_eq!(outcome.assets, 1);
+        let connection = Connection::open(output_db.as_path())?;
+        let stored_asset: String = connection.query_row(
+            "SELECT logical_path FROM project_assets WHERE logical_path LIKE '%chunk.js'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stored_asset, "Contents/Resources/ion-dist/assets/chunk.js");
         Ok(())
     }
 
