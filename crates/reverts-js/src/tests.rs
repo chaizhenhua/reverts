@@ -392,6 +392,27 @@ fn module_item_formatting_infers_minified_unary_literal_types_when_requested() {
 }
 
 #[test]
+fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const kind = typeof value; const removed = delete target.key; const same = left === right; const total = 1 + 2 * 3;",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("const kind: string = typeof value;"));
+    assert!(formatted.contains("const removed: boolean = delete target.key;"));
+    assert!(formatted.contains("const same: boolean = left === right;"));
+    assert!(formatted.contains("const total: number = 1 + 2 * 3;"));
+}
+
+#[test]
 fn module_item_formatting_infers_default_parameter_and_return_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function answer(input = 1) { return 42; } const echo = (label = 'ok') => { return 'ready'; };",

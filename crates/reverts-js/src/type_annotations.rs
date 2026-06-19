@@ -549,8 +549,57 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
         {
             Some(GeneratedTypeKind::Boolean)
         }
+        Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::Typeof =>
+        {
+            Some(GeneratedTypeKind::String)
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::Delete =>
+        {
+            Some(GeneratedTypeKind::Boolean)
+        }
+        Expression::BinaryExpression(binary)
+            if binary.operator.is_equality()
+                || binary.operator.is_compare()
+                || matches!(
+                    binary.operator,
+                    oxc_ast::ast::BinaryOperator::In | oxc_ast::ast::BinaryOperator::Instanceof
+                ) =>
+        {
+            Some(GeneratedTypeKind::Boolean)
+        }
+        Expression::BinaryExpression(binary)
+            if numeric_binary_operator_returns_number(binary.operator)
+                && expression_has_scalar_type(&binary.left, GeneratedTypeKind::Number)
+                && expression_has_scalar_type(&binary.right, GeneratedTypeKind::Number) =>
+        {
+            Some(GeneratedTypeKind::Number)
+        }
         _ => None,
     }
+}
+
+fn expression_has_scalar_type(expression: &Expression<'_>, kind: GeneratedTypeKind) -> bool {
+    literal_type_kind(expression) == Some(kind)
+}
+
+fn numeric_binary_operator_returns_number(operator: oxc_ast::ast::BinaryOperator) -> bool {
+    matches!(
+        operator,
+        oxc_ast::ast::BinaryOperator::Addition
+            | oxc_ast::ast::BinaryOperator::Subtraction
+            | oxc_ast::ast::BinaryOperator::Multiplication
+            | oxc_ast::ast::BinaryOperator::Division
+            | oxc_ast::ast::BinaryOperator::Remainder
+            | oxc_ast::ast::BinaryOperator::Exponential
+            | oxc_ast::ast::BinaryOperator::ShiftLeft
+            | oxc_ast::ast::BinaryOperator::ShiftRight
+            | oxc_ast::ast::BinaryOperator::ShiftRightZeroFill
+            | oxc_ast::ast::BinaryOperator::BitwiseOR
+            | oxc_ast::ast::BinaryOperator::BitwiseXOR
+            | oxc_ast::ast::BinaryOperator::BitwiseAnd
+    )
 }
 
 fn inferred_type_annotation_for_expression<'a>(
