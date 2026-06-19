@@ -23,7 +23,7 @@ pub(crate) use source_rewrites::rewrite_string_literal_values;
 use reverts_analyze::enrich_program;
 use reverts_emitter::{EmitError, emit_validated_project};
 use reverts_input::{InputBundle, InputBundleError, InputRows, ModuleInput, SourceFileInput};
-use reverts_ir::ModuleId;
+use reverts_ir::{BindingName, ModuleId};
 use reverts_model::{EnrichedProgram, ProgramModel};
 use reverts_observe::AuditReport;
 use reverts_planner::{ImportExportPlanner, PlanError};
@@ -67,6 +67,18 @@ pub struct SymbolIndexEntry {
     pub function_like: bool,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GenerateProjectOptions {
+    pub local_binding_renames: Vec<LocalBindingRename>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBindingRename {
+    pub file_path: String,
+    pub original_name: String,
+    pub semantic_name: String,
+}
+
 /// Builds [`SymbolIndexEntry`] rows for the top-level bindings that actually
 /// appear in each emitted file.
 ///
@@ -97,8 +109,17 @@ fn build_symbol_index(
     // (module_id, emitted/semantic name) -> original DB name, for bindings with
     // an accepted semantic name, so index keys map back to the symbols table and
     // downstream coverage can distinguish explicit names from preserved text.
+    //
+    // Unnamed entries must still be backed by a DB/source symbol. Do not fall
+    // back from an arbitrary emitted binding to `original_name = emitted_name`:
+    // late readability passes may introduce emitted-only names from property
+    // hints (for example `{ value: H }` can rename `H` to `value`). Treating
+    // those as actionable source symbols sends the Agent a bogus work item that
+    // cannot be applied through `symbol-names`.
     let mut original_for_semantic_emitted: std::collections::BTreeMap<(ModuleId, &str), &str> =
         std::collections::BTreeMap::new();
+    let mut unnamed_source_symbols: std::collections::BTreeSet<(ModuleId, &str)> =
+        std::collections::BTreeSet::new();
     for symbol in program.model().symbols() {
         if let Some(semantic) = program
             .semantic_names()
@@ -106,6 +127,8 @@ fn build_symbol_index(
         {
             original_for_semantic_emitted
                 .insert((symbol.module_id, semantic.as_str()), symbol.name.as_str());
+        } else {
+            unnamed_source_symbols.insert((symbol.module_id, symbol.name.as_str()));
         }
     }
 
@@ -145,13 +168,19 @@ fn build_symbol_index(
                 let semantic_original = original_for_semantic_emitted
                     .get(&(module_id, emitted_name.as_str()))
                     .copied();
-                let original_name =
-                    semantic_original.map_or_else(|| emitted_name.clone(), ToString::to_string);
+                let (original_name, semantic_named) =
+                    if let Some(semantic_original) = semantic_original {
+                        (semantic_original.to_string(), true)
+                    } else if unnamed_source_symbols.contains(&(module_id, emitted_name.as_str())) {
+                        (emitted_name.clone(), false)
+                    } else {
+                        continue;
+                    };
                 entries.push(SymbolIndexEntry {
                     module_id,
                     original_name,
                     emitted_name,
-                    semantic_named: semantic_original.is_some(),
+                    semantic_named,
                     file_path: file.path.clone(),
                     function_like,
                 });
@@ -295,8 +324,23 @@ pub fn generate_project_from_input(input: InputBundle) -> Result<OutputRun, Pipe
     generate_project_from_prepared(prepared)
 }
 
+pub fn generate_project_from_input_with_options(
+    input: InputBundle,
+    options: GenerateProjectOptions,
+) -> Result<OutputRun, PipelineError> {
+    let prepared = prepare_and_enrich(input)?;
+    generate_project_from_prepared_with_options(prepared, options)
+}
+
 pub fn generate_project_from_prepared(
     prepared: PreparedProgram,
+) -> Result<OutputRun, PipelineError> {
+    generate_project_from_prepared_with_options(prepared, GenerateProjectOptions::default())
+}
+
+pub fn generate_project_from_prepared_with_options(
+    prepared: PreparedProgram,
+    options: GenerateProjectOptions,
 ) -> Result<OutputRun, PipelineError> {
     let PreparedProgram {
         program,
@@ -327,9 +371,10 @@ pub fn generate_project_from_prepared(
     }
 
     let planner = ImportExportPlanner;
-    let plan = planner
+    let mut plan = planner
         .plan_enriched_program(&program)
         .map_err(PipelineError::Plan)?;
+    apply_local_binding_renames(&mut plan, &options.local_binding_renames);
     audit.extend(audit_emit_plan_synthesis(&plan));
     if audit.has_errors() {
         return Ok(OutputRun {
@@ -378,6 +423,33 @@ pub fn generate_project_from_prepared(
         assets,
         symbol_index,
     })
+}
+
+fn apply_local_binding_renames(
+    plan: &mut reverts_planner::EmitPlan,
+    renames: &[LocalBindingRename],
+) {
+    if renames.is_empty() {
+        return;
+    }
+    let mut by_path = std::collections::BTreeMap::<&str, Vec<&LocalBindingRename>>::new();
+    for rename in renames {
+        by_path
+            .entry(rename.file_path.as_str())
+            .or_default()
+            .push(rename);
+    }
+    for file in &mut plan.files {
+        let Some(file_renames) = by_path.get(file.path.as_str()) else {
+            continue;
+        };
+        for rename in file_renames {
+            file.add_readability_rename(reverts_planner::PlannedRename::new_all_scopes(
+                BindingName::new(rename.original_name.clone()),
+                BindingName::new(rename.semantic_name.clone()),
+            ));
+        }
+    }
 }
 
 /// Generate the pre-accept project needed by diagnostic inventory commands
@@ -516,7 +588,7 @@ mod tests {
     use reverts_observe::{FindingCode, Severity};
     use reverts_planner::{EmitPlan, ImportExportPlanner, PlannedBinding, PlannedFile};
 
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use reverts_emitter::{EmittedFile, EmittedProject};
 
@@ -524,7 +596,8 @@ mod tests {
     use super::audit::{audit_emit_plan_synthesis, audit_namespace_object_member_consistency};
     use super::source_rewrites::fold_multiline_static_template_literals_in_source;
     use super::{
-        OutputRun, generate_project_from_input, prepare_input_bundle_for_generation,
+        GenerateProjectOptions, LocalBindingRename, OutputRun, generate_project_from_input,
+        generate_project_from_input_with_options, prepare_input_bundle_for_generation,
         prepare_input_rows_for_pipeline,
     };
 
@@ -586,6 +659,38 @@ mod tests {
         assert!(source.contains("import * as lodashMap from 'lodash/map';"));
         assert!(source.contains("export function activate()"));
         assert!(!source.contains("undefined as any"));
+    }
+
+    #[test]
+    fn local_binding_renames_apply_during_emission() {
+        let rows =
+            rows_with_application_source("export function run(a) { const b = a + 1; return b; }");
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input_with_options(
+            input,
+            GenerateProjectOptions {
+                local_binding_renames: vec![
+                    LocalBindingRename {
+                        file_path: "src/index.ts".to_string(),
+                        original_name: "a".to_string(),
+                        semantic_name: "inputValue".to_string(),
+                    },
+                    LocalBindingRename {
+                        file_path: "src/index.ts".to_string(),
+                        original_name: "b".to_string(),
+                        semantic_name: "resultValue".to_string(),
+                    },
+                ],
+            },
+        )
+        .expect("fixture should emit");
+
+        assert!(run.audit.is_clean());
+        let source = run.project.files[0].source.as_str();
+        assert!(source.contains("run(inputValue)"));
+        assert!(source.contains("const resultValue = inputValue + 1;"));
+        assert!(source.contains("return resultValue;"));
     }
 
     #[test]
@@ -2373,6 +2478,58 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
                 .any(|file| file.path == entry.file_path),
             "indexed file {} not among emitted files",
             entry.file_path
+        );
+    }
+
+    #[test]
+    fn symbol_index_keeps_source_backed_unnamed_bindings_actionable() {
+        let mut rows = rows_with_application_source("var pendingName = 1;");
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "pendingName"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let program = super::prepare_and_enrich(input)
+            .expect("fixture should enrich")
+            .program;
+        let mut module_paths = BTreeMap::new();
+        module_paths.insert(ModuleId(1), "modules/1.ts".to_string());
+        let emitted = EmittedProject {
+            files: vec![EmittedFile {
+                path: "modules/1.ts".to_string(),
+                source: "var pendingName = 1;".to_string(),
+            }],
+        };
+
+        let entries = super::build_symbol_index(&program, &module_paths, &emitted);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].original_name, "pendingName");
+        assert_eq!(entries[0].emitted_name, "pendingName");
+        assert!(!entries[0].semantic_named);
+    }
+
+    #[test]
+    fn symbol_index_drops_emitted_only_fallback_for_accepted_symbols() {
+        let mut rows = rows_with_application_source("var value = 1;");
+        rows.symbols
+            .push(SymbolInput::new(ModuleId(1), "value").with_semantic_name("exportValue"));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let program = super::prepare_and_enrich(input)
+            .expect("fixture should enrich")
+            .program;
+        let mut module_paths = BTreeMap::new();
+        module_paths.insert(ModuleId(1), "modules/1.ts".to_string());
+        let emitted = EmittedProject {
+            files: vec![EmittedFile {
+                path: "modules/1.ts".to_string(),
+                source: "var value = 1;".to_string(),
+            }],
+        };
+
+        let entries = super::build_symbol_index(&program, &module_paths, &emitted);
+
+        assert!(
+            entries.is_empty(),
+            "emitted-only name `value` must not be reported as an actionable fallback: {entries:?}"
         );
     }
 

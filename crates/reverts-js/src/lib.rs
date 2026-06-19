@@ -113,6 +113,7 @@ impl GeneratedExport {
 pub struct GeneratedRename {
     pub original: String,
     pub renamed: String,
+    pub scope: GeneratedRenameScope,
 }
 
 impl GeneratedRename {
@@ -121,8 +122,27 @@ impl GeneratedRename {
         Self {
             original: original.into(),
             renamed: renamed.into(),
+            scope: GeneratedRenameScope::Module,
         }
     }
+
+    #[must_use]
+    pub fn new_all_scopes(original: impl Into<String>, renamed: impl Into<String>) -> Self {
+        Self {
+            original: original.into(),
+            renamed: renamed.into(),
+            scope: GeneratedRenameScope::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeneratedRenameScope {
+    /// Rename only the root/module-scope binding with this original name.
+    Module,
+    /// Rename every safely-resolved binding with this original name, including
+    /// function parameters, catch bindings, and nested locals.
+    All,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

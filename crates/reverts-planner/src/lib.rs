@@ -202,7 +202,7 @@ use import_coalesce::{
 
 pub use plan::{
     EmitPlan, PlannedBinding, PlannedExport, PlannedFile, PlannedImport, PlannedRename,
-    PlannedTypeAnnotation, ValidatedEmitPlan, ValidatedPlannedFile,
+    PlannedRenameScope, PlannedTypeAnnotation, ValidatedEmitPlan, ValidatedPlannedFile,
 };
 pub use plan_error::PlanError;
 use relative_paths::relative_import_specifier;

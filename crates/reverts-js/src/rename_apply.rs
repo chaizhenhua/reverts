@@ -8,8 +8,8 @@ use oxc_ast::{
 use oxc_semantic::SemanticBuilder;
 use oxc_syntax::{reference::ReferenceId, symbol::SymbolId};
 
-use crate::ReadabilityReport;
 use crate::identifier::sanitize_identifier;
+use crate::{GeneratedRename, ReadabilityReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum ReadabilityRenameSource {
@@ -206,6 +206,90 @@ pub(crate) fn apply_readability_renames<'a>(
             report.push(format!(
                 "renamed {original} -> {renamed}, source={}",
                 rename.source.as_str()
+            ));
+        }
+
+        let mut reference_renames = BTreeMap::<ReferenceId, String>::new();
+        for (symbol_id, renamed) in &symbol_renames {
+            for reference_id in symbols.get_resolved_reference_ids(*symbol_id) {
+                reference_renames.insert(*reference_id, renamed.clone());
+            }
+        }
+
+        (symbol_renames, reference_renames)
+    };
+
+    if symbol_renames.is_empty() && reference_renames.is_empty() {
+        return;
+    }
+
+    let mut renamer = ReadabilityRenamer {
+        builder: AstBuilder::new(allocator),
+        symbol_renames,
+        reference_renames,
+    };
+    renamer.visit_program(program);
+}
+
+pub(crate) fn apply_all_scope_readability_renames<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+    readability_renames: &[GeneratedRename],
+    report: &mut ReadabilityReport,
+) {
+    let requested = readability_renames
+        .iter()
+        .map(|rename| (rename.original.clone(), rename.renamed.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if requested.is_empty() {
+        return;
+    }
+
+    let (symbol_renames, reference_renames) = {
+        let semantic = SemanticBuilder::new().build(program).semantic;
+        let symbols = semantic.symbols();
+        let symbol_ids = symbols.symbol_ids().collect::<Vec<_>>();
+        let mut symbol_names_by_scope = BTreeMap::<_, BTreeMap<String, Vec<SymbolId>>>::new();
+        for symbol_id in &symbol_ids {
+            symbol_names_by_scope
+                .entry(symbols.get_scope_id(*symbol_id))
+                .or_default()
+                .entry(symbols.get_name(*symbol_id).to_string())
+                .or_default()
+                .push(*symbol_id);
+        }
+
+        let mut requested_targets_by_scope = BTreeMap::<_, BTreeSet<String>>::new();
+        let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
+        for symbol_id in symbol_ids {
+            let original = symbols.get_name(symbol_id);
+            let Some(renamed) = requested.get(original) else {
+                continue;
+            };
+            let scope_id = symbols.get_scope_id(symbol_id);
+            let same_scope_names = symbol_names_by_scope.entry(scope_id).or_default();
+            let collides = same_scope_names
+                .get(renamed)
+                .is_some_and(|ids| ids.iter().any(|id| *id != symbol_id));
+            if collides {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source=explicit_binding_semantic, reason=name_collision"
+                ));
+                continue;
+            }
+            if !requested_targets_by_scope
+                .entry(scope_id)
+                .or_default()
+                .insert(renamed.clone())
+            {
+                report.push(format!(
+                    "skipped rename {original} -> {renamed}, source=explicit_binding_semantic, reason=duplicate_target"
+                ));
+                continue;
+            }
+            symbol_renames.insert(symbol_id, renamed.clone());
+            report.push(format!(
+                "renamed {original} -> {renamed}, source=explicit_binding_semantic"
             ));
         }
 

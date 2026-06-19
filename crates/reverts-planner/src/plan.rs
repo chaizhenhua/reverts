@@ -268,13 +268,33 @@ pub struct PlannedImport {
 pub struct PlannedRename {
     pub original: BindingName,
     pub renamed: BindingName,
+    pub scope: PlannedRenameScope,
 }
 
 impl PlannedRename {
     #[must_use]
     pub fn new(original: BindingName, renamed: BindingName) -> Self {
-        Self { original, renamed }
+        Self {
+            original,
+            renamed,
+            scope: PlannedRenameScope::Module,
+        }
     }
+
+    #[must_use]
+    pub fn new_all_scopes(original: BindingName, renamed: BindingName) -> Self {
+        Self {
+            original,
+            renamed,
+            scope: PlannedRenameScope::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlannedRenameScope {
+    Module,
+    All,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

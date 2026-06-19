@@ -4,11 +4,13 @@ use std::fmt;
 use reverts_ir::{BindingName, InferredType};
 use reverts_js::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
-    GeneratedTypeAnnotation, GeneratedTypeKind, format_source_with_module_items_request,
-    sanitize_identifier,
+    GeneratedRenameScope, GeneratedTypeAnnotation, GeneratedTypeKind,
+    format_source_with_module_items_request, sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
-use reverts_planner::{CompilerPreservationAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
+use reverts_planner::{
+    CompilerPreservationAction, EmitPlan, PlannedFile, PlannedRenameScope, ValidatedEmitPlan,
+};
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmittedProject {
@@ -97,10 +99,14 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
         .readability_renames
         .iter()
         .map(|rename| {
-            GeneratedRename::new(
+            let mut generated = GeneratedRename::new(
                 emit_binding_name(&rename.original),
                 emit_binding_name(&rename.renamed),
-            )
+            );
+            if rename.scope == PlannedRenameScope::All {
+                generated.scope = GeneratedRenameScope::All;
+            }
+            generated
         })
         .collect::<Vec<_>>();
     let generated_type_annotations = file

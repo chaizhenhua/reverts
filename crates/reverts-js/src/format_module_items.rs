@@ -27,15 +27,16 @@ use crate::recover::{
     recover_function_declarations, recover_object_destructuring,
 };
 use crate::rename_apply::{
-    ReadabilityRenameHint, ReadabilityRenameSource, apply_emit_safety_renames,
-    apply_readability_renames, resolve_readability_rename_hints,
+    ReadabilityRenameHint, ReadabilityRenameSource, apply_all_scope_readability_renames,
+    apply_emit_safety_renames, apply_readability_renames, resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
 use crate::type_annotations::{
     apply_import_member_type_queries_to_program, apply_type_annotations_to_program,
 };
 use crate::{
-    GeneratedExport, GeneratedImport, GeneratedRename, GeneratedTypeAnnotation, ReadabilityReport,
+    GeneratedExport, GeneratedImport, GeneratedRename, GeneratedRenameScope,
+    GeneratedTypeAnnotation, ReadabilityReport,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -210,19 +211,35 @@ pub fn format_source_with_module_items_request_with_report(
             infer_literal_types,
         );
         let mut readability_hints = collect_late_readability_rename_hints(&parsed.program);
-        readability_hints.extend(readability_renames.iter().map(|rename| {
-            ReadabilityRenameHint::new(
-                rename.original.as_str(),
-                rename.renamed.as_str(),
-                ReadabilityRenameSource::ExplicitSemantic,
-            )
-        }));
+        readability_hints.extend(
+            readability_renames
+                .iter()
+                .filter(|rename| rename.scope == GeneratedRenameScope::Module)
+                .map(|rename| {
+                    ReadabilityRenameHint::new(
+                        rename.original.as_str(),
+                        rename.renamed.as_str(),
+                        ReadabilityRenameSource::ExplicitSemantic,
+                    )
+                }),
+        );
         let readability_renames_with_imports =
             resolve_readability_rename_hints(readability_hints, &mut report);
         apply_readability_renames(
             &allocator,
             &mut parsed.program,
             &readability_renames_with_imports,
+            &mut report,
+        );
+        let all_scope_renames = readability_renames
+            .iter()
+            .filter(|rename| rename.scope == GeneratedRenameScope::All)
+            .cloned()
+            .collect::<Vec<_>>();
+        apply_all_scope_readability_renames(
+            &allocator,
+            &mut parsed.program,
+            &all_scope_renames,
             &mut report,
         );
         apply_emit_safety_renames(&allocator, &mut parsed.program, &mut report);

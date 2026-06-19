@@ -18,6 +18,7 @@ pub use args::{
     NamingPlanArgs, NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
     PackageSurfaceDecisionsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
+pub use commands::binding_names::{BindingNamesArgs, binding_names_from_sqlite};
 pub use commands::coverage_ledger::{coverage_ledger_json, coverage_ledger_report};
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
@@ -119,6 +120,7 @@ pub enum CliCommand {
     IdentifierInventory(IdentifierInventoryArgs),
     FullInventory(FullInventoryArgs),
     RuntimeInventory(RuntimeInventoryArgs),
+    BindingNames(BindingNamesArgs),
     SymbolNames(SymbolNamesArgs),
     NamingProgress(NamingProgressArgs),
     NamingPlan(NamingPlanArgs),
@@ -214,6 +216,8 @@ enum ClapCommand {
     FullInventory(FullInventoryArgs),
     #[command(name = "runtime-inventory", disable_help_flag = true)]
     RuntimeInventory(RuntimeInventoryArgs),
+    #[command(name = "binding-names", disable_help_flag = true)]
+    BindingNames(BindingNamesArgs),
     #[command(name = "symbol-names", disable_help_flag = true)]
     SymbolNames(SymbolNamesArgs),
     #[command(name = "naming-progress", disable_help_flag = true)]
@@ -256,6 +260,9 @@ impl ClapCli {
             Some(ClapCommand::FullInventory(args)) => CliCommand::FullInventory(args),
             Some(ClapCommand::RuntimeInventory(args)) => {
                 CliCommand::RuntimeInventory(validate_runtime_inventory_for_cli(args)?)
+            }
+            Some(ClapCommand::BindingNames(args)) => {
+                CliCommand::BindingNames(commands::binding_names::validate_args(args)?)
             }
             Some(ClapCommand::SymbolNames(args)) => {
                 CliCommand::SymbolNames(validate_symbol_names_for_cli(args)?)
@@ -395,6 +402,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
         CliCommand::IdentifierInventory(args) => commands::identifier_inventory::run(args),
         CliCommand::FullInventory(args) => commands::full_inventory::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
+        CliCommand::BindingNames(args) => commands::binding_names::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
         CliCommand::NamingProgress(args) => commands::naming_progress::run(args),
         CliCommand::NamingPlan(args) => commands::naming_plan::run(args),

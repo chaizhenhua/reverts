@@ -1921,6 +1921,44 @@ fn readability_renames_skip_names_that_would_capture_globals() {
 }
 
 #[test]
+fn all_scope_readability_renames_update_local_bindings_and_references() {
+    let formatted = format_source_with_module_items_and_renames(
+        "function run(a) { let b = a + 1; return b; }",
+        &[],
+        &[],
+        &[
+            GeneratedRename::new_all_scopes("a", "inputValue"),
+            GeneratedRename::new_all_scopes("b", "resultValue"),
+        ],
+        Some(Path::new("src/index.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function run(inputValue)"));
+    assert!(formatted.contains("let resultValue = inputValue + 1;"));
+    assert!(formatted.contains("return resultValue;"));
+}
+
+#[test]
+fn all_scope_readability_renames_skip_same_scope_collisions() {
+    let formatted = format_source_with_module_items_and_renames(
+        "function run(a, inputValue) { return a + inputValue; }",
+        &[],
+        &[],
+        &[GeneratedRename::new_all_scopes("a", "inputValue")],
+        Some(Path::new("src/index.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function run(a, inputValue)"));
+    assert!(formatted.contains("return a + inputValue;"));
+}
+
+#[test]
 fn emit_safety_renames_strict_reserved_bindings_before_esm_output() {
     let formatted = format_source_with_module_items_and_renames(
         "var package = 1; function read() { var private = package + 1; return private; } console.log(package, read());",

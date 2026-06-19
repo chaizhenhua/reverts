@@ -684,6 +684,8 @@ pub enum CliRunError {
     FullInventory(String),
     CoverageLedger(String),
     IdentifierInventory(String),
+    GenerateProject(String),
+    BindingNames(String),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -708,6 +710,8 @@ impl fmt::Display for CliRunError {
             Self::IdentifierInventory(message) => {
                 write!(formatter, "identifier-inventory: {message}")
             }
+            Self::GenerateProject(message) => write!(formatter, "generate-project-v2: {message}"),
+            Self::BindingNames(message) => write!(formatter, "binding-names: {message}"),
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -750,6 +754,8 @@ impl Error for CliRunError {
             | Self::MatchModulesRecall(_)
             | Self::FullInventory(_)
             | Self::CoverageLedger(_)
+            | Self::GenerateProject(_)
+            | Self::BindingNames(_)
             | Self::IdentifierInventory(_) => None,
         }
     }

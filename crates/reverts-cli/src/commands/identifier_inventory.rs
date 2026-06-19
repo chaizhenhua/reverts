@@ -38,6 +38,8 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
     let mut files = code_files(args.output_root.as_path())?;
     files.sort();
     let semantic_name_index = load_explicit_semantic_name_index(args.output_root.as_path())?;
+    let semantic_binding_decisions =
+        load_semantic_binding_decision_index(args.output_root.as_path())?;
 
     let mut totals = IdentifierInventoryStats::default();
     let mut semantic_total = 0_usize;
@@ -60,6 +62,7 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                     relative_path.as_str(),
                     &stats,
                     semantic_name_index.get(relative_path.as_str()),
+                    semantic_binding_decisions.get(relative_path.as_str()),
                 );
                 semantic_total += semantic.total;
                 semantic_named += semantic.named;
@@ -99,9 +102,9 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
                         "named": semantic.named,
                         "preserved": semantic.preserved,
                         "excluded": semantic.excluded,
-                        "complete_count": semantic.named + semantic.preserved,
+                        "complete_count": semantic.complete_count(),
                         "pending": semantic.pending,
-                        "percent": percent(semantic.named + semantic.preserved, semantic.total),
+                        "percent": percent(semantic.complete_count(), semantic.total),
                         "complete": semantic.pending == 0,
                         "reason": semantic.reason,
                         "pending_bindings": semantic.pending_bindings,
@@ -140,11 +143,11 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
             "named": semantic_named,
             "preserved": semantic_preserved,
             "excluded": semantic_excluded,
-            "complete_count": semantic_named + semantic_preserved,
+            "complete_count": semantic_named + semantic_preserved + semantic_excluded,
             "pending": semantic_pending,
             "files_with_pending": semantic_pending_files.len(),
             "pending_files": semantic_pending_files,
-            "percent": percent(semantic_named + semantic_preserved, semantic_total),
+            "percent": percent(semantic_named + semantic_preserved + semantic_excluded, semantic_total),
             "complete": parse_errors.is_empty() && semantic_pending == 0,
         },
         "by_file": scanned_files,
@@ -163,10 +166,30 @@ struct SemanticBindingCoverage {
     pending_bindings: Vec<Value>,
 }
 
+impl SemanticBindingCoverage {
+    const fn complete_count(&self) -> usize {
+        self.named + self.preserved + self.excluded
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SemanticBindingDecisionStatus {
+    Named,
+    Preserved,
+    Excluded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticBindingDecision {
+    status: SemanticBindingDecisionStatus,
+    count: Option<usize>,
+}
+
 fn semantic_binding_file_coverage(
     relative_path: &str,
     stats: &IdentifierInventoryStats,
     explicit_names: Option<&BTreeMap<String, usize>>,
+    binding_decisions: Option<&BTreeMap<String, Vec<SemanticBindingDecision>>>,
 ) -> SemanticBindingCoverage {
     if !is_semantic_binding_target_path(relative_path) {
         return SemanticBindingCoverage {
@@ -181,6 +204,8 @@ fn semantic_binding_file_coverage(
     }
     let mut pending_binding_names = stats.semantic_pending_binding_names.clone();
     let mut named = 0_usize;
+    let mut preserved = 0_usize;
+    let mut excluded = 0_usize;
     if let Some(explicit_names) = explicit_names {
         for (name, accepted_count) in explicit_names {
             let Some(pending_count) = pending_binding_names.get_mut(name) else {
@@ -191,15 +216,41 @@ fn semantic_binding_file_coverage(
             named += consumed;
         }
     }
+    if let Some(binding_decisions) = binding_decisions {
+        for (name, decisions) in binding_decisions {
+            let Some(pending_count) = pending_binding_names.get_mut(name) else {
+                continue;
+            };
+            for decision in decisions {
+                if *pending_count == 0 {
+                    break;
+                }
+                let requested = decision.count.unwrap_or(*pending_count);
+                let consumed = requested.min(*pending_count);
+                *pending_count -= consumed;
+                match decision.status {
+                    SemanticBindingDecisionStatus::Named => named += consumed,
+                    SemanticBindingDecisionStatus::Preserved => preserved += consumed,
+                    SemanticBindingDecisionStatus::Excluded => excluded += consumed,
+                }
+            }
+        }
+    }
     pending_binding_names.retain(|_, count| *count > 0);
-    let pending = stats.binding_identifiers.saturating_sub(named);
+    let pending = stats
+        .binding_identifiers
+        .saturating_sub(named + preserved + excluded);
     SemanticBindingCoverage {
         total: stats.binding_identifiers,
         named,
-        preserved: 0,
-        excluded: 0,
+        preserved,
+        excluded,
         pending,
-        reason: "explicit_semantic_name_bindings_only",
+        reason: if binding_decisions.is_some() {
+            "explicit_semantic_name_and_binding_decisions"
+        } else {
+            "explicit_semantic_name_bindings_only"
+        },
         pending_bindings: pending_binding_names
             .iter()
             .map(|(name, count)| {
@@ -212,6 +263,104 @@ fn semantic_binding_file_coverage(
     }
 }
 
+fn load_semantic_binding_decision_index(
+    output_root: &Path,
+) -> Result<BTreeMap<String, BTreeMap<String, Vec<SemanticBindingDecision>>>, CliRunError> {
+    let path = output_root
+        .join("semantic-binding-index.json")
+        .exists()
+        .then(|| output_root.join("semantic-binding-index.json"))
+        .or_else(|| {
+            output_root
+                .parent()
+                .map(|parent| parent.join("semantic-binding-index.json"))
+                .filter(|path| path.exists())
+        });
+    let Some(path) = path else {
+        return Ok(BTreeMap::new());
+    };
+    let text = fs::read_to_string(&path).map_err(|source| {
+        CliRunError::IdentifierInventory(format!("failed to read {}: {source}", path.display()))
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|source| {
+        CliRunError::IdentifierInventory(format!("failed to parse {}: {source}", path.display()))
+    })?;
+    let files = value
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            CliRunError::IdentifierInventory(format!(
+                "{} must contain a files array",
+                path.display()
+            ))
+        })?;
+    let mut index = BTreeMap::<String, BTreeMap<String, Vec<SemanticBindingDecision>>>::new();
+    for file in files {
+        let file_path = file.get("path").and_then(Value::as_str).ok_or_else(|| {
+            CliRunError::IdentifierInventory(format!(
+                "{} file entries must contain path",
+                path.display()
+            ))
+        })?;
+        let bindings = file
+            .get("bindings")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                CliRunError::IdentifierInventory(format!(
+                    "{} file entries must contain bindings",
+                    path.display()
+                ))
+            })?;
+        for binding in bindings {
+            let original_name = binding
+                .get("original_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    CliRunError::IdentifierInventory(format!(
+                        "{} binding entries must contain original_name",
+                        path.display()
+                    ))
+                })?;
+            let status = binding
+                .get("status")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    CliRunError::IdentifierInventory(format!(
+                        "{} binding entries must contain status",
+                        path.display()
+                    ))
+                })
+                .and_then(|status| parse_semantic_binding_decision_status(status, &path))?;
+            let count = binding
+                .get("count")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok());
+            index
+                .entry(file_path.to_string())
+                .or_default()
+                .entry(original_name.to_string())
+                .or_default()
+                .push(SemanticBindingDecision { status, count });
+        }
+    }
+    Ok(index)
+}
+
+fn parse_semantic_binding_decision_status(
+    status: &str,
+    path: &Path,
+) -> Result<SemanticBindingDecisionStatus, CliRunError> {
+    match status {
+        "named" | "accept" | "accepted" => Ok(SemanticBindingDecisionStatus::Named),
+        "preserved" | "preserve" => Ok(SemanticBindingDecisionStatus::Preserved),
+        "excluded" | "exclude" => Ok(SemanticBindingDecisionStatus::Excluded),
+        _ => Err(CliRunError::IdentifierInventory(format!(
+            "{} has unsupported semantic binding status {status:?}",
+            path.display()
+        ))),
+    }
+}
+
 fn is_semantic_binding_target_path(relative_path: &str) -> bool {
     !relative_path.is_empty()
 }
@@ -219,9 +368,20 @@ fn is_semantic_binding_target_path(relative_path: &str) -> bool {
 fn load_explicit_semantic_name_index(
     output_root: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, usize>>, CliRunError> {
-    let path = output_root.join("symbol-index.json");
+    let mut index = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    load_explicit_semantic_name_index_file(output_root, "symbol-index.json", &mut index)?;
+    load_explicit_semantic_name_index_file(output_root, "binding-name-index.json", &mut index)?;
+    Ok(index)
+}
+
+fn load_explicit_semantic_name_index_file(
+    output_root: &Path,
+    file_name: &str,
+    index: &mut BTreeMap<String, BTreeMap<String, usize>>,
+) -> Result<(), CliRunError> {
+    let path = output_root.join(file_name);
     if !path.exists() {
-        return Ok(BTreeMap::new());
+        return Ok(());
     }
     let text = fs::read_to_string(&path).map_err(|source| {
         CliRunError::IdentifierInventory(format!("failed to read {}: {source}", path.display()))
@@ -230,9 +390,8 @@ fn load_explicit_semantic_name_index(
         CliRunError::IdentifierInventory(format!("failed to parse {}: {source}", path.display()))
     })?;
     let Some(rows) = value.as_array() else {
-        return Ok(BTreeMap::new());
+        return Ok(());
     };
-    let mut index = BTreeMap::<String, BTreeMap<String, usize>>::new();
     for row in rows {
         if !row
             .get("semantic_named")
@@ -247,13 +406,19 @@ fn load_explicit_semantic_name_index(
         let Some(emitted_name) = row.get("emitted_name").and_then(Value::as_str) else {
             continue;
         };
-        *index
+        let accepted_count = if file_name == "binding-name-index.json" {
+            usize::MAX
+        } else {
+            1
+        };
+        let name_index = index
             .entry(file_path.to_string())
             .or_default()
             .entry(emitted_name.to_string())
-            .or_default() += 1;
+            .or_default();
+        *name_index = name_index.saturating_add(accepted_count);
     }
-    Ok(index)
+    Ok(())
 }
 
 fn percent(numerator: usize, denominator: usize) -> f64 {
@@ -559,6 +724,56 @@ mod tests {
             bindings
                 .iter()
                 .any(|binding| { binding["original_name"] == "b" && binding["count"] == 1 })
+        );
+    }
+
+    #[test]
+    fn semantic_binding_index_marks_generated_bindings_complete() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        fs::write(
+            root.join("modules/minified.ts"),
+            "const a = 1; function b(c) { return a + c; }",
+        )
+        .expect("write module");
+        fs::write(
+            root.join("semantic-binding-index.json"),
+            serde_json::json!({
+                "schema": "reverts.semantic_binding_index.v1",
+                "files": [
+                    {
+                        "path": "modules/minified.ts",
+                        "bindings": [
+                            {"original_name": "a", "status": "named", "semantic_name": "answer"},
+                            {"original_name": "b", "status": "preserved"},
+                            {"original_name": "c", "status": "excluded"}
+                        ]
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write semantic binding index");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        assert_eq!(report["semantic_bindings"]["total"].as_u64(), Some(3));
+        assert_eq!(report["semantic_bindings"]["named"].as_u64(), Some(1));
+        assert_eq!(report["semantic_bindings"]["preserved"].as_u64(), Some(1));
+        assert_eq!(report["semantic_bindings"]["excluded"].as_u64(), Some(1));
+        assert_eq!(
+            report["semantic_bindings"]["complete_count"].as_u64(),
+            Some(3)
+        );
+        assert_eq!(report["semantic_bindings"]["pending"].as_u64(), Some(0));
+        assert_eq!(
+            report["semantic_bindings"]["complete"].as_bool(),
+            Some(true)
         );
     }
 }
