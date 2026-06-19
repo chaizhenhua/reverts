@@ -6,16 +6,20 @@ use oxc_ast::AstBuilder;
 use oxc_ast::Visit;
 use oxc_ast::VisitMut;
 use oxc_ast::ast::{
-    ArrayExpressionElement, AssignmentExpression, AssignmentTarget, BindingPattern,
-    BindingPatternKind, Declaration, ExportNamedDeclaration, Expression,
-    ImportDeclarationSpecifier, ObjectPropertyKind, Program, PropertyKey, SimpleAssignmentTarget,
-    Statement, TSType, TSTypeName, TSTypeParameterInstantiation, TSTypeQueryExprName,
-    UpdateExpression, VariableDeclaration, VariableDeclarationKind,
+    ArrayExpressionElement, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget,
+    BindingPattern, BindingPatternKind, Declaration, ExportNamedDeclaration, Expression,
+    FormalParameters, Function, FunctionBody, ImportDeclarationSpecifier, ObjectPropertyKind,
+    Program, PropertyKey, ReturnStatement, SimpleAssignmentTarget, Statement, TSType, TSTypeName,
+    TSTypeParameterInstantiation, TSTypeQueryExprName, UpdateExpression, VariableDeclaration,
+    VariableDeclarationKind,
 };
 use oxc_ast::visit::walk::{walk_assignment_expression, walk_update_expression};
-use oxc_ast::visit::walk_mut::walk_variable_declaration;
+use oxc_ast::visit::walk_mut::{
+    walk_arrow_function_expression, walk_function, walk_variable_declaration,
+};
 use oxc_parser::Parser;
 use oxc_span::SPAN;
+use oxc_syntax::scope::ScopeFlags;
 
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
 use crate::parse::{parse_options_for, source_type_candidates};
@@ -106,6 +110,9 @@ pub fn apply_type_annotations_to_program<'a>(
         written_bindings: &written_bindings,
     };
     annotator.visit_program(program);
+
+    let mut function_annotator = FunctionSignatureAnnotator { builder: &builder };
+    function_annotator.visit_program(program);
 }
 
 pub fn apply_import_member_type_queries_to_program<'a>(
@@ -247,6 +254,122 @@ fn annotate_safe_variable_declaration<'a>(
         declarator.id.type_annotation =
             Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
     }
+}
+
+struct FunctionSignatureAnnotator<'b, 'a> {
+    builder: &'b AstBuilder<'a>,
+}
+
+impl<'a> VisitMut<'a> for FunctionSignatureAnnotator<'_, 'a> {
+    fn visit_function(&mut self, function: &mut Function<'a>, flags: ScopeFlags) {
+        annotate_function_parameters(self.builder, &mut function.params);
+        annotate_function_return(self.builder, function);
+        walk_function(self, function, flags);
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &mut ArrowFunctionExpression<'a>) {
+        annotate_function_parameters(self.builder, &mut arrow.params);
+        annotate_arrow_return(self.builder, arrow);
+        walk_arrow_function_expression(self, arrow);
+    }
+}
+
+fn annotate_function_parameters<'a>(
+    builder: &AstBuilder<'a>,
+    parameters: &mut FormalParameters<'a>,
+) {
+    for parameter in parameters.items.iter_mut() {
+        annotate_defaulted_binding_pattern(builder, &mut parameter.pattern);
+    }
+}
+
+fn annotate_defaulted_binding_pattern<'a>(
+    builder: &AstBuilder<'a>,
+    pattern: &mut BindingPattern<'a>,
+) {
+    let BindingPatternKind::AssignmentPattern(assignment) = &mut pattern.kind else {
+        return;
+    };
+    if assignment.left.type_annotation.is_some() {
+        return;
+    }
+    if binding_pattern_identifier(&assignment.left).is_none() {
+        return;
+    }
+    let Some(type_annotation) =
+        inferred_type_annotation_for_expression(builder, &assignment.right, 0)
+    else {
+        return;
+    };
+    assignment.left.type_annotation = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+}
+
+fn annotate_function_return<'a>(builder: &AstBuilder<'a>, function: &mut Function<'a>) {
+    if function.return_type.is_some() || function.r#async || function.generator {
+        return;
+    }
+    let Some(body) = &function.body else {
+        return;
+    };
+    let Some(kind) = body_return_type(body) else {
+        return;
+    };
+    let Some(type_annotation) = type_annotation_for_kind(builder, kind) else {
+        return;
+    };
+    function.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+}
+
+fn annotate_arrow_return<'a>(builder: &AstBuilder<'a>, arrow: &mut ArrowFunctionExpression<'a>) {
+    if arrow.return_type.is_some() || arrow.r#async {
+        return;
+    }
+    let Some(kind) = body_return_type(&arrow.body) else {
+        return;
+    };
+    let Some(type_annotation) = type_annotation_for_kind(builder, kind) else {
+        return;
+    };
+    arrow.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+}
+
+fn body_return_type(body: &FunctionBody<'_>) -> Option<GeneratedTypeKind> {
+    let mut collector = ReturnTypeCollector::default();
+    collector.visit_function_body(body);
+    if collector.conflict {
+        return None;
+    }
+    collector.inferred
+}
+
+#[derive(Default)]
+struct ReturnTypeCollector {
+    inferred: Option<GeneratedTypeKind>,
+    conflict: bool,
+}
+
+impl<'a> Visit<'a> for ReturnTypeCollector {
+    fn visit_return_statement(&mut self, statement: &ReturnStatement<'a>) {
+        let Some(argument) = &statement.argument else {
+            self.conflict = true;
+            return;
+        };
+        let Some(kind) = literal_type_kind(argument) else {
+            self.conflict = true;
+            return;
+        };
+        if let Some(existing) = self.inferred {
+            if existing != kind {
+                self.conflict = true;
+            }
+        } else {
+            self.inferred = Some(kind);
+        }
+    }
+
+    fn visit_function(&mut self, _function: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _arrow: &ArrowFunctionExpression<'a>) {}
 }
 
 struct ImportMemberTypeQueryAnnotator<'b, 'a> {

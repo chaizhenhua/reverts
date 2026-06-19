@@ -372,6 +372,44 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
 }
 
 #[test]
+fn module_item_formatting_infers_default_parameter_and_return_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function answer(input = 1) { return 42; } const echo = (label = 'ok') => { return 'ready'; };",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function answer(input: number = 1): number"));
+    assert!(formatted.contains("const echo = (label: string = 'ok'): string =>"));
+}
+
+#[test]
+fn module_item_formatting_skips_conflicting_return_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "function mixed(flag) { if (flag) return 1; return 'no'; }",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("function mixed(flag)"));
+    assert!(!formatted.contains("function mixed(flag):"));
+}
+
+#[test]
 fn module_item_formatting_infers_object_and_array_literal_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "const tuple = [1, 2]; const config = { name: 'cli', port: 443 };",
