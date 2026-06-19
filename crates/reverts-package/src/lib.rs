@@ -1556,6 +1556,14 @@ fn normalize_builtin(specifier: &str) -> Option<String> {
             | "wasi"
             | "worker_threads"
             | "zlib"
+            // Electron-runtime modules: provided by the Electron host like a
+            // builtin (never installed/vendored), so they resolve as Builtin
+            // and keep their bare import rather than UnresolvableBareImport.
+            | "electron"
+            | "electron/main"
+            | "electron/common"
+            | "electron/renderer"
+            | "electron/utility"
     )
     .then(|| name.to_string())
 }
@@ -1580,6 +1588,25 @@ mod tests {
         parse_export_members_import_proof, parse_package_json_source,
         resolve_package_deep_import_specifier,
     };
+
+    #[test]
+    fn electron_runtime_specifiers_resolve_as_builtin() {
+        // Electron provides `electron` and its subpaths at runtime, like a
+        // Node builtin — they must resolve, not emit UnresolvableBareImport.
+        let index = PackageSurfaceIndex::from_attributions(&[], &[]);
+        assert!(matches!(
+            index.resolve("electron"),
+            PackageResolution::Builtin { .. }
+        ));
+        assert!(matches!(
+            index.resolve("electron/renderer"),
+            PackageResolution::Builtin { .. }
+        ));
+        assert!(matches!(
+            index.resolve("electron/main"),
+            PackageResolution::Builtin { .. }
+        ));
+    }
 
     #[test]
     fn from_attributions_builds_index_from_accepted_external_imports() {
