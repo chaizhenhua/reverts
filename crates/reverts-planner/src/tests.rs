@@ -3071,6 +3071,46 @@ fn delazify_collapses_lazy_module_with_class_export() {
 }
 
 #[test]
+#[ignore = "KNOWN GAP: multi-declarator lazy-module lowering unsupported — esbuild \
+multi-handle statements (var a=U(..),b=U(..)) lower only the first declarator and \
+emit malformed JS (`var a = 1;, b = U(..)`). The co-declared handles end up exported \
+by nobody, so consumer `b()` calls dangle (the ~oCt-class residual). Fix must teach \
+delazify + helper-rename to handle every declarator in one var statement. See memory \
+project_finding_clusters_diagnosis."]
+fn delazify_collapses_multi_declarator_lazy_modules_in_one_statement() {
+    // esbuild co-declares several lazy-module handles in ONE `var` statement
+    // (`var a=U(...),b=U(...)`). Each must lower like a single-init statement
+    // so BOTH handle names become real, exportable bindings — otherwise the
+    // co-declared handles are emitted by nobody and consumers' `b()` dangle.
+    let source = concat!(
+        "var a = U((exports, module) => { module.exports = 1; }), b = U((exports, module) => { module.exports = 2; });\n",
+        "use(a(), b());\n",
+    );
+    let helper_kinds = BTreeMap::from([(
+        BindingName::new("U"),
+        RuntimePreludeBindingKind::CommonJsWrapper,
+    )]);
+
+    let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+    assert!(
+        lowered.source.contains("var a = 1") && lowered.source.contains("b = 2"),
+        "both co-declared handles must lower to values: {}",
+        lowered.source
+    );
+    assert!(
+        lowered.source.contains("use(a, b)"),
+        "both call sites collapse: {}",
+        lowered.source
+    );
+    assert!(
+        !lowered.uses_lazy_module,
+        "no residual thunk: {}",
+        lowered.source
+    );
+}
+
+#[test]
 fn delazify_collapses_lazy_module_with_multiple_exports_assignments() {
     let source = concat!(
         "var api = U((exports, module) => { exports.foo = 1; exports.bar = 2; });\n",
