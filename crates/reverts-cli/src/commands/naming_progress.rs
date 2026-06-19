@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode};
 use reverts_ir::{ModuleId, ModuleKind};
-use reverts_js::{is_generated_placeholder_identifier, is_minified_identifier};
 use reverts_model::EnrichedProgram;
 use reverts_pipeline::{SymbolIndexEntry, generate_project_from_prepared, prepare_and_enrich};
 
@@ -213,11 +212,10 @@ pub(crate) fn classify_emitted_entry(
     if !universe.first_party.contains(&entry.module_id.0) {
         return None;
     }
-    // Named = renamed by the Agent (emitted != original) or already a meaningful
-    // identifier (preserved vendored source).
-    let named = !is_generated_placeholder_identifier(&entry.emitted_name)
-        && (entry.emitted_name != entry.original_name
-            || is_meaningful_preserved_identifier(&entry.original_name));
+    // Named means the emitted binding came from an explicit accepted
+    // `symbols.semantic_name` row. Meaningful-looking preserved source names
+    // are still unnamed until accepted by the semantic naming mechanism.
+    let named = entry.semantic_named;
     let exported = universe
         .exported_by_module
         .get(&entry.module_id.0)
@@ -232,12 +230,6 @@ pub(crate) fn classify_emitted_entry(
         tier: symbol_tier(exported, kind),
         named,
     })
-}
-
-fn is_meaningful_preserved_identifier(name: &str) -> bool {
-    !is_generated_placeholder_identifier(name)
-        && (!is_minified_identifier(name)
-            || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri"))
 }
 
 #[must_use]
@@ -511,11 +503,13 @@ mod tests {
         original: &str,
         emitted: &str,
         function_like: bool,
+        semantic_named: bool,
     ) -> SymbolIndexEntry {
         SymbolIndexEntry {
             module_id: reverts_ir::ModuleId(module_id),
             original_name: original.to_string(),
             emitted_name: emitted.to_string(),
+            semantic_named,
             file_path: format!("modules/{module_id}.ts"),
             function_like,
         }
@@ -524,40 +518,38 @@ mod tests {
     #[test]
     fn classify_marks_minified_unnamed_exported_binding() {
         let universe = universe(&[1], &[(1, "aB")]);
-        let detail = classify_emitted_entry(&entry(1, "aB", "aB", false), &universe)
+        let detail = classify_emitted_entry(&entry(1, "aB", "aB", false, false), &universe)
             .expect("first-party binding");
         assert_eq!(detail.tier, Tier::PublicSurface); // exported
         assert!(!detail.named); // minified, not renamed
     }
 
     #[test]
-    fn classify_treats_common_runtime_abbreviations_as_meaningful() {
+    fn classify_does_not_treat_common_runtime_abbreviations_as_named_without_semantic_name() {
         let universe = universe(&[1], &[]);
 
-        let detail = classify_emitted_entry(&entry(1, "cwd", "cwd", false), &universe)
+        let detail = classify_emitted_entry(&entry(1, "cwd", "cwd", false, false), &universe)
             .expect("first-party symbol");
 
-        assert!(detail.named);
+        assert!(!detail.named);
     }
 
     #[test]
     fn classify_skips_non_first_party_module() {
         let universe = universe(&[1], &[]);
-        assert!(classify_emitted_entry(&entry(2, "x", "x", false), &universe).is_none());
+        assert!(classify_emitted_entry(&entry(2, "x", "x", false, false), &universe).is_none());
     }
 
     #[test]
-    fn classify_counts_renamed_or_meaningful_as_named() {
+    fn classify_counts_only_explicit_semantic_name_as_named() {
         let universe = universe(&[1], &[]);
-        // Renamed by the Agent (emitted != original).
         assert!(
-            classify_emitted_entry(&entry(1, "aB", "createClient", false), &universe)
+            classify_emitted_entry(&entry(1, "aB", "createClient", false, true), &universe)
                 .expect("first-party")
                 .named
         );
-        // Already meaningful original.
         assert!(
-            classify_emitted_entry(&entry(1, "tokenize", "tokenize", true), &universe)
+            !classify_emitted_entry(&entry(1, "tokenize", "tokenize", true, false), &universe)
                 .expect("first-party")
                 .named
         );
@@ -568,13 +560,13 @@ mod tests {
         let universe = universe(&[1], &[]);
 
         assert!(
-            !classify_emitted_entry(&entry(1, "aB", "semanticValue25", false), &universe)
+            !classify_emitted_entry(&entry(1, "aB", "semanticValue25", false, false), &universe)
                 .expect("first-party")
                 .named
         );
         assert!(
             !classify_emitted_entry(
-                &entry(1, "Rdr", "module247SemanticSymbol001", false),
+                &entry(1, "Rdr", "module247SemanticSymbol001", false, false),
                 &universe
             )
             .expect("first-party")
@@ -586,11 +578,11 @@ mod tests {
     fn compute_aggregates_emitted_index_and_excludes_external() {
         let universe = universe(&[1], &[(1, "aB")]);
         let index = [
-            entry(1, "aB", "aB", false),         // exported, minified -> L1 unnamed
-            entry(1, "hL", "hL", true),          // internal fn -> L2 unnamed
-            entry(1, "cD", "cD", false),         // internal value -> L3 unnamed
-            entry(1, "pretty", "pretty", false), // meaningful -> L3 named
-            entry(2, "zz", "zz", false),         // module 2 not first-party -> excluded
+            entry(1, "aB", "aB", false, false), // exported, minified -> L1 unnamed
+            entry(1, "hL", "hL", true, false),  // internal fn -> L2 unnamed
+            entry(1, "cD", "cD", false, false), // internal value -> L3 unnamed
+            entry(1, "pretty", "pretty", false, true), // explicit semantic name -> L3 named
+            entry(2, "zz", "zz", false, true),  // module 2 not first-party -> excluded
         ];
         let report: NamingProgressReport = compute_naming_progress(7, &index, &universe);
 

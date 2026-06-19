@@ -4,6 +4,7 @@
 //! the rest of the generated JavaScript/TypeScript AST. It is deliberately
 //! read-only and AST-backed.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,7 @@ pub fn identifier_inventory_json(args: &IdentifierInventoryArgs) -> Result<Strin
 pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Value, CliRunError> {
     let mut files = code_files(args.output_root.as_path())?;
     files.sort();
+    let semantic_name_index = load_explicit_semantic_name_index(args.output_root.as_path())?;
 
     let mut totals = IdentifierInventoryStats::default();
     let mut semantic_total = 0_usize;
@@ -54,7 +56,11 @@ pub fn identifier_inventory_report(args: &IdentifierInventoryArgs) -> Result<Val
         match collect_identifier_inventory(&source, Some(path.as_path()), ParseGoal::TypeScript) {
             Ok(stats) => {
                 let relative_path = relative_display(args.output_root.as_path(), path.as_path());
-                let semantic = semantic_binding_file_coverage(relative_path.as_str(), &stats);
+                let semantic = semantic_binding_file_coverage(
+                    relative_path.as_str(),
+                    &stats,
+                    semantic_name_index.get(relative_path.as_str()),
+                );
                 semantic_total += semantic.total;
                 semantic_named += semantic.named;
                 semantic_preserved += semantic.preserved;
@@ -160,6 +166,7 @@ struct SemanticBindingCoverage {
 fn semantic_binding_file_coverage(
     relative_path: &str,
     stats: &IdentifierInventoryStats,
+    explicit_names: Option<&BTreeMap<String, usize>>,
 ) -> SemanticBindingCoverage {
     if !is_semantic_binding_target_path(relative_path) {
         return SemanticBindingCoverage {
@@ -172,15 +179,28 @@ fn semantic_binding_file_coverage(
             pending_bindings: Vec::new(),
         };
     }
+    let mut pending_binding_names = stats.semantic_pending_binding_names.clone();
+    let mut named = 0_usize;
+    if let Some(explicit_names) = explicit_names {
+        for (name, accepted_count) in explicit_names {
+            let Some(pending_count) = pending_binding_names.get_mut(name) else {
+                continue;
+            };
+            let consumed = (*pending_count).min(*accepted_count);
+            *pending_count -= consumed;
+            named += consumed;
+        }
+    }
+    pending_binding_names.retain(|_, count| *count > 0);
+    let pending = stats.binding_identifiers.saturating_sub(named);
     SemanticBindingCoverage {
         total: stats.binding_identifiers,
-        named: stats.semantic_named_bindings,
+        named,
         preserved: 0,
         excluded: 0,
-        pending: stats.semantic_pending_bindings,
-        reason: "semantic_binding_names_and_import_surface_bindings",
-        pending_bindings: stats
-            .semantic_pending_binding_names
+        pending,
+        reason: "explicit_semantic_name_bindings_only",
+        pending_bindings: pending_binding_names
             .iter()
             .map(|(name, count)| {
                 serde_json::json!({
@@ -194,6 +214,46 @@ fn semantic_binding_file_coverage(
 
 fn is_semantic_binding_target_path(relative_path: &str) -> bool {
     !relative_path.is_empty()
+}
+
+fn load_explicit_semantic_name_index(
+    output_root: &Path,
+) -> Result<BTreeMap<String, BTreeMap<String, usize>>, CliRunError> {
+    let path = output_root.join("symbol-index.json");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let text = fs::read_to_string(&path).map_err(|source| {
+        CliRunError::IdentifierInventory(format!("failed to read {}: {source}", path.display()))
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|source| {
+        CliRunError::IdentifierInventory(format!("failed to parse {}: {source}", path.display()))
+    })?;
+    let Some(rows) = value.as_array() else {
+        return Ok(BTreeMap::new());
+    };
+    let mut index = BTreeMap::<String, BTreeMap<String, usize>>::new();
+    for row in rows {
+        if !row
+            .get("semantic_named")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(file_path) = row.get("file_path").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(emitted_name) = row.get("emitted_name").and_then(Value::as_str) else {
+            continue;
+        };
+        *index
+            .entry(file_path.to_string())
+            .or_default()
+            .entry(emitted_name.to_string())
+            .or_default() += 1;
+    }
+    Ok(index)
 }
 
 fn percent(numerator: usize, denominator: usize) -> f64 {
@@ -327,7 +387,7 @@ mod tests {
                 .get("semantic_bindings")
                 .and_then(|bindings| bindings.get("files_with_pending"))
                 .and_then(Value::as_u64),
-            Some(2)
+            Some(3)
         );
     }
 
@@ -396,7 +456,71 @@ mod tests {
         assert_eq!(pending_files[0]["path"], "modules/template.ts");
         assert_eq!(
             pending_files[0]["reason"],
-            "semantic_binding_names_and_import_surface_bindings"
+            "explicit_semantic_name_bindings_only"
+        );
+    }
+
+    #[test]
+    fn counts_only_explicit_semantic_name_index_rows_as_named() {
+        let temp = tempdir().expect("temp dir");
+        let root = temp.path();
+        fs::create_dir(root.join("modules")).expect("mkdir modules");
+        fs::write(
+            root.join("modules/minified.ts"),
+            "const createClient = 1; function b(c) { return createClient + c; }",
+        )
+        .expect("write module");
+        fs::write(
+            root.join("symbol-index.json"),
+            serde_json::json!([
+                {
+                    "module_id": 1,
+                    "original_name": "a",
+                    "emitted_name": "createClient",
+                    "semantic_named": true,
+                    "file_path": "modules/minified.ts"
+                },
+                {
+                    "module_id": 1,
+                    "original_name": "b",
+                    "emitted_name": "b",
+                    "semantic_named": false,
+                    "file_path": "modules/minified.ts"
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write symbol index");
+
+        let report = identifier_inventory_report(&IdentifierInventoryArgs {
+            output_root: root.to_path_buf(),
+            json: None,
+        })
+        .expect("inventory should run");
+
+        assert_eq!(
+            report["semantic_bindings"]["named"].as_u64(),
+            Some(1),
+            "only semantic_named=true rows count as named"
+        );
+        assert_eq!(report["semantic_bindings"]["pending"].as_u64(), Some(2));
+        let bindings = report["semantic_bindings"]["pending_files"][0]["pending_bindings"]
+            .as_array()
+            .expect("pending binding names");
+        assert!(
+            !bindings
+                .iter()
+                .any(|binding| binding["original_name"] == "createClient" && binding["count"] == 1)
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding["original_name"] == "b" && binding["count"] == 1)
+        );
+        assert!(
+            bindings
+                .iter()
+                .any(|binding| binding["original_name"] == "c" && binding["count"] == 1)
         );
     }
 

@@ -110,6 +110,7 @@ fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> Str
                 "module_id": entry.module_id.0,
                 "original_name": entry.original_name,
                 "emitted_name": entry.emitted_name,
+                "semantic_named": entry.semantic_named,
                 "file_path": entry.file_path,
             })
         })

@@ -11,8 +11,7 @@ use oxc_ast::{
     Visit,
     ast::{
         BindingIdentifier, ExportAllDeclaration, ExportNamedDeclaration, IdentifierReference,
-        ImportDeclaration, ImportDeclarationSpecifier, ObjectProperty, Program,
-        StaticMemberExpression,
+        ImportDeclaration, ObjectProperty, Program, StaticMemberExpression,
     },
     visit::walk::{
         walk_export_all_declaration, walk_export_named_declaration, walk_import_declaration,
@@ -23,7 +22,6 @@ use oxc_parser::Parser;
 
 use crate::commonjs_exports::static_property_key_name_ref;
 use crate::errors::{JsError, ParseError, ParseGoal, Result};
-use crate::identifier::{is_generated_placeholder_identifier, is_minified_identifier};
 use crate::parse::{parse_options_for, source_type_candidates};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,16 +91,12 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
     fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
         let name = identifier.name.as_str();
         self.stats.binding_identifiers += 1;
-        if is_meaningful_preserved_binding_name(name) {
-            self.stats.semantic_named_bindings += 1;
-        } else {
-            self.stats.semantic_pending_bindings += 1;
-            *self
-                .stats
-                .semantic_pending_binding_names
-                .entry(name.to_string())
-                .or_default() += 1;
-        }
+        self.stats.semantic_pending_bindings += 1;
+        *self
+            .stats
+            .semantic_pending_binding_names
+            .entry(name.to_string())
+            .or_default() += 1;
     }
 
     fn visit_identifier_reference(&mut self, _identifier: &IdentifierReference<'a>) {
@@ -127,21 +121,8 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
             .as_ref()
             .map_or(0, |specifiers| specifiers.len());
         if let Some(specifiers) = &declaration.specifiers {
-            for specifier in specifiers {
-                let name = match specifier {
-                    ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                        specifier.local.name.as_str()
-                    }
-                    ImportDeclarationSpecifier::ImportDefaultSpecifier(specifier) => {
-                        specifier.local.name.as_str()
-                    }
-                    ImportDeclarationSpecifier::ImportNamespaceSpecifier(specifier) => {
-                        specifier.local.name.as_str()
-                    }
-                };
-                if !is_meaningful_preserved_binding_name(name) {
-                    self.stats.semantic_pending_import_bindings += 1;
-                }
+            for _specifier in specifiers {
+                self.stats.semantic_pending_import_bindings += 1;
             }
         }
         walk_import_declaration(self, declaration);
@@ -156,12 +137,6 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
         self.stats.export_specifiers += 1;
         walk_export_all_declaration(self, declaration);
     }
-}
-
-fn is_meaningful_preserved_binding_name(name: &str) -> bool {
-    !is_generated_placeholder_identifier(name)
-        && (!is_minified_identifier(name)
-            || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri"))
 }
 
 #[cfg(test)]
@@ -191,8 +166,8 @@ mod tests {
         assert!(stats.identifier_references >= 3);
         assert_eq!(stats.static_member_properties, 1);
         assert_eq!(stats.object_property_keys, 2);
-        assert_eq!(stats.semantic_pending_bindings, 0);
-        assert_eq!(stats.semantic_named_bindings, stats.binding_identifiers);
+        assert_eq!(stats.semantic_pending_bindings, stats.binding_identifiers);
+        assert_eq!(stats.semantic_named_bindings, 0);
         assert!(stats.total() >= 12);
     }
 

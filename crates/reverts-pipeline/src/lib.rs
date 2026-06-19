@@ -57,6 +57,10 @@ pub struct SymbolIndexEntry {
     pub original_name: String,
     /// Name as actually emitted (semantic name if assigned, else original).
     pub emitted_name: String,
+    /// True only when the emitted name came from an accepted
+    /// `symbols.semantic_name` entry. Meaningful-looking preserved names do not
+    /// count as semantic naming evidence.
+    pub semantic_named: bool,
     /// Emitted file the binding lands in.
     pub file_path: String,
     /// Whether the emitted declaration is a function or class (vs a value/const).
@@ -90,13 +94,18 @@ fn build_symbol_index(
         module_for_path.insert(path.as_str(), *module_id);
     }
 
-    // (module_id, emitted/semantic name) -> original DB name, for bindings the
-    // Agent already renamed, so index keys map back to the symbols table.
-    let mut original_for_emitted: std::collections::BTreeMap<(ModuleId, &str), &str> =
+    // (module_id, emitted/semantic name) -> original DB name, for bindings with
+    // an accepted semantic name, so index keys map back to the symbols table and
+    // downstream coverage can distinguish explicit names from preserved text.
+    let mut original_for_semantic_emitted: std::collections::BTreeMap<(ModuleId, &str), &str> =
         std::collections::BTreeMap::new();
     for symbol in program.model().symbols() {
-        if let Some(semantic) = symbol.semantic_name.as_deref() {
-            original_for_emitted.insert((symbol.module_id, semantic), symbol.name.as_str());
+        if let Some(semantic) = program
+            .semantic_names()
+            .binding_name(symbol.module_id, symbol.name.as_str())
+        {
+            original_for_semantic_emitted
+                .insert((symbol.module_id, semantic.as_str()), symbol.name.as_str());
         }
     }
 
@@ -133,13 +142,16 @@ fn build_symbol_index(
                 if !seen.insert(emitted_name.clone()) {
                     continue;
                 }
-                let original_name = original_for_emitted
+                let semantic_original = original_for_semantic_emitted
                     .get(&(module_id, emitted_name.as_str()))
-                    .map_or_else(|| emitted_name.clone(), |original| (*original).to_string());
+                    .copied();
+                let original_name =
+                    semantic_original.map_or_else(|| emitted_name.clone(), ToString::to_string);
                 entries.push(SymbolIndexEntry {
                     module_id,
                     original_name,
                     emitted_name,
+                    semantic_named: semantic_original.is_some(),
                     file_path: file.path.clone(),
                     function_like,
                 });
