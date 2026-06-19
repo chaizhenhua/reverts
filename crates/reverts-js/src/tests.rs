@@ -372,6 +372,26 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
 }
 
 #[test]
+fn module_item_formatting_infers_minified_unary_literal_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "var missing = -1; const present = +1; let enabled = !0;",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("var missing: number = -1;"));
+    assert!(formatted.contains("const present: number = +1;"));
+    assert!(formatted.contains("let enabled: boolean = !0;"));
+}
+
+#[test]
 fn module_item_formatting_infers_default_parameter_and_return_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function answer(input = 1) { return 42; } const echo = (label = 'ok') => { return 'ready'; };",

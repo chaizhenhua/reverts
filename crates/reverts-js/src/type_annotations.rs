@@ -505,6 +505,23 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
         {
             Some(GeneratedTypeKind::Undefined)
         }
+        Expression::UnaryExpression(unary)
+            if matches!(
+                unary.operator,
+                oxc_ast::ast::UnaryOperator::UnaryNegation | oxc_ast::ast::UnaryOperator::UnaryPlus
+            ) && matches!(&unary.argument, Expression::NumericLiteral(_)) =>
+        {
+            Some(GeneratedTypeKind::Number)
+        }
+        Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::LogicalNot
+                && matches!(
+                    &unary.argument,
+                    Expression::NumericLiteral(_) | Expression::BooleanLiteral(_)
+                ) =>
+        {
+            Some(GeneratedTypeKind::Boolean)
+        }
         _ => None,
     }
 }
