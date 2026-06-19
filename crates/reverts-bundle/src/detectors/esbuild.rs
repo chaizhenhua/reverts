@@ -193,79 +193,96 @@ fn reconstruct_multi_handle_statement(
     vd: &VariableDeclaration<'_>,
     aliases: &[String],
 ) -> Option<Vec<(String, String)>> {
-    // Classify declarators in source order: bare hoisted var, or helper handle.
+    // Classify declarators in source order. A `Handle` is a helper-init
+    // declarator (`X=helper(()=>{...})`); every other declarator is a hoisted
+    // `Member` — a bare var (`a`) or a co-hoisted definition (`iNe="..."`,
+    // `HBr=e=>{...}`) — carried verbatim into its owning handle's statement.
     enum Slot<'s> {
-        Bare(&'s str),
-        Handle { name: &'s str, decl_text: &'s str },
+        Member {
+            name: &'s str,
+            decl_text: &'s str,
+            is_bare: bool,
+        },
+        Handle {
+            name: &'s str,
+            decl_text: &'s str,
+        },
     }
     let mut slots: Vec<Slot> = Vec::new();
     let mut handle_order: Vec<usize> = Vec::new(); // indices into `slots` that are handles
     for decl in &vd.declarations {
         let BindingPatternKind::BindingIdentifier(binding) = &decl.id.kind else {
-            return None;
+            return None; // destructuring binding — not the hoist+handle shape
         };
         let name = binding.name.as_str();
+        let span = decl.span();
+        let decl_text = source.get(span.start as usize..span.end as usize)?;
         if is_helper_init_declarator(decl, aliases) {
-            let span = decl.span();
-            let decl_text = source.get(span.start as usize..span.end as usize)?;
             handle_order.push(slots.len());
             slots.push(Slot::Handle { name, decl_text });
-        } else if decl.init.is_none() {
-            slots.push(Slot::Bare(name));
         } else {
-            // A non-handle initializer (e.g. `z=5`) — not the pure hoist+handle
-            // shape we reconstruct. Bail rather than risk a wrong split.
-            return None;
+            slots.push(Slot::Member {
+                name,
+                decl_text,
+                is_bare: decl.init.is_none(),
+            });
         }
     }
     if handle_order.len() < 2 {
         return None;
     }
 
-    // Which bare names each handle's arrow body writes.
+    // Which identifiers each handle's arrow body writes (its module's hoisted
+    // vars), parallel to `handle_order`.
     let writes_by_handle: Vec<BTreeSet<String>> = handle_order
         .iter()
-        .map(|&slot_idx| {
-            let Slot::Handle { .. } = &slots[slot_idx] else {
-                unreachable!("handle_order only holds handle slots");
-            };
-            let decl = &vd.declarations[slot_idx];
-            handle_written_identifiers(decl)
-        })
+        .map(|&slot_idx| handle_written_identifiers(&vd.declarations[slot_idx]))
         .collect();
 
-    // Attribute each bare declarator (by slot index) to one handle (slot index).
-    let mut bares_for_handle: std::collections::BTreeMap<usize, Vec<&str>> =
+    // Attribute each hoisted member (by slot index) to one handle (slot index):
+    // a bare var goes to the unique handle that writes it; an initialized member
+    // (or a bare var written by none) goes to the nearest following handle —
+    // esbuild emits a module's hoisted defs adjacent to its init.
+    let mut members_for_handle: std::collections::BTreeMap<usize, Vec<&str>> =
         std::collections::BTreeMap::new();
     for (slot_idx, slot) in slots.iter().enumerate() {
-        let Slot::Bare(name) = slot else {
+        let Slot::Member {
+            name,
+            decl_text,
+            is_bare,
+        } = slot
+        else {
             continue;
         };
-        let writers: Vec<usize> = handle_order
-            .iter()
-            .enumerate()
-            .filter(|(handle_pos, _slot)| writes_by_handle[*handle_pos].contains(*name))
-            .map(|(_handle_pos, &slot)| slot)
-            .collect();
-        let owner = match writers.as_slice() {
-            [single] => *single,
-            [] => nearest_handle(&handle_order, slot_idx)?,
-            _ => return None, // written by >1 handle: ambiguous shared state
+        let owner = if *is_bare {
+            let writers: Vec<usize> = handle_order
+                .iter()
+                .enumerate()
+                .filter(|(handle_pos, _slot)| writes_by_handle[*handle_pos].contains(*name))
+                .map(|(_handle_pos, &slot)| slot)
+                .collect();
+            match writers.as_slice() {
+                [single] => *single,
+                [] => nearest_handle(&handle_order, slot_idx)?,
+                _ => return None, // bare var written by >1 handle: ambiguous shared state
+            }
+        } else {
+            nearest_handle(&handle_order, slot_idx)?
         };
-        bares_for_handle.entry(owner).or_default().push(name);
+        members_for_handle.entry(owner).or_default().push(decl_text);
     }
 
     // Emit one synthetic statement per handle, in source order.
     let mut out = Vec::new();
     for &handle_slot in &handle_order {
         let Slot::Handle { name, decl_text } = &slots[handle_slot] else {
-            unreachable!();
+            unreachable!("handle_order only holds handle slots");
         };
-        let bares = bares_for_handle.remove(&handle_slot).unwrap_or_default();
-        let synthetic = if bares.is_empty() {
+        let members = members_for_handle.remove(&handle_slot).unwrap_or_default();
+        let synthetic = if members.is_empty() {
             format!("var {decl_text};")
         } else {
-            format!("var {}, {decl_text};", bares.join(", "))
+            format!("var {}, {decl_text};", members.join(", "))
         };
         out.push(((*name).to_string(), synthetic));
     }
@@ -561,6 +578,33 @@ var a,X=st(()=>{a=1}),b,c,Y=st(()=>{b=2;c=3});"#;
             synthetic("esbuild:Y").as_deref(),
             Some("var b, c, Y=st(()=>{b=2;c=3});"),
             "Y reconstructs with its written hoisted vars: {modules:#?}"
+        );
+    }
+
+    #[test]
+    fn var_assignment_multi_handle_carries_initialized_hoisted_members() {
+        // esbuild co-hoists module-local definitions (constants, helper arrows)
+        // into the same `var` statement as the init handles. Each such
+        // initialized member is carried verbatim into the nearest following
+        // handle's reconstructed statement so it stays defined + exportable.
+        let src = r#"var st=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
+var iNe="x",a,X=st(()=>{a=1}),HBr=e=>e,Y=st(()=>{});"#;
+        let modules = extract_esm(src);
+        let synthetic = |vid: &str| {
+            modules
+                .iter()
+                .find(|m| m.virtual_id == vid)
+                .and_then(|m| m.synthetic_source.clone())
+        };
+        assert_eq!(
+            synthetic("esbuild:X").as_deref(),
+            Some(r#"var iNe="x", a, X=st(()=>{a=1});"#),
+            "X carries the preceding initialized member + its written bare var: {modules:#?}"
+        );
+        assert_eq!(
+            synthetic("esbuild:Y").as_deref(),
+            Some("var HBr=e=>e, Y=st(()=>{});"),
+            "Y carries its preceding initialized member: {modules:#?}"
         );
     }
 
