@@ -4742,7 +4742,11 @@ fn match_packages_promotes_full_cascade_function_coverage_to_module_attribution(
     assert_eq!(status, "accepted");
     assert_eq!(emission_mode, "external_import");
     assert_eq!(package_version, "1.2.3");
-    assert!(evidence.contains("cascade_function_coverage"));
+    assert!(
+        evidence.contains("normalized_source_hash")
+            || evidence.contains("cascade_function_coverage"),
+        "unexpected evidence: {evidence}"
+    );
 }
 
 #[test]
@@ -4830,7 +4834,91 @@ fn match_packages_forces_source_only_cascade_ownership_external() {
     assert_eq!(package_version.as_deref(), Some("1.2.3"));
     assert_eq!(export_specifier, None);
     assert!(rejection_reason.is_some());
-    assert!(evidence.contains("cascade_function_coverage"));
+    assert!(
+        evidence.contains("normalized_source_hash")
+            || evidence.contains("cascade_function_coverage"),
+        "unexpected evidence: {evidence}"
+    );
+}
+
+#[test]
+fn match_packages_persists_anonymous_bundle_package_ownership() {
+    let tempdir = tempfile::tempdir().expect("tempdir");
+    let mut connection = package_match_connection(
+        tempdir.path().join("bundle.js"),
+        "function add(a,b){return a+b;}",
+        &[("pkg", "1.2.3", "index.js", "function add(a,b){return a+b;}")],
+    );
+    connection
+        .execute(
+            r"
+            UPDATE modules
+               SET module_category = 'application',
+                   package_name = NULL,
+                   package_version = NULL,
+                   semantic_name = 'modules/10-esbuild-anon.ts'
+             WHERE id = 10
+            ",
+            [],
+        )
+        .expect("make module anonymous");
+    let args = MatchPackagesArgs {
+        input: PathBuf::from("unused.db"),
+        project_id: 1,
+        apply: true,
+        package_names: vec!["pkg".to_string()],
+        package_source_roots: Vec::new(),
+        materialize_package_sources: false,
+    };
+
+    let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
+
+    assert!(outcome.audit.is_clean(), "{:?}", outcome.audit.findings());
+    assert_eq!(outcome.matched_modules, 1);
+    assert_eq!(outcome.function_attributions, 0);
+    assert_eq!(outcome.written_function_attributions, 0);
+    assert_eq!(
+        outcome.written_attributions, 1,
+        "anonymous package ownership should be persisted as rejected source evidence"
+    );
+    let (status, emission_mode, package_name, package_version, export_specifier, evidence): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = connection
+        .query_row(
+            r"
+            SELECT status, emission_mode, package_name, package_version,
+                   export_specifier, evidence_json
+              FROM package_attributions
+             WHERE module_id = 10
+            ",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .expect("anonymous ownership should be written");
+    assert_eq!(status, "rejected");
+    assert_eq!(emission_mode, "application_source");
+    assert_eq!(package_name, "pkg");
+    assert_eq!(package_version.as_deref(), Some("1.2.3"));
+    assert_eq!(export_specifier, None);
+    assert!(
+        evidence.contains("normalized_source_hash")
+            || evidence.contains("cascade_function_coverage"),
+        "unexpected evidence: {evidence}"
+    );
 }
 
 #[test]

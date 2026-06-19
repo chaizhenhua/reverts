@@ -11,7 +11,7 @@ pub mod return_pattern;
 pub mod structural_anchor;
 pub mod throw_set;
 
-pub use extractor::{ExtractedFunction, FunctionExtractor};
+pub use extractor::{ExtractedFunction, FunctionExtractor, function_names};
 
 pub mod import_specifiers;
 pub use import_specifiers::extract_import_specifiers;

@@ -50,15 +50,13 @@ pub(crate) fn promote_cascade_function_coverage_to_module_attributions(
     );
 
     for module in &rows.modules {
-        if module.kind != ModuleKind::Package
-            || already_accepted.contains(&module.id)
-            || matched_modules.contains(&module.id)
-        {
+        if already_accepted.contains(&module.id) || matched_modules.contains(&module.id) {
             continue;
         }
-        let Some(expected_package_name) = module.package_name.as_deref() else {
+        let package_hint = module_package_hint(module);
+        if module.kind != ModuleKind::Package && !is_anonymous_bundle_package_candidate(module) {
             continue;
-        };
+        }
         let Some(fingerprints) = fingerprints_by_module.get(&module.id) else {
             continue;
         };
@@ -103,17 +101,15 @@ pub(crate) fn promote_cascade_function_coverage_to_module_attributions(
         };
         let package_name = *package_name;
         let package_version = *package_version;
-        if package_name != expected_package_name {
-            continue;
-        }
-        if module
-            .package_version
-            .as_deref()
-            .map(str::trim)
-            .filter(|version| !version.is_empty())
-            .is_some_and(|expected_version| package_version != expected_version)
-        {
-            continue;
+        if let Some((expected_package_name, expected_package_version)) = package_hint {
+            if package_name != expected_package_name {
+                continue;
+            }
+            if expected_package_version
+                .is_some_and(|expected_version| package_version != expected_version)
+            {
+                continue;
+            }
         }
 
         let covered_count = covered_spans.len();
@@ -142,7 +138,9 @@ pub(crate) fn promote_cascade_function_coverage_to_module_attributions(
         let has_exact_function_import_proof = selected_ownership
             .iter()
             .all(cascade_ownership_has_exact_import_proof);
-        let can_externalize = is_full_coverage
+        let has_package_hint = package_hint.is_some();
+        let can_externalize = has_package_hint
+            && is_full_coverage
             && has_exact_function_import_proof
             && selected_ownership
                 .iter()
@@ -182,6 +180,32 @@ pub(crate) fn promote_cascade_function_coverage_to_module_attributions(
             external_importable: can_externalize,
         });
     }
+}
+
+fn module_package_hint(module: &reverts_input::ModuleInput) -> Option<(&str, Option<&str>)> {
+    if module.kind != ModuleKind::Package {
+        return None;
+    }
+    let package_name = module
+        .package_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|package_name| !package_name.is_empty())?;
+    let package_version = module
+        .package_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|package_version| !package_version.is_empty());
+    Some((package_name, package_version))
+}
+
+fn is_anonymous_bundle_package_candidate(module: &reverts_input::ModuleInput) -> bool {
+    module.kind == ModuleKind::Application
+        && module
+            .package_name
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty)
 }
 
 fn cascade_ownership_has_exact_import_proof(ownership: &&CascadeOwnershipMatch) -> bool {

@@ -40,6 +40,75 @@ pub(crate) fn package_dir_candidates(root: &Path, package_name: &str) -> Vec<Pat
         .collect()
 }
 
+pub(crate) fn discover_local_package_names(
+    roots: &[PathBuf],
+) -> Result<BTreeSet<String>, MatchPackagesError> {
+    let mut package_names = BTreeSet::new();
+    for root in roots {
+        for package_dir in discover_local_package_dirs(root.as_path())? {
+            if let Some(metadata) = local_package_metadata(package_dir.as_path())? {
+                package_names.insert(metadata.name);
+            }
+        }
+    }
+    Ok(package_names)
+}
+
+fn discover_local_package_dirs(root: &Path) -> Result<Vec<PathBuf>, MatchPackagesError> {
+    let mut dirs = Vec::new();
+    if root.join("package.json").is_file() {
+        dirs.push(root.to_path_buf());
+    }
+    for node_modules in [root.join("node_modules"), root.to_path_buf()] {
+        if !node_modules.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(node_modules.as_path()).map_err(|source| {
+            MatchPackagesError::ReadPackageSourceRoot {
+                path: node_modules.clone(),
+                source,
+            }
+        })? {
+            let entry = entry.map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+                path: node_modules.clone(),
+                source,
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            if name.starts_with('@') {
+                for scoped in fs::read_dir(path.as_path()).map_err(|source| {
+                    MatchPackagesError::ReadPackageSourceRoot {
+                        path: path.clone(),
+                        source,
+                    }
+                })? {
+                    let scoped =
+                        scoped.map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+                            path: path.clone(),
+                            source,
+                        })?;
+                    let scoped_path = scoped.path();
+                    if scoped_path.join("package.json").is_file() {
+                        dirs.push(scoped_path);
+                    }
+                }
+            } else if path.join("package.json").is_file() {
+                dirs.push(path);
+            }
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    Ok(dirs)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LocalPackageMetadata {
     pub(crate) name: String,
@@ -737,4 +806,34 @@ fn slash_path(path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_local_package_names_walks_node_modules_and_scopes() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let node_modules = temp.path().join("node_modules");
+        fs::create_dir_all(node_modules.join("left-pad")).expect("mkdir left");
+        fs::create_dir_all(node_modules.join("@scope").join("pkg")).expect("mkdir scoped");
+        fs::write(
+            node_modules.join("left-pad").join("package.json"),
+            r#"{"name":"left-pad","version":"1.0.0"}"#,
+        )
+        .expect("write left");
+        fs::write(
+            node_modules.join("@scope").join("pkg").join("package.json"),
+            r#"{"name":"@scope/pkg","version":"2.0.0"}"#,
+        )
+        .expect("write scoped");
+
+        let names =
+            discover_local_package_names(&[temp.path().to_path_buf()]).expect("discover names");
+        assert_eq!(
+            names,
+            BTreeSet::from(["@scope/pkg".to_string(), "left-pad".to_string()])
+        );
+    }
 }

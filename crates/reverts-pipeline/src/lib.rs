@@ -6,7 +6,7 @@ mod runtime_dependencies;
 mod source_mirror;
 mod source_rewrites;
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
@@ -47,6 +47,11 @@ pub struct OutputRun {
     pub runtime_dependencies: Vec<RuntimeDependency>,
     pub assets: Vec<EmittedAsset>,
     pub source_mirror_assets: Vec<EmittedAsset>,
+    /// Owning module for every emitted module file. Unlike `symbol_index`, this
+    /// includes symbol-less modules (string/data modules, side-effect modules,
+    /// tiny re-export wrappers), so downstream matchers can still compare their
+    /// emitted source against package or first-party reference sources.
+    pub module_output_paths: BTreeMap<ModuleId, String>,
     /// Maps each emitted module-level binding to its original (DB) name and the
     /// file it lands in, so a downstream naming agent can read the generated
     /// TypeScript and route names back to the right `(module_id, original)`.
@@ -247,6 +252,11 @@ pub fn prepare_input_rows_for_pipeline(mut rows: InputRows) -> PreparedInputRows
     let synthetic_modules = extraction.new_modules.clone();
     let audit = extraction.audit.clone();
     extraction.merge_into(&mut rows);
+    if let Ok(input) = InputBundle::from_rows(rows.clone()) {
+        let model = ProgramModel::from_input(input);
+        let enrichment = enrich_program(model);
+        rows.dependencies = enrichment.program.model().input().dependencies.clone();
+    }
     PreparedInputRows {
         rows,
         synthetic_modules,
@@ -370,6 +380,7 @@ pub fn generate_project_from_prepared_with_options(
             runtime_dependencies,
             assets,
             source_mirror_assets,
+            module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -389,6 +400,7 @@ pub fn generate_project_from_prepared_with_options(
             runtime_dependencies,
             assets,
             source_mirror_assets,
+            module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -433,6 +445,7 @@ pub fn generate_project_from_prepared_with_options(
         runtime_dependencies,
         assets,
         source_mirror_assets,
+        module_output_paths,
         symbol_index,
     })
 }
@@ -498,6 +511,7 @@ pub fn generate_project_inventory_from_prepared(
             runtime_dependencies,
             assets,
             source_mirror_assets: Vec::new(),
+            module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -516,6 +530,7 @@ pub fn generate_project_inventory_from_prepared(
             runtime_dependencies,
             assets,
             source_mirror_assets: Vec::new(),
+            module_output_paths: BTreeMap::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -544,6 +559,7 @@ pub fn generate_project_inventory_from_prepared(
         runtime_dependencies,
         assets,
         source_mirror_assets: Vec::new(),
+        module_output_paths,
         symbol_index: Vec::new(),
     })
 }
@@ -1884,6 +1900,35 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
     }
 
     #[test]
+    fn shared_pipeline_preparation_keeps_enriched_dependency_edges() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                r#"var __commonJS=(A,Q)=>()=>(Q||A((Q={exports:{}}).exports,Q),Q.exports);
+var dep = __commonJS({"src/dep.js": (exports, module) => { function shared(){ return 1; } exports.shared = shared; }});
+var user = __commonJS({"src/user.js": (exports, module) => { var value = shared(); exports.value = value; }});"#
+                    .to_string(),
+            ),
+        ));
+
+        let prepared = prepare_input_rows_for_pipeline(rows);
+
+        assert!(
+            prepared.rows.dependencies.iter().any(|dependency| {
+                matches!(dependency.target, ModuleDependencyTarget::Module(_))
+                    && dependency.from_module_id
+                        != match dependency.target {
+                            ModuleDependencyTarget::Module(target) => target,
+                            ModuleDependencyTarget::Package { .. } => dependency.from_module_id,
+                        }
+            }),
+            "matcher preparation should expose synthesized module wiring to package/source graph matchers"
+        );
+    }
+
+    #[test]
     fn prepare_input_bundle_for_generation_is_noop_when_modules_already_attached() {
         // Simulate the post-matcher state: rows reloaded from SQLite where
         // every source file already has at least one module pointing at
@@ -1937,6 +1982,45 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
             run.project.files[0].source.contains("exports.answer = 42"),
             "generated project should use bundle-extracted inner module source, got:\n{}",
             run.project.files[0].source
+        );
+    }
+
+    #[test]
+    fn esbuild_commonjs_factory_calls_import_sibling_factories() {
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(
+                r#"var p=(q,K)=>()=>(K||q((K={exports:{}}).exports,K),K.exports);
+var dep=p((exports,module)=>{module.exports={answer:42};});
+var main=p((exports,module)=>{var d=dep();module.exports=d.answer;});
+main();"#
+                    .to_string(),
+            ),
+        ));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let run = generate_project_from_input(input).expect("fixture should emit");
+
+        assert!(run.audit.is_clean(), "{:?}", run.audit.findings());
+        let main = run
+            .project
+            .files
+            .iter()
+            .find(|file| file.path.contains("esbuild-main"))
+            .expect("main factory module should be emitted");
+        assert!(
+            main.source.contains("import { dep }"),
+            "main factory should import the sibling dep factory, got:\n{}",
+            main.source
+        );
+        assert!(
+            run.project
+                .files
+                .iter()
+                .any(|file| file.path.contains("esbuild-dep")),
+            "dep factory module should be emitted"
         );
     }
 

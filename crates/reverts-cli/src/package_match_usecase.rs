@@ -112,6 +112,15 @@ pub(crate) fn match_packages_from_connection(
     reconcile_cache_surfaces_after_attribution_safety(&rows, &mut report);
     let function_attributions = pipeline_report.function_attributions;
     let function_ownership_matches = pipeline_report.function_ownership_matches;
+    let persistence_package_names = if package_names.is_empty() {
+        report
+            .matches
+            .iter()
+            .map(|package_match| package_match.package_name.clone())
+            .collect()
+    } else {
+        package_names.clone()
+    };
 
     let (written_attributions, written_surfaces, written_function_attributions) = if args.apply {
         let mut persistence = SqliteMatchPackagePersistence::new(connection);
@@ -119,7 +128,7 @@ pub(crate) fn match_packages_from_connection(
             &rows,
             &synthetic_modules,
             &report,
-            &package_names,
+            &persistence_package_names,
             &package_version_resolutions,
             &function_attributions,
         )?;

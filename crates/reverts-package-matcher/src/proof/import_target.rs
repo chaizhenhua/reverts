@@ -259,7 +259,9 @@ fn dependency_exact_hint_source_match_external_package_source<'a>(
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
         | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-        | ModuleMatchStrategy::DependencyClosureOwnership => return None,
+        | ModuleMatchStrategy::AggregateStringAnchorSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership
+        | ModuleMatchStrategy::PackageGraphNeighborhoodOwnership => return None,
     }
     if source_match.external_importable {
         return Some(ExternalImportTarget {

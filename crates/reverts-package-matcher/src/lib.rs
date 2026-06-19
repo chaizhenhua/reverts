@@ -1,5 +1,6 @@
 mod api;
 mod binding_signatures;
+mod graph_neighborhood;
 mod index;
 mod matcher;
 mod model;
@@ -15,6 +16,7 @@ pub use api::{
     package_source_exported_members, package_source_normalized_hash,
     package_source_normalized_hashes,
 };
+pub use graph_neighborhood::{GraphNeighborhoodEvidence, graph_neighborhood_support};
 pub(crate) use index::ExternalImportSourceIndex;
 pub use index::package_module_source_quality;
 pub use index::{SourceFingerprint, fingerprint_source};

@@ -9,8 +9,9 @@ use reverts_ir::{
     ControlFlowNodeKind, FunctionFingerprint, InferredType, ModuleId, TypeSolution,
 };
 use reverts_js::{
-    GeneratedTypeKind, collect_top_level_literal_type_annotations,
-    is_generated_placeholder_identifier, sanitize_identifier,
+    GeneratedTypeKind, ParseGoal, collect_identifier_read_facts,
+    collect_top_level_literal_type_annotations, is_generated_placeholder_identifier,
+    sanitize_identifier,
 };
 pub use reverts_model::CompilerKind;
 use reverts_model::{
@@ -262,7 +263,8 @@ fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModule
         .collect();
 
     // Each non-ambient free read paired with its candidate owner modules.
-    let mut pending: Vec<(ModuleId, BindingName, BTreeSet<ModuleId>)> = Vec::new();
+    let mut pending_by_read: BTreeMap<(ModuleId, BindingName), BTreeSet<ModuleId>> =
+        BTreeMap::new();
     for (module_id, binding) in def_use.unresolved_reads() {
         if is_ambient_binding(binding.as_str()) {
             continue;
@@ -273,9 +275,52 @@ fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModule
             .filter(|owner| *owner != module_id)
             .collect();
         if !owners.is_empty() {
-            pending.push((module_id, binding, owners));
+            pending_by_read
+                .entry((module_id, binding))
+                .or_default()
+                .extend(owners);
         }
     }
+    // Some bundler factory calls live inside nested closures. The def-use
+    // graph intentionally scopes those reads, so a sibling factory call like
+    // `var d = dep()` may not appear in `unresolved_reads()`. For module
+    // dependency synthesis, scan source identifier reads as a conservative
+    // backstop and still require a single owner before adding an edge.
+    for module in model.modules() {
+        let Some(slice) = model.input().module_source_slice(module.id) else {
+            continue;
+        };
+        let Ok(facts) = collect_identifier_read_facts(
+            slice.source,
+            Some(std::path::Path::new(slice.source_file_path)),
+            ParseGoal::TypeScript,
+        ) else {
+            continue;
+        };
+        for fact in facts {
+            let binding = BindingName::new(fact.name);
+            if is_ambient_binding(binding.as_str())
+                || def_use.has_definition_or_import(module.id, &binding)
+            {
+                continue;
+            }
+            let owners: BTreeSet<ModuleId> = def_use
+                .modules_defining(&binding)
+                .into_iter()
+                .filter(|owner| *owner != module.id)
+                .collect();
+            if !owners.is_empty() {
+                pending_by_read
+                    .entry((module.id, binding))
+                    .or_default()
+                    .extend(owners);
+            }
+        }
+    }
+    let pending: Vec<(ModuleId, BindingName, BTreeSet<ModuleId>)> = pending_by_read
+        .into_iter()
+        .map(|((module_id, binding), owners)| (module_id, binding, owners))
+        .collect();
 
     // Resolve to a single owner, growing the dependency graph to a fixed point.
     // A read with one candidate resolves directly; an ambiguous read (a name

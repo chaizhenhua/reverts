@@ -7,7 +7,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
-use reverts_package_matcher::{SourceFingerprint, fingerprint_source};
+use reverts_graph::{FunctionExtractor, extract_import_specifiers, function_names};
+use reverts_input::PackageAttributionStatus;
+use reverts_ir::{FunctionFingerprint, ModuleId};
+use reverts_package_matcher::{
+    GraphNeighborhoodEvidence, SourceFingerprint, build_structural_bag, fingerprint_source,
+    graph_neighborhood_support, score_structural_bags,
+};
 use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 use rusqlite::{Connection, params};
 
@@ -64,22 +70,44 @@ struct ModulePlan {
     module_semantic_name: String,
     subject_bindings: Vec<(String, String)>,
     reference_exports: std::collections::BTreeSet<String>,
+    /// Emitted subject source and matched reference source, retained so the
+    /// binding-level pass can pair functions by AST hash after module tiers
+    /// (and the injective 1:1 demotion) are finalized.
+    subject_source: String,
+    reference_source: String,
 }
 
 fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliRunError> {
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
         .map_err(CliRunError::ReferenceSourceNames)?;
     let subjects = subject_modules(args)?;
+    let structural_support = source_structural_support(&subjects, &index);
+    let graph_support = source_graph_support(&subjects, &index, &structural_support);
+    let reference_best_subjects =
+        best_subject_by_reference(&subjects, &index, &structural_support, &graph_support);
     let mut plans = Vec::new();
     for subject in subjects {
-        let Some(matched) = best_module_match(&subject.fingerprint, &index) else {
+        let subject_structural_support = structural_support.get(&subject.module_id);
+        let subject_graph_support = graph_support.get(&subject.module_id);
+        let Some(matched) = best_module_match_with_reciprocal(
+            subject.module_id,
+            &subject.fingerprint,
+            &index,
+            &reference_best_subjects,
+            subject_structural_support,
+            subject_graph_support,
+        ) else {
             continue;
         };
-        let reference_exports = index
+        let reference_module = index
             .modules
             .iter()
-            .find(|m| m.file_path == matched.file_path)
+            .find(|m| m.file_path == matched.file_path);
+        let reference_exports = reference_module
             .map(|m| m.export_names.clone())
+            .unwrap_or_default();
+        let reference_source = reference_module
+            .map(|m| m.source.clone())
             .unwrap_or_default();
         plans.push(ModulePlan {
             module_id: subject.module_id,
@@ -89,10 +117,51 @@ fn plan_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<ModulePlan>, CliR
             matched,
             subject_bindings: subject.bindings,
             reference_exports,
+            subject_source: subject.source,
+            reference_source,
         });
     }
+    calibrate_global_reference_uniqueness(&mut plans);
     plans.sort_by(|a, b| a.module_id.cmp(&b.module_id));
     Ok(plans)
+}
+
+/// Injective 1:1 assignment: a reference file may anchor at most one Medium
+/// match. When iteration/propagation converges several subject modules onto one
+/// file (e.g. four modules all claiming `ElicitationDialog.tsx`), keep the
+/// single strongest and demote the rest to Low. Strength order: reciprocal-best,
+/// then content (`normalized_anchor`), then graph support, then margin.
+fn calibrate_global_reference_uniqueness(plans: &mut [ModulePlan]) {
+    let mut medium_by_reference = BTreeMap::<String, Vec<usize>>::new();
+    for (index, plan) in plans.iter().enumerate() {
+        if plan.matched.tier == MatchTier::Medium {
+            medium_by_reference
+                .entry(plan.matched.file_path.clone())
+                .or_default()
+                .push(index);
+        }
+    }
+    for indices in medium_by_reference.values() {
+        if indices.len() <= 1 {
+            continue;
+        }
+        let Some(&keep) = indices.iter().max_by(|&&a, &&b| {
+            let left = &plans[a].matched;
+            let right = &plans[b].matched;
+            left.reciprocal_best
+                .cmp(&right.reciprocal_best)
+                .then(left.normalized_anchor.total_cmp(&right.normalized_anchor))
+                .then(left.graph_support.cmp(&right.graph_support))
+                .then(left.margin.total_cmp(&right.margin))
+        }) else {
+            continue;
+        };
+        for &index in indices {
+            if index != keep {
+                plans[index].matched.tier = MatchTier::Low;
+            }
+        }
+    }
 }
 
 fn strip_source_extension(path: &str) -> String {
@@ -115,11 +184,11 @@ fn tier_str(tier: MatchTier) -> &'static str {
 pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let plans = plan_modules(&args)?;
     println!(
-        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tanchor"
+        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
     );
     for plan in &plans {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.3}\t{:.3}\t{}",
             plan.module_id,
             plan.subject_path,
             plan.reference_version,
@@ -129,9 +198,72 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             plan.matched.asset_overlap,
             plan.matched.export_overlap,
             plan.matched.function_overlap,
+            plan.matched.structural_score,
+            plan.matched.graph_support,
+            plan.matched.graph_known_edges,
             plan.matched.anchor_overlap,
+            plan.matched.weighted_anchor,
+            plan.matched.normalized_anchor,
+            plan.matched.margin,
+            if plan.matched.reciprocal_best {
+                "yes"
+            } else {
+                "no"
+            },
         );
     }
+    // Binding-level pass: within each accepted module match, pair functions by
+    // α-rename-invariant AST hash and rename minified bindings to the reference
+    // function names. Computed once, reused for the dry-run report and --apply.
+    let binding_eligible: Vec<&ModulePlan> = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .collect();
+    // Global AST-hash frequency across all eligible subject modules: a hash
+    // shared by many functions is a trivial shape and must not auto-accept.
+    let mut subject_hash_freq: BTreeMap<u64, usize> = BTreeMap::new();
+    for plan in &binding_eligible {
+        for f in FunctionExtractor::fingerprint(ModuleId(plan.module_id), &plan.subject_source) {
+            *subject_hash_freq.entry(f.primary.ast).or_default() += 1;
+        }
+    }
+    let binding_plans: Vec<(&ModulePlan, Vec<BindingNameRow>)> = binding_eligible
+        .iter()
+        .map(|plan| {
+            (
+                *plan,
+                pair_function_names(
+                    plan.module_id,
+                    &plan.subject_source,
+                    &plan.reference_source,
+                    &subject_hash_freq,
+                ),
+            )
+        })
+        .filter(|(_, rows)| !rows.is_empty())
+        .collect();
+    println!("---bindings---");
+    println!(
+        "module_id\tsubject_path\tref_file\toriginal\tsemantic\tkind\tast\tparams\tstmts\tscore"
+    );
+    for (plan, rows) in &binding_plans {
+        for row in rows {
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{:016x}\t{}\t{}\t{:.1}",
+                plan.module_id,
+                plan.subject_path,
+                plan.matched.file_path,
+                row.original_name,
+                row.semantic_name,
+                if row.accepted { "accepted" } else { "proposal" },
+                row.ast_hash,
+                row.param_count,
+                row.statement_count,
+                row.score,
+            );
+        }
+    }
+
     if args.apply {
         let connection = Connection::open(&args.input)
             .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
@@ -139,6 +271,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
         ensure_symbol_name_proposals_table(&connection)
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+        crate::commands::binding_names::ensure_binding_names_table_if_writable(&connection, true)?;
         let module_count = write_module_names(
             &connection,
             &plans,
@@ -164,7 +297,26 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
                 &origin,
             )?;
         }
-        println!("applied: {module_count} module name(s), {export_count} export name(s) written");
+        let mut binding_accepted = 0usize;
+        let mut binding_proposed = 0usize;
+        for (plan, rows) in &binding_plans {
+            let origin = format!(
+                "{}:{}:{}",
+                args.origin_prefix, args.reference_version, plan.matched.file_path
+            );
+            write_binding_names(
+                &connection,
+                args.project_id,
+                &plan.subject_path,
+                rows,
+                &origin,
+            )?;
+            binding_accepted += rows.iter().filter(|row| row.accepted).count();
+            binding_proposed += rows.iter().filter(|row| !row.accepted).count();
+        }
+        println!(
+            "applied: {module_count} module name(s), {export_count} export name(s), {binding_accepted} binding rename(s), {binding_proposed} binding proposal(s)"
+        );
     } else {
         println!(
             "dry-run: {} module match(es); pass --apply to write",
@@ -175,10 +327,11 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
 }
 
 /// One subject emitted module: its DB module id, emitted path, fingerprint,
-/// and the (original_name → emitted_name) bindings that land in it.
+/// and the (original_name -> emitted_name) bindings that land in it.
 struct SubjectModule {
     module_id: u32,
     file_path: String,
+    source: String,
     fingerprint: SourceFingerprint,
     bindings: Vec<(String, String)>, // (original_name, emitted_name)
 }
@@ -186,23 +339,42 @@ struct SubjectModule {
 fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>, CliRunError> {
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("load input: {error}")))?;
+    let package_owned_modules = bundle
+        .package_attributions
+        .iter()
+        .filter(|attribution| {
+            matches!(
+                attribution.status,
+                PackageAttributionStatus::Accepted | PackageAttributionStatus::Rejected
+            ) && attribution.package_version.is_some()
+        })
+        .map(|attribution| attribution.module_id.0)
+        .collect::<BTreeSet<_>>();
     let prepared = prepare_and_enrich(bundle)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("prepare: {error}")))?;
     let run = generate_project_from_prepared(prepared)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("generate: {error}")))?;
 
-    // Group symbol_index bindings by emitted file path, capturing module id.
-    let mut module_for_path: BTreeMap<String, u32> = BTreeMap::new();
+    // Group symbol_index bindings by emitted file path. The owning module map
+    // comes from the pipeline's module_output_paths, not from symbol_index:
+    // symbol-less modules (data/string modules, side-effect modules, tiny
+    // wrappers) still need source/package matching coverage.
     let mut bindings_for_path: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for entry in &run.symbol_index {
-        module_for_path
-            .entry(entry.file_path.clone())
-            .or_insert(entry.module_id.0);
+        if package_owned_modules.contains(&entry.module_id.0) {
+            continue;
+        }
         bindings_for_path
             .entry(entry.file_path.clone())
             .or_default()
             .push((entry.original_name.clone(), entry.emitted_name.clone()));
     }
+    let module_for_path = run
+        .module_output_paths
+        .iter()
+        .filter(|(module_id, _)| !package_owned_modules.contains(&module_id.0))
+        .map(|(module_id, path)| (path.clone(), module_id.0))
+        .collect::<BTreeMap<_, _>>();
 
     let mut modules = Vec::new();
     for file in &run.project.files {
@@ -215,6 +387,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
         modules.push(SubjectModule {
             module_id,
             file_path: file.path.clone(),
+            source: file.source.clone(),
             fingerprint,
             bindings: bindings_for_path
                 .remove(file.path.as_str())
@@ -229,6 +402,7 @@ fn subject_modules(args: &ReferenceSourceNamesArgs) -> Result<Vec<SubjectModule>
 pub(crate) struct ReferenceSourceModule {
     /// Path relative to the source root, e.g. `features/audio-capture.ts`.
     pub file_path: String,
+    pub source: String,
     pub fingerprint: SourceFingerprint,
     /// Exported member names (from `export:` anchors).
     pub export_names: BTreeSet<String>,
@@ -241,6 +415,11 @@ pub(crate) struct ReferenceSourceModule {
 pub(crate) struct ReferenceSourceIndex {
     pub version: String,
     pub modules: Vec<ReferenceSourceModule>,
+    /// Inverse-document-frequency weight per string anchor: `ln(N / df)` where
+    /// `df` is the number of reference modules containing the anchor. Rare,
+    /// distinctive anchors get a high weight; common "hub" anchors (present in
+    /// many files) get ~0, so they no longer forge matches via raw overlap.
+    pub anchor_idf: std::collections::BTreeMap<String, f64>,
 }
 
 use std::path::Path;
@@ -265,20 +444,303 @@ pub(crate) fn build_reference_source_index(
         let source = std::fs::read_to_string(&absolute)
             .map_err(|error| format!("read {}: {error}", absolute.display()))?;
         let Ok(fingerprint) = fingerprint_source(relative.as_str(), source.as_str()) else {
-            continue; // unparseable reference file — skip, do not guess
+            continue; // unparseable reference file - skip, do not guess
         };
         let (export_names, asset_literals) = classify_anchors(&fingerprint);
         modules.push(ReferenceSourceModule {
             file_path: relative,
+            source,
             fingerprint,
             export_names,
             asset_literals,
         });
     }
+    let anchor_idf = compute_anchor_idf(&modules);
     Ok(ReferenceSourceIndex {
         version: version.to_string(),
         modules,
+        anchor_idf,
     })
+}
+
+/// Build the per-anchor IDF weight over the reference modules. `ln(N / df)`
+/// (with `df >= 1`) so an anchor in 1 of N modules weighs `ln(N)` and an anchor
+/// in every module weighs ~0.
+fn compute_anchor_idf(
+    modules: &[ReferenceSourceModule],
+) -> std::collections::BTreeMap<String, f64> {
+    let n = modules.len().max(1) as f64;
+    let mut df: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for module in modules {
+        for anchor in &module.fingerprint.string_anchors {
+            *df.entry(anchor.clone()).or_insert(0) += 1;
+        }
+    }
+    df.into_iter()
+        .map(|(anchor, count)| (anchor, (n / f64::from(count)).ln()))
+        .collect()
+}
+
+fn source_structural_support(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+) -> BTreeMap<u32, BTreeMap<String, f64>> {
+    let reference_bags = index
+        .modules
+        .iter()
+        .filter_map(|module| {
+            let fingerprints = FunctionExtractor::fingerprint(ModuleId(0), module.source.as_str());
+            let bag = build_structural_bag(&fingerprints)?;
+            let self_score = score_structural_bags(&bag, &bag).unwrap_or(0.0);
+            Some((module.file_path.as_str(), (bag, self_score)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let reference_by_path = index
+        .modules
+        .iter()
+        .map(|module| (module.file_path.as_str(), module))
+        .collect::<BTreeMap<_, _>>();
+    let mut support = BTreeMap::<u32, BTreeMap<String, f64>>::new();
+    for subject in subjects {
+        let fingerprints =
+            FunctionExtractor::fingerprint(ModuleId(subject.module_id), subject.source.as_str());
+        let Some(subject_bag) = build_structural_bag(&fingerprints) else {
+            continue;
+        };
+        let subject_self = score_structural_bags(&subject_bag, &subject_bag).unwrap_or(0.0);
+        // Use the cheap anchor/export/hash scorer as a candidate generator,
+        // then reuse the package matcher's structural-bag scorer only on the
+        // short list. Full subject x reference cascade is too expensive and
+        // noisy; structural scoring is evidence refinement, not discovery.
+        for module in ranked_module_matches(&subject.fingerprint, index, None, None)
+            .into_iter()
+            .take(SOURCE_STRUCTURAL_CANDIDATE_LIMIT)
+            .filter_map(|candidate| reference_by_path.get(candidate.matched.file_path.as_str()))
+        {
+            let Some((reference_bag, reference_self)) =
+                reference_bags.get(module.file_path.as_str())
+            else {
+                continue;
+            };
+            let Some(score) = score_structural_bags(&subject_bag, reference_bag) else {
+                continue;
+            };
+            // Cosine-normalize structural overlap by both bags' self-scores, so a
+            // large reference file no longer structurally "matches" every module
+            // (raw score is magnitude-biased — the same hub failure mode that raw
+            // anchor overlap had before `normalized_anchor`).
+            let normalized = if subject_self > f64::EPSILON && *reference_self > f64::EPSILON {
+                (score / (subject_self * reference_self).sqrt()).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            support
+                .entry(subject.module_id)
+                .or_default()
+                .insert(module.file_path.clone(), normalized);
+        }
+    }
+    support
+}
+
+/// Best ref-file assignment for every subject given the current structural and
+/// graph support. Returns `subject_id -> ref_path`; this is the propagation
+/// state that grows each round. (Reciprocal-best only affects tier, not the
+/// selected path, so an empty map is fine here.)
+fn graph_seed_assignment(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    structural_support: &BTreeMap<u32, BTreeMap<String, f64>>,
+    graph_support: &BTreeMap<u32, BTreeMap<String, GraphEvidence>>,
+) -> BTreeMap<u32, String> {
+    subjects
+        .iter()
+        .filter_map(|subject| {
+            let matched = best_module_match_with_reciprocal(
+                subject.module_id,
+                &subject.fingerprint,
+                index,
+                &BTreeMap::new(),
+                structural_support.get(&subject.module_id),
+                graph_support.get(&subject.module_id),
+            )?;
+            Some((subject.module_id, matched.file_path))
+        })
+        .collect::<BTreeMap<_, _>>()
+}
+
+fn source_graph_support(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    structural_support: &BTreeMap<u32, BTreeMap<String, f64>>,
+) -> BTreeMap<u32, BTreeMap<String, GraphEvidence>> {
+    // The dependency graphs are invariant across propagation rounds, so build
+    // them once. Only `graph_neighborhood_support` (which reads the evolving
+    // assignment) is recomputed each round.
+    let subject_paths = subjects
+        .iter()
+        .map(|subject| subject.file_path.as_str())
+        .collect::<BTreeSet<_>>();
+    let subject_id_by_path = subjects
+        .iter()
+        .map(|subject| (subject.file_path.as_str(), subject.module_id))
+        .collect::<BTreeMap<_, _>>();
+    let reference_paths = index
+        .modules
+        .iter()
+        .map(|module| module.file_path.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let subject_deps = subjects
+        .iter()
+        .map(|subject| {
+            let deps = extract_import_specifiers(subject.source.as_str())
+                .into_iter()
+                .filter_map(|specifier| {
+                    resolve_relative_source_path(
+                        subject.file_path.as_str(),
+                        specifier.as_str(),
+                        &subject_paths,
+                    )
+                })
+                .filter_map(|path| subject_id_by_path.get(path.as_str()).copied())
+                .collect::<BTreeSet<_>>();
+            (subject.module_id, deps)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let reference_deps = index
+        .modules
+        .iter()
+        .map(|module| {
+            let deps = extract_import_specifiers(module.source.as_str())
+                .into_iter()
+                .filter_map(|specifier| {
+                    resolve_relative_source_path(
+                        module.file_path.as_str(),
+                        specifier.as_str(),
+                        &reference_paths,
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            (module.file_path.clone(), deps)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let subject_incoming = reverse_id_graph(&subject_deps);
+    let reference_incoming = reverse_path_graph(&reference_deps);
+
+    // Iterative label propagation. Seed from content + structural only (no
+    // graph), then feed each round's graph-aware assignment back as the seed so
+    // confidently-placed modules anchor their neighbors. Stops at a fixpoint.
+    let mut assignment =
+        graph_seed_assignment(subjects, index, structural_support, &BTreeMap::new());
+    let mut support = BTreeMap::new();
+    for _ in 0..MAX_PROPAGATION_ROUNDS {
+        if assignment.is_empty() {
+            break;
+        }
+        support = graph_neighborhood_support(
+            &subject_deps,
+            &subject_incoming,
+            &reference_deps,
+            &reference_incoming,
+            &assignment,
+        );
+        let next = graph_seed_assignment(subjects, index, structural_support, &support);
+        if next == assignment {
+            break;
+        }
+        assignment = next;
+    }
+    support
+}
+
+fn reverse_id_graph(graph: &BTreeMap<u32, BTreeSet<u32>>) -> BTreeMap<u32, BTreeSet<u32>> {
+    let mut reverse = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for (source, targets) in graph {
+        for target in targets {
+            reverse.entry(*target).or_default().insert(*source);
+        }
+    }
+    reverse
+}
+
+fn reverse_path_graph(
+    graph: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut reverse = BTreeMap::<String, BTreeSet<String>>::new();
+    for (source, targets) in graph {
+        for target in targets {
+            reverse
+                .entry(target.clone())
+                .or_default()
+                .insert(source.clone());
+        }
+    }
+    reverse
+}
+
+fn resolve_relative_source_path(
+    importer: &str,
+    specifier: &str,
+    known_paths: &BTreeSet<&str>,
+) -> Option<String> {
+    let specifier = specifier.split(['?', '#']).next().unwrap_or(specifier);
+    let candidate_root = if specifier.starts_with('.') {
+        let base_dir = importer.rsplit_once('/').map_or("", |(dir, _)| dir);
+        let joined = if base_dir.is_empty() {
+            specifier.to_string()
+        } else {
+            format!("{base_dir}/{specifier}")
+        };
+        normalize_relative_path(joined.as_str())?
+    } else if let Some(stripped) = specifier.strip_prefix("src/") {
+        // Claude Code's published source map tree uses both relative imports
+        // and root-relative `src/...` imports. Treat those aliases as paths
+        // relative to the reference source root; package/builtin imports still
+        // fall through because they will not resolve to a known source path.
+        stripped.to_string()
+    } else {
+        specifier.to_string()
+    };
+    source_path_candidates(candidate_root.as_str())
+        .into_iter()
+        .find(|candidate| known_paths.contains(candidate.as_str()))
+}
+
+fn normalize_relative_path(path: &str) -> Option<String> {
+    let mut parts = Vec::<&str>::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn source_path_candidates(path: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    candidates.push(path.to_string());
+    if let Some(stripped) = path
+        .strip_suffix(".js")
+        .or_else(|| path.strip_suffix(".mjs"))
+        .or_else(|| path.strip_suffix(".cjs"))
+    {
+        for ext in ["ts", "tsx", "js", "jsx", "mjs", "cjs"] {
+            candidates.push(format!("{stripped}.{ext}"));
+        }
+    } else if Path::new(path).extension().is_none() {
+        for ext in SOURCE_EXTENSIONS {
+            candidates.push(format!("{path}.{ext}"));
+        }
+        for ext in SOURCE_EXTENSIONS {
+            candidates.push(format!("{path}/index.{ext}"));
+        }
+    }
+    candidates
 }
 
 fn collect_source_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
@@ -344,6 +806,46 @@ pub(crate) enum MatchTier {
     Low,
 }
 
+/// IDF-weighted anchor mass (sum of `idf`) required to treat string-anchor
+/// overlap as Medium-tier evidence. Calibrated on the 2.1.89 to claude-code/src
+/// dataset: real first-party matches (e.g. the PowerShellTool cluster) carry
+/// many rare shared anchors and clear this comfortably, while hub files that
+/// coincidentally share common anchors with many modules stay below it.
+const MEDIUM_WEIGHTED_ANCHOR: f64 = 30.0;
+const MEDIUM_NORMALIZED_ANCHOR: f64 = 0.18;
+const MEDIUM_SCORE_MARGIN: f64 = 0.20;
+/// Strong normalized content overlap promotes to Medium on its own, regardless
+/// of absolute IDF mass. This recovers SMALL first-party modules (few anchors
+/// but a high fraction shared — e.g. a tiny module sharing 3 distinctive tokens
+/// at nanchor=0.5) that the `weighted_anchor >= 30` mass gate misses. Normalized
+/// overlap is hub-resistant, so this does not re-admit large-file false matches.
+const MEDIUM_STRONG_NANCHOR: f64 = 0.30;
+const SOURCE_STRUCTURAL_CANDIDATE_LIMIT: usize = 12;
+// Structural score is now cosine-normalized to [0,1] (see source_structural_support).
+// Used as ranking evidence and as a Medium criterion only WITH anchor
+// corroboration — standalone structural promotion was tried and reverted because
+// even normalized cosine is high for structurally-generic hub files (main.tsx,
+// mcp/client, bootstrap/state), which it admitted as false positives.
+const MEDIUM_STRUCTURAL_SCORE: f64 = 0.35;
+const MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR: f64 = 10.0;
+const MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR: f64 = 0.08;
+const MEDIUM_GRAPH_SUPPORT: usize = 1;
+/// Max rounds of graph label-propagation. Each round feeds the previous round's
+/// graph-aware assignment back as the seed, so confidently-matched modules
+/// anchor their neighbors and the match set grows across the dependency graph.
+/// Converges early when the assignment stops changing; 4 is an upper bound.
+const MAX_PROPAGATION_ROUNDS: usize = 8;
+/// Minimum normalized-anchor (content) corroboration required for the
+/// otherwise-content-free Medium criteria — `export>=2 || function>=2` and the
+/// graph-all-edges-matched promotion. Without it, coincidental function/export
+/// hashes or a trivial 2-edge "all dependencies matched" forge a Medium with
+/// zero content overlap (measured on 2.1.89: ~30 of 130 mediums, e.g. six
+/// unrelated modules all "matching" `utils/debug.ts`, three "matching"
+/// `cli/print.ts`, all at nanchor=0). Content is the true/false discriminator.
+const MEDIUM_CONTENT_NORMALIZED_FLOOR: f64 = 0.05;
+
+type GraphEvidence = GraphNeighborhoodEvidence;
+
 #[derive(Debug, Clone)]
 pub(crate) struct ModuleMatch {
     pub file_path: String,
@@ -351,20 +853,168 @@ pub(crate) struct ModuleMatch {
     pub asset_overlap: usize,
     pub export_overlap: usize,
     pub function_overlap: usize,
+    /// Aggregate structural-bag score produced by the shared package matcher
+    /// scorer. This reuses package matcher matching mechanics for first-party
+    /// source matching instead of maintaining a separate, weaker source-only
+    /// matcher.
+    pub structural_score: f64,
+    /// Count of matched outgoing/incoming neighbor edges between the subject
+    /// graph and the reference graph. This is the source-side analogue of
+    /// package matcher dependency-neighborhood promotion.
+    pub graph_support: usize,
+    /// Number of subject neighbor edges that had preliminary source matches and
+    /// therefore could participate in graph-neighborhood evidence.
+    pub graph_known_edges: usize,
     pub anchor_overlap: usize,
-    pub score: usize,
+    /// Sum of per-anchor IDF over shared string anchors - the size/hub-robust
+    /// similarity signal that drives ranking and the anchor tier promotion.
+    pub weighted_anchor: f64,
+    /// Cosine-like normalized IDF overlap. This is the hub penalty: a large
+    /// reference file with many anchors must share a meaningful fraction of its
+    /// weighted surface, not just many raw tokens.
+    pub normalized_anchor: f64,
+    /// Relative distance from the runner-up candidate: `(top - runner_up) / top`.
+    /// A high margin raises confidence; a low margin keeps non-provable matches
+    /// in the Low bucket for agent review.
+    pub margin: f64,
+    /// Whether this module is also the best subject for the selected reference
+    /// file. Reciprocal-best is strong evidence for first-party source matches
+    /// and suppresses hub files that attract many unrelated subjects.
+    pub reciprocal_best: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RankedModuleMatch {
+    relevance: f64,
+    matched: ModuleMatch,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MatchEvidence {
+    hash_match: bool,
+    asset_overlap: usize,
+    export_overlap: usize,
+    function_overlap: usize,
+    structural_score: f64,
+    graph: GraphEvidence,
+    weighted_anchor: f64,
+    normalized_anchor: f64,
 }
 
 fn overlap_len(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
     left.intersection(right).count()
 }
 
-pub(crate) fn best_module_match(
+/// Sum of IDF weights over the anchors shared by `subject` and `reference`.
+fn weighted_anchor_overlap(
+    subject: &BTreeSet<String>,
+    reference: &BTreeSet<String>,
+    anchor_idf: &std::collections::BTreeMap<String, f64>,
+) -> f64 {
+    subject
+        .intersection(reference)
+        .map(|anchor| anchor_idf.get(anchor).copied().unwrap_or(0.0))
+        .sum()
+}
+
+fn weighted_anchor_mass(
+    anchors: &BTreeSet<String>,
+    anchor_idf: &std::collections::BTreeMap<String, f64>,
+) -> f64 {
+    anchors
+        .iter()
+        .map(|anchor| anchor_idf.get(anchor).copied().unwrap_or(0.0))
+        .sum()
+}
+
+fn normalized_anchor_overlap(
+    subject: &BTreeSet<String>,
+    reference: &BTreeSet<String>,
+    anchor_idf: &std::collections::BTreeMap<String, f64>,
+    weighted_anchor: f64,
+) -> f64 {
+    let subject_mass = weighted_anchor_mass(subject, anchor_idf);
+    let reference_mass = weighted_anchor_mass(reference, anchor_idf);
+    if subject_mass <= f64::EPSILON || reference_mass <= f64::EPSILON {
+        0.0
+    } else {
+        weighted_anchor / (subject_mass * reference_mass).sqrt()
+    }
+}
+
+fn candidate_relevance(evidence: MatchEvidence) -> f64 {
+    (if evidence.hash_match { 1.0e9 } else { 0.0 })
+        + (evidence.asset_overlap as f64) * 1.0e6
+        + evidence.normalized_anchor * 150.0
+        + evidence.weighted_anchor
+        + (evidence.export_overlap as f64) * 8.0
+        + (evidence.function_overlap as f64) * 4.0
+        + evidence.structural_score * 120.0
+        + (evidence.graph.matched_edges as f64) * 35.0
+        + evidence.graph.coverage() * 75.0
+}
+
+fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
+    if evidence.hash_match || evidence.asset_overlap >= 1 {
+        MatchTier::High
+    } else if ((evidence.export_overlap >= 2 || evidence.function_overlap >= 2)
+        && evidence.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR)
+        || (evidence.structural_score >= MEDIUM_STRUCTURAL_SCORE
+            && evidence.weighted_anchor >= MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+            && evidence.normalized_anchor >= MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR)
+        || (evidence.graph.matched_edges >= MEDIUM_GRAPH_SUPPORT
+            && evidence.weighted_anchor >= MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+            && evidence.normalized_anchor >= MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR)
+        // Strong graph placement: 3+ matched dependency edges AND a majority
+        // (>=60%) of known edges matched. Content-poor first-party modules get
+        // placed by their position in the (shared) import graph; requiring a
+        // majority rather than ALL edges lets placement cascade across iteration
+        // rounds. The injective 1:1 pass downstream resolves any contention.
+        || (evidence.graph.matched_edges >= 3
+            && evidence.graph.matched_edges * 5 >= evidence.graph.known_edges * 3)
+        || (evidence.graph.known_edges >= 2
+            && evidence.graph.matched_edges == evidence.graph.known_edges
+            && evidence.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR)
+        || (evidence.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR
+            && evidence.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR)
+        || evidence.normalized_anchor >= MEDIUM_STRONG_NANCHOR
+    {
+        MatchTier::Medium
+    } else {
+        MatchTier::Low
+    }
+}
+
+fn calibrate_tier(
+    tier: MatchTier,
+    margin: f64,
+    reciprocal_best: bool,
+    normalized_anchor: f64,
+) -> MatchTier {
+    match tier {
+        MatchTier::High | MatchTier::Low => tier,
+        // Strong normalized content is self-sufficient: keep it Medium even
+        // without reciprocal-best or a wide margin. The margin/reciprocal gate
+        // exists to suppress weak/ambiguous matches, not strong-content ones.
+        MatchTier::Medium
+            if reciprocal_best
+                || margin >= MEDIUM_SCORE_MARGIN
+                || normalized_anchor >= MEDIUM_STRONG_NANCHOR =>
+        {
+            tier
+        }
+        MatchTier::Medium => MatchTier::Low,
+    }
+}
+
+fn ranked_module_matches(
     subject: &SourceFingerprint,
     index: &ReferenceSourceIndex,
-) -> Option<ModuleMatch> {
+    structural_support: Option<&BTreeMap<String, f64>>,
+    graph_support: Option<&BTreeMap<String, GraphEvidence>>,
+) -> Vec<RankedModuleMatch> {
     let (subject_exports, subject_assets) = classify_anchors(subject);
-    let mut best: Option<ModuleMatch> = None;
+    let mut ranked = Vec::new();
     for module in &index.modules {
         let asset_overlap = overlap_len(&subject_assets, &module.asset_literals);
         let export_overlap = overlap_len(&subject_exports, &module.export_names);
@@ -374,45 +1024,160 @@ pub(crate) fn best_module_match(
         );
         let anchor_overlap =
             overlap_len(&subject.string_anchors, &module.fingerprint.string_anchors);
+        let structural_score = structural_support
+            .and_then(|support| support.get(module.file_path.as_str()).copied())
+            .unwrap_or(0.0);
+        let graph = graph_support
+            .and_then(|support| support.get(module.file_path.as_str()).copied())
+            .unwrap_or_default();
+        let weighted_anchor = weighted_anchor_overlap(
+            &subject.string_anchors,
+            &module.fingerprint.string_anchors,
+            &index.anchor_idf,
+        );
+        let normalized_anchor = normalized_anchor_overlap(
+            &subject.string_anchors,
+            &module.fingerprint.string_anchors,
+            &index.anchor_idf,
+            weighted_anchor,
+        );
         let hash_match = !subject
             .normalized_source_hashes
             .is_disjoint(&module.fingerprint.normalized_source_hashes);
-        let score =
-            asset_overlap * 1000 + export_overlap * 50 + function_overlap * 5 + anchor_overlap;
-        // Require at least 2 points of evidence when there is no hash match;
-        // Low tier is never auto-accepted downstream, so this floor only
-        // affects the dry-run report, not safety.
-        if score < 2 && !hash_match {
+        // Reject candidates with no real evidence. `weighted_anchor` (not raw
+        // overlap) is the floor signal so a handful of common shared anchors no
+        // longer qualifies; Low tier is never auto-accepted, so this only
+        // affects the dry-run report.
+        if !hash_match
+            && asset_overlap == 0
+            && export_overlap == 0
+            && function_overlap == 0
+            && structural_score < 1.0
+            && graph.matched_edges == 0
+            && weighted_anchor < 1.0
+        {
             continue;
         }
-        let tier = if hash_match || asset_overlap >= 1 {
-            MatchTier::High
-        } else if export_overlap >= 2 || function_overlap >= 2 {
-            MatchTier::Medium
-        } else {
-            MatchTier::Low
-        };
-        let candidate = ModuleMatch {
-            file_path: module.file_path.clone(),
-            tier,
+        let evidence = MatchEvidence {
+            hash_match,
             asset_overlap,
             export_overlap,
             function_overlap,
-            anchor_overlap,
-            score,
+            structural_score,
+            graph,
+            weighted_anchor,
+            normalized_anchor,
         };
-        let better = match &best {
-            None => true,
-            Some(current) => {
-                candidate.score > current.score
-                    || (candidate.score == current.score && candidate.file_path < current.file_path)
-            }
-        };
-        if better {
-            best = Some(candidate);
+        let tier = raw_match_tier(evidence);
+        let relevance = candidate_relevance(evidence);
+        ranked.push(RankedModuleMatch {
+            relevance,
+            matched: ModuleMatch {
+                file_path: module.file_path.clone(),
+                tier,
+                asset_overlap,
+                export_overlap,
+                function_overlap,
+                structural_score,
+                graph_support: graph.matched_edges,
+                graph_known_edges: graph.known_edges,
+                anchor_overlap,
+                weighted_anchor,
+                normalized_anchor,
+                margin: 0.0,
+                reciprocal_best: false,
+            },
+        });
+    }
+    ranked.sort_by(|left, right| {
+        right
+            .relevance
+            .total_cmp(&left.relevance)
+            .then_with(|| left.matched.file_path.cmp(&right.matched.file_path))
+    });
+    ranked
+}
+
+#[cfg(test)]
+pub(crate) fn best_module_match(
+    subject: &SourceFingerprint,
+    index: &ReferenceSourceIndex,
+) -> Option<ModuleMatch> {
+    let ranked = ranked_module_matches(subject, index, None, None);
+    let mut best = ranked.first()?.matched.clone();
+    best.margin = match (ranked.first(), ranked.get(1)) {
+        (Some(top), Some(runner_up)) if top.relevance > f64::EPSILON => {
+            (top.relevance - runner_up.relevance).max(0.0) / top.relevance
+        }
+        (Some(_), None) => 1.0,
+        _ => 0.0,
+    };
+    best.tier = calibrate_tier(
+        best.tier,
+        best.margin,
+        best.reciprocal_best,
+        best.normalized_anchor,
+    );
+    Some(best)
+}
+
+fn best_module_match_with_reciprocal(
+    subject_id: u32,
+    subject: &SourceFingerprint,
+    index: &ReferenceSourceIndex,
+    reference_best_subjects: &BTreeMap<String, u32>,
+    structural_support: Option<&BTreeMap<String, f64>>,
+    graph_support: Option<&BTreeMap<String, GraphEvidence>>,
+) -> Option<ModuleMatch> {
+    let ranked = ranked_module_matches(subject, index, structural_support, graph_support);
+    let mut matched = ranked.first()?.matched.clone();
+    matched.margin = match (ranked.first(), ranked.get(1)) {
+        (Some(top), Some(runner_up)) if top.relevance > f64::EPSILON => {
+            (top.relevance - runner_up.relevance).max(0.0) / top.relevance
+        }
+        (Some(_), None) => 1.0,
+        _ => 0.0,
+    };
+    matched.reciprocal_best = reference_best_subjects
+        .get(matched.file_path.as_str())
+        .is_some_and(|best_subject_id| *best_subject_id == subject_id);
+    matched.tier = calibrate_tier(
+        matched.tier,
+        matched.margin,
+        matched.reciprocal_best,
+        matched.normalized_anchor,
+    );
+    Some(matched)
+}
+
+fn best_subject_by_reference(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    structural_support_by_subject: &BTreeMap<u32, BTreeMap<String, f64>>,
+    graph_support_by_subject: &BTreeMap<u32, BTreeMap<String, GraphEvidence>>,
+) -> BTreeMap<String, u32> {
+    let mut best = BTreeMap::<String, (f64, u32)>::new();
+    for subject in subjects {
+        for candidate in ranked_module_matches(
+            &subject.fingerprint,
+            index,
+            structural_support_by_subject.get(&subject.module_id),
+            graph_support_by_subject.get(&subject.module_id),
+        ) {
+            best.entry(candidate.matched.file_path)
+                .and_modify(|current| {
+                    if candidate.relevance > current.0
+                        || (candidate.relevance == current.0 && subject.module_id < current.1)
+                    {
+                        *current = (candidate.relevance, subject.module_id);
+                    }
+                })
+                .or_insert((candidate.relevance, subject.module_id));
         }
     }
-    best
+    best.into_iter()
+        .map(|(file_path, (_score, module_id))| (file_path, module_id))
+        .collect()
 }
 
 fn tier_passes(tier: MatchTier, min: MinTier) -> bool {
@@ -437,7 +1202,7 @@ fn write_export_names(
     let mut written = 0;
     for export in reference_exports {
         if !subject_originals.contains(export.as_str()) {
-            continue; // not an unambiguous 1:1 — leave for agent
+            continue; // not an unambiguous 1:1 - leave for agent
         }
         connection
             .execute(
@@ -477,30 +1242,278 @@ fn write_export_names(
     Ok(written)
 }
 
-/// Reserved for the deferred binding-level naming follow-up (Task 11b): carries
-/// one row to be written into `semantic_binding_names`.
-/// Not yet wired into `run()`.
-#[allow(dead_code)]
-struct BindingNameWrite {
+/// Number of ranked reference-function candidates emitted as proposals for each
+/// unaccepted subject function. Proposals are never written as `accepted`.
+const BINDING_PROPOSAL_TOP_K: usize = 3;
+
+/// Max number of subject functions (across all matched modules) that may share
+/// an AST hash for that hash to still auto-accept. A unique 1:1 hash match
+/// within a module pair is only *proof of identity* when the hash is also
+/// distinctive globally: a trivial body like `return x` collides across many
+/// unrelated functions, so a within-module-unique match on it is coincidence,
+/// not evidence. Common-hash pairs are demoted to proposals.
+const BINDING_ACCEPT_MAX_GLOBAL_FREQ: usize = 2;
+
+/// One function-binding naming decision derived from a matched module pair:
+/// rename the minified subject binding `original_name` to the reference
+/// function's `semantic_name`. `accepted` rows are provable (unique α-rename
+/// AST-hash match + param/statement corroboration); the rest are proposals.
+#[derive(Debug, Clone, PartialEq)]
+struct BindingNameRow {
     original_name: String,
     semantic_name: String,
     accepted: bool,
+    ast_hash: u64,
+    param_count: u32,
+    statement_count: u32,
+    score: f64,
 }
 
-/// Reserved for the deferred binding-level naming follow-up (Task 11b): writes
-/// `semantic_binding_names` rows (accepted=1 for anchored, 0 for agent proposals).
-/// Not yet wired into `run()`.
-#[allow(dead_code)]
+impl BindingNameRow {
+    fn evidence(&self) -> String {
+        if self.accepted {
+            format!(
+                "{{\"tier\":\"fn-hash-unique\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{}}}",
+                self.ast_hash, self.param_count, self.statement_count
+            )
+        } else {
+            format!(
+                "{{\"tier\":\"fn-hash-proposal\",\"ast\":\"{:016x}\",\"params\":{},\"stmts\":{},\"score\":{:.1}}}",
+                self.ast_hash, self.param_count, self.statement_count, self.score
+            )
+        }
+    }
+}
+
+/// Whether a reference function name is specific enough to propagate. The
+/// reference tree is itself a reconstruction, so some functions carry
+/// placeholder names (`_temp1`, `t8`, `e3`) or fully generic ones (`get`,
+/// `init`). Propagating those to a subject binding adds noise, not meaning —
+/// the same rationale as `is_specific_export_member` for exports.
+fn is_specific_reference_name(name: &str) -> bool {
+    let name = name.trim();
+    if name.len() < 3 {
+        return false;
+    }
+    // `_temp`, `_temp1`, `__temp2`, …
+    let unprefixed = name.trim_start_matches('_');
+    if let Some(rest) = unprefixed.strip_prefix("temp")
+        && rest.chars().all(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+    // `_0`, `__12` — underscore-prefixed numeric temporaries.
+    if !unprefixed.is_empty() && unprefixed.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // single letter + digits: `t8`, `e10`, `x5` (decompiler temporaries).
+    let mut chars = name.chars();
+    if let Some(first) = chars.next()
+        && first.is_ascii_alphabetic()
+        && chars.clone().count() >= 1
+        && chars.all(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+    !matches!(
+        name,
+        "get"
+            | "set"
+            | "has"
+            | "map"
+            | "run"
+            | "main"
+            | "init"
+            | "name"
+            | "type"
+            | "value"
+            | "index"
+            | "data"
+            | "args"
+            | "props"
+            | "item"
+            | "node"
+            | "callback"
+            | "handler"
+            | "fn"
+    )
+}
+
+/// The set of α-rename-invariant AST hashes a function carries (primary +
+/// every alternate normalization pass). Two functions sharing any hash are
+/// structurally related across builds.
+fn function_ast_hashes(fingerprint: &FunctionFingerprint) -> BTreeSet<u64> {
+    let mut hashes = BTreeSet::new();
+    hashes.insert(fingerprint.primary.ast);
+    for alternate in &fingerprint.alternates {
+        hashes.insert(alternate.axes.ast);
+    }
+    hashes
+}
+
+/// Proposal score for pairing subject function `subject` with reference
+/// function `reference`. Returns `None` when they share no AST hash — pure
+/// param/statement similarity is too weak to propose a name from.
+fn binding_proposal_score(
+    subject: &FunctionFingerprint,
+    reference: &FunctionFingerprint,
+) -> Option<f64> {
+    let overlap = function_ast_hashes(subject)
+        .intersection(&function_ast_hashes(reference))
+        .count();
+    if overlap == 0 {
+        return None;
+    }
+    let mut score = 100.0 * overlap as f64;
+    if subject.param_count == reference.param_count {
+        score += 5.0;
+    }
+    let stmt_delta = f64::from(subject.statement_count.abs_diff(reference.statement_count));
+    score += (10.0 - stmt_delta).max(0.0) * 0.5;
+    Some(score)
+}
+
+/// Pair functions between a matched module's emitted source and its reference
+/// source. Provable pass: a primary AST hash unique on BOTH sides, with equal
+/// param and statement counts and a recoverable name on each side, yields an
+/// accepted rename. Everything else with shared AST-hash signal becomes ranked
+/// proposals. Anonymous functions (no recoverable name) are skipped.
+fn pair_function_names(
+    module_id: u32,
+    subject_source: &str,
+    reference_source: &str,
+    subject_hash_freq: &BTreeMap<u64, usize>,
+) -> Vec<BindingNameRow> {
+    let subject_fns = FunctionExtractor::fingerprint(ModuleId(module_id), subject_source);
+    let reference_fns = FunctionExtractor::fingerprint(ModuleId(0), reference_source);
+    let subject_names = function_names(subject_source);
+    // Drop placeholder/generic reference names so they neither auto-accept nor
+    // get proposed; a missing entry makes the reference function "anonymous".
+    let reference_names: BTreeMap<reverts_ir::ByteRange, String> = function_names(reference_source)
+        .into_iter()
+        .filter(|(_, name)| is_specific_reference_name(name))
+        .collect();
+
+    let mut subject_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, f) in subject_fns.iter().enumerate() {
+        subject_by_hash
+            .entry(f.primary.ast)
+            .or_default()
+            .push(index);
+    }
+    let mut reference_by_hash: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, f) in reference_fns.iter().enumerate() {
+        reference_by_hash
+            .entry(f.primary.ast)
+            .or_default()
+            .push(index);
+    }
+
+    let mut rows = Vec::new();
+    let mut accepted_subject = BTreeSet::<usize>::new();
+    let mut consumed_reference = BTreeSet::<usize>::new();
+
+    // Provable pass: unique 1:1 primary-AST-hash match on both sides.
+    for (hash, subject_indices) in &subject_by_hash {
+        if subject_indices.len() != 1 {
+            continue; // ambiguous on subject side
+        }
+        let Some(reference_indices) = reference_by_hash.get(hash) else {
+            continue;
+        };
+        if reference_indices.len() != 1 {
+            continue; // ambiguous on reference side
+        }
+        if *subject_hash_freq.get(hash).unwrap_or(&1) > BINDING_ACCEPT_MAX_GLOBAL_FREQ {
+            continue; // non-distinctive shape globally - demote to proposal below
+        }
+        let subject = &subject_fns[subject_indices[0]];
+        let reference = &reference_fns[reference_indices[0]];
+        if subject.param_count != reference.param_count
+            || subject.statement_count != reference.statement_count
+        {
+            continue; // shape disagreement - demote to proposal below
+        }
+        let (Some(subject_name), Some(reference_name)) = (
+            subject_names.get(&subject.id.span),
+            reference_names.get(&reference.id.span),
+        ) else {
+            continue; // one side anonymous - cannot anchor a name
+        };
+        accepted_subject.insert(subject_indices[0]);
+        consumed_reference.insert(reference_indices[0]);
+        if subject_name == reference_name {
+            continue; // already carries the reference name
+        }
+        rows.push(BindingNameRow {
+            original_name: subject_name.clone(),
+            semantic_name: reference_name.clone(),
+            accepted: true,
+            ast_hash: *hash,
+            param_count: subject.param_count,
+            statement_count: subject.statement_count,
+            score: 1.0,
+        });
+    }
+
+    // Proposal pass: remaining named subject functions vs unconsumed named
+    // reference functions that share any AST hash.
+    let reference_candidates: Vec<usize> = reference_fns
+        .iter()
+        .enumerate()
+        .filter(|(index, f)| {
+            !consumed_reference.contains(index) && reference_names.contains_key(&f.id.span)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    for (subject_index, subject) in subject_fns.iter().enumerate() {
+        if accepted_subject.contains(&subject_index) {
+            continue;
+        }
+        let Some(subject_name) = subject_names.get(&subject.id.span) else {
+            continue;
+        };
+        let mut scored: Vec<(f64, usize)> = reference_candidates
+            .iter()
+            .filter_map(|&reference_index| {
+                binding_proposal_score(subject, &reference_fns[reference_index])
+                    .map(|score| (score, reference_index))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+        for (score, reference_index) in scored.into_iter().take(BINDING_PROPOSAL_TOP_K) {
+            let reference = &reference_fns[reference_index];
+            let reference_name = &reference_names[&reference.id.span];
+            if subject_name == reference_name {
+                continue;
+            }
+            rows.push(BindingNameRow {
+                original_name: subject_name.clone(),
+                semantic_name: reference_name.clone(),
+                accepted: false,
+                ast_hash: subject.primary.ast,
+                param_count: subject.param_count,
+                statement_count: subject.statement_count,
+                score,
+            });
+        }
+    }
+    rows
+}
+
+/// Write binding-level naming rows into `semantic_binding_names`
+/// (`accepted=1` provable renames, `=0` proposals). Keyed on the subject
+/// emitted `file_path` + minified `original_name`.
 fn write_binding_names(
     connection: &Connection,
     project_id: u32,
     file_path: &str,
-    rows: &[BindingNameWrite],
+    rows: &[BindingNameRow],
     origin: &str,
 ) -> Result<usize, CliRunError> {
     let mut written = 0;
     for row in rows {
-        let binding_key = row.original_name.clone(); // no binding_index → key on original
+        let binding_key = row.original_name.clone(); // no binding_index -> key on original
         written += connection
             .execute(
                 r"
@@ -520,11 +1533,7 @@ fn write_binding_names(
                     binding_key,
                     row.semantic_name,
                     origin,
-                    if row.accepted {
-                        "{\"tier\":\"fn-ast-collision\"}"
-                    } else {
-                        "{\"tier\":\"agent\"}"
-                    },
+                    row.evidence(),
                     i64::from(row.accepted),
                 ],
             )
@@ -546,7 +1555,7 @@ fn write_module_names(
             continue;
         }
         // _origin documents the provenance schema (prefix:version:file); symbol/binding
-        // writers in later tasks record it — modules has no origin column.
+        // writers in later tasks record it - modules has no origin column.
         let _origin = format!(
             "{origin_prefix}:{reference_version}:{}",
             plan.matched.file_path
@@ -665,6 +1674,179 @@ mod tests {
         assert_eq!(strip_source_extension("noext"), "noext");
     }
 
+    #[test]
+    fn source_path_resolution_handles_relative_and_src_alias_imports() {
+        let known = BTreeSet::from([
+            "components/HelpV2/HelpV2.tsx",
+            "services/analytics/index.ts",
+        ]);
+        assert_eq!(
+            resolve_relative_source_path(
+                "commands/help.tsx",
+                "../components/HelpV2/HelpV2.js",
+                &known,
+            ),
+            Some("components/HelpV2/HelpV2.tsx".to_string())
+        );
+        assert_eq!(
+            resolve_relative_source_path(
+                "entrypoints/app.ts",
+                "src/services/analytics/index.js",
+                &known,
+            ),
+            Some("services/analytics/index.ts".to_string())
+        );
+        assert_eq!(
+            resolve_relative_source_path("entrypoints/app.ts", "react", &known),
+            None
+        );
+    }
+
+    fn fp(anchors: &[&str]) -> SourceFingerprint {
+        SourceFingerprint {
+            normalized_source_hash: String::new(),
+            normalized_source_hashes: BTreeSet::new(),
+            function_signature_hashes: BTreeSet::new(),
+            string_anchors: anchors.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn refmod(path: &str, anchors: &[&str]) -> ReferenceSourceModule {
+        ReferenceSourceModule {
+            file_path: path.to_string(),
+            source: String::new(),
+            fingerprint: fp(anchors),
+            export_names: BTreeSet::new(),
+            asset_literals: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn compute_anchor_idf_downweights_common_anchors() {
+        let modules = vec![
+            refmod("a.ts", &["common", "u1x"]),
+            refmod("b.ts", &["common", "u2x"]),
+            refmod("c.ts", &["common", "u3x"]),
+            refmod("d.ts", &["common", "u4x"]),
+        ];
+        let idf = compute_anchor_idf(&modules);
+        // "common" is in 4/4 modules -> ln(4/4) = 0; a unique anchor -> ln(4) > 1.
+        assert!(idf["common"] < 1.0e-9, "common idf: {}", idf["common"]);
+        assert!(idf["u1x"] > 1.0, "unique idf: {}", idf["u1x"]);
+    }
+
+    #[test]
+    fn hub_overlap_stays_low_distinctive_overlap_is_medium() {
+        // 6 "hub" modules all share `hubtoken`; one `distinctive.ts` has 20 rare
+        // anchors (df = 1 each). N = 7 -> rare idf = ln(7), about 1.95.
+        let rare: Vec<String> = (0..20).map(|i| format!("rare-anchor-{i}")).collect();
+        let rare_refs: Vec<&str> = rare.iter().map(String::as_str).collect();
+        let mut modules: Vec<ReferenceSourceModule> = (0..6)
+            .map(|i| {
+                let p = format!("hub{i}.ts");
+                ReferenceSourceModule {
+                    file_path: p,
+                    source: String::new(),
+                    fingerprint: fp(&["hubtoken", "filler-token"]),
+                    export_names: BTreeSet::new(),
+                    asset_literals: BTreeSet::new(),
+                }
+            })
+            .collect();
+        modules.push(refmod("distinctive.ts", &rare_refs));
+        let anchor_idf = compute_anchor_idf(&modules);
+        let index = ReferenceSourceIndex {
+            version: "t".to_string(),
+            modules,
+            anchor_idf,
+        };
+
+        // Sharing only the hub token = near-zero weighted overlap -> rejected/Low,
+        // never promoted to Medium.
+        let subject_hub = fp(&["hubtoken"]);
+        let hub_match = best_module_match(&subject_hub, &index);
+        assert!(
+            hub_match.map_or(true, |m| m.tier == MatchTier::Low),
+            "hub-only overlap must not be promoted above Low"
+        );
+
+        // Sharing the 20 rare anchors = high weighted overlap -> Medium.
+        let subject_dist = fp(&rare_refs);
+        let dist_match = best_module_match(&subject_dist, &index).expect("distinctive match");
+        assert_eq!(dist_match.file_path, "distinctive.ts");
+        assert_eq!(
+            dist_match.tier,
+            MatchTier::Medium,
+            "wanchor={}",
+            dist_match.weighted_anchor
+        );
+    }
+
+    #[test]
+    fn normalized_anchor_penalizes_large_reference_hubs() {
+        let shared: Vec<String> = (0..20).map(|i| format!("shared-{i}")).collect();
+        let mut large_ref = shared.clone();
+        large_ref.extend((0..980).map(|i| format!("large-only-{i}")));
+        let large_refs: Vec<&str> = large_ref.iter().map(String::as_str).collect();
+
+        let mut modules = vec![refmod("large-hub.ts", &large_refs)];
+        for i in 0..99 {
+            let path = format!("filler-{i}.ts");
+            let anchor = format!("filler-anchor-{i}");
+            modules.push(ReferenceSourceModule {
+                file_path: path,
+                source: String::new(),
+                fingerprint: fp(&[anchor.as_str()]),
+                export_names: BTreeSet::new(),
+                asset_literals: BTreeSet::new(),
+            });
+        }
+        let index = ReferenceSourceIndex {
+            version: "t".to_string(),
+            anchor_idf: compute_anchor_idf(&modules),
+            modules,
+        };
+        let subject_refs: Vec<&str> = shared.iter().map(String::as_str).collect();
+        let matched = best_module_match(&fp(&subject_refs), &index).expect("match");
+
+        assert_eq!(matched.file_path, "large-hub.ts");
+        assert!(
+            matched.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR,
+            "raw weighted overlap should be high enough to need normalization: {}",
+            matched.weighted_anchor
+        );
+        assert!(
+            matched.normalized_anchor < MEDIUM_NORMALIZED_ANCHOR,
+            "large reference denominator should expose hub-like coverage: {}",
+            matched.normalized_anchor
+        );
+        assert_eq!(matched.tier, MatchTier::Low);
+    }
+
+    #[test]
+    fn fn_export_overlap_needs_anchor_corroboration_for_medium() {
+        let base = MatchEvidence {
+            hash_match: false,
+            asset_overlap: 0,
+            export_overlap: 0,
+            function_overlap: 2,
+            structural_score: 0.0,
+            graph: GraphEvidence::default(),
+            weighted_anchor: 5.0,
+            normalized_anchor: 0.0,
+        };
+        // function_overlap >= 2 but no anchor corroboration -> Low (these were the
+        // ~30 fn/export coincidence false positives, e.g. unrelated modules all
+        // "matching" cli/print.ts at nanchor=0).
+        assert_eq!(raw_match_tier(base), MatchTier::Low);
+        // The same overlap WITH normalized-anchor corroboration -> Medium.
+        let corroborated = MatchEvidence {
+            normalized_anchor: 0.1,
+            ..base
+        };
+        assert_eq!(raw_match_tier(corroborated), MatchTier::Medium);
+    }
+
     fn make_plan(module_id: u32, name: &str, tier: MatchTier) -> ModulePlan {
         ModulePlan {
             module_id,
@@ -677,11 +1859,19 @@ mod tests {
                 asset_overlap: if tier == MatchTier::High { 1 } else { 0 },
                 export_overlap: 0,
                 function_overlap: 0,
+                structural_score: 0.0,
+                graph_support: 0,
+                graph_known_edges: 0,
                 anchor_overlap: 0,
-                score: 1000,
+                weighted_anchor: 0.0,
+                normalized_anchor: 0.0,
+                margin: 1.0,
+                reciprocal_best: true,
             },
             subject_bindings: Vec::new(),
             reference_exports: std::collections::BTreeSet::new(),
+            subject_source: String::new(),
+            reference_source: String::new(),
         }
     }
     fn high_plan(id: u32, name: &str) -> ModulePlan {
@@ -689,6 +1879,49 @@ mod tests {
     }
     fn low_plan(id: u32, name: &str) -> ModulePlan {
         make_plan(id, name, MatchTier::Low)
+    }
+
+    #[test]
+    fn global_reference_uniqueness_keeps_one_medium_per_reference() {
+        // Two modules claim `components/hub`; the reciprocal-best one wins.
+        let mut reciprocal = make_plan(1, "components/hub", MatchTier::Medium);
+        reciprocal.matched.reciprocal_best = true;
+        let mut hub_duplicate = make_plan(2, "components/hub", MatchTier::Medium);
+        hub_duplicate.matched.reciprocal_best = false;
+
+        // Two modules claim `components/graph`; both graph-supported, so the
+        // higher-content (normalized_anchor) one wins. The old behavior kept
+        // BOTH — the bug that let one reference file anchor many modules (e.g.
+        // four modules all "matching" ElicitationDialog.tsx after propagation).
+        let mut graph_strong = make_plan(3, "components/graph", MatchTier::Medium);
+        graph_strong.matched.graph_support = 1;
+        graph_strong.matched.normalized_anchor = 0.30;
+        let mut graph_weak = make_plan(4, "components/graph", MatchTier::Medium);
+        graph_weak.matched.graph_support = 1;
+        graph_weak.matched.normalized_anchor = 0.10;
+
+        let unique = make_plan(5, "components/unique", MatchTier::Medium);
+
+        let mut plans = vec![reciprocal, hub_duplicate, graph_strong, graph_weak, unique];
+        calibrate_global_reference_uniqueness(&mut plans);
+
+        assert_eq!(plans[0].matched.tier, MatchTier::Medium, "reciprocal kept");
+        assert_eq!(
+            plans[1].matched.tier,
+            MatchTier::Low,
+            "hub duplicate demoted"
+        );
+        assert_eq!(
+            plans[2].matched.tier,
+            MatchTier::Medium,
+            "stronger graph kept"
+        );
+        assert_eq!(
+            plans[3].matched.tier,
+            MatchTier::Low,
+            "weaker graph duplicate demoted (injective 1:1)"
+        );
+        assert_eq!(plans[4].matched.tier, MatchTier::Medium, "unique untouched");
     }
 
     #[test]
@@ -788,15 +2021,23 @@ mod tests {
             )
             .expect("schema");
         let rows = vec![
-            BindingNameWrite {
+            BindingNameRow {
                 original_name: "x".into(),
                 semantic_name: "decodeFrame".into(),
                 accepted: true,
+                ast_hash: 0xabcd,
+                param_count: 1,
+                statement_count: 2,
+                score: 1.0,
             },
-            BindingNameWrite {
+            BindingNameRow {
                 original_name: "y".into(),
                 semantic_name: "guessName".into(),
                 accepted: false,
+                ast_hash: 0x1234,
+                param_count: 0,
+                statement_count: 1,
+                score: 105.0,
             },
         ];
         write_binding_names(&connection, 1, "modules/m.ts", &rows, "source:2.1.76:f.ts")
@@ -838,7 +2079,7 @@ mod tests {
         assert!(best_module_match(&subject, &index).is_none());
     }
 
-    // ── Test 1: e2e module match for both wrappers (hermetic) ──────────────────
+    // Test 1: e2e module match for both wrappers (hermetic)
 
     #[test]
     fn e2e_module_match_both_wrappers() {
@@ -910,7 +2151,7 @@ mod tests {
         );
     }
 
-    // ── Test 2: e2e module-name WRITE (in-memory DB) ───────────────────────────
+    // Test 2: e2e module-name WRITE (in-memory DB)
 
     #[test]
     fn e2e_write_module_names_two_high_tier() {
@@ -958,7 +2199,7 @@ mod tests {
         );
     }
 
-    // ── Test 3: export mapping e2e (in-memory DB) ──────────────────────────────
+    // Test 3: export mapping e2e (in-memory DB)
 
     #[test]
     fn e2e_export_mapping_exact_match_only() {
@@ -1041,7 +2282,7 @@ mod tests {
         );
     }
 
-    // ── Test 4: precision gate — no false High-tier accept ─────────────────────
+    // Test 4: precision gate - no false High-tier accept
 
     #[test]
     fn precision_gate_no_false_high_tier() {
@@ -1064,7 +2305,7 @@ mod tests {
         .expect("subject fp");
 
         // Zero shared evidence (different .node literal, unique strings, no shared
-        // exports/functions) must yield NO match at all — not merely a non-High one.
+        // exports/functions) must yield NO match at all - not merely a non-High one.
         // (Test 1 proves the matcher DOES return Some+High on real shared evidence, so
         // this is not vacuously satisfied by a matcher that always returns None.)
         let matched = best_module_match(&subject, &index);
@@ -1093,6 +2334,119 @@ mod tests {
         assert_eq!(
             written, 0,
             "Low-tier plan must not be written at MinTier::High gate"
+        );
+    }
+
+    /// Pair with no global-frequency context (every hash treated as
+    /// distinctive, `unwrap_or(&1)`), so these unit cases exercise the
+    /// within-pair logic without the global rarity gate.
+    fn pair(subject: &str, reference: &str) -> Vec<BindingNameRow> {
+        pair_function_names(1, subject, reference, &BTreeMap::new())
+    }
+
+    #[test]
+    fn pair_function_names_accepts_unique_hash_match() {
+        // Same body structure (α-rename-invariant), unique on each side, equal
+        // shape, differing names -> accepted rename minified -> reference.
+        let rows = pair(
+            "function aB(x) { return x + 1; }",
+            "function increment(x) { return x + 1; }",
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].accepted);
+        assert_eq!(rows[0].original_name, "aB");
+        assert_eq!(rows[0].semantic_name, "increment");
+    }
+
+    #[test]
+    fn pair_function_names_demotes_globally_common_hash() {
+        // A hash shared by many functions corpus-wide is a trivial shape; a
+        // within-pair-unique match on it must NOT auto-accept.
+        let subject = "function aB(x) { return x + 1; }";
+        let reference = "function increment(x) { return x + 1; }";
+        let hash = FunctionExtractor::fingerprint(ModuleId(1), subject)[0]
+            .primary
+            .ast;
+        let freq = BTreeMap::from([(hash, 5usize)]);
+        let rows = pair_function_names(1, subject, reference, &freq);
+        assert!(
+            !rows.iter().any(|r| r.accepted),
+            "globally common hash must not auto-accept: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn pair_function_names_demotes_hash_collision_to_proposals() {
+        // Two subject functions share the body hash -> not unique -> no accept;
+        // both still surface as proposals against the single reference function.
+        let rows = pair(
+            "function aB(x) { return x + 1; } function cD(y) { return y + 1; }",
+            "function increment(z) { return z + 1; }",
+        );
+        assert!(!rows.iter().any(|r| r.accepted), "no accepts: {rows:?}");
+        assert!(
+            rows.iter().filter(|r| !r.accepted).count() >= 1,
+            "expected proposals: {rows:?}"
+        );
+        assert!(rows.iter().all(|r| r.semantic_name == "increment"));
+    }
+
+    #[test]
+    fn pair_function_names_blocks_accept_on_param_mismatch() {
+        // Same body hash but differing param counts -> shape disagreement blocks
+        // the accept; the shared-hash signal still yields a proposal.
+        let rows = pair(
+            "function aB(x) { return x + 1; }",
+            "function increment(x, y) { return x + 1; }",
+        );
+        assert!(!rows.iter().any(|r| r.accepted), "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| !r.accepted && r.semantic_name == "increment")
+        );
+    }
+
+    #[test]
+    fn specific_reference_name_filters_placeholders_and_generics() {
+        for junk in [
+            "_temp", "_temp1", "__temp2", "t8", "e10", "x5", "_0", "__12", "get", "init", "fn",
+            "id",
+        ] {
+            assert!(!is_specific_reference_name(junk), "should reject {junk}");
+        }
+        for good in [
+            "escapeJsLineTerminators",
+            "charWidth",
+            "toAgentId",
+            "normalize",
+            "isMCPToolResult",
+        ] {
+            assert!(is_specific_reference_name(good), "should keep {good}");
+        }
+    }
+
+    #[test]
+    fn pair_function_names_drops_placeholder_reference_names() {
+        // Reference function named `_temp1` must not produce an accept.
+        let rows = pair(
+            "function aB(x) { return x + 1; }",
+            "function _temp1(x) { return x + 1; }",
+        );
+        assert!(
+            rows.is_empty(),
+            "placeholder ref name must be filtered: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn pair_function_names_skips_when_name_already_matches() {
+        let rows = pair(
+            "function increment(x) { return x + 1; }",
+            "function increment(x) { return x + 1; }",
+        );
+        assert!(
+            rows.is_empty(),
+            "already-correct name needs no row: {rows:?}"
         );
     }
 }

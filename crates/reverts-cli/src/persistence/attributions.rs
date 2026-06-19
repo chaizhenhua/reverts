@@ -318,25 +318,29 @@ fn rejected_package_attributions_for_unaccepted_modules(
 
     let mut rejected = Vec::new();
     for module in &rows.modules {
-        if module.kind != ModuleKind::Package || accepted_modules.contains(&module.id) {
+        if accepted_modules.contains(&module.id) {
             continue;
         }
-        let package_name =
-            module
-                .package_name
-                .as_deref()
-                .ok_or(MatchPackagesError::InvalidAttribution {
-                    module_id: module.id,
-                    message: "package module has no package_name".to_string(),
-                })?;
-        if !matched_package_names.contains(package_name) {
-            continue;
-        }
-
         let match_evidence = report
             .matches
             .iter()
             .find(|package_match| package_match.module_id == module.id);
+        if module.kind != ModuleKind::Package && match_evidence.is_none() {
+            continue;
+        }
+        let package_name = module
+            .package_name
+            .as_deref()
+            .or_else(|| match_evidence.map(|package_match| package_match.package_name.as_str()))
+            .ok_or(MatchPackagesError::InvalidAttribution {
+                module_id: module.id,
+                message: "package ownership module has no package_name or match evidence"
+                    .to_string(),
+            })?;
+        if !matched_package_names.contains(package_name) {
+            continue;
+        }
+
         let external_import_match =
             match_evidence.filter(|package_match| package_match.external_importable);
         let source_only_match =
@@ -587,9 +591,7 @@ fn package_attribution_proves_module_ownership(
     attribution: &PackageAttributionInput,
     module: &ModuleInput,
 ) -> bool {
-    if module.kind != ModuleKind::Package
-        || module.package_name.as_deref() != Some(attribution.package_name.as_str())
-    {
+    if !module_allows_package_ownership(module, attribution.package_name.as_str()) {
         return false;
     }
     if let Some(attribution_version) = attribution.package_version.as_deref()
@@ -612,14 +614,25 @@ fn package_match_proves_module_ownership(
     package_match: &PackageMatch,
     module: &ModuleInput,
 ) -> bool {
-    module.kind == ModuleKind::Package
-        && module.package_name.as_deref() == Some(package_match.package_name.as_str())
+    module_allows_package_ownership(module, package_match.package_name.as_str())
         && module
             .package_version
             .as_deref()
             .is_none_or(|module_version| {
                 module_version.trim().is_empty() || module_version == package_match.package_version
             })
+}
+
+fn module_allows_package_ownership(module: &ModuleInput, package_name: &str) -> bool {
+    match module.kind {
+        ModuleKind::Package => module.package_name.as_deref() == Some(package_name),
+        ModuleKind::Application => module
+            .package_name
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(str::is_empty),
+        ModuleKind::Builtin => false,
+    }
 }
 
 fn external_import_blocker_summaries(

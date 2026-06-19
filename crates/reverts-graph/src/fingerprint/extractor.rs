@@ -1,6 +1,10 @@
 use oxc_allocator::Allocator;
 use oxc_ast::Visit;
-use oxc_ast::ast::{ArrowFunctionExpression, FormalParameters, Function, FunctionBody, Program};
+use oxc_ast::ast::{
+    ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPatternKind,
+    Expression, FormalParameters, Function, FunctionBody, MethodDefinition, ObjectProperty,
+    Program, PropertyDefinition, PropertyKey, VariableDeclarator,
+};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 use oxc_syntax::scope::ScopeFlags;
@@ -155,6 +159,135 @@ impl FunctionExtractor {
             }
         }
         out
+    }
+}
+
+/// Map each function/arrow span to the name it is declared under, parsed from
+/// the SAME stripped source that [`FunctionExtractor::fingerprint`] sees so the
+/// spans line up with the returned [`FunctionId`]s. Only functions with a
+/// recoverable name are included; anonymous callbacks / IIFEs are omitted.
+///
+/// On real source (the reference tree) this yields the human name
+/// (`classifyForCollapse`); on emitted minified source it yields the minified
+/// binding (`xY7`). Pairing the two by α-rename-invariant AST hash within a
+/// matched module is what turns "module M ↔ file F" into per-function renames.
+#[must_use]
+pub fn function_names(source: &str) -> std::collections::BTreeMap<ByteRange, String> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut extractor = FunctionNameExtractor {
+        names: std::collections::BTreeMap::new(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.names
+}
+
+struct FunctionNameExtractor {
+    names: std::collections::BTreeMap<ByteRange, String>,
+}
+
+impl FunctionNameExtractor {
+    /// Record `name` for the function/arrow `expr` resolves to (peeling
+    /// parentheses). First writer wins — an inner declaration name (e.g.
+    /// `var x = function realName(){}`) is preferred over the outer binding.
+    fn record(&mut self, expr: &Expression<'_>, name: &str) {
+        if let Some(range) = function_like_span(expr) {
+            self.names.entry(range).or_insert_with(|| name.to_string());
+        }
+    }
+}
+
+fn function_like_span(expr: &Expression<'_>) -> Option<ByteRange> {
+    match expr {
+        Expression::FunctionExpression(function) => {
+            let span = function.span();
+            Some(ByteRange::new(span.start, span.end))
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            let span = arrow.span();
+            Some(ByteRange::new(span.start, span.end))
+        }
+        Expression::ParenthesizedExpression(paren) => function_like_span(&paren.expression),
+        _ => None,
+    }
+}
+
+fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(identifier) => Some(identifier.name.to_string()),
+        PropertyKey::StringLiteral(literal) => Some(literal.value.to_string()),
+        _ => None,
+    }
+}
+
+/// Name an assignment LHS contributes: a bare identifier (`fn = …`) or the
+/// trailing static member (`X.fn = …`, `X.prototype.fn = …` → `fn`).
+fn assignment_target_name(target: &AssignmentTarget<'_>) -> Option<String> {
+    match target {
+        AssignmentTarget::AssignmentTargetIdentifier(identifier) => {
+            Some(identifier.name.to_string())
+        }
+        AssignmentTarget::StaticMemberExpression(member) => Some(member.property.name.to_string()),
+        _ => None,
+    }
+}
+
+impl<'a> Visit<'a> for FunctionNameExtractor {
+    fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        if let Some(id) = &func.id {
+            let span = func.span();
+            self.names
+                .entry(ByteRange::new(span.start, span.end))
+                .or_insert_with(|| id.name.to_string());
+        }
+        oxc_ast::visit::walk::walk_function(self, func, flags);
+    }
+
+    fn visit_variable_declarator(&mut self, declarator: &VariableDeclarator<'a>) {
+        if let BindingPatternKind::BindingIdentifier(id) = &declarator.id.kind
+            && let Some(init) = &declarator.init
+        {
+            self.record(init, id.name.as_str());
+        }
+        oxc_ast::visit::walk::walk_variable_declarator(self, declarator);
+    }
+
+    fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
+        if let Some(name) = property_key_name(&property.key) {
+            self.record(&property.value, &name);
+        }
+        oxc_ast::visit::walk::walk_object_property(self, property);
+    }
+
+    fn visit_method_definition(&mut self, method: &MethodDefinition<'a>) {
+        if let Some(name) = property_key_name(&method.key) {
+            let span = method.value.span();
+            self.names
+                .entry(ByteRange::new(span.start, span.end))
+                .or_insert(name);
+        }
+        oxc_ast::visit::walk::walk_method_definition(self, method);
+    }
+
+    fn visit_property_definition(&mut self, property: &PropertyDefinition<'a>) {
+        if let (Some(name), Some(value)) = (property_key_name(&property.key), &property.value) {
+            self.record(value, &name);
+        }
+        oxc_ast::visit::walk::walk_property_definition(self, property);
+    }
+
+    fn visit_assignment_expression(&mut self, assignment: &AssignmentExpression<'a>) {
+        if let Some(name) = assignment_target_name(&assignment.left) {
+            self.record(&assignment.right, &name);
+        }
+        oxc_ast::visit::walk::walk_assignment_expression(self, assignment);
     }
 }
 
@@ -902,5 +1035,60 @@ mod tests {
         assert_eq!(funcs.len(), 2);
         assert!(funcs.iter().any(|f| f.is_async && !f.is_generator));
         assert!(funcs.iter().any(|f| !f.is_async && f.is_generator));
+    }
+
+    #[test]
+    fn function_names_recovers_declaration_binding_method_and_assignment_names() {
+        let source = "\
+function decl(a) { return a; }
+const arrow = (b) => b + 1;
+const expr = function inner() { return 0; };
+const obj = { method(c) { return c; }, prop: (d) => d };
+class K { classMethod(e) { return e; } field = (f) => f; }
+Target.assigned = function (g) { return g; };
+ns.prototype.protoMethod = (h) => h;
+[1, 2].map((x) => x * 2);
+";
+        let extracted = function_names(source);
+        let names: std::collections::BTreeSet<&str> =
+            extracted.values().map(String::as_str).collect();
+        for expected in [
+            "decl",
+            "arrow",
+            "expr", // outer binding wins over the inner function-expression id
+            "method",
+            "prop",
+            "classMethod",
+            "field",
+            "assigned",
+            "protoMethod",
+        ] {
+            assert!(names.contains(expected), "missing {expected}: {names:?}");
+        }
+        // The anonymous `.map` callback contributes no name.
+        assert!(
+            !names.contains("map"),
+            "anonymous callback must not be named: {names:?}"
+        );
+    }
+
+    #[test]
+    fn function_names_spans_align_with_fingerprint_function_ids() {
+        // The whole approach depends on function_names() and fingerprint()
+        // producing identical spans for the same (stripped) source.
+        for source in [
+            "function classifyForCollapse(a) { return a + 1; }",
+            "const classifyForCollapse = (a) => { return a + 1; };",
+            "{ const classifyForCollapse = (a) => { return a + 1; }; }",
+        ] {
+            let fingerprints = FunctionExtractor::fingerprint(ModuleId(7), source);
+            assert_eq!(fingerprints.len(), 1, "one fn in: {source}");
+            let names = function_names(source);
+            assert_eq!(
+                names.get(&fingerprints[0].id.span).map(String::as_str),
+                Some("classifyForCollapse"),
+                "span mismatch for: {source}"
+            );
+        }
     }
 }

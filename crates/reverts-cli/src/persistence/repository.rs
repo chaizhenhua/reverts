@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputRows, PackageAttributionInput};
+use reverts_input::{InputRows, ModuleDependencyTarget, PackageAttributionInput};
 use reverts_ir::ModuleId;
 use reverts_package_matcher::VersionedPackageMatchReport;
 use rusqlite::Connection;
@@ -74,6 +74,7 @@ impl MatchPackagePersistence for SqliteMatchPackagePersistence<'_> {
     ) -> Result<MatchPackagePersistenceOutcome, MatchPackagesError> {
         // Persist synthetic modules first so FKs from attribution tables resolve.
         synthetic_modules::persist_synthetic_modules(self.connection, synthetic_modules)?;
+        persist_module_dependencies(self.connection, rows)?;
 
         // Some synthetic module inserts may be ignored due to legacy uniqueness
         // constraints. Keep FK filtering in the persistence adapter instead of
@@ -105,4 +106,54 @@ impl MatchPackagePersistence for SqliteMatchPackagePersistence<'_> {
             )?,
         })
     }
+}
+
+fn persist_module_dependencies(
+    connection: &mut Connection,
+    rows: &InputRows,
+) -> Result<(), MatchPackagesError> {
+    connection
+        .execute_batch(
+            r"
+            CREATE TABLE IF NOT EXISTS module_dependencies (
+                module_id INTEGER,
+                dependency_id INTEGER
+            );
+            ",
+        )
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    let module_ids = rows
+        .modules
+        .iter()
+        .map(|module| module.id)
+        .collect::<BTreeSet<_>>();
+    let transaction = connection
+        .transaction()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    for module_id in &module_ids {
+        transaction
+            .execute(
+                "DELETE FROM module_dependencies WHERE module_id = ?1",
+                [i64::from(module_id.0)],
+            )
+            .map_err(MatchPackagesError::WriteAttribution)?;
+    }
+    for dependency in &rows.dependencies {
+        let ModuleDependencyTarget::Module(target) = dependency.target else {
+            continue;
+        };
+        if !module_ids.contains(&dependency.from_module_id) || !module_ids.contains(&target) {
+            continue;
+        }
+        transaction
+            .execute(
+                "INSERT INTO module_dependencies (module_id, dependency_id) VALUES (?1, ?2)",
+                [i64::from(dependency.from_module_id.0), i64::from(target.0)],
+            )
+            .map_err(MatchPackagesError::WriteAttribution)?;
+    }
+    transaction
+        .commit()
+        .map_err(MatchPackagesError::WriteAttribution)?;
+    Ok(())
 }

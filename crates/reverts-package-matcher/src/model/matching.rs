@@ -44,10 +44,18 @@ pub enum ModuleMatchStrategy {
     /// proves package ownership only and intentionally does not prove a unique
     /// importable source file.
     AggregateStructuralBagSimilarity,
+    /// Rare string/export anchors matched one package version as an aggregate.
+    /// This proves package ownership only for minified modules that no longer
+    /// preserve enough function shape to match a concrete source file.
+    AggregateStringAnchorSimilarity,
     /// Direct module dependencies are already owned by one package version.
     /// This proves ownership for dependency-only bundle wrappers/barrels, but
     /// not a safe single external import.
     DependencyClosureOwnership,
+    /// The module's incoming/outgoing dependency neighborhood maps onto a
+    /// package source-file import neighborhood seeded by stronger concrete
+    /// source matches. This proves package ownership only.
+    PackageGraphNeighborhoodOwnership,
 }
 
 impl ModuleMatchStrategy {
@@ -67,7 +75,9 @@ impl ModuleMatchStrategy {
             Self::CascadeFunctionOwnership => "cascade_function_ownership",
             Self::CascadePartialFunctionCoverage => "cascade_partial_function_coverage",
             Self::AggregateStructuralBagSimilarity => "aggregate_structural_bag_similarity",
+            Self::AggregateStringAnchorSimilarity => "aggregate_string_anchor_similarity",
             Self::DependencyClosureOwnership => "dependency_closure_ownership",
+            Self::PackageGraphNeighborhoodOwnership => "package_graph_neighborhood_ownership",
         }
     }
 }

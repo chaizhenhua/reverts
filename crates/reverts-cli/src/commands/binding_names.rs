@@ -399,7 +399,7 @@ fn ensure_project_exists(connection: &Connection, project_id: u32) -> Result<(),
     }
 }
 
-fn ensure_binding_names_table_if_writable(
+pub(crate) fn ensure_binding_names_table_if_writable(
     connection: &Connection,
     writable: bool,
 ) -> Result<(), CliRunError> {

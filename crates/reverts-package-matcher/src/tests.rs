@@ -64,6 +64,540 @@ fn pipeline_does_not_externalize_empty_source_scope_without_proof() {
 }
 
 #[test]
+fn pipeline_recognizes_anonymous_bundle_package_ownership_without_externalizing() {
+    let source = "function add(a,b){return a+b;} function sub(a,b){return a-b;}";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let package_sources = [PackageSource::external(
+        "pkg", "1.0.0", "pkg", "index.js", source,
+    )];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    assert!(report.package_report.audit.is_clean());
+    assert_eq!(report.package_report.matches.len(), 1);
+    let package_match = &report.package_report.matches[0];
+    assert_eq!(package_match.module_id, ModuleId(20));
+    assert_eq!(package_match.package_name, "pkg");
+    assert!(
+        !package_match.external_importable,
+        "anonymous bundle ownership must not become a public import"
+    );
+    assert!(report.package_report.attributions.is_empty());
+    assert!(report.function_attributions.is_empty());
+    assert!(report.function_ownership_matches > 0);
+}
+
+#[test]
+fn pipeline_recognizes_anonymous_bundle_package_by_function_axes() {
+    let source = "function a(x){if(x){return true;}return false;} function b(y){return y ? 1 : 0;}";
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "bundle.js",
+        Some(source.to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(
+            ModuleId(20),
+            "20-esbuild-anon",
+            "modules/20-esbuild-anon.ts",
+        )
+        .with_source_file(1),
+    );
+    let package_sources = [
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg",
+            "index.js",
+            "function first(value){if(value){return true;}return false;} function second(input){return input ? 1 : 0;}",
+        ),
+        PackageSource::external(
+            "other",
+            "1.0.0",
+            "other",
+            "index.js",
+            "function unrelated(){return 'different';}",
+        ),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    assert!(report.package_report.audit.is_clean());
+    assert_eq!(report.package_report.matches.len(), 1);
+    let package_match = &report.package_report.matches[0];
+    assert_eq!(package_match.module_id, ModuleId(20));
+    assert_eq!(package_match.package_name, "pkg");
+    assert_eq!(
+        package_match.strategy,
+        ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors
+    );
+    assert!(!package_match.external_importable);
+    assert!(report.package_report.attributions.is_empty());
+}
+
+#[test]
+fn pipeline_promotes_anonymous_module_by_package_source_graph_neighborhood() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "a.js",
+        Some("import './b.js'; export const a = 1;".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "b.js",
+        Some("const unrelated = 42;".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        3,
+        "c.js",
+        Some("export const c = 3;".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "a",
+            "node_modules/pkg/a.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(20), "anon-b", "modules/anon-b.js").with_source_file(2),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(30),
+            "c",
+            "node_modules/pkg/c.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(3),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(10),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(20),
+        target: ModuleDependencyTarget::Module(ModuleId(30)),
+    });
+    let package_sources = [
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/a",
+            "a.js",
+            "import './b.js'; export const a = 1;",
+        ),
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/b",
+            "b.js",
+            "import './c.js'; export const b = 2;",
+        ),
+        PackageSource::external("pkg", "1.0.0", "pkg/c", "c.js", "export const c = 3;"),
+        PackageSource::external(
+            "other",
+            "1.0.0",
+            "other",
+            "index.js",
+            "export const unrelated = true;",
+        ),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let graph_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(20))
+        .expect("anonymous module promoted by package source graph");
+    assert_eq!(graph_match.package_name, "pkg");
+    assert_eq!(graph_match.package_version, "1.0.0");
+    assert_eq!(
+        graph_match.strategy,
+        ModuleMatchStrategy::PackageGraphNeighborhoodOwnership
+    );
+    assert_eq!(graph_match.function_signature_matches, 2);
+    assert_eq!(graph_match.string_anchor_matches, 2);
+    assert!(
+        !graph_match.external_importable,
+        "graph-neighborhood ownership is not a public import proof"
+    );
+}
+
+#[test]
+fn pipeline_promotes_anonymous_module_by_owned_dependency_neighborhood() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "a.js",
+        Some("export const a = 1;".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "helper.js",
+        Some("exports.helper = Object;".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        3,
+        "c.js",
+        Some("export const c = 3;".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "a",
+            "node_modules/pkg/a.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(20), "anon-helper", "modules/helper.js")
+            .with_source_file(2),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(30),
+            "c",
+            "node_modules/pkg/c.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(3),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(10),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(30),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    let package_sources = [
+        PackageSource::external("pkg", "1.0.0", "pkg/a", "a.js", "export const a = 1;"),
+        PackageSource::external("pkg", "1.0.0", "pkg/c", "c.js", "export const c = 3;"),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let dependency_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(20))
+        .expect("anonymous module promoted by owned dependency neighborhood");
+    assert_eq!(dependency_match.package_name, "pkg");
+    assert_eq!(
+        dependency_match.strategy,
+        ModuleMatchStrategy::DependencyClosureOwnership
+    );
+    assert!(
+        dependency_match
+            .source_path
+            .starts_with("anonymous-dependency-neighborhood:pkg@1.0.0:")
+    );
+    assert_eq!(dependency_match.function_signature_matches, 2);
+    assert_eq!(dependency_match.string_anchor_matches, 2);
+    assert!(!dependency_match.external_importable);
+}
+
+#[test]
+fn pipeline_promotes_tiny_outgoing_only_dependency_neighborhood() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "barrel.js",
+        Some("var barrel = E(() => { helper(); });".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "helper.js",
+        Some("export function helper(){return 'helper-anchor';}".to_string()),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(10), "barrel", "modules/barrel.js").with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(11),
+            "helper",
+            "pkg/helper.js",
+            "pkg",
+            Some("1.2.3".to_string()),
+        )
+        .with_source_file(2),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(10),
+        target: ModuleDependencyTarget::Module(ModuleId(11)),
+    });
+    let package_sources = [PackageSource::external(
+        "pkg",
+        "1.2.3",
+        "pkg/helper",
+        "helper.js",
+        "export function helper(){return 'helper-anchor';}",
+    )];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let barrel_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(10))
+        .expect("tiny outgoing-only wrapper should be promoted");
+    assert_eq!(barrel_match.package_name, "pkg");
+    assert_eq!(
+        barrel_match.strategy,
+        ModuleMatchStrategy::DependencyClosureOwnership
+    );
+    assert!(barrel_match.source_path.contains("incoming=0"));
+    assert!(barrel_match.source_path.contains("outgoing=1"));
+    assert!(!barrel_match.external_importable);
+}
+
+#[test]
+fn pipeline_infers_ownership_from_incoming_package_even_with_external_outgoing_dependency() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    for (id, path, source) in [
+        (
+            1,
+            "consumer.js",
+            "export const consumer = 'consumer-anchor';",
+        ),
+        (2, "helper.js", "var helper = E(() => dep());"),
+        (3, "dep.js", "export const dep = 'dep-anchor';"),
+    ] {
+        rows.source_files
+            .push(SourceFileInput::new(id, path, Some(source.to_string())));
+    }
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(10),
+            "consumer",
+            "pkg/consumer.js",
+            "pkg",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(1),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(20), "helper", "modules/helper.js").with_source_file(2),
+    );
+    rows.modules.push(
+        ModuleInput::package(
+            ModuleId(30),
+            "dep",
+            "dep/index.js",
+            "dep",
+            Some("1.0.0".to_string()),
+        )
+        .with_source_file(3),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(10),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(20),
+        target: ModuleDependencyTarget::Module(ModuleId(30)),
+    });
+    let package_sources = [
+        PackageSource::external(
+            "pkg",
+            "1.0.0",
+            "pkg/consumer",
+            "consumer.js",
+            "export const consumer = 'consumer-anchor';",
+        ),
+        PackageSource::external(
+            "dep",
+            "1.0.0",
+            "dep",
+            "index.js",
+            "export const dep = 'dep-anchor';",
+        ),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let helper_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(20))
+        .expect("incoming package should own its private helper");
+    assert_eq!(helper_match.package_name, "pkg");
+    assert_eq!(
+        helper_match.strategy,
+        ModuleMatchStrategy::DependencyClosureOwnership
+    );
+    assert!(helper_match.source_path.contains("incoming=1"));
+}
+
+#[test]
+fn pipeline_promotes_anonymous_module_by_rare_package_anchors() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "anon.js",
+        Some(
+            r#"
+            Object.defineProperty(exports, "__esModule", { value: true });
+            exports.fromRemoteMetadata = void 0;
+            const log = "@scope/pkg-runtime";
+            "#
+            .to_string(),
+        ),
+    ));
+    rows.modules.push(
+        ModuleInput::application(ModuleId(10), "anon", "modules/anon.js").with_source_file(1),
+    );
+    let mut package_sources = vec![
+        PackageSource::source_only(
+            "@scope/pkg",
+            "1.0.0",
+            "@scope/pkg/runtime",
+            "runtime.js",
+            r#"
+            export const fromRemoteMetadata = () => "@scope/pkg-runtime";
+            "#,
+        ),
+        PackageSource::source_only(
+            "other",
+            "1.0.0",
+            "other/index",
+            "index.js",
+            "export const unrelated = 'other-runtime';",
+        ),
+    ];
+    for index in 0..32 {
+        package_sources.push(PackageSource::source_only(
+            format!("filler-{index}"),
+            "1.0.0",
+            format!("filler-{index}"),
+            "index.js",
+            format!("export const filler{index} = 'filler-{index}';"),
+        ));
+    }
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let anchor_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(10))
+        .expect("rare anchors should promote package ownership");
+    assert_eq!(anchor_match.package_name, "@scope/pkg");
+    assert_eq!(
+        anchor_match.strategy,
+        ModuleMatchStrategy::AggregateStringAnchorSimilarity
+    );
+    assert_eq!(anchor_match.string_anchor_matches, 2);
+    assert!(!anchor_match.external_importable);
+}
+
+#[test]
+fn pipeline_promotes_short_anonymous_module_by_dependency_cluster() {
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    for (id, source) in [
+        (1, "export const a = 1;"),
+        (2, "export const b = 2;"),
+        (3, "export const c = 3;"),
+        (4, "exports.tiny = 4;"),
+        (
+            5,
+            "exports.large = \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\";",
+        ),
+    ] {
+        rows.source_files.push(SourceFileInput::new(
+            id,
+            format!("{id}.js"),
+            Some(source.to_string()),
+        ));
+    }
+    for (id, name) in [(10, "a"), (20, "b"), (30, "c")] {
+        rows.modules.push(
+            ModuleInput::package(
+                ModuleId(id),
+                name,
+                format!("node_modules/pkg/{name}.js"),
+                "pkg",
+                Some("1.0.0".to_string()),
+            )
+            .with_source_file((id / 10) as u32),
+        );
+    }
+    rows.modules.push(
+        ModuleInput::application(ModuleId(40), "tiny", "modules/tiny.js").with_source_file(4),
+    );
+    rows.modules.push(
+        ModuleInput::application(ModuleId(50), "large", "modules/large.js").with_source_file(5),
+    );
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(10),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(20),
+        target: ModuleDependencyTarget::Module(ModuleId(30)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(40),
+        target: ModuleDependencyTarget::Module(ModuleId(20)),
+    });
+    rows.dependencies.push(ModuleDependencyInput {
+        from_module_id: ModuleId(40),
+        target: ModuleDependencyTarget::Module(ModuleId(50)),
+    });
+    let package_sources = [
+        PackageSource::external("pkg", "1.0.0", "pkg/a", "a.js", "export const a = 1;"),
+        PackageSource::external("pkg", "1.0.0", "pkg/b", "b.js", "export const b = 2;"),
+        PackageSource::external("pkg", "1.0.0", "pkg/c", "c.js", "export const c = 3;"),
+    ];
+
+    let report = match_packages_with_pipeline(&rows, &package_sources, None);
+
+    let cluster_match = report
+        .package_report
+        .matches
+        .iter()
+        .find(|package_match| package_match.module_id == ModuleId(40))
+        .expect("short anonymous module promoted by dependency cluster");
+    assert_eq!(cluster_match.package_name, "pkg");
+    assert!(
+        cluster_match
+            .source_path
+            .starts_with("anonymous-dependency-cluster:pkg@1.0.0:")
+    );
+    assert!(!cluster_match.external_importable);
+}
+
+#[test]
 fn package_source_normalized_hashes_include_stable_pass_alternates() {
     let source_with_boundary = "function add(a,b){return a+b;}\nexports.add = add;";
     let source_without_boundary = "function add(a,b){return a+b;}";

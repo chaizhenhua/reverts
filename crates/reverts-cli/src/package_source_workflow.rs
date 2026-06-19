@@ -11,7 +11,8 @@ pub(crate) use externalization::promote_package_sources_with_externalization_hin
 pub(crate) use reverts_package::{clean_package_entry_path, package_export_specifier};
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use reverts_input::{InputRows, ModuleDependencyTarget, PackageEmissionMode};
 use reverts_ir::{ModuleKind, is_valid_package_name};
@@ -418,7 +419,22 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
     materialize_package_sources: bool,
     persist_materialized_package_sources: bool,
 ) -> Result<LoadedPackageSources, MatchPackagesError> {
-    if package_names.is_empty() {
+    let discovered_root_package_names = if package_source_roots.is_empty() {
+        BTreeSet::new()
+    } else {
+        filter_discovered_package_names_by_source_text(
+            rows,
+            pkg_sources::discover_local_package_names(package_source_roots)?,
+        )
+    };
+    let mut expanded_package_names = if package_names.is_empty() {
+        discovered_root_package_names.clone()
+    } else {
+        expand_package_names_with_local_dependency_closure(package_names, package_source_roots)?
+    };
+    expanded_package_names.extend(discovered_root_package_names);
+
+    if expanded_package_names.is_empty() {
         return Ok(LoadedPackageSources::default());
     }
 
@@ -430,24 +446,28 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
     }
 
     let stale_cache_versions = if has_package_source_cache && materialize_package_sources {
-        stale_package_source_cache_versions(connection, package_names)?
+        stale_package_source_cache_versions(connection, &expanded_package_names)?
     } else {
         BTreeSet::new()
     };
 
     let mut package_sources = if has_package_source_cache {
-        load_cached_package_sources(connection, package_names, materialize_package_sources)?
+        load_cached_package_sources(
+            connection,
+            &expanded_package_names,
+            materialize_package_sources,
+        )?
     } else {
         Vec::new()
     };
     package_sources.extend(load_package_sources_from_roots(
-        package_names,
+        &expanded_package_names,
         package_source_roots,
     )?);
     if materialize_package_sources {
         let materialized_sources = materialize_package_sources_from_hints(
             rows,
-            package_names,
+            &expanded_package_names,
             &package_sources,
             &stale_cache_versions,
         )?;
@@ -458,7 +478,7 @@ pub(crate) fn load_package_sources_with_fingerprint_stats(
     }
     promote_package_sources_with_externalization_hints(
         connection,
-        package_names,
+        &expanded_package_names,
         &mut package_sources,
     )?;
     filter_package_sources_to_best_build_variants(rows, &mut package_sources);
@@ -514,6 +534,93 @@ pub(crate) fn filter_package_sources_to_referenced_package_versions(
     before.saturating_sub(package_sources.len())
 }
 
+fn expand_package_names_with_local_dependency_closure(
+    seed_package_names: &BTreeSet<String>,
+    package_source_roots: &[PathBuf],
+) -> Result<BTreeSet<String>, MatchPackagesError> {
+    if seed_package_names.is_empty() || package_source_roots.is_empty() {
+        return Ok(seed_package_names.clone());
+    }
+    let mut expanded = seed_package_names.clone();
+    let mut stack = seed_package_names.iter().cloned().collect::<Vec<_>>();
+    while let Some(package_name) = stack.pop() {
+        for root in package_source_roots {
+            for package_dir in pkg_sources::package_dir_candidates(root.as_path(), &package_name) {
+                let Some(metadata) = pkg_sources::local_package_metadata(package_dir.as_path())?
+                else {
+                    continue;
+                };
+                if metadata.name != package_name {
+                    continue;
+                }
+                for dependency in local_runtime_dependency_names(package_dir.as_path())? {
+                    if expanded.insert(dependency.clone()) {
+                        stack.push(dependency);
+                    }
+                }
+            }
+        }
+    }
+    Ok(expanded)
+}
+
+fn local_runtime_dependency_names(
+    package_dir: &Path,
+) -> Result<BTreeSet<String>, MatchPackagesError> {
+    let package_json_path = package_dir.join("package.json");
+    let content = fs::read_to_string(package_json_path.as_path()).map_err(|source| {
+        MatchPackagesError::ReadPackageSourceRoot {
+            path: package_json_path.clone(),
+            source,
+        }
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(content.as_str()).map_err(|source| {
+        MatchPackagesError::InvalidPackageMetadata {
+            path: package_json_path.clone(),
+            source,
+        }
+    })?;
+    let mut names = BTreeSet::new();
+    for field in ["dependencies", "optionalDependencies", "peerDependencies"] {
+        let Some(dependencies) = value.get(field).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for package_name in dependencies.keys() {
+            let package_name = package_name.trim();
+            if is_valid_package_name(package_name) {
+                names.insert(package_name.to_string());
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn filter_discovered_package_names_by_source_text(
+    rows: &InputRows,
+    package_names: BTreeSet<String>,
+) -> BTreeSet<String> {
+    if package_names.is_empty() {
+        return package_names;
+    }
+    let haystack = rows
+        .source_files
+        .iter()
+        .filter_map(|source_file| source_file.source.as_deref())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if haystack.is_empty() {
+        return package_names;
+    }
+    package_names
+        .into_iter()
+        .filter(|package_name| {
+            let needle = package_name.to_ascii_lowercase();
+            needle.len() >= 3 && haystack.contains(needle.as_str())
+        })
+        .collect()
+}
+
 fn load_package_sources_from_roots(
     package_names: &BTreeSet<String>,
     package_source_roots: &[PathBuf],
@@ -540,4 +647,71 @@ fn load_package_sources_from_roots(
         }
     }
     Ok(sources)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_package(root: &Path, name: &str, version: &str, extra: &str) {
+        let package_dir = name
+            .split('/')
+            .fold(root.join("node_modules"), |path, segment| {
+                path.join(segment)
+            });
+        std::fs::create_dir_all(package_dir.as_path()).expect("package dir");
+        std::fs::write(
+            package_dir.join("package.json"),
+            format!(
+                r#"{{
+  "name": "{name}",
+  "version": "{version}",
+  "main": "index.js"
+  {extra}
+}}"#
+            ),
+        )
+        .expect("package json");
+        std::fs::write(package_dir.join("index.js"), "module.exports = 1;\n").expect("source");
+    }
+
+    #[test]
+    fn package_source_scope_expands_local_runtime_dependency_closure() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        write_package(
+            tempdir.path(),
+            "seed",
+            "1.0.0",
+            r#",
+  "dependencies": {"dep": "^1.0.0"},
+  "optionalDependencies": {"@scope/opt": "^1.0.0"}
+"#,
+        );
+        write_package(
+            tempdir.path(),
+            "dep",
+            "1.0.0",
+            r#",
+  "dependencies": {"leaf": "^1.0.0"}
+"#,
+        );
+        write_package(tempdir.path(), "@scope/opt", "1.0.0", "");
+        write_package(tempdir.path(), "leaf", "1.0.0", "");
+        write_package(tempdir.path(), "unrelated", "1.0.0", "");
+
+        let seed = BTreeSet::from(["seed".to_string()]);
+        let expanded =
+            expand_package_names_with_local_dependency_closure(&seed, &[tempdir.path().into()])
+                .expect("expand");
+
+        assert_eq!(
+            expanded,
+            BTreeSet::from([
+                "@scope/opt".to_string(),
+                "dep".to_string(),
+                "leaf".to_string(),
+                "seed".to_string()
+            ])
+        );
+    }
 }

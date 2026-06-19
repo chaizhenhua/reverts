@@ -193,7 +193,9 @@ fn cross_version_source_candidate_score(package_match: &ModulePackageMatch) -> u
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
         | ModuleMatchStrategy::AggregateStructuralBagSimilarity
-        | ModuleMatchStrategy::DependencyClosureOwnership => 0,
+        | ModuleMatchStrategy::AggregateStringAnchorSimilarity
+        | ModuleMatchStrategy::DependencyClosureOwnership
+        | ModuleMatchStrategy::PackageGraphNeighborhoodOwnership => 0,
     };
     strategy_score
         + package_match.function_signature_matches * 3

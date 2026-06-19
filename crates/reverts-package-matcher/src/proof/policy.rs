@@ -126,7 +126,9 @@ pub(crate) fn semantic_external_target_policies(
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => Vec::new(),
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::AggregateStringAnchorSimilarity
+        | ModuleMatchStrategy::PackageGraphNeighborhoodOwnership => Vec::new(),
     }
 }
 
@@ -142,12 +144,14 @@ pub(crate) fn canonical_subpath_policy_allows(package_match: &PackageMatch) -> b
             package_match.function_signature_matches >= 3
                 && package_match.string_anchor_matches >= 8
         }
+        ModuleMatchStrategy::AggregateStringAnchorSimilarity => false,
         ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
         | ModuleMatchStrategy::AggregateFunctionSignatureAndStringAnchors => {
             package_match.function_signature_matches >= 2
                 && package_match.string_anchor_matches >= 1
         }
+        ModuleMatchStrategy::PackageGraphNeighborhoodOwnership => false,
         ModuleMatchStrategy::NormalizedSourceHash
         | ModuleMatchStrategy::FunctionSignatureAndStringAnchors
         | ModuleMatchStrategy::PropertyShapeAndStringAnchors
@@ -176,7 +180,9 @@ pub(crate) fn semantic_source_only_export_member_policy_allows(
         | ModuleMatchStrategy::CascadeFunctionCoverage
         | ModuleMatchStrategy::CascadeFunctionOwnership
         | ModuleMatchStrategy::CascadePartialFunctionCoverage
-        | ModuleMatchStrategy::AggregateStructuralBagSimilarity => false,
+        | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+        | ModuleMatchStrategy::AggregateStringAnchorSimilarity
+        | ModuleMatchStrategy::PackageGraphNeighborhoodOwnership => false,
     }
 }
 
@@ -207,6 +213,7 @@ pub(crate) fn dependency_graph_source_fingerprint_policy_allows(
             | ModuleMatchStrategy::CascadeFunctionOwnership
             | ModuleMatchStrategy::CascadePartialFunctionCoverage
             | ModuleMatchStrategy::AggregateStructuralBagSimilarity
+            | ModuleMatchStrategy::AggregateStringAnchorSimilarity
             | ModuleMatchStrategy::PropertyShapeAndStringAnchors
             | ModuleMatchStrategy::ObjectShapeAndStringAnchors
             | ModuleMatchStrategy::ClassShapeAndStringAnchors
