@@ -186,6 +186,13 @@ impl PreAcceptTransform for FoldStaticTemplateLiterals {
     }
 }
 
+fn preserved_source(source_file_path: &str, source: &str) -> String {
+    let mut preserved = format!("// reverts-preserved-source-import-target: {source_file_path}\n");
+    preserved.push_str("// @ts-nocheck\n");
+    preserved.push_str(source);
+    preserved
+}
+
 fn materialize_relative_source_import_targets(
     project: &mut EmittedProject,
     context: &PreAcceptContext<'_>,
@@ -240,7 +247,7 @@ fn materialize_relative_source_import_targets(
         let Ok(specifiers) = collect_static_module_specifiers(
             file.source.as_str(),
             Some(Path::new(file.path.as_str())),
-            ParseGoal::TypeScript,
+            parse_goal_for_path(file.path.as_str()),
         ) else {
             continue;
         };
@@ -269,13 +276,9 @@ fn materialize_relative_source_import_targets(
             if emitted_paths.contains(output_path.as_str()) {
                 continue;
             }
-            let source = format!(
-                "// reverts-preserved-source-import-target: {}\n// @ts-nocheck\n{}",
-                source_file.path, source
-            );
             project.files.push(EmittedFile {
                 path: output_path.clone(),
-                source,
+                source: preserved_source(source_file.path.as_str(), source),
             });
             emitted_paths.insert(output_path.clone());
             source_origin_by_output_path.insert(output_path, source_file.path.clone());
@@ -386,6 +389,16 @@ fn normalize_path(path: &Path) -> String {
 
 fn path_to_slash_string(path: &Path) -> String {
     normalize_path(path)
+}
+
+fn parse_goal_for_path(path: &str) -> ParseGoal {
+    match Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("js" | "jsx" | "mjs" | "cjs") => ParseGoal::JavaScript,
+        _ => ParseGoal::TypeScript,
+    }
 }
 
 fn strip_query_and_fragment(value: &str) -> &str {

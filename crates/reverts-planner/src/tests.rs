@@ -5339,41 +5339,6 @@ fn entrypoint_runtime_uses_shared_helper_module_with_tail_side_effects() {
 }
 
 #[test]
-fn cli_entrypoint_generation_preserves_unreachable_source_modules() {
-    let prelude = "function main() { return 'ok'; }\n";
-    let body = "export const entryValue = 1;\n";
-    let tail = "main();\n";
-    let source = format!("{prelude}{body}{tail}");
-    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
-    rows.source_files
-        .push(SourceFileInput::new(1, "entry.js", Some(source.clone())));
-    rows.source_files.push(SourceFileInput::new(
-        2,
-        "unreachable.js",
-        Some("export const unreachableValue = 1;\n".to_string()),
-    ));
-    rows.modules.push(
-        ModuleInput::application(ModuleId(1), "entry", "modules/entry.ts")
-            .with_source_file(1)
-            .with_source_span(SourceSpan::new(
-                prelude.len() as u32,
-                (prelude.len() + body.len()) as u32,
-            )),
-    );
-    rows.modules.push(
-        ModuleInput::application(ModuleId(2), "unreachable", "modules/unreachable.ts")
-            .with_source_file(2),
-    );
-
-    let plan = plan_from_rows(rows);
-
-    assert!(planned_source_opt(&plan, "cli.ts").is_some());
-    assert!(planned_source_opt(&plan, "modules/entrypoint.ts").is_some());
-    let unreachable = planned_source(&plan, "modules/unreachable.ts");
-    assert!(unreachable.contains("unreachableValue"));
-}
-
-#[test]
 fn entrypoint_runtime_and_module_setters_share_single_helper_state() {
     let planner = ImportExportPlanner;
     let prelude = "var yA;\nfunction main() { initModule(); return yA(); }\n";

@@ -3,6 +3,7 @@ mod audit;
 mod output_paths;
 mod pre_accept;
 mod runtime_dependencies;
+mod source_mirror;
 mod source_rewrites;
 
 use std::collections::HashSet;
@@ -19,6 +20,7 @@ use audit::{
 use output_paths::module_output_paths;
 pub(crate) use output_paths::relative_asset_specifier;
 use runtime_dependencies::collect_runtime_dependencies;
+use source_mirror::collect_source_mirror_assets;
 pub(crate) use source_rewrites::rewrite_string_literal_values;
 
 use reverts_analyze::enrich_program;
@@ -44,6 +46,7 @@ pub struct OutputRun {
     pub audit: AuditReport,
     pub runtime_dependencies: Vec<RuntimeDependency>,
     pub assets: Vec<EmittedAsset>,
+    pub source_mirror_assets: Vec<EmittedAsset>,
     /// Maps each emitted module-level binding to its original (DB) name and the
     /// file it lands in, so a downstream naming agent can read the generated
     /// TypeScript and route names back to the right `(module_id, original)`.
@@ -352,6 +355,7 @@ pub fn generate_project_from_prepared_with_options(
     let runtime_dependencies = collect_runtime_dependencies(input);
     let asset_references = collect_required_asset_references(input);
     let assets = collect_emitted_assets(input, &asset_references);
+    let source_mirror_assets = collect_source_mirror_assets(input);
     audit.extend(audit_required_sources(&program));
     audit.extend(audit_required_assets(input, &asset_references));
     // Only errors zero-out emission. Warnings (e.g. UnprotectedNullableMemberRead
@@ -365,6 +369,7 @@ pub fn generate_project_from_prepared_with_options(
             audit,
             runtime_dependencies,
             assets,
+            source_mirror_assets,
             symbol_index: Vec::new(),
         });
     }
@@ -383,6 +388,7 @@ pub fn generate_project_from_prepared_with_options(
             audit,
             runtime_dependencies,
             assets,
+            source_mirror_assets,
             symbol_index: Vec::new(),
         });
     }
@@ -426,6 +432,7 @@ pub fn generate_project_from_prepared_with_options(
         audit,
         runtime_dependencies,
         assets,
+        source_mirror_assets,
         symbol_index,
     })
 }
@@ -490,6 +497,7 @@ pub fn generate_project_inventory_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            source_mirror_assets: Vec::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -507,6 +515,7 @@ pub fn generate_project_inventory_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            source_mirror_assets: Vec::new(),
             symbol_index: Vec::new(),
         });
     }
@@ -534,6 +543,7 @@ pub fn generate_project_inventory_from_prepared(
         audit,
         runtime_dependencies,
         assets,
+        source_mirror_assets: Vec::new(),
         symbol_index: Vec::new(),
     })
 }

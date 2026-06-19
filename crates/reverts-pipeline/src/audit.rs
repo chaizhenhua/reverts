@@ -400,7 +400,7 @@ pub(crate) fn audit_emitted_project_parse(project: &EmittedProject) -> AuditRepo
         if let Err(error) = parse_source(
             file.source.as_str(),
             Some(Path::new(file.path.as_str())),
-            ParseGoal::TypeScript,
+            parse_goal_for_emitted_path(file.path.as_str()),
         ) {
             audit.push(
                 AuditFinding::error(
@@ -438,7 +438,7 @@ pub(crate) fn audit_emitted_relative_import_targets(
         let Ok(specifiers) = collect_static_module_specifiers(
             file.source.as_str(),
             Some(Path::new(file.path.as_str())),
-            ParseGoal::TypeScript,
+            parse_goal_for_emitted_path(file.path.as_str()),
         ) else {
             continue;
         };
@@ -524,6 +524,16 @@ fn preserved_source_import_target(source: &str) -> Option<&str> {
         .lines()
         .next()
         .and_then(|line| line.strip_prefix("// reverts-preserved-source-import-target: "))
+}
+
+fn parse_goal_for_emitted_path(path: &str) -> ParseGoal {
+    match Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("js" | "jsx" | "mjs" | "cjs") => ParseGoal::JavaScript,
+        _ => ParseGoal::TypeScript,
+    }
 }
 
 fn specifier_requires_emitted_module_target(specifier: &str) -> bool {

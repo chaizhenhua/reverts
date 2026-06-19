@@ -90,13 +90,14 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         run.runtime_dependencies.clone(),
         &manifests,
     );
-    let assets = apply_local_binding_renames_to_code_assets(
+    let mut assets = apply_local_binding_renames_to_code_assets(
         run.assets.as_slice(),
         local_binding_renames.as_slice(),
     )?;
+    assets.extend(run.source_mirror_assets.clone());
     let written = write_accepted_project(
         accepted_project,
-        &assets,
+        assets.as_slice(),
         &args.output,
         &runtime_dependencies,
     )?;

@@ -26,9 +26,11 @@
 //! the candidate set (the graph only follows static named specifiers), mirroring
 //! `plan_reachability`'s "ignore unknown strings rather than guess" rule.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use reverts_ir::{BindingName, is_identifier_like_ascii};
+use reverts_ir::BindingName;
+use reverts_ir::is_identifier_like_ascii;
 
 use crate::runtime_orphan_prune::prune_orphan_runtime_bindings;
 use crate::{
