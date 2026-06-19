@@ -6,6 +6,7 @@
 pub enum HelpTopic {
     TopLevel,
     GenerateProjectV2,
+    ImportUnpacked,
     MatchPackages,
     MatchPackagesReport,
     PackageVersionDiagnostics,
@@ -27,6 +28,7 @@ pub struct CommandSpec {
 }
 
 pub const GENERATE_PROJECT_V2_COMMAND: &str = "generate-project-v2";
+pub const IMPORT_UNPACKED_COMMAND: &str = "import-unpacked";
 pub const MATCH_PACKAGES_COMMAND: &str = "match-packages";
 pub const MATCH_PACKAGES_REPORT_COMMAND: &str = "match-packages-report";
 pub const PACKAGE_VERSION_DIAGNOSTICS_COMMAND: &str = "package-version-diagnostics";
@@ -40,6 +42,11 @@ pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
 pub const MATCH_MODULES_RECALL_COMMAND: &str = "match-modules-recall";
 
 pub const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        name: IMPORT_UNPACKED_COMMAND,
+        topic: HelpTopic::ImportUnpacked,
+        summary: "Import unpack Skill evidence into Reverts SQLite facts",
+    },
     CommandSpec {
         name: MATCH_PACKAGES_COMMAND,
         topic: HelpTopic::MatchPackages,
@@ -119,7 +126,10 @@ pub fn version_text() -> String {
 pub fn help_text(topic: HelpTopic) -> &'static str {
     match topic {
         HelpTopic::TopLevel => {
-            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+            "reverts-cli\n\nUSAGE:\n    reverts-cli <COMMAND> [OPTIONS]\n    reverts-cli --help [COMMAND]\n    reverts-cli --version\n\nCOMMANDS:\n    import-unpacked                  Import unpack Skill evidence into Reverts SQLite facts\n    match-packages                   Populate package_attributions/package_surfaces in SQLite\n    match-packages-report            Report package match, externalization, and source-elimination rates across projects\n    package-version-diagnostics      Diagnose rejected package-version matches without writing SQLite\n    package-cache-audit              Audit package_source_cache freshness and validity\n    package-cache-prune-stale        Delete invalid/stale package_source_cache rows with --apply\n    package-externalization-hints    Generate verified package externalization hint rows\n    extract-assets                   Populate project_assets from asset references in source slices\n    generate-project-v2              Generate a TypeScript project from SQLite input\n    runtime-inventory                Measure emitted runtime helpers and generated internal names\n    symbol-names                     List, propose, or accept symbol semantic names in SQLite\n    naming-progress                  Report semantic-naming completion across public-surface/declarations/full tiers\n    match-modules-recall             Measure cross-project module match recall against a ground-truth project\n\nUse `reverts-cli help <COMMAND>` for command-specific help."
+        }
+        HelpTopic::ImportUnpacked => {
+            "reverts-cli import-unpacked\n\nUSAGE:\n    reverts-cli import-unpacked --input <UNPACKED_ROOT> --manifest <MANIFEST> --project-name <NAME> --output-db <DB> [--ignore-native-assets] [--max-source-bytes <N>] [--bundle-source-bytes <N>]\n\nOPTIONS:\n    --input <UNPACKED_ROOT>       Unpacked source root, for Electron usually Contents/Resources/app\n    --manifest <MANIFEST>         Skill evidence manifest, e.g. reverts-import-evidence.json\n    --project-name <NAME>         Project name stored in Reverts SQLite\n    --output-db <DB>              SQLite database to create\n    --ignore-native-assets        Do not write native .node/Mach-O assets into project_assets\n    --max-source-bytes <N>        Defer source files larger than N bytes as project_assets instead of modules\n    --bundle-source-bytes <N>     Keep source files larger than N bytes as source_files without module rows so the pipeline can extract bundled modules\n\nOUTPUT:\n    Creates canonical Reverts facts: projects, source_files, project_files, modules, module_dependencies, project_assets, and package_attributions."
         }
         HelpTopic::GenerateProjectV2 => {
             "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"

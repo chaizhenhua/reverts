@@ -33,6 +33,13 @@ pub struct StringLiteralFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticModuleSpecifierFact {
+    pub value: String,
+    pub byte_start: u32,
+    pub byte_end: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticTemplateLiteralFact {
     pub value: String,
     pub byte_start: u32,
@@ -328,6 +335,34 @@ pub fn collect_static_resource_specifiers(
         }
 
         let mut collector = StaticResourceSpecifierCollector::default();
+        collector.visit_program(&parsed.program);
+        return Ok(collector.specifiers);
+    }
+
+    Err(JsError::ParseFailed(errors))
+}
+
+pub fn collect_static_module_specifiers(
+    source: &str,
+    path_hint: Option<&Path>,
+    goal: ParseGoal,
+) -> Result<Vec<StaticModuleSpecifierFact>> {
+    let allocator = Allocator::default();
+    let mut errors = Vec::new();
+
+    for source_type in source_type_candidates(path_hint, goal) {
+        let parsed = Parser::new(&allocator, source, source_type)
+            .with_options(parse_options_for(source_type))
+            .parse();
+        if !parsed.errors.is_empty() || parsed.panicked {
+            errors.push(ParseError {
+                source_type: format!("{source_type:?}"),
+                diagnostics: parsed.errors.iter().map(ToString::to_string).collect(),
+            });
+            continue;
+        }
+
+        let mut collector = StaticModuleSpecifierCollector::default();
         collector.visit_program(&parsed.program);
         return Ok(collector.specifiers);
     }
@@ -784,6 +819,56 @@ impl StaticResourceSpecifierCollector {
     }
 }
 
+#[derive(Debug, Default)]
+struct StaticModuleSpecifierCollector {
+    specifiers: Vec<StaticModuleSpecifierFact>,
+}
+
+impl<'a> Visit<'a> for StaticModuleSpecifierCollector {
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        self.push_literal(&declaration.source);
+        walk_import_declaration(self, declaration);
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if let Some(source) = declaration.source.as_ref() {
+            self.push_literal(source);
+        }
+        walk_export_named_declaration(self, declaration);
+    }
+
+    fn visit_export_all_declaration(&mut self, declaration: &ExportAllDeclaration<'a>) {
+        self.push_literal(&declaration.source);
+        walk_export_all_declaration(self, declaration);
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(source) = &expression.source {
+            self.push_literal(source);
+        }
+        walk_import_expression(self, expression);
+    }
+
+    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
+        if expression_identifier(&expression.callee) == Some("require")
+            && let Some(Argument::StringLiteral(source)) = expression.arguments.first()
+        {
+            self.push_literal(source);
+        }
+        walk_call_expression(self, expression);
+    }
+}
+
+impl StaticModuleSpecifierCollector {
+    fn push_literal(&mut self, literal: &StringLiteral<'_>) {
+        self.specifiers.push(StaticModuleSpecifierFact {
+            value: literal.value.as_str().to_string(),
+            byte_start: literal.span.start,
+            byte_end: literal.span.end,
+        });
+    }
+}
+
 fn call_callee_accepts_static_resource(callee: &Expression<'_>) -> bool {
     if expression_identifier(callee) == Some("require") {
         return true;
@@ -885,7 +970,7 @@ fn is_file_url_source_location(value: &str) -> bool {
 
 #[cfg(test)]
 mod void_zero_collector_tests {
-    use super::collect_void_zero_expression_statements;
+    use super::{collect_static_module_specifiers, collect_void_zero_expression_statements};
     use crate::errors::ParseGoal;
 
     fn spans(source: &str) -> Vec<(u32, u32)> {
@@ -920,5 +1005,22 @@ mod void_zero_collector_tests {
         // leaves a valid `() => {}`.
         let source = "const f = () => { void 0; };";
         assert_eq!(spans(source).len(), 1);
+    }
+
+    #[test]
+    fn static_module_specifiers_collects_import_export_require_and_dynamic_import() {
+        let source = r#"
+            import value from "./a.js";
+            export { value } from "./b.js";
+            const c = require("./c");
+            const d = import("./d.mjs");
+            new URL("./asset.png", import.meta.url);
+        "#;
+        let values = collect_static_module_specifiers(source, None, ParseGoal::TypeScript)
+            .expect("parseable")
+            .into_iter()
+            .map(|fact| fact.value)
+            .collect::<Vec<_>>();
+        assert_eq!(values, vec!["./a.js", "./b.js", "./c", "./d.mjs"]);
     }
 }

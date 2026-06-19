@@ -6,6 +6,7 @@
 
 pub(crate) mod extract_assets;
 pub(crate) mod generate_project;
+pub(crate) mod import_unpacked;
 pub(crate) mod match_modules;
 pub(crate) mod match_packages;
 pub(crate) mod naming_progress;

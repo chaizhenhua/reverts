@@ -13,14 +13,15 @@ mod runtime_dependency_coherence;
 mod tests;
 
 pub use args::{
-    ExtractAssetsArgs, MatchPackagesArgs, MatchPackagesReportArgs, NamingProgressArgs,
-    PackageCacheArgs, PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs,
-    RuntimeInventoryArgs,
+    ExtractAssetsArgs, ImportUnpackedArgs, MatchPackagesArgs, MatchPackagesReportArgs,
+    NamingProgressArgs, PackageCacheArgs, PackageExternalizationHintsArgs,
+    PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
 };
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
 };
 pub use commands::generate_project::GenerateProjectV2Args;
+pub use commands::import_unpacked::{ImportUnpackedOutcome, import_unpacked_to_sqlite};
 pub use commands::match_modules::MatchModulesRecallArgs;
 pub use commands::naming_progress::{
     ModuleNamingProgress, NamingKind, NamingProgressReport, Tier, TierBreakdown, TierCoverage,
@@ -34,8 +35,8 @@ pub use commands::runtime_inventory::{
 };
 pub use commands::symbol_names::SymbolNamesArgs;
 pub use errors::{
-    CliError, CliRunError, ExtractAssetsError, MatchPackagesError, NamingProgressError,
-    RuntimeInventoryError, SymbolNamesError,
+    CliError, CliRunError, ExtractAssetsError, ImportUnpackedError, MatchPackagesError,
+    NamingProgressError, RuntimeInventoryError, SymbolNamesError,
 };
 pub use help::{HelpTopic, help_text, version_text};
 
@@ -93,6 +94,7 @@ pub enum CliCommand {
     Help(HelpTopic),
     Version,
     GenerateProjectV2(GenerateProjectV2Args),
+    ImportUnpacked(ImportUnpackedArgs),
     MatchPackages(MatchPackagesArgs),
     MatchPackagesReport(MatchPackagesReportArgs),
     PackageVersionDiagnostics(PackageVersionDiagnosticsArgs),
@@ -168,6 +170,8 @@ struct ClapCli {
 enum ClapCommand {
     #[command(name = "generate-project-v2", disable_help_flag = true)]
     GenerateProjectV2(GenerateProjectV2Args),
+    #[command(name = "import-unpacked", disable_help_flag = true)]
+    ImportUnpacked(ImportUnpackedArgs),
     #[command(name = "match-packages", disable_help_flag = true)]
     MatchPackages(MatchPackagesArgs),
     #[command(name = "match-packages-report", disable_help_flag = true)]
@@ -196,6 +200,7 @@ impl ClapCli {
     fn into_cli_command(self) -> Result<CliCommand, CliError> {
         Ok(match self.command {
             Some(ClapCommand::GenerateProjectV2(args)) => CliCommand::GenerateProjectV2(args),
+            Some(ClapCommand::ImportUnpacked(args)) => CliCommand::ImportUnpacked(args),
             Some(ClapCommand::MatchPackages(args)) => CliCommand::MatchPackages(args),
             Some(ClapCommand::MatchPackagesReport(args)) => {
                 CliCommand::MatchPackagesReport(validate_match_packages_report_for_cli(args)?)
@@ -327,6 +332,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
             Ok(())
         }
         CliCommand::GenerateProjectV2(args) => commands::generate_project::run(args),
+        CliCommand::ImportUnpacked(args) => commands::import_unpacked::run(args),
         CliCommand::MatchPackages(args) => commands::match_packages::run(args),
         CliCommand::MatchPackagesReport(args) => commands::match_packages::run_report(args),
         CliCommand::PackageVersionDiagnostics(args) => {

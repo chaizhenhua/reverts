@@ -38,11 +38,12 @@ pub use lowering::CompilerLowering;
 pub use errors::{JsError, ParseError, ParseGoal, Result, parse_error_message};
 pub use facts::{
     IdentifierReadFact, LazyValueSubSnippet, PathBuilderCallFact, SourceLocationRewriteFact,
-    StatementSpanFact, StaticTemplateLiteralFact, StringLiteralFact, TopLevelStatementFact,
-    TopLevelStatementKind, collect_file_url_source_location_rewrites,
-    collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
-    collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
-    collect_void_zero_expression_statements, lazy_value_sub_snippets,
+    StatementSpanFact, StaticModuleSpecifierFact, StaticTemplateLiteralFact, StringLiteralFact,
+    TopLevelStatementFact, TopLevelStatementKind, collect_file_url_source_location_rewrites,
+    collect_identifier_read_facts, collect_path_builder_calls, collect_static_module_specifiers,
+    collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
+    collect_top_level_statement_facts, collect_void_zero_expression_statements,
+    lazy_value_sub_snippets,
 };
 pub use identifier::{
     is_ascii_identifier_continue, is_ascii_identifier_start, is_identifier_like_ascii,

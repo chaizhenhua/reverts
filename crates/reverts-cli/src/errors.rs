@@ -12,6 +12,8 @@ use reverts_ir::ModuleId;
 use reverts_js::JsError;
 use reverts_pipeline::PipelineError;
 
+pub use crate::commands::import_unpacked::ImportUnpackedError;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliError {
     MissingCommand,
@@ -584,6 +586,7 @@ pub enum CliRunError {
     LoadInput(SqliteInputError),
     Pipeline(PipelineError),
     MatchPackages(MatchPackagesError),
+    ImportUnpacked(ImportUnpackedError),
     ExtractAssets(ExtractAssetsError),
     RuntimeInventory(RuntimeInventoryError),
     NamingProgress(NamingProgressError),
@@ -601,6 +604,7 @@ impl fmt::Display for CliRunError {
             Self::LoadInput(source) => write!(formatter, "{source}"),
             Self::Pipeline(source) => write!(formatter, "{source}"),
             Self::MatchPackages(source) => write!(formatter, "{source}"),
+            Self::ImportUnpacked(source) => write!(formatter, "{source}"),
             Self::ExtractAssets(source) => write!(formatter, "{source}"),
             Self::RuntimeInventory(source) => write!(formatter, "{source}"),
             Self::NamingProgress(source) => write!(formatter, "{source}"),
@@ -635,6 +639,7 @@ impl Error for CliRunError {
             Self::LoadInput(source) => Some(source),
             Self::Pipeline(source) => Some(source),
             Self::MatchPackages(source) => Some(source),
+            Self::ImportUnpacked(source) => Some(source),
             Self::ExtractAssets(source) => Some(source),
             Self::RuntimeInventory(source) => Some(source),
             Self::NamingProgress(source) => Some(source),

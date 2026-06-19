@@ -142,6 +142,31 @@ impl ExtractAssetsArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct ImportUnpackedArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long)]
+    pub manifest: PathBuf,
+    #[arg(long = "project-name")]
+    pub project_name: String,
+    #[arg(long = "output-db")]
+    pub output_db: PathBuf,
+    #[arg(long = "ignore-native-assets")]
+    pub ignore_native_assets: bool,
+    #[arg(long = "max-source-bytes", value_parser = parse_byte_limit)]
+    pub max_source_bytes: Option<u64>,
+    #[arg(long = "bundle-source-bytes", value_parser = parse_byte_limit)]
+    pub bundle_source_bytes: Option<u64>,
+}
+
+impl ImportUnpackedArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::IMPORT_UNPACKED_COMMAND)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
 pub struct RuntimeInventoryArgs {
     #[arg(long, value_parser = parse_project_id)]
     pub project_id: Option<u32>,

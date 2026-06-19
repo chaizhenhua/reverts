@@ -8,8 +8,11 @@
 //! - `audit_required_assets` flags references that the bundle expects
 //!   but `project_assets` doesn't supply (per ADR 0002 this is a warning;
 //!   the emitted source still references the missing asset).
-//! - `collect_emitted_assets` filters the input asset list down to ones
-//!   actually referenced.
+//! - `collect_emitted_assets` carries every input asset forward. Some
+//!   decompilation targets contain assets that are loaded through dynamic
+//!   paths not recoverable from static source analysis; preserving the full
+//!   `project_assets` evidence set keeps output complete while
+//!   `audit_required_assets` still validates known references.
 //! - `rewrite_emitted_asset_references` rewrites the literal in the
 //!   generated source so each module imports its asset through the
 //!   chosen `output_path`, relative to where the module lands.
@@ -29,16 +32,11 @@ use crate::{
 
 pub(crate) fn collect_emitted_assets(
     input: &InputBundle,
-    references: &[AssetReference],
+    _references: &[AssetReference],
 ) -> Vec<EmittedAsset> {
-    let required_logical_paths = references
-        .iter()
-        .map(|reference| reference.logical_path.as_str())
-        .collect::<BTreeSet<_>>();
     input
         .assets
         .iter()
-        .filter(|asset| required_logical_paths.contains(asset.logical_path.as_str()))
         .map(|asset| EmittedAsset {
             path: asset.output_path.clone(),
             bytes: asset.bytes.clone(),

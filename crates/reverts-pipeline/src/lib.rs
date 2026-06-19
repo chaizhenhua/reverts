@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_emits_only_assets_referenced_by_source_literals() {
+    fn pipeline_preserves_unreferenced_project_assets() {
         let mut rows = rows_with_application_source(
             "const native = require('/$bunfs/root/addon.node'); export { native };",
         );
@@ -693,9 +693,11 @@ mod tests {
         let run = generate_project_from_input(input).expect("fixture should emit");
 
         assert!(run.audit.is_clean());
-        assert_eq!(run.assets.len(), 1);
+        assert_eq!(run.assets.len(), 2);
         assert_eq!(run.assets[0].path, "modules/1-app/addon.node");
         assert_eq!(run.assets[0].bytes, b"native");
+        assert_eq!(run.assets[1].path, "modules/1-app/unused.node");
+        assert_eq!(run.assets[1].bytes, b"unused");
     }
 
     #[test]
