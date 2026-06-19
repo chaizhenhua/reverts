@@ -1270,7 +1270,10 @@ mod tests {
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
         assert_eq!(source.matches("from './utils'").count(), 1);
-        assert!(source.contains("import { a, z } from './utils';"));
+        assert!(
+            source.contains("import { a as semanticImport, z as semanticImport2 } from './utils';")
+        );
+        assert!(source.contains("console.log(semanticImport2, semanticImport);"));
     }
 
     #[test]
@@ -1285,13 +1288,15 @@ mod tests {
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
         assert_eq!(source.matches("from './utils'").count(), 1);
-        assert!(source.contains("import { a, z } from './utils';"));
-        assert!(source.contains("console.log(z, a);"));
+        assert!(
+            source.contains("import { a as semanticImport, z as semanticImport2 } from './utils';")
+        );
+        assert!(source.contains("console.log(semanticImport2, semanticImport);"));
         assert!(!source.contains("utils.z"));
     }
 
     #[test]
-    fn late_readability_rename_skips_colliding_source_binding() {
+    fn late_readability_rename_uses_generated_name_when_semantic_collides() {
         let mut rows = rows_with_application_source(
             "var a = 1; var settings = 2; console.log(a, settings); export { a };",
         );
@@ -1303,10 +1308,10 @@ mod tests {
 
         assert!(run.audit.is_clean());
         let source = run.project.files[0].source.as_str();
-        assert!(source.contains("var a: number = 1;"));
+        assert!(source.contains("var semanticValue: number = 1;"));
         assert!(source.contains("var settings: number = 2;"));
-        assert!(source.contains("console.log(a, settings);"));
-        assert!(source.contains("export { a };"));
+        assert!(source.contains("console.log(semanticValue, settings);"));
+        assert!(source.contains("export { semanticValue as a };"));
     }
 
     #[test]

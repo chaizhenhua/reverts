@@ -721,7 +721,7 @@ fn generated_semantic_names_preserve_template_raw_source() {
 }
 
 #[test]
-fn generated_semantic_names_preserving_source_skips_shorthand_symbols() {
+fn generated_semantic_names_preserving_source_expands_shorthand_symbols() {
     let source = "const a = 1; const b = { a }; const { c } = b; console.log(a, c);";
     let renamed = apply_generated_semantic_binding_renames_preserving_source(
         source,
@@ -731,10 +731,34 @@ fn generated_semantic_names_preserving_source_skips_shorthand_symbols() {
     .expect("fixture should parse")
     .expect("safe minified bindings should be renamed");
 
-    assert!(renamed.contains("const a = 1;"));
-    assert!(renamed.contains("{ a }"));
-    assert!(renamed.contains("{ c }"));
+    assert!(renamed.contains("{ a: semantic"));
+    assert!(renamed.contains("{ c: semantic"));
+    assert!(!renamed.contains("{ a }"));
+    assert!(!renamed.contains("{ c }"));
     assert!(renamed.contains("semantic"));
+}
+
+#[test]
+fn generated_semantic_names_preserving_source_expands_import_export_surface() {
+    let source = "import { a } from './a'; const b = a; export { b };";
+    let renamed = apply_generated_semantic_binding_renames_preserving_source(
+        source,
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("fixture should parse")
+    .expect("surface bindings should be renamed");
+
+    assert!(renamed.contains("import { a as semanticImport"));
+    assert!(renamed.contains("export { semantic"));
+    assert!(renamed.contains(" as b }"));
+    let stats = collect_identifier_inventory(
+        renamed.as_str(),
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("renamed source should parse");
+    assert_eq!(stats.semantic_pending_bindings, 0);
 }
 
 #[test]

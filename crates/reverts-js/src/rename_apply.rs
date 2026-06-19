@@ -11,6 +11,7 @@ use oxc_ast::{
 };
 use oxc_parser::Parser;
 use oxc_semantic::{SemanticBuilder, SymbolTable};
+use oxc_span::GetSpan;
 use oxc_syntax::{
     reference::ReferenceId,
     symbol::{SymbolFlags, SymbolId},
@@ -348,6 +349,7 @@ pub fn apply_generated_semantic_binding_renames_preserving_source(
         }
 
         let mut collector = SourceRenameSpanCollector {
+            source,
             symbol_renames: &symbol_renames,
             reference_renames: &reference_renames,
             replacements: Vec::new(),
@@ -417,8 +419,6 @@ fn generated_semantic_binding_renames_for_source_preservation(
 ) -> (BTreeMap<SymbolId, String>, BTreeMap<ReferenceId, String>) {
     let semantic = SemanticBuilder::new().build(program).semantic;
     let symbols = semantic.symbols();
-    let exported_symbols = exported_specifier_symbols(program, symbols);
-    let unsafe_symbols = source_preserving_unsafe_symbols(program, symbols);
     let safe_import_symbols = source_preserving_safe_import_symbols(program);
     let mut used_names = symbols
         .symbol_ids()
@@ -438,14 +438,12 @@ fn generated_semantic_binding_renames_for_source_preservation(
     for symbol_id in symbols.symbol_ids() {
         let original = symbols.get_name(symbol_id);
         let flags = symbols.get_flags(symbol_id);
-        if unsafe_symbols.contains(&symbol_id)
-            || !should_assign_generated_semantic_name_for_source_preservation(
-                original,
-                flags,
-                exported_symbols.contains(&symbol_id),
-                safe_import_symbols.contains(&symbol_id),
-            )
-        {
+        if !should_assign_generated_semantic_name_for_source_preservation(
+            original,
+            flags,
+            false,
+            safe_import_symbols.contains(&symbol_id),
+        ) {
             continue;
         }
         let renamed = unique_safe_identifier_with_counters(
@@ -524,10 +522,7 @@ impl<'a> Visit<'a> for SourcePreservingSafeImportCollector {
                     }
                 }
                 ImportDeclarationSpecifier::ImportSpecifier(specifier) => {
-                    if module_export_name_text(&specifier.imported)
-                        .is_some_and(|imported| imported != specifier.local.name.as_str())
-                        && let Some(symbol_id) = specifier.local.symbol_id.get()
-                    {
+                    if let Some(symbol_id) = specifier.local.symbol_id.get() {
                         self.safe_import_symbols.insert(symbol_id);
                     }
                 }
@@ -537,53 +532,107 @@ impl<'a> Visit<'a> for SourcePreservingSafeImportCollector {
     }
 }
 
-fn source_preserving_unsafe_symbols(
-    program: &Program<'_>,
-    symbols: &SymbolTable,
-) -> BTreeSet<SymbolId> {
-    let mut collector = SourcePreservingUnsafeSymbolCollector {
-        symbols,
-        unsafe_symbols: BTreeSet::new(),
-    };
-    collector.visit_program(program);
-    collector.unsafe_symbols
+struct SourceRenameSpanCollector<'b> {
+    source: &'b str,
+    symbol_renames: &'b BTreeMap<SymbolId, String>,
+    reference_renames: &'b BTreeMap<ReferenceId, String>,
+    replacements: Vec<(usize, usize, String)>,
 }
 
-struct SourcePreservingUnsafeSymbolCollector<'b> {
-    symbols: &'b SymbolTable,
-    unsafe_symbols: BTreeSet<SymbolId>,
+impl SourceRenameSpanCollector<'_> {
+    fn source_slice(&self, start: u32, end: u32) -> &str {
+        &self.source[start as usize..end as usize]
+    }
 }
 
-impl<'a> Visit<'a> for SourcePreservingUnsafeSymbolCollector<'_> {
+impl<'a> Visit<'a> for SourceRenameSpanCollector<'_> {
+    fn visit_import_declaration(&mut self, declaration: &ImportDeclaration<'a>) {
+        if let Some(specifiers) = &declaration.specifiers {
+            for specifier in specifiers {
+                let ImportDeclarationSpecifier::ImportSpecifier(specifier) = specifier else {
+                    continue;
+                };
+                let Some(symbol_id) = specifier.local.symbol_id.get() else {
+                    continue;
+                };
+                let Some(renamed) = self.symbol_renames.get(&symbol_id) else {
+                    continue;
+                };
+                let Some(imported) = module_export_name_text(&specifier.imported) else {
+                    continue;
+                };
+                if imported == specifier.local.name.as_str() {
+                    self.replacements.push((
+                        specifier.span.start as usize,
+                        specifier.span.end as usize,
+                        format!("{imported} as {renamed}"),
+                    ));
+                }
+            }
+        }
+        oxc_ast::visit::walk::walk_import_declaration(self, declaration);
+    }
+
+    fn visit_export_named_declaration(&mut self, declaration: &ExportNamedDeclaration<'a>) {
+        if declaration.source.is_none() {
+            for specifier in &declaration.specifiers {
+                let ModuleExportName::IdentifierReference(local) = &specifier.local else {
+                    continue;
+                };
+                let Some(reference_id) = local.reference_id.get() else {
+                    continue;
+                };
+                let Some(renamed) = self.reference_renames.get(&reference_id) else {
+                    continue;
+                };
+                let Some(exported) = module_export_name_text(&specifier.exported) else {
+                    continue;
+                };
+                if local.name.as_str() == exported {
+                    self.replacements.push((
+                        specifier.span.start as usize,
+                        specifier.span.end as usize,
+                        format!("{renamed} as {exported}"),
+                    ));
+                }
+            }
+        }
+        oxc_ast::visit::walk::walk_export_named_declaration(self, declaration);
+    }
+
     fn visit_object_property(&mut self, property: &ObjectProperty<'a>) {
         if property.shorthand
             && let oxc_ast::ast::Expression::Identifier(identifier) = &property.value
             && let Some(reference_id) = identifier.reference_id.get()
-            && let Some(symbol_id) = self.symbols.get_reference(reference_id).symbol_id()
+            && let Some(renamed) = self.reference_renames.get(&reference_id)
         {
-            self.unsafe_symbols.insert(symbol_id);
+            let key = self.source_slice(property.key.span().start, property.key.span().end);
+            self.replacements.push((
+                property.span.start as usize,
+                property.span.end as usize,
+                format!("{key}: {renamed}"),
+            ));
         }
         oxc_ast::visit::walk::walk_object_property(self, property);
     }
 
     fn visit_binding_property(&mut self, property: &BindingProperty<'a>) {
         if property.shorthand
-            && let BindingPatternKind::BindingIdentifier(identifier) = &property.value.kind
-            && let Some(symbol_id) = identifier.symbol_id.get()
+            && let Some((symbol_id, binding_end)) =
+                binding_property_shorthand_symbol(&property.value.kind)
+            && let Some(renamed) = self.symbol_renames.get(&symbol_id)
         {
-            self.unsafe_symbols.insert(symbol_id);
+            let key = self.source_slice(property.key.span().start, property.key.span().end);
+            let suffix = self.source_slice(binding_end, property.span.end);
+            self.replacements.push((
+                property.span.start as usize,
+                property.span.end as usize,
+                format!("{key}: {renamed}{suffix}"),
+            ));
         }
         oxc_ast::visit::walk::walk_binding_property(self, property);
     }
-}
 
-struct SourceRenameSpanCollector<'b> {
-    symbol_renames: &'b BTreeMap<SymbolId, String>,
-    reference_renames: &'b BTreeMap<ReferenceId, String>,
-    replacements: Vec<(usize, usize, String)>,
-}
-
-impl<'a> Visit<'a> for SourceRenameSpanCollector<'_> {
     fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
         let Some(symbol_id) = identifier.symbol_id.get() else {
             return;
@@ -610,6 +659,25 @@ impl<'a> Visit<'a> for SourceRenameSpanCollector<'_> {
             identifier.span.end as usize,
             renamed.clone(),
         ));
+    }
+}
+
+fn binding_property_shorthand_symbol(kind: &BindingPatternKind<'_>) -> Option<(SymbolId, u32)> {
+    match kind {
+        BindingPatternKind::BindingIdentifier(identifier) => identifier
+            .symbol_id
+            .get()
+            .map(|symbol_id| (symbol_id, identifier.span.end)),
+        BindingPatternKind::AssignmentPattern(assignment) => {
+            let BindingPatternKind::BindingIdentifier(identifier) = &assignment.left.kind else {
+                return None;
+            };
+            identifier
+                .symbol_id
+                .get()
+                .map(|symbol_id| (symbol_id, identifier.span.end))
+        }
+        BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => None,
     }
 }
 
@@ -667,11 +735,10 @@ impl<'a> Visit<'a> for TemplateRawCollector {
 fn should_assign_generated_semantic_name(
     name: &str,
     flags: SymbolFlags,
-    is_exported_specifier: bool,
+    _is_exported_specifier: bool,
 ) -> bool {
     crate::identifier::is_minified_identifier(name)
-        && !is_exported_specifier
-        && !flags.intersects(SymbolFlags::Import | SymbolFlags::TypeImport)
+        && !flags.intersects(SymbolFlags::TypeImport)
         && !matches!(
             name,
             "_$cached"
