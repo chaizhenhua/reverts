@@ -4,8 +4,9 @@ use std::fmt;
 use reverts_ir::{BindingName, InferredType};
 use reverts_js::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
-    GeneratedTypeAnnotation, GeneratedTypeKind, format_source_with_module_items_request,
-    sanitize_identifier,
+    GeneratedTypeAnnotation, GeneratedTypeKind,
+    apply_generated_semantic_binding_renames_preserving_source,
+    format_source_with_module_items_request, sanitize_identifier,
 };
 use reverts_observe::{AuditFinding, FindingCode};
 use reverts_planner::{CompilerPreservationAction, EmitPlan, PlannedFile, ValidatedEmitPlan};
@@ -117,8 +118,11 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
     // Per ADR 0002 the emitter is faithful, not corrective. Two paths reach
     // raw-body emission:
     //   1. `should_preserve_raw_source_body` — template-literal preservation:
-    //      OXC codegen would normalize whitespace inside quasis. No finding;
-    //      this is deliberate preservation, not an implicit repair path.
+    //      OXC codegen would normalize whitespace inside quasis. In this mode
+    //      we may still apply AST-guided identifier-span renames, but the
+    //      source-preserving pass reparses the output and proves template raw
+    //      chunks are unchanged before accepting it. No finding; this is
+    //      deliberate preservation, not an implicit repair path.
     //   2. `format_source_with_module_items_and_renames` returns Err — the
     //      injection pass refused the body (e.g. `const X;`, JSX comma
     //      patterns). The raw body ships without the planned imports /
@@ -133,7 +137,15 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
         &generated_type_annotations,
         lowering,
     ) {
-        (body_source, None)
+        let renamed = apply_generated_semantic_binding_renames_preserving_source(
+            body_source.as_str(),
+            file.source_strategy().path_hint(file.path.as_str()),
+            file.source_strategy().parse_goal(),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or(body_source);
+        (renamed, None)
     } else {
         match format_source_with_module_items_request(FormatSourceRequest {
             body_source: &body_source,

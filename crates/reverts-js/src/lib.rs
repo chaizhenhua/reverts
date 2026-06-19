@@ -62,6 +62,7 @@ pub use lazy::{
 };
 pub(crate) use local_named_exports::module_export_name_text;
 pub use parse::{parse_options_for, parse_source, source_type_candidates, source_type_for_parse};
+pub use rename_apply::apply_generated_semantic_binding_renames_preserving_source;
 pub use type_annotations::{
     GeneratedTypeAnnotation, GeneratedTypeKind, TypeCoverageStats,
     apply_import_member_type_queries_to_program, apply_type_annotations_to_program,

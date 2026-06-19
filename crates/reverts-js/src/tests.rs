@@ -3,13 +3,14 @@ use std::path::Path;
 use super::{
     CompilerLowering, FormatSourceRequest, GeneratedExport, GeneratedImport, GeneratedRename,
     ImportUsageScope, JsError, LazyBodyClassification, ParseGoal, TopLevelStatementKind,
-    classify_import_usage_scope, classify_lazy_module_body,
-    collect_file_url_source_location_rewrites, collect_identifier_inventory,
-    collect_identifier_read_facts, collect_path_builder_calls, collect_static_resource_specifiers,
-    collect_static_template_literals, collect_string_literals, collect_top_level_statement_facts,
-    collect_type_coverage_stats, collect_void_zero_expression_statements,
-    extract_lazy_module_eager_value, format_source_minified, format_source_pretty,
-    format_source_with_module_items, format_source_with_module_items_and_renames,
+    apply_generated_semantic_binding_renames_preserving_source, classify_import_usage_scope,
+    classify_lazy_module_body, collect_file_url_source_location_rewrites,
+    collect_identifier_inventory, collect_identifier_read_facts, collect_path_builder_calls,
+    collect_static_resource_specifiers, collect_static_template_literals, collect_string_literals,
+    collect_top_level_statement_facts, collect_type_coverage_stats,
+    collect_void_zero_expression_statements, extract_lazy_module_eager_value,
+    format_source_minified, format_source_pretty, format_source_with_module_items,
+    format_source_with_module_items_and_renames,
     format_source_with_module_items_and_renames_with_report,
     format_source_with_module_items_request, lazy_value_sub_snippets,
     normalize_source_for_pipeline, parse_error_message, parse_options_for, parse_source,
@@ -694,6 +695,46 @@ fn generated_semantic_names_rename_minified_bindings_ast_first() {
     )
     .expect("formatted source should parse");
     assert_eq!(stats.semantic_pending_bindings, 0);
+}
+
+#[test]
+fn generated_semantic_names_preserve_template_raw_source() {
+    let source = "let b = 1; const a = `keep ${b}\\n raw`; function c(d) { return a + d; }";
+    let renamed = apply_generated_semantic_binding_renames_preserving_source(
+        source,
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("fixture should parse")
+    .expect("minified bindings should be renamed");
+
+    assert!(renamed.contains("`keep ${semantic"));
+    assert!(renamed.contains("\\n raw`"));
+    assert!(renamed.contains("function semanticFunction("));
+    let stats = collect_identifier_inventory(
+        renamed.as_str(),
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("renamed source should parse");
+    assert_eq!(stats.semantic_pending_bindings, 0);
+}
+
+#[test]
+fn generated_semantic_names_preserving_source_skips_shorthand_symbols() {
+    let source = "const a = 1; const b = { a }; const { c } = b; console.log(a, c);";
+    let renamed = apply_generated_semantic_binding_renames_preserving_source(
+        source,
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+    )
+    .expect("fixture should parse")
+    .expect("safe minified bindings should be renamed");
+
+    assert!(renamed.contains("const a = 1;"));
+    assert!(renamed.contains("{ a }"));
+    assert!(renamed.contains("{ c }"));
+    assert!(renamed.contains("semantic"));
 }
 
 #[test]
