@@ -727,7 +727,7 @@ mod tests {
         assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
         let emitted = run.project.files[0].source.as_str();
         assert!(
-            emitted.contains("var docs = \"alpha\\nbravo\\ncharlie\\ndelta"),
+            emitted.contains("var docs: string = \"alpha\\nbravo\\ncharlie\\ndelta"),
             "multiline static template must be a regular escaped string, got:\n{emitted}",
         );
         assert!(

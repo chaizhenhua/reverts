@@ -24,6 +24,7 @@ use oxc_ast::visit::walk_mut::{
 use oxc_parser::Parser;
 use oxc_semantic::{SemanticBuilder, SymbolTable};
 use oxc_span::SPAN;
+use oxc_syntax::reference::ReferenceId;
 use oxc_syntax::scope::ScopeFlags;
 use oxc_syntax::symbol::SymbolId;
 
@@ -73,6 +74,7 @@ impl TypeCoverageStats {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum InferredExpressionType {
     Primitive(GeneratedTypeKind),
+    Named(String),
     Object(Vec<(String, InferredExpressionType)>),
     Array(Box<InferredExpressionType>),
     Union(Vec<InferredExpressionType>),
@@ -175,9 +177,19 @@ pub fn apply_type_annotations_to_program<'a>(
     };
     annotator.visit_program(program);
 
-    let call_site_parameter_types = call_site_parameter_types(program);
+    let identifier_types = inferred_identifier_types(program);
+    let mut identifier_annotator = IdentifierTypeAnnotator {
+        builder: &builder,
+        written_bindings: &written_bindings,
+        identifier_types: &identifier_types,
+    };
+    identifier_annotator.visit_program(program);
+
+    let call_site_parameter_types = call_site_parameter_types(program, &identifier_types);
+    let reference_types = inferred_reference_types(program, &identifier_types);
     let mut function_annotator = FunctionSignatureAnnotator {
         builder: &builder,
+        reference_types: &reference_types,
         call_site_parameter_types: &call_site_parameter_types,
     };
     function_annotator.visit_program(program);
@@ -324,8 +336,47 @@ fn annotate_safe_variable_declaration<'a>(
     }
 }
 
+struct IdentifierTypeAnnotator<'b, 'a> {
+    builder: &'b AstBuilder<'a>,
+    written_bindings: &'b BTreeSet<String>,
+    identifier_types: &'b BTreeMap<SymbolId, InferredExpressionType>,
+}
+
+impl<'a> VisitMut<'a> for IdentifierTypeAnnotator<'_, 'a> {
+    fn visit_variable_declaration(&mut self, declaration: &mut VariableDeclaration<'a>) {
+        for declarator in declaration.declarations.iter_mut() {
+            if declarator.id.type_annotation.is_some() {
+                continue;
+            }
+            let Some(binding) = binding_pattern_identifier(&declarator.id) else {
+                continue;
+            };
+            if declaration.kind != VariableDeclarationKind::Const
+                && self.written_bindings.contains(binding)
+            {
+                continue;
+            }
+            let Some(symbol_id) = binding_pattern_symbol_id(&declarator.id) else {
+                continue;
+            };
+            let Some(inferred) = self.identifier_types.get(&symbol_id) else {
+                continue;
+            };
+            let Some(type_annotation) =
+                type_annotation_for_inferred_expression_type(self.builder, inferred)
+            else {
+                continue;
+            };
+            declarator.id.type_annotation =
+                Some(self.builder.alloc_ts_type_annotation(SPAN, type_annotation));
+        }
+        walk_variable_declaration(self, declaration);
+    }
+}
+
 struct FunctionSignatureAnnotator<'b, 'a> {
     builder: &'b AstBuilder<'a>,
+    reference_types: &'b BTreeMap<ReferenceId, InferredExpressionType>,
     call_site_parameter_types: &'b BTreeMap<SymbolId, Vec<Option<InferredExpressionType>>>,
 }
 
@@ -347,7 +398,7 @@ impl<'a> VisitMut<'a> for FunctionSignatureAnnotator<'_, 'a> {
                         symbol_id,
                         &mut function.params,
                     );
-                    annotate_function_return(self.builder, function);
+                    annotate_function_return(self.builder, self.reference_types, function);
                 }
                 Expression::ArrowFunctionExpression(arrow) => {
                     annotate_function_parameters(self.builder, &mut arrow.params);
@@ -357,7 +408,7 @@ impl<'a> VisitMut<'a> for FunctionSignatureAnnotator<'_, 'a> {
                         symbol_id,
                         &mut arrow.params,
                     );
-                    annotate_arrow_return(self.builder, arrow);
+                    annotate_arrow_return(self.builder, self.reference_types, arrow);
                 }
                 _ => {}
             }
@@ -377,13 +428,13 @@ impl<'a> VisitMut<'a> for FunctionSignatureAnnotator<'_, 'a> {
                 &mut function.params,
             );
         }
-        annotate_function_return(self.builder, function);
+        annotate_function_return(self.builder, self.reference_types, function);
         walk_function(self, function, flags);
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &mut ArrowFunctionExpression<'a>) {
         annotate_function_parameters(self.builder, &mut arrow.params);
-        annotate_arrow_return(self.builder, arrow);
+        annotate_arrow_return(self.builder, self.reference_types, arrow);
         walk_arrow_function_expression(self, arrow);
     }
 }
@@ -465,14 +516,18 @@ fn annotate_defaulted_binding_pattern<'a>(
     assignment.left.type_annotation = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
 }
 
-fn annotate_function_return<'a>(builder: &AstBuilder<'a>, function: &mut Function<'a>) {
+fn annotate_function_return<'a>(
+    builder: &AstBuilder<'a>,
+    reference_types: &BTreeMap<ReferenceId, InferredExpressionType>,
+    function: &mut Function<'a>,
+) {
     if function.return_type.is_some() || function.r#async || function.generator {
         return;
     }
     let Some(body) = &function.body else {
         return;
     };
-    let Some(inferred) = body_return_type(body) else {
+    let Some(inferred) = body_return_type(body, reference_types) else {
         return;
     };
     let Some(type_annotation) = type_annotation_for_inferred_expression_type(builder, &inferred)
@@ -482,11 +537,15 @@ fn annotate_function_return<'a>(builder: &AstBuilder<'a>, function: &mut Functio
     function.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
 }
 
-fn annotate_arrow_return<'a>(builder: &AstBuilder<'a>, arrow: &mut ArrowFunctionExpression<'a>) {
+fn annotate_arrow_return<'a>(
+    builder: &AstBuilder<'a>,
+    reference_types: &BTreeMap<ReferenceId, InferredExpressionType>,
+    arrow: &mut ArrowFunctionExpression<'a>,
+) {
     if arrow.return_type.is_some() || arrow.r#async {
         return;
     }
-    let Some(inferred) = body_return_type(&arrow.body) else {
+    let Some(inferred) = body_return_type(&arrow.body, reference_types) else {
         return;
     };
     let Some(type_annotation) = type_annotation_for_inferred_expression_type(builder, &inferred)
@@ -496,8 +555,15 @@ fn annotate_arrow_return<'a>(builder: &AstBuilder<'a>, arrow: &mut ArrowFunction
     arrow.return_type = Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
 }
 
-fn body_return_type(body: &FunctionBody<'_>) -> Option<InferredExpressionType> {
-    let mut collector = ReturnTypeCollector::default();
+fn body_return_type(
+    body: &FunctionBody<'_>,
+    reference_types: &BTreeMap<ReferenceId, InferredExpressionType>,
+) -> Option<InferredExpressionType> {
+    let mut collector = ReturnTypeCollector {
+        reference_types,
+        inferred: Vec::new(),
+        conflict: false,
+    };
     collector.visit_function_body(body);
     if collector.conflict {
         return None;
@@ -534,19 +600,21 @@ fn merged_expression_type(
     None
 }
 
-#[derive(Default)]
-struct ReturnTypeCollector {
+struct ReturnTypeCollector<'b> {
+    reference_types: &'b BTreeMap<ReferenceId, InferredExpressionType>,
     inferred: Vec<InferredExpressionType>,
     conflict: bool,
 }
 
-impl<'a> Visit<'a> for ReturnTypeCollector {
+impl<'a> Visit<'a> for ReturnTypeCollector<'_> {
     fn visit_return_statement(&mut self, statement: &ReturnStatement<'a>) {
         let Some(argument) = &statement.argument else {
             self.conflict = true;
             return;
         };
-        let Some(inferred) = inferred_expression_type(argument, 0) else {
+        let Some(inferred) =
+            inferred_expression_type_with_context(argument, 0, self.reference_types)
+        else {
             self.conflict = true;
             return;
         };
@@ -753,10 +821,116 @@ fn binding_pattern_symbol_id(pattern: &BindingPattern<'_>) -> Option<SymbolId> {
     }
 }
 
+fn inferred_identifier_types(program: &Program<'_>) -> BTreeMap<SymbolId, InferredExpressionType> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    let symbols = semantic.symbols();
+    let mut types = BTreeMap::new();
+
+    for _ in 0..4 {
+        let before = types.len();
+        let reference_types = reference_types_for_symbols(program, symbols, &types);
+        let mut collector = IdentifierTypeCollector {
+            known_types: &types,
+            reference_types: &reference_types,
+            discovered_types: BTreeMap::new(),
+        };
+        collector.visit_program(program);
+        types.extend(collector.discovered_types);
+        if types.len() == before {
+            break;
+        }
+    }
+
+    types
+}
+
+fn inferred_reference_types(
+    program: &Program<'_>,
+    identifier_types: &BTreeMap<SymbolId, InferredExpressionType>,
+) -> BTreeMap<ReferenceId, InferredExpressionType> {
+    let semantic = SemanticBuilder::new().build(program).semantic;
+    reference_types_for_symbols(program, semantic.symbols(), identifier_types)
+}
+
+fn reference_types_for_symbols(
+    program: &Program<'_>,
+    symbols: &SymbolTable,
+    identifier_types: &BTreeMap<SymbolId, InferredExpressionType>,
+) -> BTreeMap<ReferenceId, InferredExpressionType> {
+    let mut collector = ReferenceTypeCollector {
+        symbols,
+        identifier_types,
+        reference_types: BTreeMap::new(),
+    };
+    collector.visit_program(program);
+    collector.reference_types
+}
+
+struct ReferenceTypeCollector<'b> {
+    symbols: &'b SymbolTable,
+    identifier_types: &'b BTreeMap<SymbolId, InferredExpressionType>,
+    reference_types: BTreeMap<ReferenceId, InferredExpressionType>,
+}
+
+impl<'a> Visit<'a> for ReferenceTypeCollector<'_> {
+    fn visit_identifier_reference(&mut self, identifier: &oxc_ast::ast::IdentifierReference<'a>) {
+        let Some(reference_id) = identifier.reference_id.get() else {
+            return;
+        };
+        let Some(symbol_id) = self.symbols.get_reference(reference_id).symbol_id() else {
+            return;
+        };
+        let Some(inferred) = self.identifier_types.get(&symbol_id) else {
+            return;
+        };
+        self.reference_types.insert(reference_id, inferred.clone());
+    }
+}
+
+struct IdentifierTypeCollector<'b> {
+    known_types: &'b BTreeMap<SymbolId, InferredExpressionType>,
+    reference_types: &'b BTreeMap<ReferenceId, InferredExpressionType>,
+    discovered_types: BTreeMap<SymbolId, InferredExpressionType>,
+}
+
+impl<'a> Visit<'a> for IdentifierTypeCollector<'_> {
+    fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+        for declarator in &declaration.declarations {
+            let Some(symbol_id) = binding_pattern_symbol_id(&declarator.id) else {
+                continue;
+            };
+            if self.known_types.contains_key(&symbol_id)
+                || self.discovered_types.contains_key(&symbol_id)
+            {
+                continue;
+            }
+            let inferred = match &declarator.id.type_annotation {
+                Some(type_annotation) => {
+                    inferred_expression_type_from_ts_type(&type_annotation.type_annotation)
+                }
+                None if declaration.kind == VariableDeclarationKind::Const => {
+                    let init = declarator.init.as_ref();
+                    init.and_then(|expression| {
+                        inferred_expression_type_with_context(expression, 0, self.reference_types)
+                    })
+                }
+                None => None,
+            };
+            if let Some(inferred) = inferred {
+                self.discovered_types.insert(symbol_id, inferred);
+            }
+        }
+        walk_variable_declaration_read(self, declaration);
+    }
+}
+
 fn call_site_parameter_types(
     program: &Program<'_>,
+    identifier_types: &BTreeMap<SymbolId, InferredExpressionType>,
 ) -> BTreeMap<SymbolId, Vec<Option<InferredExpressionType>>> {
     let semantic = SemanticBuilder::new().build(program).semantic;
+    let reference_types =
+        reference_types_for_symbols(program, semantic.symbols(), identifier_types);
     let callable_parameter_counts = callable_parameter_counts(program);
     if callable_parameter_counts.is_empty() {
         return BTreeMap::new();
@@ -764,6 +938,7 @@ fn call_site_parameter_types(
 
     let mut collector = CallSiteArgumentCollector {
         symbols: semantic.symbols(),
+        reference_types: &reference_types,
         callable_parameter_counts: &callable_parameter_counts,
         evidence: BTreeMap::new(),
     };
@@ -864,6 +1039,7 @@ struct ParameterTypeEvidence {
 
 struct CallSiteArgumentCollector<'b> {
     symbols: &'b SymbolTable,
+    reference_types: &'b BTreeMap<ReferenceId, InferredExpressionType>,
     callable_parameter_counts: &'b BTreeMap<SymbolId, usize>,
     evidence: BTreeMap<SymbolId, Vec<ParameterTypeEvidence>>,
 }
@@ -907,7 +1083,7 @@ impl CallSiteArgumentCollector<'_> {
                 evidence[index].conflict = true;
                 continue;
             };
-            match inferred_expression_type(expression, 0) {
+            match inferred_expression_type_with_context(expression, 0, self.reference_types) {
                 Some(ty) => evidence[index].types.push(ty),
                 None => evidence[index].conflict = true,
             }
@@ -959,6 +1135,7 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
         {
             Some(GeneratedTypeKind::String)
         }
+        Expression::TemplateLiteral(_) => Some(GeneratedTypeKind::String),
         Expression::UnaryExpression(unary)
             if unary.operator == oxc_ast::ast::UnaryOperator::Delete =>
         {
@@ -973,6 +1150,13 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
                 ) =>
         {
             Some(GeneratedTypeKind::Boolean)
+        }
+        Expression::BinaryExpression(binary)
+            if binary.operator == oxc_ast::ast::BinaryOperator::Addition
+                && (expression_has_scalar_type(&binary.left, GeneratedTypeKind::String)
+                    || expression_has_scalar_type(&binary.right, GeneratedTypeKind::String)) =>
+        {
+            Some(GeneratedTypeKind::String)
         }
         Expression::BinaryExpression(binary)
             if numeric_binary_operator_returns_number(binary.operator)
@@ -1027,6 +1211,14 @@ fn inferred_expression_type(
     expression: &Expression<'_>,
     depth: usize,
 ) -> Option<InferredExpressionType> {
+    inferred_expression_type_with_context(expression, depth, &BTreeMap::new())
+}
+
+fn inferred_expression_type_with_context(
+    expression: &Expression<'_>,
+    depth: usize,
+    reference_types: &BTreeMap<ReferenceId, InferredExpressionType>,
+) -> Option<InferredExpressionType> {
     if depth > 2 {
         return None;
     }
@@ -1034,13 +1226,27 @@ fn inferred_expression_type(
         return Some(InferredExpressionType::Primitive(kind));
     }
     match expression {
+        Expression::Identifier(identifier) => {
+            let reference_id = identifier.reference_id.get()?;
+            reference_types.get(&reference_id).cloned()
+        }
         Expression::ArrayExpression(array) => array_expression_type(array, depth),
         Expression::ObjectExpression(object) => object_expression_type(object, depth),
         Expression::CallExpression(call) => builtin_call_type(call),
+        Expression::NewExpression(new_expression) => builtin_new_expression_type(new_expression),
+        Expression::RegExpLiteral(_) => Some(InferredExpressionType::Named("RegExp".to_string())),
         Expression::ConditionalExpression(conditional) => {
             let mut types = vec![
-                inferred_expression_type(&conditional.consequent, depth + 1)?,
-                inferred_expression_type(&conditional.alternate, depth + 1)?,
+                inferred_expression_type_with_context(
+                    &conditional.consequent,
+                    depth + 1,
+                    reference_types,
+                )?,
+                inferred_expression_type_with_context(
+                    &conditional.alternate,
+                    depth + 1,
+                    reference_types,
+                )?,
             ];
             merged_expression_type(&mut types)
         }
@@ -1051,8 +1257,8 @@ fn inferred_expression_type(
             ) =>
         {
             let mut types = vec![
-                inferred_expression_type(&logical.left, depth + 1)?,
-                inferred_expression_type(&logical.right, depth + 1)?,
+                inferred_expression_type_with_context(&logical.left, depth + 1, reference_types)?,
+                inferred_expression_type_with_context(&logical.right, depth + 1, reference_types)?,
             ];
             merged_expression_type(&mut types)
         }
@@ -1120,6 +1326,29 @@ fn builtin_call_type(call: &oxc_ast::ast::CallExpression<'_>) -> Option<Inferred
         _ => return None,
     };
     Some(InferredExpressionType::Primitive(kind))
+}
+
+fn builtin_new_expression_type(
+    new_expression: &oxc_ast::ast::NewExpression<'_>,
+) -> Option<InferredExpressionType> {
+    if new_expression.type_parameters.is_some() {
+        return None;
+    }
+    let path = static_member_path(&new_expression.callee)?;
+    let name = match path.as_slice() {
+        ["Date"] => "Date",
+        ["Error"]
+        | ["TypeError"]
+        | ["RangeError"]
+        | ["ReferenceError"]
+        | ["SyntaxError"]
+        | ["URIError"]
+        | ["EvalError"] => "Error",
+        ["RegExp"] => "RegExp",
+        ["URL"] => "URL",
+        _ => return None,
+    };
+    Some(InferredExpressionType::Named(name.to_string()))
 }
 
 fn global_static_member_type(expression: &Expression<'_>) -> Option<InferredExpressionType> {
@@ -1222,6 +1451,14 @@ fn type_annotation_for_inferred_expression_type<'a>(
 ) -> Option<TSType<'a>> {
     match inferred {
         InferredExpressionType::Primitive(kind) => type_annotation_for_kind(builder, *kind),
+        InferredExpressionType::Named(name) => {
+            let type_name = builder.ts_type_name_identifier_reference(SPAN, name.as_str());
+            Some(builder.ts_type_type_reference(
+                SPAN,
+                type_name,
+                None::<oxc_allocator::Box<'a, TSTypeParameterInstantiation<'a>>>,
+            ))
+        }
         InferredExpressionType::Object(properties) => {
             let mut members = builder.vec();
             for (name, value_type) in properties {
@@ -1251,6 +1488,62 @@ fn type_annotation_for_inferred_expression_type<'a>(
             }
             Some(builder.ts_type_union_type(SPAN, members))
         }
+    }
+}
+
+fn inferred_expression_type_from_ts_type(ty: &TSType<'_>) -> Option<InferredExpressionType> {
+    match ty {
+        TSType::TSStringKeyword(_) => {
+            Some(InferredExpressionType::Primitive(GeneratedTypeKind::String))
+        }
+        TSType::TSNumberKeyword(_) => {
+            Some(InferredExpressionType::Primitive(GeneratedTypeKind::Number))
+        }
+        TSType::TSBooleanKeyword(_) => Some(InferredExpressionType::Primitive(
+            GeneratedTypeKind::Boolean,
+        )),
+        TSType::TSBigIntKeyword(_) => {
+            Some(InferredExpressionType::Primitive(GeneratedTypeKind::BigInt))
+        }
+        TSType::TSNullKeyword(_) => {
+            Some(InferredExpressionType::Primitive(GeneratedTypeKind::Null))
+        }
+        TSType::TSUndefinedKeyword(_) => Some(InferredExpressionType::Primitive(
+            GeneratedTypeKind::Undefined,
+        )),
+        TSType::TSNeverKeyword(_) => {
+            Some(InferredExpressionType::Primitive(GeneratedTypeKind::Never))
+        }
+        TSType::TSArrayType(array) => Some(InferredExpressionType::Array(Box::new(
+            inferred_expression_type_from_ts_type(&array.element_type)?,
+        ))),
+        TSType::TSParenthesizedType(parenthesized) => {
+            inferred_expression_type_from_ts_type(&parenthesized.type_annotation)
+        }
+        TSType::TSUnionType(union) if union.types.len() <= 3 => {
+            let mut members = Vec::new();
+            for ty in &union.types {
+                members.push(inferred_expression_type_from_ts_type(ty)?);
+            }
+            Some(InferredExpressionType::Union(members))
+        }
+        TSType::TSTypeReference(reference) if reference.type_parameters.is_none() => {
+            let name = ts_type_name_identifier(&reference.type_name)?;
+            match name {
+                "Date" | "Error" | "RegExp" | "URL" => {
+                    Some(InferredExpressionType::Named(name.to_string()))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn ts_type_name_identifier<'a>(type_name: &'a TSTypeName<'a>) -> Option<&'a str> {
+    match type_name {
+        TSTypeName::IdentifierReference(identifier) => Some(identifier.name.as_str()),
+        TSTypeName::QualifiedName(_) => None,
     }
 }
 

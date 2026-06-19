@@ -415,7 +415,7 @@ fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
 #[test]
 fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
-        body_source: "const stamp = Date.now(); const text = JSON.stringify(value); const finite = Number.isFinite(value); const keys = Object.keys(value); const env = process.env.HOME; const choice = flag ? 'yes' : 'no';",
+        body_source: "const stamp = Date.now(); const text = JSON.stringify(value); const finite = Number.isFinite(value); const keys = Object.keys(value); const env = process.env.HOME; const choice = flag ? 'yes' : 'no'; const message = `hello ${name}`; const prefix = 'id:' + value; const created = new Date(); const matcher = /ok/;",
         generated_imports: &[],
         generated_exports: &[],
         readability_renames: &[],
@@ -433,6 +433,10 @@ fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
     assert!(formatted.contains("const keys: string[] = Object.keys(value);"));
     assert!(formatted.contains("const env: string | undefined = process.env.HOME;"));
     assert!(formatted.contains("const choice: string = flag ? 'yes' : 'no';"));
+    assert!(formatted.contains("const message: string = `hello ${name}`;"));
+    assert!(formatted.contains("const prefix: string = 'id:' + value;"));
+    assert!(formatted.contains("const created: Date = new Date();"));
+    assert!(formatted.contains("const matcher: RegExp = /ok/;"));
 }
 
 #[test]
@@ -471,6 +475,29 @@ fn module_item_formatting_infers_parameters_from_call_sites_when_requested() {
 
     assert!(formatted.contains("function greet(name: string): string"));
     assert!(formatted.contains("const double = (value: number) =>"));
+}
+
+#[test]
+fn module_item_formatting_propagates_identifier_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const label = 'Ada'; const alias = label; function echo(value) { return alias; } echo(label);",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("const label: string = 'Ada';"));
+    assert!(formatted.contains("const alias: string = label;"));
+    assert!(
+        formatted.contains("function echo(value: string): string"),
+        "{formatted}"
+    );
 }
 
 #[test]
