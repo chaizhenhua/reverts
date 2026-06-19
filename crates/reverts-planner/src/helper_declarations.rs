@@ -149,19 +149,26 @@ pub(crate) fn parse_commonjs_wrapper_replacement(
 ) -> Option<(String, usize)> {
     let bytes = source.as_bytes();
     cursor = skip_ws(bytes, cursor);
-    if bytes.get(cursor) != Some(&b'(') {
+    // esbuild minified arrows: a single-identifier parameter list often loses
+    // its parens (`e=>{...}` instead of `(e)=>{...}`). Accept both forms.
+    let (params, after_params): (Vec<&str>, usize) = if bytes.get(cursor) == Some(&b'(') {
+        let params_end = find_byte(bytes, cursor + 1, b')')?;
+        let parsed = source[cursor + 1..params_end]
+            .split(',')
+            .map(str::trim)
+            .filter(|param| !param.is_empty())
+            .collect::<Vec<_>>();
+        (parsed, params_end + 1)
+    } else if let Some((ident, after_ident)) = crate::identifiers::parse_identifier(source, cursor)
+    {
+        (vec![ident], after_ident)
+    } else {
         return None;
-    }
-    let params_end = find_byte(bytes, cursor + 1, b')')?;
-    let params = source[cursor + 1..params_end]
-        .split(',')
-        .map(str::trim)
-        .filter(|param| !param.is_empty())
-        .collect::<Vec<_>>();
+    };
     if params.is_empty() {
         return None;
     }
-    cursor = skip_ws(bytes, params_end + 1);
+    cursor = skip_ws(bytes, after_params);
     cursor = expect_arrow(bytes, cursor)?;
     cursor = skip_ws(bytes, cursor);
     if bytes.get(cursor) != Some(&b'{') {

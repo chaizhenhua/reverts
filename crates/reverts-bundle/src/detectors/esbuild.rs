@@ -272,18 +272,26 @@ fn reconstruct_multi_handle_statement(
         members_for_handle.entry(owner).or_default().push(decl_text);
     }
 
-    // Emit one synthetic statement per handle, in source order.
+    // Emit one synthetic statement per handle, in source order. Each declarator
+    // (member + handle) gets its OWN `var` statement so the helper-init handle
+    // sits in single-declarator form — the planner's helper-rename matches
+    // `var X=helper(...)` only when `var` is immediately before the binding,
+    // and would miss a continuation-position `<bare>, ..., X=helper(...)`.
     let mut out = Vec::new();
     for &handle_slot in &handle_order {
         let Slot::Handle { name, decl_text } = &slots[handle_slot] else {
             unreachable!("handle_order only holds handle slots");
         };
         let members = members_for_handle.remove(&handle_slot).unwrap_or_default();
-        let synthetic = if members.is_empty() {
-            format!("var {decl_text};")
-        } else {
-            format!("var {}, {decl_text};", members.join(", "))
-        };
+        let mut synthetic = String::new();
+        for member_text in &members {
+            synthetic.push_str("var ");
+            synthetic.push_str(member_text);
+            synthetic.push_str("; ");
+        }
+        synthetic.push_str("var ");
+        synthetic.push_str(decl_text);
+        synthetic.push(';');
         out.push(((*name).to_string(), synthetic));
     }
     Some(out)
@@ -571,12 +579,12 @@ var a,X=st(()=>{a=1}),b,c,Y=st(()=>{b=2;c=3});"#;
         };
         assert_eq!(
             synthetic("esbuild:X").as_deref(),
-            Some("var a, X=st(()=>{a=1});"),
+            Some("var a; var X=st(()=>{a=1});"),
             "X reconstructs with its written hoisted var: {modules:#?}"
         );
         assert_eq!(
             synthetic("esbuild:Y").as_deref(),
-            Some("var b, c, Y=st(()=>{b=2;c=3});"),
+            Some("var b; var c; var Y=st(()=>{b=2;c=3});"),
             "Y reconstructs with its written hoisted vars: {modules:#?}"
         );
     }
@@ -598,12 +606,12 @@ var iNe="x",a,X=st(()=>{a=1}),HBr=e=>e,Y=st(()=>{});"#;
         };
         assert_eq!(
             synthetic("esbuild:X").as_deref(),
-            Some(r#"var iNe="x", a, X=st(()=>{a=1});"#),
+            Some(r#"var iNe="x"; var a; var X=st(()=>{a=1});"#),
             "X carries the preceding initialized member + its written bare var: {modules:#?}"
         );
         assert_eq!(
             synthetic("esbuild:Y").as_deref(),
-            Some("var HBr=e=>e, Y=st(()=>{});"),
+            Some("var HBr=e=>e; var Y=st(()=>{});"),
             "Y carries its preceding initialized member: {modules:#?}"
         );
     }
