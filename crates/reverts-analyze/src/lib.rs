@@ -38,7 +38,6 @@ pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
     let mut audit = AuditReport::default();
     audit.extend(audit_ast_fact_extraction(&model));
     audit.extend(audit_def_use_graph(&model));
-    audit.extend(audit_duplicate_top_level_bindings(&model));
     audit.extend(audit_binding_shape_conflicts(&binding_shapes));
     audit.extend(audit_unprotected_nullable_member_reads(&model));
     audit.extend(audit_unreachable_top_level_code(&model));
@@ -165,43 +164,15 @@ fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
     audit
 }
 
-fn audit_duplicate_top_level_bindings(model: &ProgramModel) -> AuditReport {
-    let mut counts = BTreeMap::<(ModuleId, BindingName), usize>::new();
-    for fact in model
-        .graph()
-        .ast_facts()
-        .iter()
-        .filter(|fact| fact.kind == AstFactKind::Definition)
-    {
-        let Some(binding) = &fact.binding else {
-            continue;
-        };
-        *counts.entry((fact.module_id, binding.clone())).or_default() += 1;
-    }
-
-    let mut audit = AuditReport::default();
-    for ((module_id, binding), count) in counts {
-        if count <= 1 {
-            continue;
-        }
-        // The input bundle has multiple top-level declarations of the same
-        // name. JS permits this for `var`/`function`; for `let`/`const` it's
-        // a parse error in the source, but bundlers regularly emit code
-        // where two distinct logical bindings happen to share a generated
-        // name. Per ADR 0002 the decompiler is faithful, not corrective:
-        // we surface the duplicate so consumers can disambiguate, but we
-        // don't strand emission on this module-local condition.
-        audit.push(
-            AuditFinding::warning(
-                FindingCode::DuplicateTopLevelBinding,
-                format!("top-level binding '{binding}' is declared {count} times"),
-            )
-            .with_module(module_id.0.to_string())
-            .with_binding(binding.as_str()),
-        );
-    }
-    audit
-}
+// NOTE: a per-module `DuplicateTopLevelBinding` audit was removed here. It
+// counted raw top-level Definition facts, but for validly-parsed input a
+// repeated top-level binding can only be `var`/`function` hoisting (duplicate
+// `let`/`const` is a parse error), which the def-use graph already dedupes to
+// a single binding and which emission preserves as valid JS (DeclaratorSplit
+// keeps the declaration kind). It therefore only ever produced false
+// positives. A genuine duplicate hazard — distinct module owners colliding on
+// one *output file* — is a per-output-file concern for the planner, not this
+// per-module analysis pass.
 
 fn is_ambient_binding(binding: &str) -> bool {
     // Three families:
@@ -1755,7 +1726,13 @@ NativeModuleType();
     }
 
     #[test]
-    fn duplicate_top_level_ast_definition_is_reported() {
+    fn legal_var_redeclaration_is_not_flagged_as_duplicate() {
+        // `var value = 1; var value = 2;` is a single hoisted binding (the
+        // def-use graph already dedupes it), and emission preserves `var`
+        // (DeclaratorSplit keeps the declaration kind), so this is valid JS.
+        // For validly-parsed input a duplicate *top-level* binding can only be
+        // var/function hoisting (duplicate let/const is a parse error), so it
+        // is always benign — surfacing it is a false positive, not a defect.
         let mut rows = valid_rows();
         rows.source_files.push(SourceFileInput::new(
             1,
@@ -1768,11 +1745,7 @@ NativeModuleType();
 
         let output = enrich_program(ProgramModel::from_input(input));
 
-        assert!(output.audit.has(FindingCode::DuplicateTopLevelBinding));
-        assert!(output.audit.findings().iter().any(|finding| {
-            finding.code == FindingCode::DuplicateTopLevelBinding
-                && finding.binding.as_deref() == Some("value")
-        }));
+        assert!(!output.audit.has(FindingCode::DuplicateTopLevelBinding));
     }
 
     #[test]
