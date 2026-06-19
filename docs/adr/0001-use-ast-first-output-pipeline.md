@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted — 2026-05-14
 
 ## Context
 
@@ -26,3 +26,13 @@ supports the operation.
   audit where it can be tested with small fixtures.
 - Regex or string-based source manipulation is not acceptable for new output
   behavior when AST support is available.
+
+## References
+
+- [ADR 0002](0002-reject-post-write-repair.md) forbids the post-write repair
+  passes that text-level manipulation tends to invite.
+- [ADR 0008](0008-allow-in-memory-pre-accept-transforms.md) defines the narrow,
+  audited exceptions where byte-level edits are still permitted.
+- [decompilation-output-v2.md](../architecture/decompilation-output-v2.md) and
+  [decompilation-references.md](../research/decompilation-references.md) carry
+  the target pipeline and the research basis.

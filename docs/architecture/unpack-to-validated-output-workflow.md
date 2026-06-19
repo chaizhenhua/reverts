@@ -9,6 +9,26 @@ The key boundary is:
 - **Skills handle external formats and environment-specific unpacking.**
 - **Reverts code handles facts, graphs, classification, naming, package matching, planning, emitting, and output validation.**
 
+This boundary is now recorded as [ADR 0007](../adr/0007-skill-vs-reverts-code-boundary.md).
+
+## Status (2026-05-27)
+
+This document is the design target. Several pieces have since landed, in some
+cases under different names than the proposal below. Read command/crate names
+here against this map:
+
+| Proposed in this doc | Actual today |
+| --- | --- |
+| `import-unpacked` | ✅ shipped as `reverts-cli import-unpacked` |
+| `classify-modules` | ✅ shipped as `reverts-cli module-classify` |
+| `public-surface --list` / `public-surface-names` gate | landed as `reverts-cli naming-plan` (work list) + `naming-progress` (coverage gate) |
+| `symbol-context` | not yet a standalone command; context is exposed through `naming-plan` |
+| `validate-output` | provided by validation **Skills** (`reverts-decompile`, `electron-collector`, `browser-extension-collector`), not a CLI command |
+| `reverts-import` / `reverts-surface` / `reverts-validate` crates | **not extracted**; these use-cases currently live as module seams inside `reverts-cli`. Promotion to dedicated crates is optional (see ADR 0007), not a prerequisite. |
+
+The "Recommended Crate Layout" and "Proposed End-User Command" sections below
+remain aspirational and are kept for reference.
+
 ## Target Pipeline
 
 ```text
@@ -628,9 +648,11 @@ The current codebase already has working local pieces:
 - `generate-project-v2` emit.
 - TypeScript compile validation for small emitted projects.
 
-Observed gaps from validation:
+Observed gaps from validation (historical; see Status section above for what has
+since landed):
 
-- No formal `import-unpacked` command exists yet.
+- ~~No formal `import-unpacked` command exists yet.~~ Now shipped, along with
+  `module-classify`, `naming-plan`, and `naming-progress`.
 - `symbol-names --list` exposes module/global symbols, but this is not the same as target-aware public surface.
 - Some imported browser extension projects have many unnamed module/global symbols.
 - Existing package matching does not run unless modules have package evidence/classification.

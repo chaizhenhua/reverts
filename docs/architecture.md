@@ -4,25 +4,35 @@ Reverts is organized as a layered compiler pipeline. The core rule is: data type
 are stable and low-level, mechanisms transform those data types, and strategies
 choose which mechanisms to run.
 
+This page is the conceptual entry point. The **authoritative** crate map,
+dependency directions (with machine-enforced layer ranks), data flow, and
+filesystem/network access rules live in
+[architecture/module-boundaries.md](architecture/module-boundaries.md). The
+target pipeline is in
+[architecture/decompilation-output-v2.md](architecture/decompilation-output-v2.md),
+and accepted decisions are recorded in [adr/](adr/README.md).
+
 ## Crate layers
 
-- `reverts-ir`: shared identifiers, binding names, module kinds, and other core
-  data structures. It has no `reverts-*` dependencies.
-- `reverts-input`: SQLite/project input model and conversion into rows/bundles.
-  It may depend on `reverts-ir`, but not on matcher, planner, emitter, or CLI.
-- `reverts-js`: JavaScript AST parsing/normalization helpers and JS-specific
-  mechanisms.
-- `reverts-package`: package-domain data and policy: accepted attribution checks,
-  package surface indexing, public export/member proof kinds, Node builtin and
-  package public-specifier rules.
-- `reverts-package-matcher`: package matching strategies. It orchestrates passes
-  over input rows and package source cache, but delegates package public-surface
-  policy to `reverts-package`.
-- `reverts-planner` / `reverts-emitter` / `reverts-pipeline`: generation
-  planning, emission, and end-to-end pipeline mechanisms.
-- `reverts-cli`: use cases, persistence wiring, command parsing, network/cache
-  adapters, and user-facing reports. CLI can compose lower layers; lower layers
-  must not depend on CLI.
+The full crate set (~17 crates) and its ranked dependency DAG are in
+[module-boundaries.md](architecture/module-boundaries.md). At a glance, from the
+foundation up:
+
+- **Foundation** — `reverts-ir` (shared IDs, binding names, module/shape
+  records; no `reverts-*` deps), `reverts-observe` (findings/telemetry),
+  `reverts-js` (OXC parsing/codegen), `reverts-input` (input model + row
+  conversion), `reverts-package-index` (fingerprint-index primitives).
+- **Analysis** — `reverts-package` (package-surface policy), `reverts-graph`
+  (graph/def-use/control-flow), `reverts-model` (program/enriched handoff),
+  `reverts-analyze` (semantic names, shapes, package decisions), `reverts-bundle`
+  (bundler-wrapper extraction), `reverts-package-matcher` (AST-fingerprint
+  matching; delegates surface policy to `reverts-package`).
+- **Planning / emission** — `reverts-planner`, `reverts-emitter`.
+- **Orchestration / adapters** — `reverts-pipeline` (in-memory core loop),
+  `reverts-rollup-adapter` (SQLite tool), `reverts-cli` (use cases, persistence,
+  command parsing, reports). CLI composes lower layers; lower layers must not
+  depend on CLI.
+- **Test support** — `reverts-fixtures` (dev-dependency only).
 
 ## Data, mechanism, and strategy separation
 
@@ -69,10 +79,15 @@ matcher strategies separate from package public-surface policy.
 ## Reference architecture patterns
 
 - Compiler pipeline: parse/normalize/analyze/plan/emit phases with explicit pass
-  ordering.
+  ordering ([ADR 0001](adr/0001-use-ast-first-output-pipeline.md)).
 - Functional core, imperative shell: pure domain mechanisms in lower crates;
-  side effects and persistence in CLI/workflow adapters.
+  side effects and persistence in CLI/workflow adapters
+  ([ADR 0005](adr/0005-enforce-single-direction-crate-layering.md)).
 - Hexagonal boundaries: package cache, SQLite, network materialization, and CLI
   arguments are adapters around core mechanisms.
 - Strategy / chain-of-responsibility: matching and ownership promotion are
   explicit passes rather than hidden unproven promotion branches.
+- Typestate gating: validation boundaries are distinct types
+  (`EmitPlan → ValidatedEmitPlan`, `EmittedProject → PreAcceptProject →
+  AcceptedProject`) so skipping a check is a compile error
+  ([ADR 0006](adr/0006-typestate-output-gating.md)).

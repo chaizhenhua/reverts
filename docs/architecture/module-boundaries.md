@@ -16,7 +16,9 @@ The workspace currently contains these output-v2 crates:
 | `reverts-input` | existing | In-memory input bundle and row conversion contract |
 | `reverts-graph` | existing | Graph, def-use, import/export, and lightweight control-flow construction from input bundles |
 | `reverts-package` | existing | Package surface index construction from input attributions and import specifier resolution |
+| `reverts-package-index` | existing | Fingerprint index primitives (`PackageId`, `PackageOwner`, exact/CFG/feature keys) shared by the matcher; depends only on `reverts-ir` |
 | `reverts-package-matcher` | existing | AST-fingerprint matching of bundle modules against cached npm package sources, persisting accepted attributions |
+| `reverts-bundle` | existing | Bundler-aware module extraction: splits bundler wrappers into parseable `InnerModule` records (see [ADR 0004](../adr/0004-bundler-aware-module-extraction.md)) |
 | `reverts-model` | existing | Program and enriched-program handoff records |
 | `reverts-analyze` | existing | Semantic naming, package-decision enrichment, shape-solution wiring, and compiler-profile detection |
 | `reverts-planner` | existing | Emit planning for imports, declarations, and exports |
@@ -41,7 +43,9 @@ planning, emission, and command orchestration.
 | `reverts-model` | analysis | Hold `ProgramModel`, `SemanticNameMap`, and `EnrichedProgram` as the typed handoff from analysis to planning |
 | `reverts-analyze` | analysis | Enrich the program model with semantic names, binding-shape solutions, and package-import decisions |
 | `reverts-package` | analysis | Resolve package names, builtins, exports, subpaths, and build the package-surface index from input attributions without emitting source |
+| `reverts-package-index` | foundation | Own fingerprint-index primitives (`PackageId`, `PackageOwner`, exact/CFG/feature keys) reused by the matcher; depends only on `reverts-ir` |
 | `reverts-package-matcher` | analysis | Match bundle modules to cached npm package sources via AST fingerprints; produce accepted attribution rows the pipeline can later read |
+| `reverts-bundle` | analysis | Split bundler-emitted wrappers into parseable per-module records before graph construction; emit ambiguity as audit findings |
 | `reverts-rollup-adapter` | adapter/tool | Own SQLite loading/apply logic and command-line probes for rollup externalization projections; depends on pure rollup analysis but is not part of core generation |
 | `reverts-planner` | planning | Produce file-level import, export, local binding, and synthetic binding plans |
 | `reverts-emitter` | emission | Convert accepted plans into AST-backed emitted files and `EmittedProject` |
@@ -51,34 +55,31 @@ planning, emission, and command orchestration.
 
 ## Dependency Direction
 
-Production dependencies must flow downward through the architecture. Lower
-layers must not depend on higher layers.
+Production (`[dependencies]`) edges must flow downward through the layers below.
+Lower layers must not depend on higher layers. This is machine-enforced by a
+layer-rank test ([ADR 0005](../adr/0005-enforce-single-direction-crate-layering.md),
+`crates/reverts-cli/tests/architecture_boundaries.rs`): every production edge
+must point to a strictly lower rank, and any unranked `reverts-*` crate fails the
+test. The rank tiers (each crate may depend on any crate in a lower tier):
 
 ```text
-reverts-cli
-  -> reverts-pipeline
-      -> reverts-analyze
-          -> reverts-model
-              -> reverts-graph
-                  -> reverts-input
-          -> reverts-package
-              -> reverts-input
-      -> reverts-planner
-          -> reverts-model
-          -> reverts-package
-      -> reverts-emitter
-          -> reverts-planner
-      -> reverts-observe
-  -> reverts-package-matcher
-      -> reverts-input
-      -> reverts-js
-      -> reverts-observe
-
-reverts-rollup-adapter
-  -> reverts-analyze
-  -> reverts-input
-  -> reverts-package
+rank 80  reverts-cli                                   (orchestration / IO)
+rank 70  reverts-pipeline                              (in-memory core loop)
+rank 60  reverts-emitter        reverts-rollup-adapter  (emission / adapter-tool)
+rank 50  reverts-planner        reverts-bundle          (planning / structural)
+rank 40  reverts-analyze        reverts-package-matcher (analysis / matching)
+rank 35  reverts-fixtures                              (test support, dev-dep only)
+rank 30  reverts-model
+rank 20  reverts-package        reverts-graph
+rank 10  reverts-js  reverts-input  reverts-package-index
+rank  0  reverts-ir  reverts-observe                   (foundation roots)
 ```
+
+Concretely, `reverts-cli` depends directly on `reverts-pipeline`,
+`reverts-package-matcher`, `reverts-package-index`, and the analysis/foundation
+crates; `reverts-pipeline` pulls in `reverts-analyze`, `reverts-bundle`,
+`reverts-emitter`, and `reverts-planner`. The graph is a strict DAG — there are
+no equal-rank or upward edges.
 
 `reverts-rollup-adapter` is intentionally outside the core output loop: it may
 use SQLite, filesystem paths, and command-line process exits because it is an
@@ -104,8 +105,6 @@ crate tests / integration tests
   -> reverts-fixtures
       -> reverts-input
       -> reverts-ir
-      -> reverts-js
-      -> reverts-observe
 ```
 
 ## Boundary Rules
@@ -231,12 +230,33 @@ callers cannot mistake it for accepted output; project writers must write
 ## Source Surgery
 
 Text/byte-level edits are centralized in `reverts-planner::source_surgery` for
-the remaining cases where AST-first output is not yet practical. The module owns
-the shared edit applier, parser-derived top-level statement spans, previous
+the remaining cases where AST-first output is not yet practical (see
+[ADR 0008](../adr/0008-allow-in-memory-pre-accept-transforms.md)). The module
+owns the shared edit applier, parser-derived top-level statement spans, previous
 non-whitespace lookup, initializer-operator scanning, and line-removal newline
 policy, with parse and delimiter-boundary tests. Passes that still scan source
 bytes must document why they cannot use AST-first rewriting and should use
 `source_surgery`/`byte_lexer` helpers rather than ad hoc string repair.
+
+### Byte-surgery debt registry
+
+This is sanctioned debt against [ADR 0001](../adr/0001-use-ast-first-output-pipeline.md):
+each category should migrate to AST-first rewriting as OXC support allows. The
+**authoritative list** of passes is the set of `reverts-planner` modules that
+import `byte_lexer` or `source_surgery` (and `reverts-pipeline::source_rewrites`);
+every such module must carry a rationale comment explaining why it cannot
+round-trip through OXC. The current categories:
+
+| Category | Representative modules | Why not AST-first yet |
+| --- | --- | --- |
+| Runtime-helper write/setter rewrites | `runtime_helper_writes`, `destructure_writes`, `runtime_namespace_rewrite` | Edits target precise byte ranges inside larger expressions OXC would reformat |
+| Runtime-source scanning / stripping | `runtime_source_scan`, `noop_runtime_helpers`, `runtime_orphan_prune`, `helper_declarations` | Identifies dead/unreferenced helper spans by delimiter-aware scan |
+| Lazy/initializer & wrapper inlining | `lazy_initializer_parse`, `lazy_wrapper_inline`, `runtime_proxy_inline`, `delazify` | Splices recovered initializer bodies without reflowing surrounding source |
+| Node-builtin / namespace decomposition | `node_builtin_require`, `decompose_namespace`, `runtime_literal_compaction` | Rewrites specifier/member spans in place |
+| Pipeline-level source normalization | `reverts-pipeline::source_rewrites` (`import.meta.url`, template-literal folding) | Runs as a pre-accept transform over emitted files |
+
+New byte-scanning behavior must land in one of these modules (or a new one with a
+rationale comment) using the shared helpers — never as ad hoc string replacement.
 
 ## Compiler Lowering Pipeline
 
@@ -297,7 +317,9 @@ Filesystem and external access are intentionally narrow:
 | `reverts-analyze` | no | no | no |
 | `reverts-rollup-adapter` | yes, SQLite paths and optional JSON output | no | no |
 | `reverts-package` | optional offline cache adapter only | no required access | no |
+| `reverts-package-index` | no | no | no |
 | `reverts-package-matcher` | no required access; reads package source rows from input | no | no |
+| `reverts-bundle` | no | no | no |
 | `reverts-planner` | no | no | no |
 | `reverts-emitter` | no required access; returns `EmittedProject` | no | no |
 | `reverts-pipeline` | no required access; returns `EmittedProject` | no | no |
@@ -319,6 +341,8 @@ now live only in their final owner crates:
 | Program snapshots and enrichment records | `reverts-model` |
 | Semantic naming, package-decision enrichment, shape-solution wiring, compiler-profile detection, and CFG-based audits (e.g. `UnreachableTopLevelCode`) | `reverts-analyze` |
 | Package name, builtin, exports, and subpath resolution | `reverts-package` |
+| Fingerprint-index primitives shared by the matcher | `reverts-package-index` |
+| Bundler-wrapper module extraction into parseable inner modules | `reverts-bundle` |
 | Bundle-to-package AST-fingerprint matching | `reverts-package-matcher` |
 | Import/export/local/synthetic binding planning | `reverts-planner` |
 | Per-compiler AST lowerings (`CompilerLowering`), AST/codegen plumbing | `reverts-js` |

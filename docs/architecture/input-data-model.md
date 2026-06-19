@@ -107,6 +107,10 @@ Invariants:
 - `module_id` must reference an existing module.
 - `name` must not be empty.
 
+`SymbolInput`/the `symbols` table is **not** the source of truth for which
+bindings are nameable. The semantic-naming universe is derived from the graph
+and the emitted symbol index; see [naming-universe.md](naming-universe.md).
+
 ### ModuleDependencyInput
 
 `ModuleDependencyInput` records dependency edges discovered before graph

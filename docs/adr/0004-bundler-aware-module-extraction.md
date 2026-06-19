@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted — 2026-05-17
 
 ## Context
 
@@ -86,3 +86,15 @@ The crate is organised around three architectural commitments:
 - The legacy emit-side concerns (`public_surface`, `submodule_ingester`) are
   not ported; they belong to a later code-emission stage and are not needed
   by the matcher.
+
+## References
+
+- [ADR 0001](0001-use-ast-first-output-pipeline.md),
+  [ADR 0002](0002-reject-post-write-repair.md) — extraction is AST/shape-driven
+  and surfaces ambiguity rather than repairing it.
+- [decompilation-references.md](../research/decompilation-references.md) —
+  compiler-aware recovery and pattern-independent structuring.
+- [module-boundaries.md](../architecture/module-boundaries.md) — the
+  `reverts-bundle` crate boundary and the `CompilerLowering` lowering pipeline
+  (per-compiler source lowering is a separate concern from structural
+  extraction).

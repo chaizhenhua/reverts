@@ -6,7 +6,38 @@ test-gate impact, and what it unblocks. Phases are independent — each can
 land on its own and unblocks downstream work, but they're ordered by
 combined "leverage × tractability".
 
-## Current monolith sizes (2026-05-23)
+## Current state (2026-05-27)
+
+The big-three monolith split is **substantially complete**. Actual `lib.rs`
+sizes today versus the 2026-05-23 baseline that this roadmap was written
+against:
+
+| crate | `lib.rs` then | `lib.rs` now | total | files | status |
+|---|---:|---:|---:|---:|---|
+| `reverts-planner` | 33,900 | **8,222** | 41,927 | 60 | 🟢 Phase 3 largely done; remaining work is incremental |
+| `reverts-package-matcher` | 13,907 | **95** | 20,236 | 55 | 🟢 Phase 2 done (lib.rs is now re-exports) |
+| `reverts-cli` | 13,810 | **852** | 27,271 | 39 | 🟢 Phase 1 done (target was ~600) |
+| `reverts-js` | 8,671 | **148** | 16,277 | 57 | 🟢 |
+| `reverts-pipeline` | 3,753 | **2,959** | 4,443 | 7 | 🟡 Phase 4 partially done |
+| `reverts-graph` | 3,918 | 3,932 | 6,920 | 16 | 🟢 |
+
+Status correction: earlier session notes below say crate-boundary rules were
+**not** machine-enforced ("except machine-enforced crate-boundary tests"). That
+is now **out of date** — the full layering DAG is enforced by
+`crates/reverts-cli/tests/architecture_boundaries.rs` (see
+[ADR 0005](../adr/0005-enforce-single-direction-crate-layering.md)). Treat the
+phase narratives below as a historical log of how the split happened, not as the
+current backlog.
+
+Remaining live debt (small, incremental): the planner's `compute_modules` per-
+module passes can still be split further; `reverts-pipeline` Phase 4 file
+extraction is unfinished; CLI package-source/cache use-cases are still
+`reverts-cli`-local module seams that could become dedicated crates
+([ADR 0007](../adr/0007-skill-vs-reverts-code-boundary.md) treats that promotion
+as optional). The byte-surgery debt is tracked in
+[module-boundaries.md](module-boundaries.md#byte-surgery-debt-registry).
+
+## Historical baseline — monolith sizes (2026-05-23)
 
 | crate | `lib.rs` lines | total | files | severity |
 |---|---:|---:|---:|---|

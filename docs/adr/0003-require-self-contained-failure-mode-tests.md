@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted — 2026-05-14
 
 ## Context
 
@@ -27,3 +27,11 @@ package installations, real project databases, or state from prior runs.
 - New behavior should start with a failing unit or integration test that
   captures the structural failure mode.
 - Tests remain fast, deterministic, and safe to run in parallel.
+
+## References
+
+- [decompilation-output-v2.md](../architecture/decompilation-output-v2.md)
+  lists the historic runtime failures and the minimal fixtures that capture
+  them.
+- [module-boundaries.md](../architecture/module-boundaries.md) records which
+  crates are allowed filesystem, network, or external-program access at all.
