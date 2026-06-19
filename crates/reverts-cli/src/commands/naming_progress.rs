@@ -215,8 +215,8 @@ pub(crate) fn classify_emitted_entry(
     }
     // Named = renamed by the Agent (emitted != original) or already a meaningful
     // identifier (preserved vendored source).
-    let named =
-        entry.emitted_name != entry.original_name || !is_minified_identifier(&entry.original_name);
+    let named = entry.emitted_name != entry.original_name
+        || is_meaningful_preserved_identifier(&entry.original_name);
     let exported = universe
         .exported_by_module
         .get(&entry.module_id.0)
@@ -231,6 +231,11 @@ pub(crate) fn classify_emitted_entry(
         tier: symbol_tier(exported, kind),
         named,
     })
+}
+
+fn is_meaningful_preserved_identifier(name: &str) -> bool {
+    !is_minified_identifier(name)
+        || matches!(name, "cmd" | "cwd" | "env" | "gid" | "pid" | "uid" | "uri")
 }
 
 #[must_use]
@@ -474,6 +479,16 @@ mod tests {
             .expect("first-party binding");
         assert_eq!(detail.tier, Tier::PublicSurface); // exported
         assert!(!detail.named); // minified, not renamed
+    }
+
+    #[test]
+    fn classify_treats_common_runtime_abbreviations_as_meaningful() {
+        let universe = universe(&[1], &[]);
+
+        let detail = classify_emitted_entry(&entry(1, "cwd", "cwd", false), &universe)
+            .expect("first-party symbol");
+
+        assert!(detail.named);
     }
 
     #[test]
