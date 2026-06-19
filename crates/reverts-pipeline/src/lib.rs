@@ -239,8 +239,13 @@ pub fn prepare_input_bundle_for_generation(
         candidate_source_files.into_iter().cloned().collect();
     let extraction = reverts_bundle::extract(&candidate_source_files, &input.modules);
     let audit = extraction.audit.clone();
+    let new_source_files = extraction.new_source_files;
     let new_modules = extraction.new_modules;
+    // Synthetic source files (reconstructed esbuild multi-handle modules) must
+    // be appended BEFORE their modules so the module → source_file FK resolves.
     let input = input
+        .with_appended_source_files(new_source_files)
+        .map_err(PipelineError::Input)?
         .with_appended_modules(new_modules)
         .map_err(PipelineError::Input)?;
     Ok((input, audit))

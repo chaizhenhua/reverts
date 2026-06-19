@@ -28,6 +28,10 @@ pub struct BundleExtraction {
     pub classifications: std::collections::BTreeMap<u32, BundleClassification>,
     /// New ModuleInput rows that should be appended to the bundle.
     pub new_modules: Vec<ModuleInput>,
+    /// In-memory synthetic source files backing reconstructed modules
+    /// (esbuild multi-handle handles). Append these to the bundle's
+    /// `source_files` BEFORE `new_modules` so the module FK resolves.
+    pub new_source_files: Vec<SourceFileInput>,
     /// Updated module rows replacing entries in `input.modules`.
     pub updated_modules: Vec<ModuleInput>,
     /// Audit findings (BundleDetectorAmbiguous, MissingParseableBody, …).
@@ -36,8 +40,8 @@ pub struct BundleExtraction {
 
 impl BundleExtraction {
     /// Apply the extraction into `input` in place. Replaces rows in
-    /// `input.modules` whose ids appear in `updated_modules` and
-    /// appends every `new_modules` row.
+    /// `input.modules` whose ids appear in `updated_modules`, appends every
+    /// `new_source_files` row, then appends every `new_modules` row.
     pub fn merge_into(self, input: &mut InputRows) {
         let mut updates: HashMap<ModuleId, ModuleInput> = self
             .updated_modules
@@ -49,6 +53,7 @@ impl BundleExtraction {
                 *module = replacement;
             }
         }
+        input.source_files.extend(self.new_source_files);
         input.modules.extend(self.new_modules);
     }
 }
@@ -61,6 +66,7 @@ impl BundleExtraction {
 pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> BundleExtraction {
     let mut classifications = std::collections::BTreeMap::new();
     let mut new_modules = Vec::new();
+    let mut new_source_files = Vec::new();
     let mut updated_modules = Vec::new();
     let mut audit = AuditReport::default();
 
@@ -75,6 +81,19 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
     // pathological input fails loudly rather than silently aliasing.
     let max_real_id = modules.iter().map(|m| m.id.0).max().unwrap_or(0);
     let mut next_synthetic_id = max_real_id.saturating_add(1);
+    // Synthetic SOURCE FILE ids for reconstructed multi-handle modules,
+    // allocated past the largest real source file id (a separate namespace
+    // from module ids). The caller may pass only a SUBSET of source files
+    // (generation classifies just the module-less ones), so also consider the
+    // source_file_ids referenced by `modules` — together they cover every real
+    // source file id and prevent a synthetic id from aliasing an existing file.
+    let max_source_file_id = source_files
+        .iter()
+        .map(|sf| sf.id)
+        .chain(modules.iter().filter_map(|m| m.source_file_id))
+        .max()
+        .unwrap_or(0);
+    let mut next_synthetic_source_file_id = max_source_file_id.saturating_add(1);
 
     for source_file in source_files {
         if !is_bundle_candidate_path(Path::new(source_file.path.as_str())) {
@@ -110,12 +129,18 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
             modules,
             &classification,
             next_synthetic_id,
+            next_synthetic_source_file_id,
         );
         let added = u32::try_from(merge_output.new_modules.len())
             .expect("new_modules per source file fit in u32");
         next_synthetic_id = next_synthetic_id
             .checked_add(added)
             .expect("synthetic ModuleId space exhausted");
+        let added_source_files = u32::try_from(merge_output.new_source_files.len())
+            .expect("new_source_files per source file fit in u32");
+        next_synthetic_source_file_id = next_synthetic_source_file_id
+            .checked_add(added_source_files)
+            .expect("synthetic source file id space exhausted");
         for m in &merge_output.updated_modules {
             // Only collect modules that differ from upstream.
             if let Some(orig) = modules_by_id.get(&m.id)
@@ -125,6 +150,7 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
             }
         }
         new_modules.extend(merge_output.new_modules);
+        new_source_files.extend(merge_output.new_source_files);
         audit.extend(merge_output.audit);
         classifications.insert(source_file.id, classification);
     }
@@ -132,6 +158,7 @@ pub fn extract(source_files: &[SourceFileInput], modules: &[ModuleInput]) -> Bun
     BundleExtraction {
         classifications,
         new_modules,
+        new_source_files,
         updated_modules,
         audit,
     }
