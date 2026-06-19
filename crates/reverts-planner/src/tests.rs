@@ -3071,12 +3071,6 @@ fn delazify_collapses_lazy_module_with_class_export() {
 }
 
 #[test]
-#[ignore = "KNOWN GAP: multi-declarator lazy-module lowering unsupported — esbuild \
-multi-handle statements (var a=U(..),b=U(..)) lower only the first declarator and \
-emit malformed JS (`var a = 1;, b = U(..)`). The co-declared handles end up exported \
-by nobody, so consumer `b()` calls dangle (the ~oCt-class residual). Fix must teach \
-delazify + helper-rename to handle every declarator in one var statement. See memory \
-project_finding_clusters_diagnosis."]
 fn delazify_collapses_multi_declarator_lazy_modules_in_one_statement() {
     // esbuild co-declares several lazy-module handles in ONE `var` statement
     // (`var a=U(...),b=U(...)`). Each must lower like a single-init statement
@@ -3106,6 +3100,69 @@ fn delazify_collapses_multi_declarator_lazy_modules_in_one_statement() {
     assert!(
         !lowered.uses_lazy_module,
         "no residual thunk: {}",
+        lowered.source
+    );
+}
+
+#[test]
+fn delazify_collapses_three_declarator_lazy_modules_in_one_statement() {
+    // The declarator loop must handle an arbitrary-length comma chain, not
+    // just a pair — every co-declared handle becomes its own value binding.
+    let source = concat!(
+        "var a = U((exports, module) => { module.exports = 1; }), \
+b = U((exports, module) => { module.exports = 2; }), \
+c = U((exports, module) => { module.exports = 3; });\n",
+        "use(a(), b(), c());\n",
+    );
+    let helper_kinds = BTreeMap::from([(
+        BindingName::new("U"),
+        RuntimePreludeBindingKind::CommonJsWrapper,
+    )]);
+
+    let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+    assert!(
+        lowered.source.contains("var a = 1")
+            && lowered.source.contains("b = 2")
+            && lowered.source.contains("c = 3"),
+        "all three co-declared handles must lower to values: {}",
+        lowered.source
+    );
+    assert!(
+        lowered.source.contains("use(a, b, c)"),
+        "all three call sites collapse: {}",
+        lowered.source
+    );
+    assert!(
+        !lowered.uses_lazy_module,
+        "no residual thunk: {}",
+        lowered.source
+    );
+}
+
+#[test]
+fn helper_rename_leaves_mixed_declarator_statement_untouched() {
+    // Conservative bail: if a multi-declarator statement mixes a helper call
+    // with a non-helper declarator, lowering only the helper one would sever
+    // the comma list into malformed JS (`var a = lazyModule(...);, c = 5;`).
+    // Decline the whole statement instead — esbuild never emits this shape,
+    // and leaving it intact keeps the output valid.
+    let source = "var a = U((exports, module) => { module.exports = 1; }), c = 5;\nuse(a(), c);\n";
+    let helper_kinds = BTreeMap::from([(
+        BindingName::new("U"),
+        RuntimePreludeBindingKind::CommonJsWrapper,
+    )]);
+
+    let lowered = lower_runtime_helpers(source, &helper_kinds, &BTreeSet::new(), &BTreeSet::new());
+
+    assert_eq!(
+        lowered.source, source,
+        "mixed declarator statement must be left exactly as-is: {}",
+        lowered.source
+    );
+    assert!(
+        !lowered.source.contains(";,") && !lowered.source.contains("lazyModule"),
+        "no malformed half-lowering: {}",
         lowered.source
     );
 }

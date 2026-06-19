@@ -54,50 +54,92 @@ pub(crate) fn find_helper_declaration(
     let mut index = from;
     while index < bytes.len() {
         let (start, keyword) = find_declaration_keyword(source, index)?;
-        let mut cursor = start + keyword.len();
-        cursor = skip_ws(bytes, cursor);
-        let Some((binding, after_binding)) = parse_identifier(source, cursor) else {
-            index = start + keyword.len();
-            continue;
-        };
-        cursor = skip_ws(bytes, after_binding);
-        if bytes.get(cursor) != Some(&b'=') {
-            index = start + keyword.len();
-            continue;
+        let cursor = start + keyword.len();
+        if let Some((replacement, end)) = parse_helper_declarator_list(source, cursor, helper, kind)
+        {
+            return Some(HelperDeclaration {
+                start,
+                end,
+                replacement,
+            });
         }
-        cursor = skip_ws(bytes, cursor + 1);
-        let Some((callee, after_callee)) = parse_identifier(source, cursor) else {
-            index = cursor.saturating_add(1);
-            continue;
-        };
-        if callee != helper {
-            index = after_callee;
-            continue;
-        }
-        cursor = skip_ws(bytes, after_callee);
-        if bytes.get(cursor) != Some(&b'(') {
-            index = after_callee;
-            continue;
-        }
-        let parsed = match kind {
-            HelperDeclarationKind::CommonJsWrapper => {
-                parse_commonjs_wrapper_replacement(source, cursor + 1, binding)
-            }
-            HelperDeclarationKind::LazyInitializer => {
-                parse_lazy_initializer_replacement(source, cursor + 1, binding)
-            }
-        };
-        let Some((replacement, end)) = parsed else {
-            index = after_callee;
-            continue;
-        };
-        return Some(HelperDeclaration {
-            start,
-            end,
-            replacement,
-        });
+        // Not a (fully) lowerable helper declaration at this keyword. Advance
+        // just past the keyword so the next scan picks up the following
+        // `var`/`let`/`const` without re-matching this one.
+        index = start + keyword.len();
     }
     None
+}
+
+/// Parse every comma-separated declarator in a single `var`/`let`/`const`
+/// statement, requiring each to be `<binding> = HELPER(<args>)`. esbuild
+/// co-declares several module/value handles in one statement
+/// (`var a = U(...), b = U(...)`), so lowering only the first declarator would
+/// emit malformed JS (`var a = lazyModule(...);, b = U(...)`) and leave the
+/// co-declared handles wrapped by nobody. Each declarator becomes its own
+/// `var <binding> = lazyModule(...);` statement so that the downstream
+/// single-declarator delazify / inline passes can collapse each independently.
+///
+/// Returns `None` (leaving the statement untouched) unless the *first*
+/// declarator is a helper call — that signals this keyword is not a helper
+/// declaration — or if any *later* declarator is not a helper call, in which
+/// case lowering would risk severing the comma list, so we conservatively
+/// decline the whole statement.
+fn parse_helper_declarator_list(
+    source: &str,
+    cursor_after_keyword: usize,
+    helper: &str,
+    kind: HelperDeclarationKind,
+) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let mut replacements: Vec<String> = Vec::new();
+    let mut cursor = cursor_after_keyword;
+    loop {
+        let (replacement, end) = parse_one_helper_declarator(source, cursor, helper, kind)?;
+        replacements.push(replacement);
+        let after = skip_ws(bytes, end);
+        if bytes.get(after) == Some(&b',') {
+            cursor = after + 1;
+            continue;
+        }
+        return Some((replacements.join(" "), end));
+    }
+}
+
+/// Parse a single `<binding> = HELPER(<args>)` declarator starting at `start`,
+/// returning its standalone `var <binding> = lazy…(...);` replacement and the
+/// byte offset just past the declarator (after the call's `)` and any trailing
+/// `;`). Returns `None` for any other declarator shape.
+fn parse_one_helper_declarator(
+    source: &str,
+    start: usize,
+    helper: &str,
+    kind: HelperDeclarationKind,
+) -> Option<(String, usize)> {
+    let bytes = source.as_bytes();
+    let cursor = skip_ws(bytes, start);
+    let (binding, after_binding) = parse_identifier(source, cursor)?;
+    let cursor = skip_ws(bytes, after_binding);
+    if bytes.get(cursor) != Some(&b'=') {
+        return None;
+    }
+    let cursor = skip_ws(bytes, cursor + 1);
+    let (callee, after_callee) = parse_identifier(source, cursor)?;
+    if callee != helper {
+        return None;
+    }
+    let cursor = skip_ws(bytes, after_callee);
+    if bytes.get(cursor) != Some(&b'(') {
+        return None;
+    }
+    match kind {
+        HelperDeclarationKind::CommonJsWrapper => {
+            parse_commonjs_wrapper_replacement(source, cursor + 1, binding)
+        }
+        HelperDeclarationKind::LazyInitializer => {
+            parse_lazy_initializer_replacement(source, cursor + 1, binding)
+        }
+    }
 }
 
 pub(crate) fn parse_commonjs_wrapper_replacement(
