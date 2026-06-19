@@ -142,8 +142,10 @@ fn tier_breakdown(facts: &[SymbolFact]) -> TierBreakdown {
 
 /// Modules whose source the human reads: `Application` modules with no
 /// externalizing attribution, plus package modules attributed
-/// `ApplicationSource`. Excludes `ExternalImport`/`VendoredAsset`/`RuntimeGlue`
-/// and `Builtin`.
+/// `ApplicationSource`. Excludes `ExternalImport`/`VendoredAsset`/`RuntimeGlue`,
+/// `Builtin`, and vendored third-party source kept under `node_modules` (a
+/// deterministic path signal — such modules are not first-party naming work
+/// even when they were not externalized to a bare import).
 fn first_party_module_ids(input: &InputBundle) -> BTreeSet<ModuleId> {
     let mut accepted_emission: BTreeMap<ModuleId, PackageEmissionMode> = BTreeMap::new();
     for attribution in &input.package_attributions {
@@ -154,12 +156,22 @@ fn first_party_module_ids(input: &InputBundle) -> BTreeSet<ModuleId> {
     input
         .modules
         .iter()
-        .filter(|module| match accepted_emission.get(&module.id) {
-            Some(mode) => *mode == PackageEmissionMode::ApplicationSource,
-            None => module.kind == ModuleKind::Application,
+        .filter(|module| {
+            if is_vendored_path(&module.semantic_path) {
+                return false;
+            }
+            match accepted_emission.get(&module.id) {
+                Some(mode) => *mode == PackageEmissionMode::ApplicationSource,
+                None => module.kind == ModuleKind::Application,
+            }
         })
         .map(|module| module.id)
         .collect()
+}
+
+/// Path evidence that a module is vendored third-party source.
+fn is_vendored_path(path: &str) -> bool {
+    path.contains("node_modules/") || path.starts_with("node_modules")
 }
 
 #[must_use]
@@ -386,6 +398,15 @@ mod tests {
         let breakdown = tier_breakdown(&[]);
         assert_eq!(breakdown.full.universe, 0);
         assert_eq!(breakdown.reached_level, None);
+    }
+
+    #[test]
+    fn vendored_node_modules_paths_are_excluded() {
+        use super::is_vendored_path;
+        assert!(is_vendored_path("modules/36-node_modules/ws/lib/stream.ts"));
+        assert!(is_vendored_path("node_modules/ws/index.js"));
+        assert!(!is_vendored_path("modules/495-esbuild-sfr.ts"));
+        assert!(!is_vendored_path("src/index.ts"));
     }
 
     #[test]
