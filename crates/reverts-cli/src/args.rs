@@ -195,6 +195,33 @@ impl RuntimeInventoryArgs {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct ModuleClassifyArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long)]
+    pub list: bool,
+    /// Deterministically classify vendored `node_modules` paths as third-party.
+    #[arg(long)]
+    pub auto: bool,
+    #[arg(long)]
+    pub apply: bool,
+    #[arg(long, default_value = "agent")]
+    pub origin: String,
+    /// TSV file of `MODULE_ID<TAB>CLASSIFICATION[<TAB>EVIDENCE]` rows.
+    #[arg(long)]
+    pub batch: Option<PathBuf>,
+}
+
+impl ModuleClassifyArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::MODULE_CLASSIFY_COMMAND)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamingProgressTier {
     PublicSurface,

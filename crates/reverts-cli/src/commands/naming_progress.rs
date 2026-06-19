@@ -146,7 +146,10 @@ fn tier_breakdown(facts: &[SymbolFact]) -> TierBreakdown {
 /// `Builtin`, and vendored third-party source kept under `node_modules` (a
 /// deterministic path signal — such modules are not first-party naming work
 /// even when they were not externalized to a bare import).
-fn first_party_module_ids(input: &InputBundle) -> BTreeSet<ModuleId> {
+fn first_party_module_ids(
+    input: &InputBundle,
+    excluded: &BTreeSet<ModuleId>,
+) -> BTreeSet<ModuleId> {
     let mut accepted_emission: BTreeMap<ModuleId, PackageEmissionMode> = BTreeMap::new();
     for attribution in &input.package_attributions {
         if attribution.status == PackageAttributionStatus::Accepted {
@@ -157,6 +160,10 @@ fn first_party_module_ids(input: &InputBundle) -> BTreeSet<ModuleId> {
         .modules
         .iter()
         .filter(|module| {
+            // Honor recorded module classifications (agent or deterministic).
+            if excluded.contains(&module.id) {
+                return false;
+            }
             if is_vendored_path(&module.semantic_path) {
                 return false;
             }
@@ -175,9 +182,13 @@ fn is_vendored_path(path: &str) -> bool {
 }
 
 #[must_use]
-pub fn compute_naming_progress(project_id: u32, program: &EnrichedProgram) -> NamingProgressReport {
+pub fn compute_naming_progress(
+    project_id: u32,
+    program: &EnrichedProgram,
+    excluded: &BTreeSet<ModuleId>,
+) -> NamingProgressReport {
     let model = program.model();
-    let first_party = first_party_module_ids(model.input());
+    let first_party = first_party_module_ids(model.input(), excluded);
     let graph = model.graph();
     let paths: BTreeMap<ModuleId, &str> = model
         .modules()
@@ -234,10 +245,19 @@ pub fn compute_naming_progress(project_id: u32, program: &EnrichedProgram) -> Na
 pub fn naming_progress_from_sqlite(
     args: &NamingProgressArgs,
 ) -> Result<NamingProgressReport, NamingProgressError> {
+    let excluded = crate::commands::module_classify::excluded_module_ids_from_sqlite(
+        args.input.as_path(),
+        args.project_id,
+    )
+    .map_err(NamingProgressError::Classification)?;
     let bundle = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(NamingProgressError::LoadInput)?;
     let prepared = prepare_and_enrich(bundle).map_err(NamingProgressError::Pipeline)?;
-    Ok(compute_naming_progress(args.project_id, &prepared.program))
+    Ok(compute_naming_progress(
+        args.project_id,
+        &prepared.program,
+        &excluded,
+    ))
 }
 
 fn pct(coverage: TierCoverage) -> f64 {
@@ -460,7 +480,8 @@ mod tests {
 
         let bundle = InputBundle::from_rows(rows).expect("valid bundle");
         let program = enrich_program(ProgramModel::from_input(bundle)).program;
-        let report: NamingProgressReport = compute_naming_progress(7, &program);
+        let report: NamingProgressReport =
+            compute_naming_progress(7, &program, &std::collections::BTreeSet::new());
 
         assert_eq!(report.project_id, 7);
         // Only the first-party module is measured; `dep` is excluded.

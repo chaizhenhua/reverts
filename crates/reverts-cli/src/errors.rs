@@ -430,6 +430,7 @@ impl Error for RuntimeInventoryError {
 pub enum NamingProgressError {
     LoadInput(SqliteInputError),
     Pipeline(PipelineError),
+    Classification(ModuleClassifyError),
 }
 
 impl fmt::Display for NamingProgressError {
@@ -437,6 +438,7 @@ impl fmt::Display for NamingProgressError {
         match self {
             Self::LoadInput(source) => write!(formatter, "{source}"),
             Self::Pipeline(source) => write!(formatter, "{source}"),
+            Self::Classification(source) => write!(formatter, "{source}"),
         }
     }
 }
@@ -446,6 +448,77 @@ impl Error for NamingProgressError {
         match self {
             Self::LoadInput(source) => Some(source),
             Self::Pipeline(source) => Some(source),
+            Self::Classification(source) => Some(source),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ModuleClassifyError {
+    OpenDatabase {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
+    ConfigureDatabase(rusqlite::Error),
+    QueryClassification(rusqlite::Error),
+    WriteClassification(rusqlite::Error),
+    ReadBatch(io::Error),
+    InvalidBatchLine {
+        line: usize,
+        message: String,
+    },
+    ProjectNotFound {
+        project_id: u32,
+    },
+    InvalidDatabaseId {
+        owner: &'static str,
+        value: i64,
+    },
+}
+
+impl fmt::Display for ModuleClassifyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OpenDatabase { path, source } => {
+                write!(formatter, "failed to open {}: {source}", path.display())
+            }
+            Self::ConfigureDatabase(source) => {
+                write!(formatter, "failed to configure SQLite: {source}")
+            }
+            Self::QueryClassification(source) => {
+                write!(formatter, "failed to query module_classification: {source}")
+            }
+            Self::WriteClassification(source) => {
+                write!(formatter, "failed to write module_classification: {source}")
+            }
+            Self::ReadBatch(source) => write!(formatter, "failed to read batch: {source}"),
+            Self::InvalidBatchLine { line, message } => {
+                write!(formatter, "invalid batch line {line}: {message}")
+            }
+            Self::ProjectNotFound { project_id } => {
+                write!(
+                    formatter,
+                    "project {project_id} was not found in SQLite database"
+                )
+            }
+            Self::InvalidDatabaseId { owner, value } => {
+                write!(formatter, "invalid {owner} value {value}")
+            }
+        }
+    }
+}
+
+impl Error for ModuleClassifyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::OpenDatabase { source, .. }
+            | Self::ConfigureDatabase(source)
+            | Self::QueryClassification(source)
+            | Self::WriteClassification(source) => Some(source),
+            Self::ReadBatch(source) => Some(source),
+            Self::InvalidBatchLine { .. }
+            | Self::ProjectNotFound { .. }
+            | Self::InvalidDatabaseId { .. } => None,
         }
     }
 }
@@ -590,6 +663,7 @@ pub enum CliRunError {
     ExtractAssets(ExtractAssetsError),
     RuntimeInventory(RuntimeInventoryError),
     NamingProgress(NamingProgressError),
+    ModuleClassify(ModuleClassifyError),
     SymbolNames(SymbolNamesError),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
@@ -608,6 +682,7 @@ impl fmt::Display for CliRunError {
             Self::ExtractAssets(source) => write!(formatter, "{source}"),
             Self::RuntimeInventory(source) => write!(formatter, "{source}"),
             Self::NamingProgress(source) => write!(formatter, "{source}"),
+            Self::ModuleClassify(source) => write!(formatter, "{source}"),
             Self::SymbolNames(source) => write!(formatter, "{source}"),
             Self::AuditRejected(summary) => {
                 write!(
@@ -643,6 +718,7 @@ impl Error for CliRunError {
             Self::ExtractAssets(source) => Some(source),
             Self::RuntimeInventory(source) => Some(source),
             Self::NamingProgress(source) => Some(source),
+            Self::ModuleClassify(source) => Some(source),
             Self::SymbolNames(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
             Self::AuditRejected(_) | Self::UnsafeOutputPath(_) | Self::MatchModulesRecall(_) => {
