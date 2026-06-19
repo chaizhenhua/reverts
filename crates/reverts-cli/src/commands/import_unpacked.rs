@@ -711,12 +711,16 @@ fn create_schema(connection: &Connection) -> rusqlite::Result<()> {
             UNIQUE (module_id)
         );
         CREATE TABLE package_surfaces (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL,
             package_name TEXT NOT NULL,
             package_version TEXT NOT NULL,
             export_specifier TEXT NOT NULL,
             status TEXT NOT NULL,
-            evidence_json TEXT
+            evidence_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (project_id, export_specifier)
         );
         CREATE TABLE project_assets (
             id INTEGER PRIMARY KEY,
