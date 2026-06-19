@@ -110,6 +110,84 @@ fn classify_anchors(fingerprint: &SourceFingerprint) -> (BTreeSet<String>, BTree
     (exports, assets)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchTier {
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModuleMatch {
+    pub file_path: String,
+    pub tier: MatchTier,
+    pub asset_overlap: usize,
+    pub export_overlap: usize,
+    pub function_overlap: usize,
+    pub anchor_overlap: usize,
+    pub score: usize,
+}
+
+fn overlap_len(left: &BTreeSet<String>, right: &BTreeSet<String>) -> usize {
+    left.intersection(right).count()
+}
+
+pub(crate) fn best_module_match(
+    subject: &SourceFingerprint,
+    index: &ReferenceSourceIndex,
+) -> Option<ModuleMatch> {
+    let (subject_exports, subject_assets) = classify_anchors(subject);
+    let mut best: Option<ModuleMatch> = None;
+    for module in &index.modules {
+        let asset_overlap = overlap_len(&subject_assets, &module.asset_literals);
+        let export_overlap = overlap_len(&subject_exports, &module.export_names);
+        let function_overlap = overlap_len(
+            &subject.function_signature_hashes,
+            &module.fingerprint.function_signature_hashes,
+        );
+        let anchor_overlap =
+            overlap_len(&subject.string_anchors, &module.fingerprint.string_anchors);
+        let hash_match = !subject
+            .normalized_source_hashes
+            .is_disjoint(&module.fingerprint.normalized_source_hashes);
+        let score =
+            asset_overlap * 1000 + export_overlap * 50 + function_overlap * 5 + anchor_overlap;
+        // Require at least 2 points of evidence when there is no hash match;
+        // Low tier is never auto-accepted downstream, so this floor only
+        // affects the dry-run report, not safety.
+        if score < 2 && !hash_match {
+            continue;
+        }
+        let tier = if hash_match || asset_overlap >= 1 {
+            MatchTier::High
+        } else if export_overlap >= 2 || function_overlap >= 2 {
+            MatchTier::Medium
+        } else {
+            MatchTier::Low
+        };
+        let candidate = ModuleMatch {
+            file_path: module.file_path.clone(),
+            tier,
+            asset_overlap,
+            export_overlap,
+            function_overlap,
+            anchor_overlap,
+            score,
+        };
+        let better = match &best {
+            None => true,
+            Some(current) => {
+                candidate.score > current.score
+                    || (candidate.score == current.score && candidate.file_path < current.file_path)
+            }
+        };
+        if better {
+            best = Some(candidate);
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +236,47 @@ mod tests {
             assets.contains("/$bunfs/root/audio-capture.node"),
             "assets: {assets:?}"
         );
+    }
+
+    #[test]
+    fn native_asset_literal_match_is_high_tier() {
+        let index = {
+            let temp = tempfile::tempdir().expect("temp");
+            std::fs::create_dir_all(temp.path().join("features")).expect("mkdir");
+            std::fs::write(
+                temp.path().join("features/audio-capture.ts"),
+                "export var _HL = require('/$bunfs/root/audio-capture.node');",
+            )
+            .expect("write");
+            build_reference_source_index(temp.path(), "2.1.76").expect("index")
+        };
+        // Subject emitted module references the same native asset.
+        let subject = fingerprint_source(
+            "modules/m1.ts",
+            "export const a = require('/$bunfs/root/audio-capture.node');",
+        )
+        .expect("subject fp");
+        let matched = best_module_match(&subject, &index).expect("match");
+        assert_eq!(matched.file_path, "features/audio-capture.ts");
+        assert_eq!(matched.tier, MatchTier::High);
+    }
+
+    #[test]
+    fn unrelated_modules_do_not_match() {
+        let index = {
+            let temp = tempfile::tempdir().expect("temp");
+            std::fs::write(
+                temp.path().join("a.ts"),
+                "export function alpha(x){ return x + 1; }",
+            )
+            .expect("write");
+            build_reference_source_index(temp.path(), "v").expect("index")
+        };
+        let subject = fingerprint_source(
+            "modules/m.ts",
+            "export const totallyDifferent = 42; console.log('zzz-unique-string');",
+        )
+        .expect("fp");
+        assert!(best_module_match(&subject, &index).is_none());
     }
 }
