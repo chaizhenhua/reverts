@@ -138,6 +138,14 @@ fn ledger_from_inventory(inventory: &Value, identifier_inventory: Option<&Value>
             0,
         ),
     ];
+    let global_api_surface = coverage_from_nested(symbols, "global_api_surface");
+    if global_api_surface.total > 0 {
+        rows.push(global_api_surface);
+    }
+    let internal_module_surface = coverage_from_nested(symbols, "internal_module_surface");
+    if internal_module_surface.total > 0 {
+        rows.push(internal_module_surface);
+    }
     if let Some(identifier_inventory) = identifier_inventory {
         let inventory_files = identifier_inventory.get("files").unwrap_or(&Value::Null);
         let identifiers = identifier_inventory
@@ -253,6 +261,16 @@ fn coverage_row(kind: &'static str, total: usize, complete: usize, pending: usiz
     }
 }
 
+fn coverage_from_nested(value: &Value, key: &'static str) -> CoverageRow {
+    let nested = value.get(key).unwrap_or(&Value::Null);
+    coverage_row(
+        key,
+        number(nested, "total"),
+        number(nested, "named"),
+        number(nested, "pending"),
+    )
+}
+
 fn number(value: &Value, key: &str) -> usize {
     value
         .get(key)
@@ -266,6 +284,8 @@ fn required_action(kind: &str) -> &'static str {
         "module" => "classify",
         "package_module" => "match_package",
         "module_symbol" => "name",
+        "global_api_surface" => "name",
+        "internal_module_surface" => "name",
         "identifier_source_file" => "fix_parse_error",
         "semantic_binding" => "name",
         _ => "explain",
@@ -280,6 +300,12 @@ fn group_reason(kind: &str) -> &'static str {
         "module" => "classified as application/package/runtime/third-party",
         "package_module" => "matched or pending package attribution",
         "module_symbol" => "covered by emitted first-party module-level semantic naming",
+        "global_api_surface" => {
+            "globally exported first-party module symbols that need semantic names"
+        }
+        "internal_module_surface" => {
+            "first-party module-level symbols imported by other first-party modules"
+        }
         "identifier_source_file" => "generated JS/TS files parsed by the AST identifier inventory",
         "identifier" => "AST identifier sites counted beyond module-scope semantic naming",
         "semantic_binding" => {
@@ -310,7 +336,13 @@ mod tests {
             },
             "modules": {"total": 5, "unclassified": 1},
             "packages": {"package_modules": 2, "matched": 2, "unmatched": 0},
-            "symbols": {"semantic_required": 7, "semantic_named": 6, "semantic_pending": 1}
+            "symbols": {
+                "semantic_required": 7,
+                "semantic_named": 6,
+                "semantic_pending": 1,
+                "global_api_surface": {"total": 2, "named": 1, "pending": 1},
+                "internal_module_surface": {"total": 4, "named": 3, "pending": 1}
+            }
         });
 
         let ledger = super::ledger_from_inventory(&inventory, None);
@@ -318,7 +350,9 @@ mod tests {
         assert_eq!(ledger["status"], "pending");
         assert_eq!(ledger["by_kind"]["module"]["pending"], 1);
         assert_eq!(ledger["by_kind"]["module_symbol"]["pending"], 1);
-        assert_eq!(ledger["summary"]["pending_items"], 2);
+        assert_eq!(ledger["by_kind"]["global_api_surface"]["pending"], 1);
+        assert_eq!(ledger["by_kind"]["internal_module_surface"]["pending"], 1);
+        assert_eq!(ledger["summary"]["pending_items"], 4);
     }
 
     #[test]

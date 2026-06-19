@@ -2,9 +2,13 @@
 //! cumulative work-amount tiers for first-party modules.
 //!
 //! Tiers (cumulative, `PublicSurface ⊆ Declarations ⊆ Full`):
-//! - `PublicSurface`: exported symbols.
+//! - `PublicSurface`: globally exported symbols.
 //! - `Declarations`: + non-exported function/class-like top-level symbols.
 //! - `Full`: + remaining module-level value/const symbols.
+//!
+//! Internal module surface is reported separately: every first-party module that
+//! is imported by another first-party module contributes all of its module-level
+//! emitted symbols to boundary-level naming work.
 //!
 //! "Named" is the Agent-written DB field `symbols.semantic_name`
 //! (`SymbolInput::semantic_name`), never the always-present computed
@@ -12,7 +16,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use reverts_input::{InputBundle, PackageAttributionStatus, PackageEmissionMode};
+use reverts_input::{
+    InputBundle, ModuleDependencyTarget, PackageAttributionStatus, PackageEmissionMode,
+};
 use reverts_ir::{ModuleId, ModuleKind};
 use reverts_model::EnrichedProgram;
 use reverts_pipeline::{SymbolIndexEntry, generate_project_from_prepared, prepare_and_enrich};
@@ -41,6 +47,8 @@ pub(crate) struct SymbolDetail {
     pub original_name: String,
     pub tier: Tier,
     pub named: bool,
+    pub global_api_surface: bool,
+    pub internal_module_surface: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +72,11 @@ pub struct TierBreakdown {
 pub struct ModuleNamingProgress {
     pub module_id: ModuleId,
     pub semantic_path: String,
+    pub imported_by_count: usize,
+    pub imports_count: usize,
     pub breakdown: TierBreakdown,
+    pub global_api_surface: Vec<SurfaceSymbol>,
+    pub internal_module_surface: Vec<SurfaceSymbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +84,16 @@ pub struct NamingProgressReport {
     pub project_id: u32,
     pub modules: Vec<ModuleNamingProgress>,
     pub totals: TierBreakdown,
+    pub global_api_surface: TierCoverage,
+    pub internal_module_surface: TierCoverage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurfaceSymbol {
+    pub original_name: String,
+    pub emitted_name: String,
+    pub semantic_named: bool,
+    pub function_like: bool,
 }
 
 pub(crate) fn symbol_tier(exported: bool, kind: NamingKind) -> Tier {
@@ -175,6 +197,8 @@ fn is_vendored_path(path: &str) -> bool {
 pub(crate) struct EmittedUniverse {
     pub first_party: BTreeSet<u32>,
     pub exported_by_module: BTreeMap<u32, BTreeSet<String>>,
+    pub imported_by_count: BTreeMap<u32, usize>,
+    pub imports_count: BTreeMap<u32, usize>,
 }
 
 pub(crate) fn emitted_universe(
@@ -196,9 +220,31 @@ pub(crate) fn emitted_universe(
             .collect();
         exported_by_module.insert(module_id.0, exported);
     }
+    let mut imported_by = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut imports = BTreeMap::<u32, BTreeSet<u32>>::new();
+    for dependency in &model.input().dependencies {
+        let ModuleDependencyTarget::Module(target) = dependency.target else {
+            continue;
+        };
+        let from = dependency.from_module_id.0;
+        let to = target.0;
+        if !first_party.contains(&from) || !first_party.contains(&to) || from == to {
+            continue;
+        }
+        imports.entry(from).or_default().insert(to);
+        imported_by.entry(to).or_default().insert(from);
+    }
     EmittedUniverse {
         first_party,
         exported_by_module,
+        imported_by_count: imported_by
+            .into_iter()
+            .map(|(module_id, consumers)| (module_id, consumers.len()))
+            .collect(),
+        imports_count: imports
+            .into_iter()
+            .map(|(module_id, targets)| (module_id, targets.len()))
+            .collect(),
     }
 }
 
@@ -220,6 +266,12 @@ pub(crate) fn classify_emitted_entry(
         .exported_by_module
         .get(&entry.module_id.0)
         .is_some_and(|names| names.contains(&entry.original_name));
+    let internal_module_surface = universe
+        .imported_by_count
+        .get(&entry.module_id.0)
+        .copied()
+        .unwrap_or(0)
+        > 0;
     let kind = if entry.function_like {
         NamingKind::FunctionLike
     } else {
@@ -229,7 +281,19 @@ pub(crate) fn classify_emitted_entry(
         original_name: entry.original_name.clone(),
         tier: symbol_tier(exported, kind),
         named,
+        global_api_surface: exported,
+        internal_module_surface,
     })
+}
+
+fn surface_coverage(symbols: &[SurfaceSymbol]) -> TierCoverage {
+    TierCoverage {
+        universe: symbols.len(),
+        named: symbols
+            .iter()
+            .filter(|symbol| symbol.semantic_named)
+            .count(),
+    }
 }
 
 #[must_use]
@@ -239,11 +303,31 @@ pub(crate) fn compute_naming_progress(
     universe: &EmittedUniverse,
 ) -> NamingProgressReport {
     let mut by_module: BTreeMap<u32, (String, Vec<SymbolDetail>)> = BTreeMap::new();
+    let mut global_surface_by_module = BTreeMap::<u32, Vec<SurfaceSymbol>>::new();
+    let mut internal_surface_by_module = BTreeMap::<u32, Vec<SurfaceSymbol>>::new();
     let mut all_symbols: Vec<SymbolDetail> = Vec::new();
     for entry in symbol_index {
         let Some(detail) = classify_emitted_entry(entry, universe) else {
             continue;
         };
+        let surface_symbol = SurfaceSymbol {
+            original_name: entry.original_name.clone(),
+            emitted_name: entry.emitted_name.clone(),
+            semantic_named: entry.semantic_named,
+            function_like: entry.function_like,
+        };
+        if detail.global_api_surface {
+            global_surface_by_module
+                .entry(entry.module_id.0)
+                .or_default()
+                .push(surface_symbol.clone());
+        }
+        if detail.internal_module_surface {
+            internal_surface_by_module
+                .entry(entry.module_id.0)
+                .or_default()
+                .push(surface_symbol);
+        }
         all_symbols.push(detail.clone());
         by_module
             .entry(entry.module_id.0)
@@ -251,18 +335,42 @@ pub(crate) fn compute_naming_progress(
             .1
             .push(detail);
     }
+    let global_surface = global_surface_by_module
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
+    let internal_surface = internal_surface_by_module
+        .values()
+        .flatten()
+        .cloned()
+        .collect::<Vec<_>>();
     let modules = by_module
         .into_iter()
         .map(|(module_id, (file_path, symbols))| ModuleNamingProgress {
             module_id: ModuleId(module_id),
             semantic_path: file_path,
+            imported_by_count: universe
+                .imported_by_count
+                .get(&module_id)
+                .copied()
+                .unwrap_or(0),
+            imports_count: universe.imports_count.get(&module_id).copied().unwrap_or(0),
             breakdown: tier_breakdown(&symbols),
+            global_api_surface: global_surface_by_module
+                .remove(&module_id)
+                .unwrap_or_default(),
+            internal_module_surface: internal_surface_by_module
+                .remove(&module_id)
+                .unwrap_or_default(),
         })
         .collect();
     NamingProgressReport {
         project_id,
         modules,
         totals: tier_breakdown(&all_symbols),
+        global_api_surface: surface_coverage(&global_surface),
+        internal_module_surface: surface_coverage(&internal_surface),
     }
 }
 
@@ -322,6 +430,23 @@ fn coverage_json(coverage: TierCoverage) -> serde_json::Value {
     })
 }
 
+fn surface_symbols_json(symbols: &[SurfaceSymbol]) -> serde_json::Value {
+    let coverage = surface_coverage(symbols);
+    serde_json::json!({
+        "named": coverage.named,
+        "total": coverage.universe,
+        "pending": coverage.universe.saturating_sub(coverage.named),
+        "symbols": symbols.iter().map(|symbol| {
+            serde_json::json!({
+                "original_name": symbol.original_name,
+                "emitted_name": symbol.emitted_name,
+                "semantic_named": symbol.semantic_named,
+                "function_like": symbol.function_like,
+            })
+        }).collect::<Vec<_>>(),
+    })
+}
+
 fn headline_coverage(breakdown: &TierBreakdown, target: NamingProgressTier) -> TierCoverage {
     match target {
         NamingProgressTier::PublicSurface => breakdown.public_surface,
@@ -348,16 +473,25 @@ pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgres
             "declarations": coverage_json(report.totals.declarations),
             "full": coverage_json(report.totals.full),
         },
+        "workload": {
+            "global_api_surface": coverage_json(report.global_api_surface),
+            "internal_module_surface": coverage_json(report.internal_module_surface),
+            "module_scope_symbols": coverage_json(report.totals.full),
+        },
         "modules": report.modules.iter().map(|module| {
             serde_json::json!({
                 "module_id": module.module_id.0,
                 "file_path": module.semantic_path,
+                "imported_by_count": module.imported_by_count,
+                "imports_count": module.imports_count,
                 "reached": tier_label(module.breakdown.reached_level),
                 "tiers": {
                     "public_surface": coverage_json(module.breakdown.public_surface),
                     "declarations": coverage_json(module.breakdown.declarations),
                     "full": coverage_json(module.breakdown.full),
                 },
+                "global_api_surface": surface_symbols_json(&module.global_api_surface),
+                "internal_module_surface": surface_symbols_json(&module.internal_module_surface),
             })
         }).collect::<Vec<_>>(),
     });
@@ -373,30 +507,45 @@ pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
     let totals = &report.totals;
     let headline = headline_coverage(totals, args.target_level);
     println!(
-        "naming progress for project {}: target={} {}/{} ({:.2}%) | public_surface {}/{} ({:.2}%), declarations {}/{} ({:.2}%), full {}/{} ({:.2}%), reached={}, modules={}",
+        "naming progress for project {}: target={} {}/{} ({:.2}%) | global_api_surface {}/{} ({:.2}%), internal_module_surface {}/{} ({:.2}%), module_scope_symbols {}/{} ({:.2}%), declarations {}/{} ({:.2}%), reached={}, modules={}",
         report.project_id,
         target_label(args.target_level),
         headline.named,
         headline.universe,
         pct(headline),
-        totals.public_surface.named,
-        totals.public_surface.universe,
-        pct(totals.public_surface),
-        totals.declarations.named,
-        totals.declarations.universe,
-        pct(totals.declarations),
+        report.global_api_surface.named,
+        report.global_api_surface.universe,
+        pct(report.global_api_surface),
+        report.internal_module_surface.named,
+        report.internal_module_surface.universe,
+        pct(report.internal_module_surface),
         totals.full.named,
         totals.full.universe,
         pct(totals.full),
+        totals.declarations.named,
+        totals.declarations.universe,
+        pct(totals.declarations),
         tier_label(totals.reached_level),
         report.modules.len(),
     );
     for module in &report.modules {
         println!(
-            "  {}: public_surface {}/{}, declarations {}/{}, full {}/{}, reached={}",
+            "  {}: imported_by={}, imports={}, global_api_surface {}/{}, internal_module_surface {}/{}, declarations {}/{}, full {}/{}, reached={}",
             module.semantic_path,
-            module.breakdown.public_surface.named,
-            module.breakdown.public_surface.universe,
+            module.imported_by_count,
+            module.imports_count,
+            module
+                .global_api_surface
+                .iter()
+                .filter(|symbol| symbol.semantic_named)
+                .count(),
+            module.global_api_surface.len(),
+            module
+                .internal_module_surface
+                .iter()
+                .filter(|symbol| symbol.semantic_named)
+                .count(),
+            module.internal_module_surface.len(),
             module.breakdown.declarations.named,
             module.breakdown.declarations.universe,
             module.breakdown.full.named,
@@ -419,6 +568,8 @@ mod tests {
             original_name: String::new(),
             tier: symbol_tier(exported, kind),
             named,
+            global_api_surface: exported,
+            internal_module_surface: false,
         }
     }
 
@@ -495,7 +646,21 @@ mod tests {
         super::EmittedUniverse {
             first_party: first_party.iter().copied().collect(),
             exported_by_module,
+            imported_by_count: BTreeMap::new(),
+            imports_count: BTreeMap::new(),
         }
+    }
+
+    fn universe_with_imports(
+        first_party: &[u32],
+        exported: &[(u32, &str)],
+        imported_by_count: &[(u32, usize)],
+        imports_count: &[(u32, usize)],
+    ) -> super::EmittedUniverse {
+        let mut universe = universe(first_party, exported);
+        universe.imported_by_count = imported_by_count.iter().copied().collect();
+        universe.imports_count = imports_count.iter().copied().collect();
+        universe
     }
 
     fn entry(
@@ -595,5 +760,32 @@ mod tests {
         assert_eq!(report.totals.public_surface.named, 0);
         assert_eq!(report.totals.declarations.universe, 2); // `aB` + `hL`
         assert_eq!(report.totals.reached_level, None); // public surface incomplete
+        assert_eq!(report.global_api_surface.universe, 1);
+        assert_eq!(report.internal_module_surface.universe, 0);
+    }
+
+    #[test]
+    fn internal_surface_counts_imported_first_party_modules() {
+        let universe = universe_with_imports(&[1, 2], &[(1, "publicName")], &[(1, 2)], &[(2, 1)]);
+        let index = [
+            entry(1, "publicName", "publicName", true, true),
+            entry(1, "localValue", "localValue", false, false),
+            entry(2, "consumer", "consumer", true, false),
+        ];
+
+        let report = compute_naming_progress(7, &index, &universe);
+        let provider = report
+            .modules
+            .iter()
+            .find(|module| module.module_id == reverts_ir::ModuleId(1))
+            .expect("provider module");
+
+        assert_eq!(report.global_api_surface.universe, 1);
+        assert_eq!(report.global_api_surface.named, 1);
+        assert_eq!(report.internal_module_surface.universe, 2);
+        assert_eq!(report.internal_module_surface.named, 1);
+        assert_eq!(provider.imported_by_count, 2);
+        assert_eq!(provider.internal_module_surface.len(), 2);
+        assert_eq!(provider.global_api_surface.len(), 1);
     }
 }

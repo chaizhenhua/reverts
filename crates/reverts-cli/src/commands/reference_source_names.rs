@@ -253,7 +253,7 @@ pub(crate) fn build_reference_source_index(
     version: &str,
 ) -> Result<ReferenceSourceIndex, String> {
     let mut files = Vec::new();
-    collect_source_files(root, root, &mut files)?;
+    collect_source_files(root, &mut files)?;
     files.sort();
     let mut modules = Vec::new();
     for absolute in files {
@@ -281,11 +281,7 @@ pub(crate) fn build_reference_source_index(
     })
 }
 
-fn collect_source_files(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<std::path::PathBuf>,
-) -> Result<(), String> {
+fn collect_source_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
     let entries =
         std::fs::read_dir(dir).map_err(|error| format!("read_dir {}: {error}", dir.display()))?;
     for entry in entries {
@@ -297,7 +293,7 @@ fn collect_source_files(
             if SKIP_DIRS.contains(&name.as_str()) {
                 continue;
             }
-            collect_source_files(root, &path, out)?;
+            collect_source_files(&path, out)?;
         } else if file_type.is_file() {
             if name.ends_with(".d.ts") {
                 continue;
@@ -327,7 +323,15 @@ fn classify_anchors(fingerprint: &SourceFingerprint) -> (BTreeSet<String>, BTree
             // full literal differs while the distinctive `.node` filename is
             // stable across versions.
             let basename = anchor.rsplit('/').next().unwrap_or(anchor.as_str());
-            assets.insert(basename.to_string());
+            // Require a non-empty stem before `.node`: a bare `".node"` extension
+            // string (common in file-type lists) is NOT a native-asset reference
+            // and must not produce a spurious High-tier asset match.
+            if basename
+                .strip_suffix(".node")
+                .is_some_and(|stem| !stem.is_empty())
+            {
+                assets.insert(basename.to_string());
+            }
         }
     }
     (exports, assets)
@@ -604,6 +608,27 @@ mod tests {
         assert!(
             assets.contains("audio-capture.node"),
             "assets matched by basename: {assets:?}"
+        );
+    }
+
+    #[test]
+    fn bare_node_extension_is_not_a_native_asset() {
+        // A file-type list containing the bare `'.node'` extension must NOT be
+        // classified as a native-asset literal (it would collide across unrelated
+        // modules and forge a High-tier match).
+        let fingerprint = fingerprint_source(
+            "constants/files.ts",
+            "export const sourceExtensions = ['.ts', '.node', '.wasm'];",
+        )
+        .expect("fingerprint");
+        let (_exports, assets) = classify_anchors(&fingerprint);
+        assert!(
+            !assets.contains(".node"),
+            "bare .node extension must not be an asset: {assets:?}"
+        );
+        assert!(
+            assets.is_empty(),
+            "no native-asset literals expected: {assets:?}"
         );
     }
 

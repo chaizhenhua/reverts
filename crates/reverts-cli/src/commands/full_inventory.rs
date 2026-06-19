@@ -172,6 +172,26 @@ pub fn full_inventory_report(args: &FullInventoryArgs) -> Result<Value, CliRunEr
     let semantic_total = json_usize(&progress_json, &["total"]);
     let semantic_named = json_usize(&progress_json, &["named"]);
     let semantic_pending = json_usize(&progress_json, &["pending"]);
+    let global_api_surface_total =
+        json_usize(&progress_json, &["workload", "global_api_surface", "total"]);
+    let global_api_surface_named =
+        json_usize(&progress_json, &["workload", "global_api_surface", "named"]);
+    let global_api_surface_pending = json_usize(
+        &progress_json,
+        &["workload", "global_api_surface", "pending"],
+    );
+    let internal_module_surface_total = json_usize(
+        &progress_json,
+        &["workload", "internal_module_surface", "total"],
+    );
+    let internal_module_surface_named = json_usize(
+        &progress_json,
+        &["workload", "internal_module_surface", "named"],
+    );
+    let internal_module_surface_pending = json_usize(
+        &progress_json,
+        &["workload", "internal_module_surface", "pending"],
+    );
     let semantic_complete = progress_json
         .get("complete")
         .and_then(Value::as_bool)
@@ -230,6 +250,21 @@ pub fn full_inventory_report(args: &FullInventoryArgs) -> Result<Value, CliRunEr
             "semantic_named": semantic_named,
             "semantic_pending": semantic_pending,
             "semantic_complete": semantic_complete,
+            "module_scope_symbols": {
+                "total": semantic_total,
+                "named": semantic_named,
+                "pending": semantic_pending,
+            },
+            "global_api_surface": {
+                "total": global_api_surface_total,
+                "named": global_api_surface_named,
+                "pending": global_api_surface_pending,
+            },
+            "internal_module_surface": {
+                "total": internal_module_surface_total,
+                "named": internal_module_surface_named,
+                "pending": internal_module_surface_pending,
+            },
         },
         "excluded_or_explained": [
             {
