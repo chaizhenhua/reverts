@@ -185,6 +185,8 @@ pub struct RuntimeInventoryArgs {
     #[arg(long)]
     pub package_source_blockers: bool,
     #[arg(long)]
+    pub finding_clusters: bool,
+    #[arg(long)]
     pub input: PathBuf,
 }
 

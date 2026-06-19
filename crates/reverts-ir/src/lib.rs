@@ -420,6 +420,17 @@ impl DefUseGraph {
             || self.imports.contains(&(module_id, binding.clone()))
     }
 
+    /// Modules that contain a top-level *definition* of `binding` (imports are
+    /// excluded — an importer is not the owner). Used to attribute a free read
+    /// in one module back to the module(s) that actually own the symbol.
+    #[must_use]
+    pub fn modules_defining(&self, binding: &BindingName) -> BTreeSet<ModuleId> {
+        self.definitions
+            .iter()
+            .filter_map(|(module_id, defined)| (defined == binding).then_some(*module_id))
+            .collect()
+    }
+
     #[must_use]
     pub fn unresolved_reads(&self) -> Vec<(ModuleId, BindingName)> {
         self.reads
@@ -863,6 +874,22 @@ mod tests {
         graph.write(ModuleId(1), "namespace");
 
         assert!(graph.unresolved_writes().is_empty());
+    }
+
+    #[test]
+    fn modules_defining_returns_only_modules_that_define_the_binding() {
+        let mut graph = DefUseGraph::default();
+        graph.define(ModuleId(1), "helper");
+        graph.define(ModuleId(2), "helper");
+        graph.import(ModuleId(3), "helper");
+        graph.read(ModuleId(4), "helper");
+
+        let owners = graph.modules_defining(&BindingName::new("helper"));
+
+        assert_eq!(
+            owners,
+            std::collections::BTreeSet::from([ModuleId(1), ModuleId(2)])
+        );
     }
 
     #[test]

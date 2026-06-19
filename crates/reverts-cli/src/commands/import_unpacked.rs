@@ -1437,6 +1437,7 @@ mod tests {
                 setter_blockers: false,
                 runtime_attribution: false,
                 package_source_blockers: false,
+                finding_clusters: false,
                 input: output_db,
             },
         )?;

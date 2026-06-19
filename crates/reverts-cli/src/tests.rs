@@ -15,13 +15,13 @@ use reverts_package_matcher::{
 };
 use reverts_pipeline::{
     EmittedAsset, EmittedFile, RuntimeDependency, RuntimeSetterMigrationBlockerReason,
-    RuntimeSetterMigrationBlockerReport,
+    RuntimeSetterMigrationBlockerReport, prepare_and_enrich,
 };
 use rusqlite::{Connection, params};
 
 use super::commands::generate_project::{checked_output_path, write_emitted_project};
 use super::commands::runtime_inventory::{
-    RuntimeSourceSpanOwner, package_source_blocker_report_from_files,
+    RuntimeSourceSpanOwner, audit_finding_cluster_report, package_source_blocker_report_from_files,
     runtime_emitted_setter_blockers_from_files, runtime_inventory_counts_from_files,
     runtime_inventory_project_selections, runtime_line_attribution_from_files,
     runtime_module_owner_label, runtime_original_name_owners_by_binding,
@@ -281,6 +281,7 @@ fn parses_runtime_inventory_command() {
         "--setter-blockers".to_string(),
         "--runtime-attribution".to_string(),
         "--package-source-blockers".to_string(),
+        "--finding-clusters".to_string(),
     ])
     .expect("args should parse");
 
@@ -293,6 +294,7 @@ fn parses_runtime_inventory_command() {
     assert!(args.setter_blockers);
     assert!(args.runtime_attribution);
     assert!(args.package_source_blockers);
+    assert!(args.finding_clusters);
 
     let command = CliCommand::parse([
         "runtime-inventory".to_string(),
@@ -488,6 +490,103 @@ fn package_source_blocker_report_groups_preserved_package_source() {
             .map(|bucket| bucket.files),
         Some(1)
     );
+}
+
+#[test]
+fn audit_finding_cluster_report_attributes_cross_module_owner() {
+    // Module `a` defines `helper`; module `b` reads it as a free variable.
+    // A MissingDefinition in `b` must be attributed back to `a` as the owner.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "a.js",
+        Some("function helper() { return 1; }".to_string()),
+    ));
+    rows.source_files.push(SourceFileInput::new(
+        2,
+        "b.js",
+        Some("helper();".to_string()),
+    ));
+    rows.modules
+        .push(ModuleInput::application(ModuleId(1), "a", "a.ts").with_source_file(1));
+    rows.modules
+        .push(ModuleInput::application(ModuleId(2), "b", "b.ts").with_source_file(2));
+    let input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+    let prepared = prepare_and_enrich(input).expect("prepare should succeed");
+
+    let mut audit = AuditReport::default();
+    audit.push(
+        AuditFinding::warning(
+            FindingCode::MissingDefinition,
+            "binding 'helper' is read without a local definition or import",
+        )
+        .with_module(ModuleId(2).0.to_string())
+        .with_binding("helper"),
+    );
+
+    let report = audit_finding_cluster_report(&prepared.program, &audit);
+
+    assert_eq!(report.total_findings, 1);
+    let item = &report.items[0];
+    assert_eq!(item.binding, "helper");
+    assert_eq!(item.module_original_name, "b");
+    assert_eq!(item.owner_candidate, "a.ts");
+    assert_eq!(item.category, "cross-module-owner");
+    assert!(!item.is_package_module);
+    assert!(!item.is_bundle_source);
+    assert_eq!(report.by_category.get("cross-module-owner"), Some(&1));
+}
+
+#[test]
+fn audit_finding_cluster_report_flags_esbuild_short_names_as_minified() {
+    // No module defines any of these bindings (owner_count == 0). Real ambient
+    // globals are already filtered upstream, so the meaningful split is
+    // minified-shaped (esbuild `e`/`GPi`/`P7e`/`K3A` — closure-scope loss) vs a
+    // genuine real-word symbol that is missing for some other reason.
+    let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        "b.js",
+        Some("var ok = 1;".to_string()),
+    ));
+    rows.modules
+        .push(ModuleInput::application(ModuleId(1), "b", "b.ts").with_source_file(1));
+    let input = reverts_input::InputBundle::from_rows(rows).expect("rows should be valid");
+    let prepared = prepare_and_enrich(input).expect("prepare should succeed");
+
+    let mut audit = AuditReport::default();
+    // Minified: 1-char, digit, inner-caps, plus the all-caps / cap-lower /
+    // all-lower 3-char esbuild base-N families (ZIA/Zut/zlt). Real symbols:
+    // a long camelCase name and a standard global the allowlist missed.
+    let minified = ["e", "GPi", "P7e", "K3A", "ZIA", "Zut", "zlt"];
+    let real = ["getUserConfig", "AggregateError"];
+    for binding in minified.iter().chain(real.iter()) {
+        audit.push(
+            AuditFinding::warning(
+                FindingCode::MissingDefinition,
+                "binding is read without a local definition or import",
+            )
+            .with_module(ModuleId(1).0.to_string())
+            .with_binding(*binding),
+        );
+    }
+
+    let report = audit_finding_cluster_report(&prepared.program, &audit);
+
+    let category_of = |binding: &str| {
+        report
+            .items
+            .iter()
+            .find(|item| item.binding == binding)
+            .map(|item| item.category.as_str())
+    };
+    for binding in minified {
+        assert_eq!(category_of(binding), Some("minified-free-var"), "{binding}");
+    }
+    for binding in real {
+        assert_eq!(category_of(binding), Some("unresolved-symbol"), "{binding}");
+    }
+    assert_eq!(report.by_category.get("minified-free-var"), Some(&7));
 }
 
 #[test]
@@ -997,6 +1096,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         setter_blockers: false,
         runtime_attribution: false,
         package_source_blockers: false,
+        finding_clusters: false,
     };
     let selections =
         runtime_inventory_project_selections(&newest_args).expect("select newest projects");
@@ -1017,6 +1117,7 @@ fn runtime_inventory_selects_project_source_sizes_with_limit_ordering() {
         setter_blockers: false,
         runtime_attribution: false,
         package_source_blockers: false,
+        finding_clusters: false,
     };
     let selections =
         runtime_inventory_project_selections(&single_project_args).expect("select single project");

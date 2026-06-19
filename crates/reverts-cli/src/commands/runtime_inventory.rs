@@ -15,6 +15,7 @@ use reverts_js::{
     ParseGoal, TopLevelStatementFact, TopLevelStatementKind, collect_top_level_statement_facts,
 };
 use reverts_model::EnrichedProgram;
+use reverts_observe::{AuditReport, FindingCode};
 use reverts_package::{
     ExternalImportProof, ExternalImportProofKind, is_accepted_external_attribution,
 };
@@ -42,6 +43,7 @@ pub struct RuntimeInventoryOutcome {
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub runtime_attribution: Option<RuntimeLineAttributionReport>,
     pub package_source_blockers: Option<PackageSourceBlockerReport>,
+    pub finding_clusters: Option<AuditFindingClusterReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,7 @@ pub struct RuntimeInventoryProject {
     pub emitted_setter_blockers: Option<RuntimeSetterMigrationBlockerReport>,
     pub runtime_attribution: Option<RuntimeLineAttributionReport>,
     pub package_source_blockers: Option<PackageSourceBlockerReport>,
+    pub finding_clusters: Option<AuditFindingClusterReport>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +131,197 @@ pub struct PackageSourceBlockerItem {
     pub bytes: usize,
     pub reason: String,
     pub detail: String,
+}
+
+/// Diagnostic clustering of audit findings (MissingDefinition,
+/// DuplicateTopLevelBinding, UnresolvableBareImport, ...) back to the module
+/// and symbol-closure facts that produced them. The goal is to turn thousands
+/// of scattered findings into a handful of actionable categories so the fix
+/// can be made in the graph/planner rather than via post-write string repair.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AuditFindingClusterReport {
+    pub total_findings: usize,
+    pub items: Vec<AuditFindingClusterItem>,
+    pub by_category: BTreeMap<String, usize>,
+    pub by_code: BTreeMap<String, usize>,
+    pub by_module: BTreeMap<String, usize>,
+}
+
+/// One enriched audit finding: the raw finding joined with the owning module's
+/// metadata and the cross-module owner candidate for its free binding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditFindingClusterItem {
+    pub finding_code: String,
+    pub module_id: String,
+    pub module_original_name: String,
+    pub source_file: String,
+    pub binding: String,
+    pub owner_candidate: String,
+    pub is_bundle_source: bool,
+    pub is_package_module: bool,
+    pub category: String,
+}
+
+impl AuditFindingClusterReport {
+    fn add(&mut self, other: &Self) {
+        self.total_findings += other.total_findings;
+        self.items.extend(other.items.iter().cloned());
+        merge_count_buckets(&mut self.by_category, &other.by_category);
+        merge_count_buckets(&mut self.by_code, &other.by_code);
+        merge_count_buckets(&mut self.by_module, &other.by_module);
+    }
+}
+
+fn merge_count_buckets(into: &mut BTreeMap<String, usize>, from: &BTreeMap<String, usize>) {
+    for (key, count) in from {
+        *into.entry(key.clone()).or_insert(0) += count;
+    }
+}
+
+pub(crate) fn audit_finding_cluster_report(
+    program: &EnrichedProgram,
+    audit: &AuditReport,
+) -> AuditFindingClusterReport {
+    let model = program.model();
+    let def_use = model.graph().def_use();
+    let modules_by_id: BTreeMap<u32, &ModuleInput> = model
+        .modules()
+        .iter()
+        .map(|module| (module.id.0, module))
+        .collect();
+    let source_paths: BTreeMap<u32, &str> = model
+        .input()
+        .source_files
+        .iter()
+        .map(|file| (file.id, file.path.as_str()))
+        .collect();
+
+    let mut report = AuditFindingClusterReport::default();
+    for finding in audit.findings() {
+        let code = format!("{:?}", finding.code);
+        let binding = finding.binding.clone().unwrap_or_default();
+        let module_id_str = finding.module.clone().unwrap_or_default();
+        let module = module_id_str
+            .parse::<u32>()
+            .ok()
+            .and_then(|id| modules_by_id.get(&id).copied());
+
+        let module_original_name = module.map_or_else(String::new, |m| m.original_name.clone());
+        let source_file = module
+            .and_then(|m| m.source_file_id)
+            .map(|sid| {
+                source_paths
+                    .get(&sid)
+                    .map_or_else(|| sid.to_string(), |path| (*path).to_string())
+            })
+            .unwrap_or_default();
+        let is_bundle_source = module.is_some_and(|m| m.source_span.is_some());
+        let is_package_module = module.is_some_and(|m| m.kind == ModuleKind::Package);
+
+        let owner_modules: Vec<&ModuleInput> = if binding.is_empty() {
+            Vec::new()
+        } else {
+            def_use
+                .modules_defining(&BindingName::new(binding.clone()))
+                .into_iter()
+                .filter(|owner| module.map(|m| m.id) != Some(*owner))
+                .filter_map(|owner| modules_by_id.get(&owner.0).copied())
+                .collect()
+        };
+        let owner_candidate = if owner_modules.is_empty() {
+            "<none>".to_string()
+        } else {
+            owner_modules
+                .iter()
+                .map(|m| m.semantic_path.clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let category = classify_audit_finding(finding.code, &binding, owner_modules.len());
+
+        report.items.push(AuditFindingClusterItem {
+            finding_code: code.clone(),
+            module_id: module_id_str,
+            module_original_name,
+            source_file,
+            binding,
+            owner_candidate,
+            is_bundle_source,
+            is_package_module,
+            category: category.clone(),
+        });
+        *report.by_category.entry(category).or_insert(0) += 1;
+        *report.by_code.entry(code).or_insert(0) += 1;
+        if let Some(module) = module {
+            *report
+                .by_module
+                .entry(module.semantic_path.clone())
+                .or_insert(0) += 1;
+        }
+    }
+    report.total_findings = report.items.len();
+    report
+}
+
+/// Bucket a finding into an actionable category. The MissingDefinition axis is
+/// owner-status + binding-shape (so minified `e`/`t`/`n` free variables — the
+/// bundle-wrapper-parameter class — separate from real cross-module owners).
+fn classify_audit_finding(code: FindingCode, binding: &str, owner_count: usize) -> String {
+    match code {
+        FindingCode::MissingDefinition => {
+            classify_missing_definition(binding, owner_count).to_string()
+        }
+        FindingCode::DuplicateTopLevelBinding => "duplicate-binding".to_string(),
+        FindingCode::UnresolvableBareImport => "bare-import".to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+fn classify_missing_definition(binding: &str, owner_count: usize) -> &'static str {
+    if binding.is_empty() {
+        "no-binding"
+    } else if looks_minified(binding) {
+        "minified-free-var"
+    } else if owner_count == 1 {
+        "cross-module-owner"
+    } else if owner_count > 1 {
+        "cross-module-owner-ambiguous"
+    } else {
+        "unresolved-symbol"
+    }
+}
+
+/// Heuristic for a minified identifier — a diagnostic proxy for bundle-wrapper
+/// parameters and other closure-scoped names that got sliced out of their
+/// defining scope. esbuild/webpack emit dense base-N names up to ~4 chars
+/// (`e`, `GPi`, `P7e`, `K3A`, `ZIA`, `Zut`, `zlt`), so any identifier-shaped
+/// name of four chars or fewer counts; at five chars a high-entropy signal (a
+/// digit, or inner-string caps mixed with lowercase) is required. Real short
+/// globals like `URL`/`Map`/`Set` are filtered upstream by the ambient
+/// allowlist before reaching a finding, so they do not arrive here.
+fn looks_minified(binding: &str) -> bool {
+    let len = binding.chars().count();
+    if !is_identifier_shaped(binding) {
+        return false;
+    }
+    if len <= 4 {
+        return true;
+    }
+    if len > 5 {
+        return false;
+    }
+    let has_digit = binding.chars().any(|c| c.is_ascii_digit());
+    let has_lower = binding.chars().any(|c| c.is_ascii_lowercase());
+    let has_inner_upper = binding.chars().skip(1).any(|c| c.is_ascii_uppercase());
+    has_digit || (has_inner_upper && has_lower)
+}
+
+fn is_identifier_shaped(binding: &str) -> bool {
+    !binding.is_empty()
+        && binding.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '$')
+        && binding
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
 impl PackageSourceBlockerReport {
@@ -208,6 +402,9 @@ pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
         if let Some(report) = &project.package_source_blockers {
             print_package_source_blocker_report("  package_source_blockers", report);
         }
+        if let Some(report) = &project.finding_clusters {
+            print_audit_finding_cluster_report("  finding_clusters", report);
+        }
     }
     println!(
         "total: files={}, source_lines={}, runtime_files={}, runtime_lines={}, runtime_reexport_only_files={}, runtime_imports={}, runtime_reexports={}, setters={}, setter_imports={}, setter_functions={}, reverts_internal_names={}, named_imports={}, named_exports={}, audit_findings={}, skipped_source_bytes={}",
@@ -240,7 +437,56 @@ pub(crate) fn run(args: RuntimeInventoryArgs) -> Result<(), CliRunError> {
     if print_total_details && let Some(report) = &outcome.package_source_blockers {
         print_package_source_blocker_report("total package_source_blockers", report);
     }
+    if print_total_details && let Some(report) = &outcome.finding_clusters {
+        print_audit_finding_cluster_report("total finding_clusters", report);
+    }
     Ok(())
+}
+
+/// Print the finding-cluster diagnostic: the by-code and by-category rollups
+/// (the actionable clustering) plus the heaviest modules. Per-finding rows are
+/// gated behind `REVERTS_FINDING_CLUSTER_ROWS=tsv` to keep default output to
+/// the buckets rather than thousands of scattered findings.
+fn print_audit_finding_cluster_report(label: &str, report: &AuditFindingClusterReport) {
+    println!("{label}: total_findings={}", report.total_findings);
+    print_count_bucket("  by_code", &report.by_code, usize::MAX);
+    print_count_bucket("  by_category", &report.by_category, usize::MAX);
+    print_count_bucket("  by_module", &report.by_module, 20);
+    if std::env::var_os("REVERTS_FINDING_CLUSTER_ROWS").is_some() {
+        println!(
+            "  rows: finding_code\tmodule_id\tmodule_original_name\tsource_file\tbinding\towner_candidate\tis_bundle_source\tis_package_module\tcategory"
+        );
+        for item in &report.items {
+            println!(
+                "  row\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                item.finding_code,
+                item.module_id,
+                item.module_original_name,
+                item.source_file,
+                item.binding,
+                item.owner_candidate,
+                item.is_bundle_source,
+                item.is_package_module,
+                item.category,
+            );
+        }
+    }
+}
+
+/// Print a `name=count` bucket map sorted by descending count, keeping at most
+/// `limit` entries (use `usize::MAX` for all).
+fn print_count_bucket(label: &str, bucket: &BTreeMap<String, usize>, limit: usize) {
+    if bucket.is_empty() {
+        return;
+    }
+    let mut entries: Vec<(&String, &usize)> = bucket.iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    let shown: Vec<String> = entries
+        .iter()
+        .take(limit)
+        .map(|(name, count)| format!("{name}={count}"))
+        .collect();
+    println!("{label}: [{}]", shown.join(", "));
 }
 
 fn print_runtime_setter_blocker_report(label: &str, report: &RuntimeSetterMigrationBlockerReport) {
@@ -442,6 +688,9 @@ pub fn runtime_inventory_from_sqlite(
     let mut package_source_blockers = args
         .package_source_blockers
         .then(PackageSourceBlockerReport::default);
+    let mut finding_clusters = args
+        .finding_clusters
+        .then(AuditFindingClusterReport::default);
     let timing_enabled = std::env::var_os("REVERTS_RUNTIME_INVENTORY_TIMING").is_some();
 
     for selection in selections {
@@ -481,6 +730,7 @@ pub fn runtime_inventory_from_sqlite(
                 emitted_setter_blockers: None,
                 runtime_attribution: None,
                 package_source_blockers: None,
+                finding_clusters: None,
             });
             continue;
         }
@@ -507,9 +757,23 @@ pub fn runtime_inventory_from_sqlite(
         {
             total.add(project_report);
         }
+        // The cluster report joins audit findings (only assembled on `run`,
+        // post-generate) with the enriched program's def-use owner facts.
+        // Clone the program ahead of the move into `generate` so both halves
+        // are available; gated on the opt-in flag to avoid the cost otherwise.
+        let cluster_program = args.finding_clusters.then(|| prepared.program.clone());
         let run = generate_project_inventory_from_prepared(prepared)
             .map_err(RuntimeInventoryError::Pipeline)?;
         mark_timing!("generate_project_inventory");
+        let project_finding_clusters = cluster_program
+            .as_ref()
+            .map(|program| audit_finding_cluster_report(program, &run.audit));
+        mark_timing!("finding_clusters");
+        if let (Some(total), Some(project_report)) =
+            (finding_clusters.as_mut(), project_finding_clusters.as_ref())
+        {
+            total.add(project_report);
+        }
         let runtime_facts_by_path = args
             .runtime_attribution
             .then(|| runtime_top_level_statement_facts_by_path(&run.project.files));
@@ -603,6 +867,7 @@ pub fn runtime_inventory_from_sqlite(
             emitted_setter_blockers: project_emitted_setter_blockers,
             runtime_attribution: project_runtime_attribution,
             package_source_blockers: project_package_source_blockers,
+            finding_clusters: project_finding_clusters,
         });
     }
 
@@ -616,6 +881,7 @@ pub fn runtime_inventory_from_sqlite(
         emitted_setter_blockers,
         runtime_attribution,
         package_source_blockers,
+        finding_clusters,
     })
 }
 
