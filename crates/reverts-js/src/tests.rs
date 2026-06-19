@@ -372,6 +372,46 @@ fn module_item_formatting_skips_reassigned_literal_variable_types_when_requested
 }
 
 #[test]
+fn module_item_formatting_infers_object_and_array_literal_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const tuple = [1, 2]; const config = { name: 'cli', port: 443 };",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("const tuple: number[] = [1, 2];"));
+    assert!(formatted.contains("const config: {"));
+    assert!(formatted.contains("name: string;"));
+    assert!(formatted.contains("port: number;"));
+}
+
+#[test]
+fn module_item_formatting_recovers_package_member_type_query() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const createClient = __pkg.createClient;",
+        generated_imports: &[GeneratedImport::new("__pkg", "pkg")],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("import * as pkg from 'pkg';"));
+    assert!(formatted.contains("const createClient: typeof pkg.createClient = pkg.createClient;"));
+}
+
+#[test]
 fn module_item_formatting_builds_imports_and_exports_as_ast_nodes() {
     let formatted = format_source_with_module_items(
         "const answer = __pkg.answer;",

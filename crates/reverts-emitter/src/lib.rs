@@ -320,7 +320,7 @@ mod tests {
 
         let source = project.files[0].source.as_str();
         assert!(source.contains("import * as pkg from 'pkg';"));
-        assert!(source.contains("const answer = pkg.answer;"));
+        assert!(source.contains("const answer: typeof pkg.answer = pkg.answer;"));
         assert!(source.contains("export { answer };"));
     }
 
@@ -349,7 +349,9 @@ mod tests {
             source.contains("import * as colors from 'css-color-names' with { type: 'json' };"),
             "{source}"
         );
-        assert!(source.contains("const aliceblue = colors.default.aliceblue;"));
+        assert!(source.contains(
+            "const aliceblue: typeof colors.default.aliceblue = colors.default.aliceblue;"
+        ));
     }
 
     #[test]

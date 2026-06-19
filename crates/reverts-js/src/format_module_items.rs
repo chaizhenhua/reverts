@@ -31,7 +31,9 @@ use crate::rename_apply::{
     apply_readability_renames, resolve_readability_rename_hints,
 };
 use crate::rename_hints::collect_late_readability_rename_hints;
-use crate::type_annotations::apply_type_annotations_to_program;
+use crate::type_annotations::{
+    apply_import_member_type_queries_to_program, apply_type_annotations_to_program,
+};
 use crate::{
     GeneratedExport, GeneratedImport, GeneratedRename, GeneratedTypeAnnotation, ReadabilityReport,
 };
@@ -230,6 +232,9 @@ pub fn format_source_with_module_items_request_with_report(
             parsed.program.body.push(empty_export_statement(&builder));
         }
         coalesce_simple_local_named_exports_in_program(&mut parsed.program, &builder);
+        if infer_literal_types {
+            apply_import_member_type_queries_to_program(&allocator, &mut parsed.program);
+        }
 
         let output = CodeGenerator::new()
             .with_options(CodegenOptions {

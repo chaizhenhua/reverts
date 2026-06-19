@@ -6,8 +6,10 @@ use oxc_ast::AstBuilder;
 use oxc_ast::Visit;
 use oxc_ast::VisitMut;
 use oxc_ast::ast::{
-    AssignmentExpression, AssignmentTarget, BindingPattern, BindingPatternKind, Declaration,
-    ExportNamedDeclaration, Expression, Program, SimpleAssignmentTarget, Statement, TSType,
+    ArrayExpressionElement, AssignmentExpression, AssignmentTarget, BindingPattern,
+    BindingPatternKind, Declaration, ExportNamedDeclaration, Expression,
+    ImportDeclarationSpecifier, ObjectPropertyKind, Program, PropertyKey, SimpleAssignmentTarget,
+    Statement, TSType, TSTypeName, TSTypeParameterInstantiation, TSTypeQueryExprName,
     UpdateExpression, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast::visit::walk::{walk_assignment_expression, walk_update_expression};
@@ -102,6 +104,24 @@ pub fn apply_type_annotations_to_program<'a>(
     let mut annotator = SafeLiteralInitializerAnnotator {
         builder: &builder,
         written_bindings: &written_bindings,
+    };
+    annotator.visit_program(program);
+}
+
+pub fn apply_import_member_type_queries_to_program<'a>(
+    allocator: &'a Allocator,
+    program: &mut Program<'a>,
+) {
+    let import_namespaces = import_namespace_bindings(program);
+    if import_namespaces.is_empty() {
+        return;
+    }
+    let written_bindings = written_bindings_in_program(program);
+    let builder = AstBuilder::new(allocator);
+    let mut annotator = ImportMemberTypeQueryAnnotator {
+        builder: &builder,
+        written_bindings: &written_bindings,
+        import_namespaces: &import_namespaces,
     };
     annotator.visit_program(program);
 }
@@ -220,15 +240,78 @@ fn annotate_safe_variable_declaration<'a>(
         let Some(init) = &declarator.init else {
             continue;
         };
-        let Some(kind) = literal_type_kind(init) else {
-            continue;
-        };
-        let Some(type_annotation) = type_annotation_for_kind(builder, kind) else {
+        let Some(type_annotation) = inferred_type_annotation_for_expression(builder, init, 0)
+        else {
             continue;
         };
         declarator.id.type_annotation =
             Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
     }
+}
+
+struct ImportMemberTypeQueryAnnotator<'b, 'a> {
+    builder: &'b AstBuilder<'a>,
+    written_bindings: &'b BTreeSet<String>,
+    import_namespaces: &'b BTreeSet<String>,
+}
+
+impl<'a> VisitMut<'a> for ImportMemberTypeQueryAnnotator<'_, 'a> {
+    fn visit_variable_declaration(&mut self, declaration: &mut VariableDeclaration<'a>) {
+        annotate_import_member_variable_declaration(
+            self.builder,
+            self.written_bindings,
+            self.import_namespaces,
+            declaration,
+        );
+        walk_variable_declaration(self, declaration);
+    }
+}
+
+fn annotate_import_member_variable_declaration<'a>(
+    builder: &AstBuilder<'a>,
+    written_bindings: &BTreeSet<String>,
+    import_namespaces: &BTreeSet<String>,
+    declaration: &mut VariableDeclaration<'a>,
+) {
+    for declarator in declaration.declarations.iter_mut() {
+        if declarator.id.type_annotation.is_some() {
+            continue;
+        }
+        let Some(binding) = binding_pattern_identifier(&declarator.id) else {
+            continue;
+        };
+        if declaration.kind != VariableDeclarationKind::Const && written_bindings.contains(binding)
+        {
+            continue;
+        }
+        let Some(init) = &declarator.init else {
+            continue;
+        };
+        let Some(type_annotation) = import_member_type_query(builder, import_namespaces, init)
+        else {
+            continue;
+        };
+        declarator.id.type_annotation =
+            Some(builder.alloc_ts_type_annotation(SPAN, type_annotation));
+    }
+}
+
+fn import_namespace_bindings(program: &Program<'_>) -> BTreeSet<String> {
+    let mut namespaces = BTreeSet::new();
+    for statement in &program.body {
+        let Statement::ImportDeclaration(import) = statement else {
+            continue;
+        };
+        let Some(specifiers) = &import.specifiers else {
+            continue;
+        };
+        for specifier in specifiers {
+            if let ImportDeclarationSpecifier::ImportNamespaceSpecifier(namespace) = specifier {
+                namespaces.insert(namespace.local.name.as_str().to_string());
+            }
+        }
+    }
+    namespaces
 }
 
 fn written_bindings_in_program(program: &Program<'_>) -> BTreeSet<String> {
@@ -298,6 +381,122 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
             if unary.operator == oxc_ast::ast::UnaryOperator::Void =>
         {
             Some(GeneratedTypeKind::Undefined)
+        }
+        _ => None,
+    }
+}
+
+fn inferred_type_annotation_for_expression<'a>(
+    builder: &AstBuilder<'a>,
+    expression: &Expression<'_>,
+    depth: usize,
+) -> Option<TSType<'a>> {
+    if depth > 2 {
+        return None;
+    }
+    if let Some(kind) = literal_type_kind(expression) {
+        return type_annotation_for_kind(builder, kind);
+    }
+    match expression {
+        Expression::ArrayExpression(array) => array_type_annotation(builder, array, depth),
+        Expression::ObjectExpression(object) => {
+            if object.properties.is_empty() || object.properties.len() > 12 {
+                return None;
+            }
+            let mut members = builder.vec();
+            for property in &object.properties {
+                let ObjectPropertyKind::ObjectProperty(property) = property else {
+                    return None;
+                };
+                if property.method || property.computed {
+                    return None;
+                }
+                let PropertyKey::StaticIdentifier(identifier) = &property.key else {
+                    return None;
+                };
+                let value_type =
+                    inferred_type_annotation_for_expression(builder, &property.value, depth + 1)?;
+                members.push(builder.ts_signature_property_signature(
+                    SPAN,
+                    false,
+                    false,
+                    false,
+                    builder.property_key_identifier_name(SPAN, identifier.name.as_str()),
+                    Some(builder.alloc_ts_type_annotation(SPAN, value_type)),
+                ));
+            }
+            Some(builder.ts_type_type_literal(SPAN, members))
+        }
+        _ => None,
+    }
+}
+
+fn array_type_annotation<'a>(
+    builder: &AstBuilder<'a>,
+    array: &oxc_ast::ast::ArrayExpression<'_>,
+    depth: usize,
+) -> Option<TSType<'a>> {
+    if array.elements.is_empty() {
+        return None;
+    }
+    let mut kind = None;
+    for element in &array.elements {
+        let element_expression = match element {
+            ArrayExpressionElement::SpreadElement(_) | ArrayExpressionElement::Elision(_) => {
+                return None;
+            }
+            other => other.to_expression(),
+        };
+        let element_kind = literal_type_kind(element_expression)?;
+        if let Some(existing) = kind {
+            if existing != element_kind {
+                return None;
+            }
+        } else {
+            kind = Some(element_kind);
+        }
+    }
+    let element_type = type_annotation_for_kind(builder, kind?)?;
+    if depth > 1 {
+        return None;
+    }
+    Some(builder.ts_type_array_type(SPAN, element_type))
+}
+
+fn import_member_type_query<'a>(
+    builder: &AstBuilder<'a>,
+    import_namespaces: &BTreeSet<String>,
+    expression: &Expression<'_>,
+) -> Option<TSType<'a>> {
+    let path = static_member_path(expression)?;
+    if path.len() < 2 || !import_namespaces.contains(path[0]) {
+        return None;
+    }
+    let mut type_name = builder.ts_type_name_identifier_reference(SPAN, path[0]);
+    for segment in path.iter().skip(1) {
+        let right = builder.identifier_name(SPAN, *segment);
+        type_name = builder.ts_type_name_qualified_name(SPAN, type_name, right);
+    }
+    let query_name = match type_name {
+        TSTypeName::IdentifierReference(identifier) => {
+            TSTypeQueryExprName::IdentifierReference(identifier)
+        }
+        TSTypeName::QualifiedName(qualified) => TSTypeQueryExprName::QualifiedName(qualified),
+    };
+    Some(builder.ts_type_type_query(
+        SPAN,
+        query_name,
+        None::<oxc_allocator::Box<'a, TSTypeParameterInstantiation<'a>>>,
+    ))
+}
+
+fn static_member_path<'a>(expression: &'a Expression<'a>) -> Option<Vec<&'a str>> {
+    match expression {
+        Expression::Identifier(identifier) => Some(vec![identifier.name.as_str()]),
+        Expression::StaticMemberExpression(member) if !member.optional => {
+            let mut path = static_member_path(&member.object)?;
+            path.push(member.property.name.as_str());
+            Some(path)
         }
         _ => None,
     }
