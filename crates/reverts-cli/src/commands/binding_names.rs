@@ -40,6 +40,7 @@ pub struct BindingNamesArgs {
 pub struct BindingNameSpec {
     pub file_path: String,
     pub original_name: String,
+    pub binding_index: Option<u32>,
     pub semantic_name: String,
 }
 
@@ -72,12 +73,15 @@ pub fn validate_args(args: BindingNamesArgs) -> Result<BindingNamesArgs, CliErro
 pub(crate) fn run(args: BindingNamesArgs) -> Result<(), CliRunError> {
     let outcome = binding_names_from_sqlite(&args)?;
     if args.list {
-        println!("file_path\toriginal_name\tsemantic_name\torigin\tevidence");
+        println!("file_path\toriginal_name\tbinding_index\tsemantic_name\torigin\tevidence");
         for row in outcome.listed {
             println!(
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 row.file_path,
                 row.original_name,
+                row.binding_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_default(),
                 row.semantic_name,
                 row.origin,
                 row.evidence.unwrap_or_default()
@@ -108,6 +112,7 @@ pub struct BindingNamesOutcome {
 pub struct BindingNameRow {
     pub file_path: String,
     pub original_name: String,
+    pub binding_index: Option<u32>,
     pub semantic_name: String,
     pub origin: String,
     pub evidence: Option<String>,
@@ -141,23 +146,27 @@ pub fn binding_names_from_sqlite(
 
     let specs = collect_specs(args)?;
     validate_specs(&specs)?;
+    if args.apply {
+        ensure_binding_names_table_if_writable(&connection, true)?;
+    }
     validate_final_names(&connection, args.project_id, &specs)?;
     let written_changes = if args.apply {
-        ensure_binding_names_table_if_writable(&connection, true)?;
         let transaction = connection
             .transaction()
             .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
         let mut written = 0_usize;
         for spec in &specs {
+            let binding_key = binding_key(spec.binding_index);
             written += transaction
                 .execute(
                     r"
                     INSERT INTO semantic_binding_names (
-                        project_id, file_path, original_name, semantic_name,
+                        project_id, file_path, original_name, binding_index, binding_key, semantic_name,
                         origin, evidence, accepted, created_at, updated_at
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, datetime('now'), datetime('now'))
-                    ON CONFLICT(project_id, file_path, original_name) DO UPDATE SET
+                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, datetime('now'), datetime('now'))
+                    ON CONFLICT(project_id, file_path, original_name, binding_key) DO UPDATE SET
+                        binding_index = excluded.binding_index,
                         semantic_name = excluded.semantic_name,
                         origin = excluded.origin,
                         evidence = excluded.evidence,
@@ -168,6 +177,8 @@ pub fn binding_names_from_sqlite(
                         i64::from(args.project_id),
                         spec.file_path,
                         spec.original_name,
+                        spec.binding_index.map(i64::from),
+                        binding_key,
                         spec.semantic_name,
                         args.origin,
                         args.evidence,
@@ -197,11 +208,29 @@ fn parse_binding_name_spec(value: &str) -> Result<BindingNameSpec, String> {
     let Some((file_path, original_name)) = target.rsplit_once(':') else {
         return Err("expected FILE_PATH:ORIGINAL_NAME=SEMANTIC_NAME".to_string());
     };
+    let (original_name, binding_index) = parse_original_name_with_optional_index(original_name)?;
     Ok(BindingNameSpec {
         file_path: file_path.to_string(),
-        original_name: original_name.to_string(),
+        original_name,
+        binding_index,
         semantic_name: semantic_name.to_string(),
     })
+}
+
+fn parse_original_name_with_optional_index(value: &str) -> Result<(String, Option<u32>), String> {
+    let Some((original_name, binding_index)) = value.rsplit_once('#') else {
+        return Ok((value.to_string(), None));
+    };
+    if original_name.is_empty() {
+        return Err("original name before # must be non-empty".to_string());
+    }
+    let binding_index = binding_index
+        .parse::<u32>()
+        .map_err(|_| "binding index after # must be a positive integer".to_string())?;
+    if binding_index == 0 {
+        return Err("binding index after # must be a positive integer".to_string());
+    }
+    Ok((original_name.to_string(), Some(binding_index)))
 }
 
 fn collect_specs(args: &BindingNamesArgs) -> Result<Vec<BindingNameSpec>, CliRunError> {
@@ -219,21 +248,28 @@ fn collect_specs(args: &BindingNamesArgs) -> Result<Vec<BindingNameSpec>, CliRun
                 continue;
             }
             let columns = line.split('\t').collect::<Vec<_>>();
-            match columns.as_slice() {
-                ["accept", file_path, original_name, semantic_name, ..] => {
-                    specs.push(BindingNameSpec {
-                        file_path: (*file_path).to_string(),
-                        original_name: (*original_name).to_string(),
-                        semantic_name: (*semantic_name).to_string(),
-                    });
-                }
-                _ => {
-                    return Err(CliRunError::BindingNames(format!(
-                        "invalid batch row {}: expected accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>SEMANTIC_NAME",
-                        index + 1
-                    )));
-                }
+            if columns.len() < 4 || columns[0] != "accept" {
+                return Err(CliRunError::BindingNames(format!(
+                    "invalid batch row {}: expected accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>SEMANTIC_NAME or accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>BINDING_INDEX<TAB>SEMANTIC_NAME",
+                    index + 1
+                )));
             }
+            let file_path = columns[1].to_string();
+            let original_name = columns[2].to_string();
+            let (binding_index, semantic_name) = if columns.len() >= 5 {
+                match columns[3].parse::<u32>() {
+                    Ok(index) if index > 0 => (Some(index), columns[4].to_string()),
+                    _ => (None, columns[3].to_string()),
+                }
+            } else {
+                (None, columns[3].to_string())
+            };
+            specs.push(BindingNameSpec {
+                file_path,
+                original_name,
+                binding_index,
+                semantic_name,
+            });
         }
     }
     Ok(specs)
@@ -247,6 +283,11 @@ fn validate_specs(specs: &[BindingNameSpec]) -> Result<(), CliRunError> {
         {
             return Err(CliRunError::BindingNames(
                 "file_path, original_name, and semantic_name must be non-empty".to_string(),
+            ));
+        }
+        if spec.binding_index == Some(0) {
+            return Err(CliRunError::BindingNames(
+                "binding_index must be a positive integer when supplied".to_string(),
             ));
         }
         if is_generated_placeholder_identifier(&spec.semantic_name)
@@ -270,31 +311,44 @@ fn validate_final_names(
     if sqlite_table_exists(connection, "semantic_binding_names")
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?
     {
+        let has_binding_key = binding_names_table_has_binding_key(connection)?;
         let mut statement = connection
-            .prepare(
+            .prepare(if has_binding_key {
                 r"
-                SELECT file_path, original_name, semantic_name
+                SELECT file_path, original_name, binding_index, semantic_name
                 FROM semantic_binding_names
                 WHERE project_id = ?1 AND accepted = 1
-                ",
-            )
+                "
+            } else {
+                r"
+                SELECT file_path, original_name, NULL AS binding_index, semantic_name
+                FROM semantic_binding_names
+                WHERE project_id = ?1 AND accepted = 1
+                "
+            })
             .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
         let rows = statement
             .query_map(params![i64::from(project_id)], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             })
             .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
         for row in collect_sqlite_rows(rows)
             .map_err(|source| CliRunError::BindingNames(source.to_string()))?
         {
-            by_file_semantic.insert((row.0, row.2), row.1);
+            if row.2.is_none() {
+                by_file_semantic.insert((row.0, row.3), row.1);
+            }
         }
     }
     for spec in specs {
+        if spec.binding_index.is_some() {
+            continue;
+        }
         let key = (spec.file_path.clone(), spec.semantic_name.clone());
         if let Some(existing_original) = by_file_semantic.get(&key)
             && existing_original != &spec.original_name
@@ -307,6 +361,23 @@ fn validate_final_names(
         by_file_semantic.insert(key, spec.original_name.clone());
     }
     Ok(())
+}
+
+fn binding_key(binding_index: Option<u32>) -> String {
+    binding_index
+        .map(|index| index.to_string())
+        .unwrap_or_else(|| "*".to_string())
+}
+
+fn binding_names_table_has_binding_key(connection: &Connection) -> Result<bool, CliRunError> {
+    let columns = connection
+        .prepare("PRAGMA table_info(semantic_binding_names)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            collect_sqlite_rows(rows)
+        })
+        .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
+    Ok(columns.iter().any(|column| column == "binding_key"))
 }
 
 fn ensure_project_exists(connection: &Connection, project_id: u32) -> Result<(), CliRunError> {
@@ -335,6 +406,9 @@ fn ensure_binding_names_table_if_writable(
     if sqlite_table_exists(connection, "semantic_binding_names")
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?
     {
+        if writable {
+            migrate_binding_names_table(connection)?;
+        }
         return Ok(());
     }
     if !writable {
@@ -347,14 +421,61 @@ fn ensure_binding_names_table_if_writable(
                 project_id INTEGER NOT NULL,
                 file_path TEXT NOT NULL,
                 original_name TEXT NOT NULL,
+                binding_index INTEGER,
+                binding_key TEXT NOT NULL,
                 semantic_name TEXT NOT NULL,
                 origin TEXT NOT NULL,
                 evidence TEXT,
                 accepted INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (project_id, file_path, original_name)
+                PRIMARY KEY (project_id, file_path, original_name, binding_key)
             );
+            CREATE INDEX IF NOT EXISTS idx_semantic_binding_names_project_file
+                ON semantic_binding_names(project_id, file_path);
+            ",
+        )
+        .map_err(|source| CliRunError::BindingNames(source.to_string()))
+}
+
+fn migrate_binding_names_table(connection: &Connection) -> Result<(), CliRunError> {
+    let columns = connection
+        .prepare("PRAGMA table_info(semantic_binding_names)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            collect_sqlite_rows(rows)
+        })
+        .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
+    if columns.iter().any(|column| column == "binding_key") {
+        return Ok(());
+    }
+    connection
+        .execute_batch(
+            r"
+            ALTER TABLE semantic_binding_names RENAME TO semantic_binding_names_old;
+            CREATE TABLE semantic_binding_names (
+                project_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                original_name TEXT NOT NULL,
+                binding_index INTEGER,
+                binding_key TEXT NOT NULL,
+                semantic_name TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                evidence TEXT,
+                accepted INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (project_id, file_path, original_name, binding_key)
+            );
+            INSERT INTO semantic_binding_names (
+                project_id, file_path, original_name, binding_index, binding_key,
+                semantic_name, origin, evidence, accepted, created_at, updated_at
+            )
+            SELECT
+                project_id, file_path, original_name, NULL, '*',
+                semantic_name, origin, evidence, accepted, created_at, updated_at
+            FROM semantic_binding_names_old;
+            DROP TABLE semantic_binding_names_old;
             CREATE INDEX IF NOT EXISTS idx_semantic_binding_names_project_file
                 ON semantic_binding_names(project_id, file_path);
             ",
@@ -371,24 +492,35 @@ fn load_binding_name_rows(
     {
         return Ok(Vec::new());
     }
+    let has_binding_key = binding_names_table_has_binding_key(connection)?;
     let mut statement = connection
-        .prepare(
+        .prepare(if has_binding_key {
             r"
-            SELECT file_path, original_name, semantic_name, origin, evidence
+            SELECT file_path, original_name, binding_index, semantic_name, origin, evidence
+            FROM semantic_binding_names
+            WHERE project_id = ?1 AND accepted = 1
+            ORDER BY file_path, original_name, binding_key
+            "
+        } else {
+            r"
+            SELECT file_path, original_name, NULL AS binding_index, semantic_name, origin, evidence
             FROM semantic_binding_names
             WHERE project_id = ?1 AND accepted = 1
             ORDER BY file_path, original_name
-            ",
-        )
+            "
+        })
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
     let rows = statement
         .query_map(params![i64::from(project_id)], |row| {
             Ok(BindingNameRow {
                 file_path: row.get(0)?,
                 original_name: row.get(1)?,
-                semantic_name: row.get(2)?,
-                origin: row.get(3)?,
-                evidence: row.get(4)?,
+                binding_index: row
+                    .get::<_, Option<i64>>(2)?
+                    .and_then(|value| u32::try_from(value).ok()),
+                semantic_name: row.get(3)?,
+                origin: row.get(4)?,
+                evidence: row.get(5)?,
             })
         })
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
@@ -431,6 +563,7 @@ mod tests {
             accepts: vec![BindingNameSpec {
                 file_path: "modules/entrypoint.ts".to_string(),
                 original_name: "a".to_string(),
+                binding_index: None,
                 semantic_name: "requestOptions".to_string(),
             }],
             batch: None,
@@ -454,10 +587,52 @@ mod tests {
     }
 
     #[test]
+    fn accepts_binding_index_names() {
+        let temp = tempdir().expect("temp dir");
+        let db = temp.path().join("project.sqlite");
+        let connection = Connection::open(&db).expect("open db");
+        create_db(&connection);
+        drop(connection);
+
+        let args = BindingNamesArgs {
+            input: db.clone(),
+            project_id: 1,
+            list: false,
+            apply: true,
+            origin: "agent".to_string(),
+            evidence: Some("test".to_string()),
+            accepts: vec![BindingNameSpec {
+                file_path: "modules/entrypoint.ts".to_string(),
+                original_name: "a".to_string(),
+                binding_index: Some(2),
+                semantic_name: "secondInput".to_string(),
+            }],
+            batch: None,
+        };
+        let outcome = binding_names_from_sqlite(&args).expect("apply");
+        assert_eq!(outcome.written_changes, 1);
+
+        let listed = binding_names_from_sqlite(&BindingNamesArgs {
+            input: db,
+            project_id: 1,
+            list: true,
+            apply: false,
+            origin: "agent".to_string(),
+            evidence: None,
+            accepts: Vec::new(),
+            batch: None,
+        })
+        .expect("list");
+        assert_eq!(listed.listed[0].binding_index, Some(2));
+        assert_eq!(listed.listed[0].semantic_name, "secondInput");
+    }
+
+    #[test]
     fn rejects_placeholder_binding_name() {
         let spec = BindingNameSpec {
             file_path: "modules/entrypoint.ts".to_string(),
             original_name: "a".to_string(),
+            binding_index: None,
             semantic_name: "semanticValue1".to_string(),
         };
 

@@ -2758,3 +2758,23 @@ fn lazy_value_sub_snippets_returns_none_for_non_lazy_shape() {
         "non-lazyValue callee is not a lazy block"
     );
 }
+
+#[test]
+fn binding_index_rename_targets_one_same_named_binding() {
+    let source = "function first(a) { return a + 1; }\nfunction second(a) { return a + 2; }";
+    let output = format_source_with_module_items_and_renames(
+        source,
+        &[],
+        &[],
+        &[GeneratedRename::new_binding_index("a", "secondInput", 2)],
+        Some(Path::new("fixture.ts")),
+        ParseGoal::TypeScript,
+        CompilerLowering::None,
+    )
+    .expect("binding-index rename should emit");
+
+    assert!(output.contains("function first(a)"));
+    assert!(output.contains("return a + 1;"));
+    assert!(output.contains("function second(secondInput)"));
+    assert!(output.contains("return secondInput + 2;"));
+}

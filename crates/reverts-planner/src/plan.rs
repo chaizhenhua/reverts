@@ -289,12 +289,26 @@ impl PlannedRename {
             scope: PlannedRenameScope::All,
         }
     }
+
+    #[must_use]
+    pub fn new_binding_index(
+        original: BindingName,
+        renamed: BindingName,
+        binding_index: u32,
+    ) -> Self {
+        Self {
+            original,
+            renamed,
+            scope: PlannedRenameScope::BindingIndex(binding_index),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlannedRenameScope {
     Module,
     All,
+    BindingIndex(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -103,8 +103,14 @@ fn emit_file(file: &PlannedFile) -> Result<(EmittedFile, Option<AuditFinding>), 
                 emit_binding_name(&rename.original),
                 emit_binding_name(&rename.renamed),
             );
-            if rename.scope == PlannedRenameScope::All {
-                generated.scope = GeneratedRenameScope::All;
+            match rename.scope {
+                PlannedRenameScope::Module => {}
+                PlannedRenameScope::All => {
+                    generated.scope = GeneratedRenameScope::All;
+                }
+                PlannedRenameScope::BindingIndex(binding_index) => {
+                    generated.scope = GeneratedRenameScope::BindingIndex(binding_index);
+                }
             }
             generated
         })

@@ -139,10 +139,18 @@ fn apply_local_binding_renames_to_code_assets(
         renames_by_path
             .entry(rename.file_path.as_str())
             .or_default()
-            .push(GeneratedRename::new_all_scopes(
-                rename.original_name.as_str(),
-                rename.semantic_name.as_str(),
-            ));
+            .push(if let Some(binding_index) = rename.binding_index {
+                GeneratedRename::new_binding_index(
+                    rename.original_name.as_str(),
+                    rename.semantic_name.as_str(),
+                    binding_index,
+                )
+            } else {
+                GeneratedRename::new_all_scopes(
+                    rename.original_name.as_str(),
+                    rename.semantic_name.as_str(),
+                )
+            });
     }
     let mut transformed = Vec::with_capacity(assets.len());
     for asset in assets {
@@ -205,10 +213,23 @@ fn load_local_binding_renames(
     {
         return Ok(Vec::new());
     }
+    let has_binding_key =
+        sqlite_column_exists(&connection, "semantic_binding_names", "binding_key")?;
     let mut statement = connection
-        .prepare(
+        .prepare(if has_binding_key {
             r"
-            SELECT file_path, original_name, semantic_name
+            SELECT file_path, original_name, binding_index, semantic_name
+            FROM semantic_binding_names
+            WHERE project_id = ?1
+              AND accepted = 1
+              AND TRIM(file_path) != ''
+              AND TRIM(original_name) != ''
+              AND TRIM(semantic_name) != ''
+            ORDER BY file_path, original_name, binding_key
+            "
+        } else {
+            r"
+            SELECT file_path, original_name, NULL AS binding_index, semantic_name
             FROM semantic_binding_names
             WHERE project_id = ?1
               AND accepted = 1
@@ -216,19 +237,38 @@ fn load_local_binding_renames(
               AND TRIM(original_name) != ''
               AND TRIM(semantic_name) != ''
             ORDER BY file_path, original_name
-            ",
-        )
+            "
+        })
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     let rows = statement
         .query_map(params![i64::from(project_id)], |row| {
             Ok(LocalBindingRename {
                 file_path: row.get(0)?,
                 original_name: row.get(1)?,
-                semantic_name: row.get(2)?,
+                binding_index: row
+                    .get::<_, Option<i64>>(2)?
+                    .and_then(|value| u32::try_from(value).ok()),
+                semantic_name: row.get(3)?,
             })
         })
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     collect_sqlite_rows(rows).map_err(|source| CliRunError::GenerateProject(source.to_string()))
+}
+
+fn sqlite_column_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> Result<bool, CliRunError> {
+    let mut statement = connection
+        .prepare(format!("PRAGMA table_info({table})").as_str())
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let columns = collect_sqlite_rows(rows)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    Ok(columns.iter().any(|existing| existing == column))
 }
 
 fn serialize_binding_name_index(entries: &[LocalBindingRename]) -> String {
@@ -238,6 +278,7 @@ fn serialize_binding_name_index(entries: &[LocalBindingRename]) -> String {
             serde_json::json!({
                 "file_path": entry.file_path,
                 "original_name": entry.original_name,
+                "binding_index": entry.binding_index,
                 "emitted_name": entry.semantic_name,
                 "semantic_named": true,
             })

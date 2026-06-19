@@ -134,6 +134,19 @@ impl GeneratedRename {
             scope: GeneratedRenameScope::All,
         }
     }
+
+    #[must_use]
+    pub fn new_binding_index(
+        original: impl Into<String>,
+        renamed: impl Into<String>,
+        binding_index: u32,
+    ) -> Self {
+        Self {
+            original: original.into(),
+            renamed: renamed.into(),
+            scope: GeneratedRenameScope::BindingIndex(binding_index),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,6 +156,10 @@ pub enum GeneratedRenameScope {
     /// Rename every safely-resolved binding with this original name, including
     /// function parameters, catch bindings, and nested locals.
     All,
+    /// Rename one binding occurrence for this original name. The index is the
+    /// 1-based AST binding occurrence ordinal among bindings with that name in
+    /// the emitted file.
+    BindingIndex(u32),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

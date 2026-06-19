@@ -233,7 +233,12 @@ pub fn format_source_with_module_items_request_with_report(
         );
         let all_scope_renames = readability_renames
             .iter()
-            .filter(|rename| rename.scope == GeneratedRenameScope::All)
+            .filter(|rename| {
+                matches!(
+                    rename.scope,
+                    GeneratedRenameScope::All | GeneratedRenameScope::BindingIndex(_)
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         apply_all_scope_readability_renames(

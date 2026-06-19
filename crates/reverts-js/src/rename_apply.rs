@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oxc_allocator::Allocator;
 use oxc_ast::{
-    AstBuilder, VisitMut,
+    AstBuilder, Visit, VisitMut,
     ast::{BindingIdentifier, IdentifierReference, Program},
 };
 use oxc_semantic::SemanticBuilder;
@@ -237,11 +237,22 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
     readability_renames: &[GeneratedRename],
     report: &mut ReadabilityReport,
 ) {
-    let requested = readability_renames
+    let requested_all = readability_renames
         .iter()
+        .filter(|rename| rename.scope == crate::GeneratedRenameScope::All)
         .map(|rename| (rename.original.clone(), rename.renamed.clone()))
         .collect::<BTreeMap<_, _>>();
-    if requested.is_empty() {
+    let requested_by_binding = readability_renames
+        .iter()
+        .filter_map(|rename| match rename.scope {
+            crate::GeneratedRenameScope::BindingIndex(binding_index) => Some((
+                (rename.original.clone(), binding_index),
+                rename.renamed.clone(),
+            )),
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    if requested_all.is_empty() && requested_by_binding.is_empty() {
         return;
     }
 
@@ -249,6 +260,8 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
         let semantic = SemanticBuilder::new().build(program).semantic;
         let symbols = semantic.symbols();
         let symbol_ids = symbols.symbol_ids().collect::<Vec<_>>();
+        let mut binding_ordinals = BindingOrdinalCollector::default();
+        binding_ordinals.visit_program(program);
         let mut symbol_names_by_scope = BTreeMap::<_, BTreeMap<String, Vec<SymbolId>>>::new();
         for symbol_id in &symbol_ids {
             symbol_names_by_scope
@@ -263,7 +276,16 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
         let mut symbol_renames = BTreeMap::<SymbolId, String>::new();
         for symbol_id in symbol_ids {
             let original = symbols.get_name(symbol_id);
-            let Some(renamed) = requested.get(original) else {
+            let binding_index = binding_ordinals
+                .symbol_binding_indices
+                .get(&symbol_id)
+                .copied();
+            let indexed_key = binding_index.map(|index| (original.to_string(), index));
+            let Some(renamed) = indexed_key
+                .as_ref()
+                .and_then(|key| requested_by_binding.get(key))
+                .or_else(|| requested_all.get(original))
+            else {
                 continue;
             };
             let scope_id = symbols.get_scope_id(symbol_id);
@@ -313,6 +335,30 @@ pub(crate) fn apply_all_scope_readability_renames<'a>(
         reference_renames,
     };
     renamer.visit_program(program);
+}
+
+#[derive(Default)]
+struct BindingOrdinalCollector {
+    name_counts: BTreeMap<String, u32>,
+    symbol_binding_indices: BTreeMap<SymbolId, u32>,
+}
+
+impl<'a> Visit<'a> for BindingOrdinalCollector {
+    fn visit_program(&mut self, program: &Program<'a>) {
+        oxc_ast::visit::walk::walk_program(self, program);
+    }
+
+    fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
+        let Some(symbol_id) = identifier.symbol_id.get() else {
+            return;
+        };
+        let index = self
+            .name_counts
+            .entry(identifier.name.as_str().to_string())
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+        self.symbol_binding_indices.insert(symbol_id, *index);
+    }
 }
 
 pub(crate) fn apply_emit_safety_renames<'a>(

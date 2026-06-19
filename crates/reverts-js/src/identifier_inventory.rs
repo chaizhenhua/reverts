@@ -36,6 +36,7 @@ pub struct IdentifierInventoryStats {
     pub semantic_pending_bindings: usize,
     pub semantic_pending_import_bindings: usize,
     pub semantic_pending_binding_names: BTreeMap<String, usize>,
+    pub semantic_pending_binding_entries: Vec<SemanticBindingEntry>,
 }
 
 impl IdentifierInventoryStats {
@@ -48,6 +49,12 @@ impl IdentifierInventoryStats {
             + self.import_specifiers
             + self.export_specifiers
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticBindingEntry {
+    pub original_name: String,
+    pub binding_index: u32,
 }
 
 pub fn collect_identifier_inventory(
@@ -81,6 +88,7 @@ pub fn collect_identifier_inventory(
 #[derive(Default)]
 struct IdentifierInventoryCollector {
     stats: IdentifierInventoryStats,
+    binding_indices_by_name: BTreeMap<String, u32>,
 }
 
 impl<'a> Visit<'a> for IdentifierInventoryCollector {
@@ -90,6 +98,11 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
 
     fn visit_binding_identifier(&mut self, identifier: &BindingIdentifier<'a>) {
         let name = identifier.name.as_str();
+        let binding_index = self
+            .binding_indices_by_name
+            .entry(name.to_string())
+            .and_modify(|index| *index = index.saturating_add(1))
+            .or_insert(1);
         self.stats.binding_identifiers += 1;
         self.stats.semantic_pending_bindings += 1;
         *self
@@ -97,6 +110,12 @@ impl<'a> Visit<'a> for IdentifierInventoryCollector {
             .semantic_pending_binding_names
             .entry(name.to_string())
             .or_default() += 1;
+        self.stats
+            .semantic_pending_binding_entries
+            .push(SemanticBindingEntry {
+                original_name: name.to_string(),
+                binding_index: *binding_index,
+            });
     }
 
     fn visit_identifier_reference(&mut self, _identifier: &IdentifierReference<'a>) {
@@ -183,6 +202,10 @@ mod tests {
         assert_eq!(stats.binding_identifiers, 3);
         assert_eq!(stats.semantic_named_bindings, 0);
         assert_eq!(stats.semantic_pending_bindings, 3);
+        assert_eq!(stats.semantic_pending_binding_entries[0].original_name, "a");
+        assert_eq!(stats.semantic_pending_binding_entries[0].binding_index, 1);
+        assert_eq!(stats.semantic_pending_binding_entries[2].original_name, "c");
+        assert_eq!(stats.semantic_pending_binding_entries[2].binding_index, 1);
     }
 
     #[test]

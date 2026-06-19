@@ -76,6 +76,7 @@ pub struct GenerateProjectOptions {
 pub struct LocalBindingRename {
     pub file_path: String,
     pub original_name: String,
+    pub binding_index: Option<u32>,
     pub semantic_name: String,
 }
 
@@ -441,10 +442,14 @@ fn apply_local_binding_renames(
             continue;
         };
         for rename in file_renames {
-            file.add_readability_rename(reverts_planner::PlannedRename::new_all_scopes(
-                BindingName::new(rename.original_name.clone()),
-                BindingName::new(rename.semantic_name.clone()),
-            ));
+            let original = BindingName::new(rename.original_name.clone());
+            let semantic = BindingName::new(rename.semantic_name.clone());
+            let planned = if let Some(binding_index) = rename.binding_index {
+                reverts_planner::PlannedRename::new_binding_index(original, semantic, binding_index)
+            } else {
+                reverts_planner::PlannedRename::new_all_scopes(original, semantic)
+            };
+            file.add_readability_rename(planned);
         }
     }
 }
@@ -671,11 +676,13 @@ mod tests {
                     LocalBindingRename {
                         file_path: "src/index.ts".to_string(),
                         original_name: "a".to_string(),
+                        binding_index: None,
                         semantic_name: "inputValue".to_string(),
                     },
                     LocalBindingRename {
                         file_path: "src/index.ts".to_string(),
                         original_name: "b".to_string(),
+                        binding_index: None,
                         semantic_name: "resultValue".to_string(),
                     },
                 ],

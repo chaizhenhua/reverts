@@ -203,6 +203,7 @@ fn semantic_binding_file_coverage(
         };
     }
     let mut pending_binding_names = stats.semantic_pending_binding_names.clone();
+    let mut consumed_by_name = BTreeMap::<String, usize>::new();
     let mut named = 0_usize;
     let mut preserved = 0_usize;
     let mut excluded = 0_usize;
@@ -213,6 +214,7 @@ fn semantic_binding_file_coverage(
             };
             let consumed = (*pending_count).min(*accepted_count);
             *pending_count -= consumed;
+            *consumed_by_name.entry(name.clone()).or_default() += consumed;
             named += consumed;
         }
     }
@@ -228,6 +230,7 @@ fn semantic_binding_file_coverage(
                 let requested = decision.count.unwrap_or(*pending_count);
                 let consumed = requested.min(*pending_count);
                 *pending_count -= consumed;
+                *consumed_by_name.entry(name.clone()).or_default() += consumed;
                 match decision.status {
                     SemanticBindingDecisionStatus::Named => named += consumed,
                     SemanticBindingDecisionStatus::Preserved => preserved += consumed,
@@ -251,16 +254,30 @@ fn semantic_binding_file_coverage(
         } else {
             "explicit_semantic_name_bindings_only"
         },
-        pending_bindings: pending_binding_names
-            .iter()
-            .map(|(name, count)| {
-                serde_json::json!({
-                    "original_name": name,
-                    "count": count,
-                })
-            })
-            .collect(),
+        pending_bindings: pending_binding_entries(stats, &mut consumed_by_name),
     }
+}
+
+fn pending_binding_entries(
+    stats: &IdentifierInventoryStats,
+    consumed_by_name: &mut BTreeMap<String, usize>,
+) -> Vec<Value> {
+    let mut entries = Vec::new();
+    for binding in &stats.semantic_pending_binding_entries {
+        let consumed = consumed_by_name
+            .entry(binding.original_name.clone())
+            .or_default();
+        if *consumed > 0 {
+            *consumed -= 1;
+            continue;
+        }
+        entries.push(serde_json::json!({
+            "original_name": binding.original_name,
+            "binding_index": binding.binding_index,
+            "count": 1,
+        }));
+    }
+    entries
 }
 
 fn load_semantic_binding_decision_index(
@@ -406,7 +423,11 @@ fn load_explicit_semantic_name_index_file(
         let Some(emitted_name) = row.get("emitted_name").and_then(Value::as_str) else {
             continue;
         };
-        let accepted_count = if file_name == "binding-name-index.json" {
+        let accepted_count = if file_name == "binding-name-index.json"
+            && row.get("binding_index").and_then(Value::as_u64).is_some()
+        {
+            1
+        } else if file_name == "binding-name-index.json" {
             usize::MAX
         } else {
             1
@@ -715,16 +736,21 @@ mod tests {
             .as_array()
             .expect("pending binding names should be listed");
 
-        assert!(
-            bindings
-                .iter()
-                .any(|binding| { binding["original_name"] == "a" && binding["count"] == 2 })
-        );
-        assert!(
-            bindings
-                .iter()
-                .any(|binding| { binding["original_name"] == "b" && binding["count"] == 1 })
-        );
+        assert!(bindings.iter().any(|binding| {
+            binding["original_name"] == "a"
+                && binding["binding_index"] == 1
+                && binding["count"] == 1
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding["original_name"] == "a"
+                && binding["binding_index"] == 2
+                && binding["count"] == 1
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding["original_name"] == "b"
+                && binding["binding_index"] == 1
+                && binding["count"] == 1
+        }));
     }
 
     #[test]
