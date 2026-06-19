@@ -13,13 +13,15 @@ mod runtime_dependency_coherence;
 mod tests;
 
 pub use args::{
-    ExtractAssetsArgs, ImportUnpackedArgs, MatchPackagesArgs, MatchPackagesReportArgs,
-    ModuleClassifyArgs, NamingPlanArgs, NamingProgressArgs, PackageCacheArgs,
-    PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs, RuntimeInventoryArgs,
+    ExtractAssetsArgs, FullInventoryArgs, ImportUnpackedArgs, MatchPackagesArgs,
+    MatchPackagesReportArgs, ModuleClassifyArgs, NamingPlanArgs, NamingProgressArgs,
+    PackageCacheArgs, PackageExternalizationHintsArgs, PackageVersionDiagnosticsArgs,
+    RuntimeInventoryArgs,
 };
 pub use commands::extract_assets::{
     ExtractAssetsOutcome, extract_assets_from_connection, extract_assets_from_sqlite,
 };
+pub use commands::full_inventory::{full_inventory_json, full_inventory_report};
 pub use commands::generate_project::GenerateProjectV2Args;
 pub use commands::import_unpacked::{ImportUnpackedOutcome, import_unpacked_to_sqlite};
 pub use commands::match_modules::MatchModulesRecallArgs;
@@ -107,6 +109,7 @@ pub enum CliCommand {
     PackageCachePruneStale(PackageCacheArgs),
     PackageExternalizationHints(PackageExternalizationHintsArgs),
     ExtractAssets(ExtractAssetsArgs),
+    FullInventory(FullInventoryArgs),
     RuntimeInventory(RuntimeInventoryArgs),
     SymbolNames(SymbolNamesArgs),
     NamingProgress(NamingProgressArgs),
@@ -193,6 +196,8 @@ enum ClapCommand {
     PackageExternalizationHints(PackageExternalizationHintsArgs),
     #[command(name = "extract-assets", disable_help_flag = true)]
     ExtractAssets(ExtractAssetsArgs),
+    #[command(name = "full-inventory", disable_help_flag = true)]
+    FullInventory(FullInventoryArgs),
     #[command(name = "runtime-inventory", disable_help_flag = true)]
     RuntimeInventory(RuntimeInventoryArgs),
     #[command(name = "symbol-names", disable_help_flag = true)]
@@ -227,6 +232,7 @@ impl ClapCli {
                 CliCommand::PackageExternalizationHints(args)
             }
             Some(ClapCommand::ExtractAssets(args)) => CliCommand::ExtractAssets(args),
+            Some(ClapCommand::FullInventory(args)) => CliCommand::FullInventory(args),
             Some(ClapCommand::RuntimeInventory(args)) => {
                 CliCommand::RuntimeInventory(validate_runtime_inventory_for_cli(args)?)
             }
@@ -357,6 +363,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<(), CliRunError> {
             commands::package_cache::run_externalization_hints(args)
         }
         CliCommand::ExtractAssets(args) => commands::extract_assets::run(args),
+        CliCommand::FullInventory(args) => commands::full_inventory::run(args),
         CliCommand::RuntimeInventory(args) => commands::runtime_inventory::run(args),
         CliCommand::SymbolNames(args) => commands::symbol_names::run(args),
         CliCommand::NamingProgress(args) => commands::naming_progress::run(args),

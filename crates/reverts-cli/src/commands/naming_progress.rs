@@ -319,6 +319,15 @@ fn target_label(target: NamingProgressTier) -> &'static str {
     }
 }
 
+fn coverage_json(coverage: TierCoverage) -> serde_json::Value {
+    serde_json::json!({
+        "named": coverage.named,
+        "total": coverage.universe,
+        "pending": coverage.universe.saturating_sub(coverage.named),
+        "percent": pct(coverage),
+    })
+}
+
 fn headline_coverage(breakdown: &TierBreakdown, target: NamingProgressTier) -> TierCoverage {
     match target {
         NamingProgressTier::PublicSurface => breakdown.public_surface,
@@ -327,8 +336,46 @@ fn headline_coverage(breakdown: &TierBreakdown, target: NamingProgressTier) -> T
     }
 }
 
+#[must_use]
+pub fn naming_progress_json(report: &NamingProgressReport, target: NamingProgressTier) -> String {
+    let headline = headline_coverage(&report.totals, target);
+    let value = serde_json::json!({
+        "schema": "reverts.naming_progress.v1",
+        "project_id": report.project_id,
+        "target_level": target_label(target),
+        "named": headline.named,
+        "total": headline.universe,
+        "pending": headline.universe.saturating_sub(headline.named),
+        "percent": pct(headline),
+        "reached": tier_label(report.totals.reached_level),
+        "complete": headline.universe == 0 || headline.named == headline.universe,
+        "tiers": {
+            "public_surface": coverage_json(report.totals.public_surface),
+            "declarations": coverage_json(report.totals.declarations),
+            "full": coverage_json(report.totals.full),
+        },
+        "modules": report.modules.iter().map(|module| {
+            serde_json::json!({
+                "module_id": module.module_id.0,
+                "file_path": module.semantic_path,
+                "reached": tier_label(module.breakdown.reached_level),
+                "tiers": {
+                    "public_surface": coverage_json(module.breakdown.public_surface),
+                    "declarations": coverage_json(module.breakdown.declarations),
+                    "full": coverage_json(module.breakdown.full),
+                },
+            })
+        }).collect::<Vec<_>>(),
+    });
+    serde_json::to_string_pretty(&value).expect("serializing naming progress JSON is infallible")
+}
+
 pub(crate) fn run(args: NamingProgressArgs) -> Result<(), CliRunError> {
     let report = naming_progress_from_sqlite(&args).map_err(CliRunError::NamingProgress)?;
+    if args.json {
+        println!("{}", naming_progress_json(&report, args.target_level));
+        return Ok(());
+    }
     let totals = &report.totals;
     let headline = headline_coverage(totals, args.target_level);
     println!(

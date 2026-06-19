@@ -69,6 +69,7 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
         .collect();
 
     let plan = serde_json::json!({
+        "schema": "reverts.naming_plan.v1",
         "project_id": args.project_id,
         "target_level": target_label(args.target_level),
         "target_count": target_count,

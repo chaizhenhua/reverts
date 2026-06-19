@@ -251,6 +251,8 @@ pub struct NamingProgressArgs {
     pub project_id: u32,
     #[arg(long = "target-level", value_parser = parse_target_level, default_value = "full")]
     pub target_level: NamingProgressTier,
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl NamingProgressArgs {
@@ -273,6 +275,31 @@ pub struct NamingPlanArgs {
 impl NamingPlanArgs {
     pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
         parse_subcommand_args(args, help::NAMING_PLAN_COMMAND)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+pub struct FullInventoryArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+    #[arg(long, value_parser = parse_project_id)]
+    pub project_id: u32,
+    #[arg(long)]
+    pub manifest: Option<PathBuf>,
+    #[arg(long = "source-root")]
+    pub source_root: Option<PathBuf>,
+    #[arg(long = "output-root")]
+    pub output_root: Option<PathBuf>,
+    #[arg(long = "naming-progress")]
+    pub naming_progress: Option<PathBuf>,
+    #[arg(long)]
+    pub json: Option<PathBuf>,
+}
+
+impl FullInventoryArgs {
+    pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Self, CliError> {
+        parse_subcommand_args(args, help::FULL_INVENTORY_COMMAND)
     }
 }
 

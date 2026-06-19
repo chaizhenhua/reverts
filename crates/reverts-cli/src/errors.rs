@@ -665,6 +665,7 @@ pub enum CliRunError {
     NamingProgress(NamingProgressError),
     ModuleClassify(ModuleClassifyError),
     SymbolNames(SymbolNamesError),
+    FullInventory(String),
     AuditRejected(String),
     UnsafeOutputPath(PathBuf),
     WriteOutput { path: PathBuf, source: io::Error },
@@ -684,6 +685,7 @@ impl fmt::Display for CliRunError {
             Self::NamingProgress(source) => write!(formatter, "{source}"),
             Self::ModuleClassify(source) => write!(formatter, "{source}"),
             Self::SymbolNames(source) => write!(formatter, "{source}"),
+            Self::FullInventory(message) => write!(formatter, "full-inventory: {message}"),
             Self::AuditRejected(summary) => {
                 write!(
                     formatter,
@@ -721,9 +723,10 @@ impl Error for CliRunError {
             Self::ModuleClassify(source) => Some(source),
             Self::SymbolNames(source) => Some(source),
             Self::WriteOutput { source, .. } => Some(source),
-            Self::AuditRejected(_) | Self::UnsafeOutputPath(_) | Self::MatchModulesRecall(_) => {
-                None
-            }
+            Self::AuditRejected(_)
+            | Self::UnsafeOutputPath(_)
+            | Self::MatchModulesRecall(_)
+            | Self::FullInventory(_) => None,
         }
     }
 }

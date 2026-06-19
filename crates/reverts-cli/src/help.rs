@@ -14,6 +14,7 @@ pub enum HelpTopic {
     PackageCachePruneStale,
     PackageExternalizationHints,
     ExtractAssets,
+    FullInventory,
     RuntimeInventory,
     SymbolNames,
     NamingProgress,
@@ -38,6 +39,7 @@ pub const PACKAGE_CACHE_AUDIT_COMMAND: &str = "package-cache-audit";
 pub const PACKAGE_CACHE_PRUNE_STALE_COMMAND: &str = "package-cache-prune-stale";
 pub const PACKAGE_EXTERNALIZATION_HINTS_COMMAND: &str = "package-externalization-hints";
 pub const EXTRACT_ASSETS_COMMAND: &str = "extract-assets";
+pub const FULL_INVENTORY_COMMAND: &str = "full-inventory";
 pub const RUNTIME_INVENTORY_COMMAND: &str = "runtime-inventory";
 pub const SYMBOL_NAMES_COMMAND: &str = "symbol-names";
 pub const NAMING_PROGRESS_COMMAND: &str = "naming-progress";
@@ -85,6 +87,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
         name: EXTRACT_ASSETS_COMMAND,
         topic: HelpTopic::ExtractAssets,
         summary: "Populate project_assets from asset references in source slices",
+    },
+    CommandSpec {
+        name: FULL_INVENTORY_COMMAND,
+        topic: HelpTopic::FullInventory,
+        summary: "Write a full decompile inventory and coverage report",
     },
     CommandSpec {
         name: GENERATE_PROJECT_V2_COMMAND,
@@ -148,6 +155,9 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
         HelpTopic::GenerateProjectV2 => {
             "reverts-cli generate-project-v2\n\nUSAGE:\n    reverts-cli generate-project-v2 --input <DB> --project-id <ID> --output <DIR>\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --output <DIR>        Output directory for the generated TypeScript project"
         }
+        HelpTopic::FullInventory => {
+            "reverts-cli full-inventory\n\nUSAGE:\n    reverts-cli full-inventory --input <DB> --project-id <ID> [--manifest <FILE>] [--source-root <DIR>] [--output-root <DIR>] [--naming-progress <FILE>] [--json <FILE>]\n\nOPTIONS:\n    --input <DB>              SQLite input database\n    --project-id <ID>         Positive project id\n    --manifest <FILE>         Optional reverts-import-evidence.json for unpack/source coverage counts\n    --source-root <DIR>       Optional extracted source root for file counts\n    --output-root <DIR>       Optional generated project root for output and symbol-index counts\n    --naming-progress <FILE>  Optional naming-progress JSON to reuse instead of recomputing\n    --json <FILE>             Write JSON report to this file; without it, print JSON to stdout"
+        }
         HelpTopic::MatchPackages => {
             "reverts-cli match-packages\n\nUSAGE:\n    reverts-cli match-packages --input <DB> --project-id <ID> [--package-name <NAME> ...] [--package-source-root <DIR> ...] [--materialize-package-sources] [--apply]\n\nOPTIONS:\n    --input <DB>                     SQLite input database\n    --project-id <ID>                Positive project id\n    --package-name <NAME>            Restrict matching to the package graph component containing this package; repeatable\n    --package-source-root <DIR>      Additional local package source root (package dir, node_modules, or project root containing node_modules); repeatable. Loaded files are source-only unless later proven importable.\n    --materialize-package-sources    Resolve exact/range/missing package version hints and download only concrete, compatible package versions from the npm registry into the on-disk package cache (~/.reverts/package-cache, override REVERTS_PACKAGE_CACHE_DIR) before matching; with --apply, persist collected sources to package_source_cache\n    --apply                          Persist accepted package attributions, surfaces, and materialized package source cache rows"
         }
@@ -176,7 +186,7 @@ pub fn help_text(topic: HelpTopic) -> &'static str {
             "reverts-cli symbol-names\n\nUSAGE:\n    reverts-cli symbol-names --input <DB> --project-id <ID> --list [--all-proposals]\n    reverts-cli symbol-names --input <DB> --project-id <ID> [--propose <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--accept <MODULE_ID:ORIGINAL=SEMANTIC> ...] [--clear-active <MODULE_ID:ORIGINAL> ...] [--origin <SOURCE>] [--evidence <TEXT>] [--batch <TSV|->] [--apply]\n\nOPTIONS:\n    --input <DB>          SQLite input database\n    --project-id <ID>     Positive project id\n    --list                Print active module/global symbols as TSV\n    --all-proposals       With --list, print recorded name proposals instead of active symbols\n    --propose <SPEC>      Record a naming proposal without changing emitted output; repeatable\n    --accept <SPEC>       Record and activate a semantic name for the next emit; repeatable (--set alias)\n    --clear-active <SPEC> Clear the active semantic name; repeatable (--clear alias)\n    --origin <SOURCE>     Proposal source label, default: agent\n    --evidence <TEXT>     Optional evidence stored with proposals from this invocation\n    --batch <TSV|->       Read tab-separated propose/accept/clear-active operations from a file or stdin\n    --apply               Persist changes; without --apply, only validates and prints a dry-run summary\n\nBATCH TSV:\n    propose<TAB>module_id<TAB>original_name<TAB>semantic_name\n    accept<TAB>module_id<TAB>original_name<TAB>semantic_name\n    clear-active<TAB>module_id<TAB>original_name"
         }
         HelpTopic::NamingProgress => {
-            "reverts-cli naming-progress\n\nUSAGE:\n    reverts-cli naming-progress --input <DB> --project-id <ID> [--target-level <LEVEL>]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   Headline tier: public-surface | declarations | full (default: full)\n\nTIERS (cumulative, first-party modules only):\n    public-surface   Exported symbols\n    declarations     + non-exported function/class declarations\n    full             + remaining module-level value/const symbols"
+            "reverts-cli naming-progress\n\nUSAGE:\n    reverts-cli naming-progress --input <DB> --project-id <ID> [--target-level <LEVEL>] [--json]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   Headline tier: public-surface | declarations | full (default: full)\n    --json                   Print stable JSON instead of human-readable text\n\nTIERS (cumulative, first-party modules only):\n    public-surface   Exported symbols\n    declarations     + non-exported function/class declarations\n    full             + remaining module-level value/const symbols"
         }
         HelpTopic::NamingPlan => {
             "reverts-cli naming-plan\n\nUSAGE:\n    reverts-cli naming-plan --input <DB> --project-id <ID> [--target-level <LEVEL>]\n\nOPTIONS:\n    --input <DB>             SQLite input database (opened read-only)\n    --project-id <ID>        Positive project id\n    --target-level <LEVEL>   public-surface | declarations | full (default: full)\n\nEmits JSON: unnamed (minified, no semantic name) module-level bindings up to the\ntarget tier, grouped by first-party module. Join with symbol-index.json (from\ngenerate-project-v2) on (module_id, original_name) for file locations."
