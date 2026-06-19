@@ -353,6 +353,12 @@ fn body_return_type(body: &FunctionBody<'_>) -> Option<InferredExpressionType> {
 }
 
 fn merged_return_type(mut inferred: Vec<InferredExpressionType>) -> Option<InferredExpressionType> {
+    merged_expression_type(&mut inferred)
+}
+
+fn merged_expression_type(
+    inferred: &mut Vec<InferredExpressionType>,
+) -> Option<InferredExpressionType> {
     if inferred.is_empty() {
         return None;
     }
@@ -576,6 +582,13 @@ fn literal_type_kind(expression: &Expression<'_>) -> Option<GeneratedTypeKind> {
         {
             Some(GeneratedTypeKind::Number)
         }
+        Expression::CallExpression(call) => builtin_call_type(call).and_then(|ty| {
+            if let InferredExpressionType::Primitive(kind) = ty {
+                Some(kind)
+            } else {
+                None
+            }
+        }),
         _ => None,
     }
 }
@@ -624,8 +637,120 @@ fn inferred_expression_type(
     match expression {
         Expression::ArrayExpression(array) => array_expression_type(array, depth),
         Expression::ObjectExpression(object) => object_expression_type(object, depth),
+        Expression::CallExpression(call) => builtin_call_type(call),
+        Expression::ConditionalExpression(conditional) => {
+            let mut types = vec![
+                inferred_expression_type(&conditional.consequent, depth + 1)?,
+                inferred_expression_type(&conditional.alternate, depth + 1)?,
+            ];
+            merged_expression_type(&mut types)
+        }
+        Expression::LogicalExpression(logical)
+            if matches!(
+                logical.operator,
+                oxc_ast::ast::LogicalOperator::Or | oxc_ast::ast::LogicalOperator::Coalesce
+            ) =>
+        {
+            let mut types = vec![
+                inferred_expression_type(&logical.left, depth + 1)?,
+                inferred_expression_type(&logical.right, depth + 1)?,
+            ];
+            merged_expression_type(&mut types)
+        }
+        Expression::StaticMemberExpression(_) => global_static_member_type(expression),
         _ => None,
     }
+}
+
+fn builtin_call_type(call: &oxc_ast::ast::CallExpression<'_>) -> Option<InferredExpressionType> {
+    if call.optional || call.type_parameters.is_some() {
+        return None;
+    }
+    let path = static_member_path(&call.callee)?;
+    let kind = match path.as_slice() {
+        ["String"] | ["JSON", "stringify"] => GeneratedTypeKind::String,
+        ["Number"]
+        | ["Date", "now"]
+        | ["Date", "parse"]
+        | ["Math", "abs"]
+        | ["Math", "acos"]
+        | ["Math", "acosh"]
+        | ["Math", "asin"]
+        | ["Math", "asinh"]
+        | ["Math", "atan"]
+        | ["Math", "atan2"]
+        | ["Math", "atanh"]
+        | ["Math", "cbrt"]
+        | ["Math", "ceil"]
+        | ["Math", "clz32"]
+        | ["Math", "cos"]
+        | ["Math", "cosh"]
+        | ["Math", "exp"]
+        | ["Math", "expm1"]
+        | ["Math", "floor"]
+        | ["Math", "fround"]
+        | ["Math", "hypot"]
+        | ["Math", "imul"]
+        | ["Math", "log"]
+        | ["Math", "log10"]
+        | ["Math", "log1p"]
+        | ["Math", "log2"]
+        | ["Math", "max"]
+        | ["Math", "min"]
+        | ["Math", "pow"]
+        | ["Math", "random"]
+        | ["Math", "round"]
+        | ["Math", "sign"]
+        | ["Math", "sin"]
+        | ["Math", "sinh"]
+        | ["Math", "sqrt"]
+        | ["Math", "tan"]
+        | ["Math", "tanh"]
+        | ["Math", "trunc"] => GeneratedTypeKind::Number,
+        ["Boolean"]
+        | ["Array", "isArray"]
+        | ["Number", "isFinite"]
+        | ["Number", "isInteger"]
+        | ["Number", "isNaN"]
+        | ["Number", "isSafeInteger"] => GeneratedTypeKind::Boolean,
+        ["Object", "keys"] => {
+            return Some(InferredExpressionType::Array(Box::new(
+                InferredExpressionType::Primitive(GeneratedTypeKind::String),
+            )));
+        }
+        _ => return None,
+    };
+    Some(InferredExpressionType::Primitive(kind))
+}
+
+fn global_static_member_type(expression: &Expression<'_>) -> Option<InferredExpressionType> {
+    let path = static_member_path(expression)?;
+    let kind = match path.as_slice() {
+        ["Number", "EPSILON"]
+        | ["Number", "MAX_SAFE_INTEGER"]
+        | ["Number", "MAX_VALUE"]
+        | ["Number", "MIN_SAFE_INTEGER"]
+        | ["Number", "MIN_VALUE"]
+        | ["Number", "NaN"]
+        | ["Number", "NEGATIVE_INFINITY"]
+        | ["Number", "POSITIVE_INFINITY"]
+        | ["Math", "E"]
+        | ["Math", "LN10"]
+        | ["Math", "LN2"]
+        | ["Math", "LOG10E"]
+        | ["Math", "LOG2E"]
+        | ["Math", "PI"]
+        | ["Math", "SQRT1_2"]
+        | ["Math", "SQRT2"] => GeneratedTypeKind::Number,
+        ["process", "env", _] => {
+            return Some(InferredExpressionType::Union(vec![
+                InferredExpressionType::Primitive(GeneratedTypeKind::String),
+                InferredExpressionType::Primitive(GeneratedTypeKind::Undefined),
+            ]));
+        }
+        _ => return None,
+    };
+    Some(InferredExpressionType::Primitive(kind))
 }
 
 fn object_expression_type(

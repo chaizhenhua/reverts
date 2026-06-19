@@ -413,6 +413,29 @@ fn module_item_formatting_infers_fixed_operator_result_types_when_requested() {
 }
 
 #[test]
+fn module_item_formatting_infers_builtin_api_result_types_when_requested() {
+    let formatted = format_source_with_module_items_request(FormatSourceRequest {
+        body_source: "const stamp = Date.now(); const text = JSON.stringify(value); const finite = Number.isFinite(value); const keys = Object.keys(value); const env = process.env.HOME; const choice = flag ? 'yes' : 'no';",
+        generated_imports: &[],
+        generated_exports: &[],
+        readability_renames: &[],
+        type_annotations: &[],
+        infer_literal_types: true,
+        path_hint: Some(Path::new("fixture.ts")),
+        goal: ParseGoal::TypeScript,
+        lowering: CompilerLowering::None,
+    })
+    .expect("fixture should format");
+
+    assert!(formatted.contains("const stamp: number = Date.now();"));
+    assert!(formatted.contains("const text: string = JSON.stringify(value);"));
+    assert!(formatted.contains("const finite: boolean = Number.isFinite(value);"));
+    assert!(formatted.contains("const keys: string[] = Object.keys(value);"));
+    assert!(formatted.contains("const env: string | undefined = process.env.HOME;"));
+    assert!(formatted.contains("const choice: string = flag ? 'yes' : 'no';"));
+}
+
+#[test]
 fn module_item_formatting_infers_default_parameter_and_return_types_when_requested() {
     let formatted = format_source_with_module_items_request(FormatSourceRequest {
         body_source: "function answer(input = 1) { return 42; } const echo = (label = 'ok') => { return 'ready'; };",
