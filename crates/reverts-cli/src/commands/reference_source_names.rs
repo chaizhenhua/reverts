@@ -372,6 +372,61 @@ fn tier_passes(tier: MatchTier, min: MinTier) -> bool {
     }
 }
 
+fn write_export_names(
+    connection: &Connection,
+    project_id: u32,
+    module_id: u32,
+    reference_exports: &BTreeSet<String>,
+    subject_bindings: &[(String, String)],
+    origin: &str,
+) -> Result<usize, CliRunError> {
+    let subject_originals: BTreeSet<&str> = subject_bindings
+        .iter()
+        .map(|(orig, _)| orig.as_str())
+        .collect();
+    let mut written = 0;
+    for export in reference_exports {
+        if !subject_originals.contains(export.as_str()) {
+            continue; // not an unambiguous 1:1 — leave for agent
+        }
+        connection
+            .execute(
+                r"
+                INSERT INTO symbol_name_proposals (
+                    project_id, module_id, original_name, semantic_name, origin, accepted, evidence
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+                ON CONFLICT(project_id, module_id, original_name, origin, semantic_name)
+                DO UPDATE SET accepted = excluded.accepted,
+                    evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence)
+                ",
+                params![
+                    i64::from(project_id),
+                    i64::from(module_id),
+                    export.as_str(),
+                    export.as_str(),
+                    origin,
+                    "{\"tier\":\"export-exact\"}",
+                ],
+            )
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+        written += connection
+            .execute(
+                r"
+                UPDATE symbols SET semantic_name = ?3, semantic_name_source = ?4
+                 WHERE module_id = ?1 AND original_name = ?2 AND scope_level = 'module'
+                ",
+                params![
+                    i64::from(module_id),
+                    export.as_str(),
+                    export.as_str(),
+                    origin
+                ],
+            )
+            .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
+    }
+    Ok(written)
+}
+
 fn write_module_names(
     connection: &Connection,
     plans: &[ModulePlan],
@@ -540,6 +595,50 @@ mod tests {
             .expect("q11");
         assert_eq!(name10.as_deref(), Some("features/audio-capture"));
         assert_eq!(name11, None, "low tier must not be written");
+    }
+
+    #[test]
+    fn export_name_proposals_only_on_exact_original_match() {
+        let connection = rusqlite::Connection::open_in_memory().expect("db");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE symbol_name_proposals (
+                    project_id INTEGER NOT NULL, module_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL, semantic_name TEXT NOT NULL,
+                    origin TEXT NOT NULL, accepted INTEGER NOT NULL DEFAULT 0, evidence TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (project_id, module_id, original_name, origin, semantic_name)
+                );
+                CREATE TABLE symbols (
+                    module_id INTEGER, semantic_name TEXT, semantic_name_source TEXT,
+                    export_name TEXT, original_name TEXT, scope_level TEXT
+                );
+                INSERT INTO symbols (module_id, original_name, scope_level)
+                VALUES (10, '_HL', 'module'), (10, 'other', 'module');
+                ",
+            )
+            .expect("schema");
+        let ref_exports: BTreeSet<String> = ["_HL".to_string(), "missing".to_string()].into();
+        let subject_bindings = vec![("_HL".to_string(), "a".to_string())];
+        let written = write_export_names(
+            &connection,
+            1,
+            10,
+            &ref_exports,
+            &subject_bindings,
+            "source:2.1.76:features/audio-capture.ts",
+        )
+        .expect("write");
+        assert_eq!(written, 1);
+        let sem: Option<String> = connection
+            .query_row(
+                "SELECT semantic_name FROM symbols WHERE module_id = 10 AND original_name = '_HL'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("q");
+        assert_eq!(sem.as_deref(), Some("_HL"));
     }
 
     #[test]
