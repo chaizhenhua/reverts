@@ -550,6 +550,14 @@ impl RevertsGraph {
         &self.def_use
     }
 
+    /// Record a synthesized cross-module import (`module_id` now imports
+    /// `binding` from a sibling module whose owner was resolved by analysis).
+    /// Keeps the def-use graph consistent with the planner wiring so a read
+    /// resolved by a synthesized dependency is no longer reported unresolved.
+    pub fn record_import(&mut self, module_id: ModuleId, binding: BindingName) {
+        self.def_use.import(module_id, binding.as_str());
+    }
+
     #[must_use]
     pub fn control_flow(&self) -> &ControlFlowGraph {
         &self.control_flow

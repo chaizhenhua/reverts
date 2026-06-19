@@ -3,7 +3,7 @@ pub mod rollup;
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstFactKind, AstWrapperKind, FunctionExtractor};
-use reverts_input::{ModuleDependencyTarget, SymbolScope};
+use reverts_input::{ModuleDependencyInput, ModuleDependencyTarget, SymbolScope};
 use reverts_ir::{
     BindingConstraintKind, BindingName, BindingShapeSolution, ControlFlowEdgeKind,
     ControlFlowNodeKind, FunctionFingerprint, InferredType, ModuleId, TypeSolution,
@@ -26,7 +26,16 @@ pub struct EnrichmentOutput {
 }
 
 #[must_use]
-pub fn enrich_program(model: ProgramModel) -> EnrichmentOutput {
+pub fn enrich_program(mut model: ProgramModel) -> EnrichmentOutput {
+    // Wire cross-module free reads to their owning module. Bundle slicing
+    // (esp. esbuild scope-hoisting) leaves a module reading a binding that is
+    // defined in a sibling module with no explicit dependency edge; without
+    // the edge the planner cannot emit the import. Resolve only unambiguous
+    // single-owner reads — never guess for a colliding name.
+    let synthesized = synthesize_module_dependency_edges(&model);
+    model.register_module_imports(synthesized.imports);
+    model.add_module_dependencies(synthesized.edges);
+
     let semantic_names = assign_semantic_names(&model);
     let binding_shapes = BindingShapeSolution::from_def_use_graph(model.graph().def_use());
     let type_solution = infer_type_solution(&model);
@@ -173,6 +182,67 @@ fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
 // positives. A genuine duplicate hazard — distinct module owners colliding on
 // one *output file* — is a per-output-file concern for the planner, not this
 // per-module analysis pass.
+
+/// Synthesize `Module` dependency edges for free reads that resolve to a
+/// single defining module. For each unresolved read `(M, B)` where exactly one
+/// other module `O` defines `B`, emit an edge `M -> O`; the planner's
+/// `source_module_wiring` then imports `B` from `O`. Ambiguous reads (a name
+/// defined by several modules — the minified-collision shape) and ambient
+/// globals are skipped: we never guess an owner. Edges already present in the
+/// input are not duplicated; one edge per `(from, to)` pair covers all shared
+/// bindings since the planner intersects reads with the owner's exports.
+struct SynthesizedModuleWiring {
+    edges: Vec<ModuleDependencyInput>,
+    imports: Vec<(ModuleId, BindingName)>,
+}
+
+fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModuleWiring {
+    let def_use = model.graph().def_use();
+    let existing: BTreeSet<(ModuleId, ModuleId)> = model
+        .input()
+        .dependencies
+        .iter()
+        .filter_map(|dependency| match dependency.target {
+            ModuleDependencyTarget::Module(target) => Some((dependency.from_module_id, target)),
+            ModuleDependencyTarget::Package { .. } => None,
+        })
+        .collect();
+
+    let mut pairs: BTreeSet<(ModuleId, ModuleId)> = BTreeSet::new();
+    let mut imports: Vec<(ModuleId, BindingName)> = Vec::new();
+    for (module_id, binding) in def_use.unresolved_reads() {
+        if is_ambient_binding(binding.as_str()) {
+            continue;
+        }
+        let mut owners = def_use
+            .modules_defining(&binding)
+            .into_iter()
+            .filter(|owner| *owner != module_id);
+        let Some(owner) = owners.next() else {
+            continue;
+        };
+        if owners.next().is_some() {
+            // More than one defining module — ambiguous, do not guess.
+            continue;
+        }
+        // The read is now imported from its single owner: record the import
+        // (resolves the def-use audit) and the edge (drives planner wiring).
+        imports.push((module_id, binding));
+        let pair = (module_id, owner);
+        if !existing.contains(&pair) {
+            pairs.insert(pair);
+        }
+    }
+
+    let edges = pairs
+        .into_iter()
+        .map(|(from_module_id, target)| ModuleDependencyInput {
+            from_module_id,
+            target: ModuleDependencyTarget::Module(target),
+        })
+        .collect();
+    SynthesizedModuleWiring { edges, imports }
+}
 
 fn is_ambient_binding(binding: &str) -> bool {
     // Three families:
@@ -1723,6 +1793,78 @@ NativeModuleType();
                 && finding.binding.as_deref() == Some("missing")
                 && finding.message.contains("written")
         }));
+    }
+
+    #[test]
+    fn enrich_synthesizes_dependency_edge_from_free_read_to_owner() {
+        // Module `a` defines `helper`; module `b` reads it as a free variable
+        // with no dependency edge. Enrichment must synthesize the b->a module
+        // dependency so the planner emits `import { helper } from './a'`.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "a.js",
+            Some("function helper(){return 1}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "b.js",
+            Some("helper()".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "a", "a.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(2), "b", "b.ts").with_source_file(2));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+
+        let output = enrich_program(model);
+
+        let deps = &output.program.model().input().dependencies;
+        assert!(
+            deps.iter().any(|dep| dep.from_module_id == ModuleId(2)
+                && dep.target == ModuleDependencyTarget::Module(ModuleId(1))),
+            "expected synthesized edge b->a, got: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn enrich_does_not_synthesize_edge_for_ambiguous_owner() {
+        // Both `a` and `c` define `helper`; `b` reads it. The owner is
+        // ambiguous (minified collision shape), so NO edge is synthesized —
+        // we never guess which module owns a colliding name.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "a.js",
+            Some("function helper(){return 1}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "b.js",
+            Some("helper()".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            3,
+            "c.js",
+            Some("function helper(){return 2}".to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "a", "a.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(2), "b", "b.ts").with_source_file(2));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(3), "c", "c.ts").with_source_file(3));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+
+        let output = enrich_program(model);
+
+        let deps = &output.program.model().input().dependencies;
+        assert!(
+            !deps.iter().any(|dep| dep.from_module_id == ModuleId(2)),
+            "ambiguous owner must not synthesize an edge, got: {deps:?}"
+        );
     }
 
     #[test]

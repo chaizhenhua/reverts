@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_graph::{AstWrapperKind, RevertsGraph};
-use reverts_input::{InputBundle, ModuleInput, SymbolInput};
+use reverts_input::{InputBundle, ModuleDependencyInput, ModuleInput, SymbolInput};
 use reverts_ir::{
     BindingName, BindingShape, BindingShapeSolution, FunctionFingerprint, InferredType, ModuleId,
     TypeSolution,
@@ -24,6 +24,23 @@ impl ProgramModel {
     #[must_use]
     pub fn input(&self) -> &InputBundle {
         &self.input
+    }
+
+    /// Append synthesized module-dependency edges to the input bundle. The
+    /// def-use graph is built from AST facts (definitions/reads), not from
+    /// dependency edges, so adding edges after construction leaves the graph
+    /// unchanged while giving the planner the cross-module wiring it needs.
+    pub fn add_module_dependencies(&mut self, dependencies: Vec<ModuleDependencyInput>) {
+        self.input.dependencies.extend(dependencies);
+    }
+
+    /// Register synthesized cross-module imports into the def-use graph so a
+    /// read resolved by a synthesized dependency edge is no longer reported as
+    /// an unresolved (missing) definition.
+    pub fn register_module_imports(&mut self, imports: Vec<(ModuleId, BindingName)>) {
+        for (module_id, binding) in imports {
+            self.graph.record_import(module_id, binding);
+        }
     }
 
     #[must_use]
