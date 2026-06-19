@@ -136,6 +136,52 @@ fn audit_ast_fact_extraction(model: &ProgramModel) -> AuditReport {
     audit
 }
 
+/// Parse the parent source file id from a synthetic source path of the form
+/// `__reverts_synthetic__/<parent_id>/<name>.js` (produced by reverts-bundle
+/// for reconstructed esbuild multi-handle modules). Mirrors the planner-side
+/// helper since reverts-analyze can't depend on reverts-planner.
+fn synthetic_parent_source_file_id(path: &str) -> Option<u32> {
+    path.strip_prefix("__reverts_synthetic__/")?
+        .split_once('/')
+        .and_then(|(parent, _rest)| parent.parse::<u32>().ok())
+}
+
+/// True when `binding` is a runtime-helper binding in this module's source
+/// file's prelude — or, for reconstructed synthetic modules, in the PARENT
+/// source file's prelude. Such bindings (e.g. esbuild `__commonJS` aliases
+/// `We`/`St` in source 6's prelude) are not real missing-definitions: the
+/// planner's helper-rename pass lowers `helper(...)` calls to `lazyModule`/
+/// `lazyValue` and the raw alias is gone in the emitted output.
+fn is_runtime_helper_binding(
+    model: &ProgramModel,
+    module_id: ModuleId,
+    binding: &BindingName,
+) -> bool {
+    let Some(module) = model.input().modules.iter().find(|m| m.id == module_id) else {
+        return false;
+    };
+    let Some(source_file_id) = module.source_file_id else {
+        return false;
+    };
+    let parent_id = model
+        .input()
+        .source_files
+        .iter()
+        .find(|sf| sf.id == source_file_id)
+        .and_then(|sf| synthetic_parent_source_file_id(sf.path.as_str()));
+    let mut candidates = vec![source_file_id];
+    if let Some(parent) = parent_id {
+        candidates.push(parent);
+    }
+    candidates.iter().any(|id| {
+        model
+            .graph()
+            .runtime_prelude(*id)
+            .map(|prelude| prelude.bindings.contains_key(binding))
+            .unwrap_or(false)
+    })
+}
+
 fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
     let mut audit = AuditReport::default();
     // A bare `MissingDefinition` reflects an incomplete bundle slice: the
@@ -146,6 +192,9 @@ fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
     // points the missing binding for backfill.
     for (module_id, binding) in model.graph().def_use().unresolved_reads() {
         if is_ambient_binding(binding.as_str()) {
+            continue;
+        }
+        if is_runtime_helper_binding(model, module_id, &binding) {
             continue;
         }
         audit.push(
@@ -159,6 +208,9 @@ fn audit_def_use_graph(model: &ProgramModel) -> AuditReport {
     }
     for (module_id, binding) in model.graph().def_use().unresolved_writes() {
         if is_ambient_binding(binding.as_str()) {
+            continue;
+        }
+        if is_runtime_helper_binding(model, module_id, &binding) {
             continue;
         }
         audit.push(
@@ -1828,6 +1880,46 @@ NativeModuleType();
             finding.code == FindingCode::MissingDefinition
                 && finding.binding.as_deref() == Some("missing")
         }));
+    }
+
+    #[test]
+    fn runtime_helper_binding_read_is_not_reported_as_missing() {
+        // A bundle's top-level __commonJS helper alias (`var St = (e,A) => () =>
+        // (A||e((A={exports:{}}).exports,A),A.exports)`) sits OUTSIDE any module
+        // span and becomes a prelude binding classified as `CommonJsWrapper`. A
+        // module reading `St` (the planner will lower the `St(...)` call to
+        // `lazyModule`) must NOT trip a `MissingDefinition` audit finding —
+        // the binding is resolved at the prelude/lowering layer, not free.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        let bundle_source = "var St=(e,A)=>()=>(A||e((A={exports:{}}).exports,A),A.exports);\nvar app=St((exports,module)=>{module.exports=1});";
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(bundle_source.into()),
+        ));
+        // The module owns only its handle declarator + body, leaving the `St`
+        // helper definition outside as a prelude binding.
+        let module_span_start = bundle_source.find("var app=").unwrap() as u32;
+        let module_span_end = bundle_source.len() as u32;
+        rows.modules.push(
+            ModuleInput::application(ModuleId(10), "esbuild:app", "esbuild:app")
+                .with_source_file(1)
+                .with_source_span(reverts_input::SourceSpan::new(
+                    module_span_start,
+                    module_span_end,
+                )),
+        );
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let output = enrich_program(ProgramModel::from_input(input));
+
+        assert!(
+            !output.audit.findings().iter().any(|finding| {
+                finding.code == FindingCode::MissingDefinition
+                    && finding.binding.as_deref() == Some("St")
+            }),
+            "St (prelude-classified CommonJsWrapper) must not be flagged as missing: {:#?}",
+            output.audit.findings()
+        );
     }
 
     #[test]
