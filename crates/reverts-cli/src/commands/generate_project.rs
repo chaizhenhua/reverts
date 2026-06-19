@@ -81,12 +81,41 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         &args.output,
         &runtime_dependencies,
     )?;
+    let symbol_index_path = args.output.join("symbol-index.json");
+    std::fs::write(
+        &symbol_index_path,
+        serialize_symbol_index(&run.symbol_index),
+    )
+    .map_err(|source| CliRunError::WriteOutput {
+        path: symbol_index_path.clone(),
+        source,
+    })?;
     println!(
-        "generated project {} into {} with {written} files",
+        "generated project {} into {} with {written} files ({} symbol-index entries)",
         args.project_id,
-        args.output.display()
+        args.output.display(),
+        run.symbol_index.len()
     );
     Ok(())
+}
+
+/// Serializes the symbol index as a JSON array. `reverts_pipeline::SymbolIndexEntry`
+/// has no serde derive (the pipeline crate stays serde-free), so the CLI renders
+/// the rows it needs.
+fn serialize_symbol_index(entries: &[reverts_pipeline::SymbolIndexEntry]) -> String {
+    let rows: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "module_id": entry.module_id.0,
+                "original_name": entry.original_name,
+                "emitted_name": entry.emitted_name,
+                "file_path": entry.file_path,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::Value::Array(rows))
+        .expect("serializing a JSON array of plain values is infallible")
 }
 
 pub(crate) use crate::project_writer::write_accepted_project;

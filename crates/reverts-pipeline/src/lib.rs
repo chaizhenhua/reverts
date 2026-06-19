@@ -43,6 +43,61 @@ pub struct OutputRun {
     pub audit: AuditReport,
     pub runtime_dependencies: Vec<RuntimeDependency>,
     pub assets: Vec<EmittedAsset>,
+    /// Maps each emitted module-level binding to its original (DB) name and the
+    /// file it lands in, so a downstream naming agent can read the generated
+    /// TypeScript and route names back to the right `(module_id, original)`.
+    pub symbol_index: Vec<SymbolIndexEntry>,
+}
+
+/// One emitted module-level binding: where it appears and under which name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolIndexEntry {
+    pub module_id: ModuleId,
+    /// Binding name as it exists in the graph / DB key space.
+    pub original_name: String,
+    /// Name as actually emitted (semantic name if assigned, else original).
+    pub emitted_name: String,
+    /// Emitted file the binding lands in.
+    pub file_path: String,
+}
+
+/// Builds [`SymbolIndexEntry`] rows for every module-level binding that lands in
+/// an emitted file. Derived from the graph (the real binding universe), the
+/// planner's `module_output_paths`, and the semantic-name overlay.
+fn build_symbol_index(
+    program: &EnrichedProgram,
+    module_output_paths: &std::collections::BTreeMap<ModuleId, String>,
+    emitted: &reverts_emitter::EmittedProject,
+) -> Vec<SymbolIndexEntry> {
+    let emitted_paths: std::collections::BTreeSet<&str> = emitted
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    let graph = program.model().graph();
+    let semantic = program.semantic_names();
+    let mut entries = Vec::new();
+    for module in program.model().modules() {
+        let Some(path) = module_output_paths.get(&module.id) else {
+            continue;
+        };
+        if !emitted_paths.contains(path.as_str()) {
+            continue;
+        }
+        for binding in graph.definitions_for(module.id) {
+            let original = binding.as_str();
+            let emitted_name = semantic
+                .binding_name(module.id, original)
+                .map_or_else(|| original.to_string(), |name| name.as_str().to_string());
+            entries.push(SymbolIndexEntry {
+                module_id: module.id,
+                original_name: original.to_string(),
+                emitted_name,
+                file_path: path.clone(),
+            });
+        }
+    }
+    entries
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,6 +256,7 @@ pub fn generate_project_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            symbol_index: Vec::new(),
         });
     }
 
@@ -217,6 +273,7 @@ pub fn generate_project_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            symbol_index: Vec::new(),
         });
     }
 
@@ -244,6 +301,7 @@ pub fn generate_project_from_prepared(
         &emitted_project,
     ));
     let accepted_project = pre_accept.clone().accept_if_clean(&audit);
+    let symbol_index = build_symbol_index(&program, &module_output_paths, &emitted_project);
 
     Ok(OutputRun {
         project: pre_accept,
@@ -252,6 +310,7 @@ pub fn generate_project_from_prepared(
         audit,
         runtime_dependencies,
         assets,
+        symbol_index,
     })
 }
 
@@ -284,6 +343,7 @@ pub fn generate_project_inventory_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            symbol_index: Vec::new(),
         });
     }
 
@@ -300,6 +360,7 @@ pub fn generate_project_inventory_from_prepared(
             audit,
             runtime_dependencies,
             assets,
+            symbol_index: Vec::new(),
         });
     }
 
@@ -326,6 +387,7 @@ pub fn generate_project_inventory_from_prepared(
         audit,
         runtime_dependencies,
         assets,
+        symbol_index: Vec::new(),
     })
 }
 
@@ -2195,6 +2257,27 @@ var inner = __commonJS({"src/inner.js": (exports, module) => { exports.answer = 
         assert!(
             !emitted.contains("// reverts-compiler-preserved: esbuild"),
             "function-local esbuild identifier must not trigger esbuild banner, got:\n{emitted}",
+        );
+    }
+
+    #[test]
+    fn symbol_index_maps_emitted_bindings_to_files() {
+        let source = "export function parse(a){ return a + 1; }\n";
+        let run = run_with_source(source, &["parse"]);
+        assert!(run.audit.is_clean(), "audit: {:?}", run.audit.findings());
+        let entry = run
+            .symbol_index
+            .iter()
+            .find(|entry| entry.original_name == "parse")
+            .expect("parse should be indexed");
+        // The indexed file must be one of the actually emitted files.
+        assert!(
+            run.project
+                .files
+                .iter()
+                .any(|file| file.path == entry.file_path),
+            "indexed file {} not among emitted files",
+            entry.file_path
         );
     }
 
