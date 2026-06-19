@@ -615,6 +615,34 @@ impl InputBundle {
         Ok(self)
     }
 
+    /// Append additional source files to an already-validated bundle without
+    /// re-running validation on existing rows. Used for in-memory SYNTHETIC
+    /// source files — reconstructed esbuild multi-handle modules whose content
+    /// is generated rather than read from disk (they carry `source: Some(_)`).
+    /// Validates only id uniqueness against the existing set; a module that
+    /// later spans a content-less source file is still rejected by
+    /// `with_appended_modules`' span check.
+    pub fn with_appended_source_files(
+        mut self,
+        source_files: Vec<SourceFileInput>,
+    ) -> Result<Self, InputBundleError> {
+        if source_files.is_empty() {
+            return Ok(self);
+        }
+        let mut existing_ids: BTreeSet<u32> = self
+            .source_files
+            .iter()
+            .map(|source_file| source_file.id)
+            .collect();
+        for source_file in &source_files {
+            if !existing_ids.insert(source_file.id) {
+                return Err(InputBundleError::DuplicateSourceFileId(source_file.id));
+            }
+        }
+        self.source_files.extend(source_files);
+        Ok(self)
+    }
+
     #[must_use]
     pub fn into_rows(self) -> InputRows {
         InputRows {
@@ -2176,6 +2204,36 @@ mod tests {
         assert_eq!(slice.source_file_path, "bundle.js");
         assert_eq!(slice.source, "export const two = 2;");
         assert_eq!(slice.span, Some(SourceSpan::new(22, 43)));
+    }
+
+    #[test]
+    fn appended_synthetic_source_file_resolves_module_slice() {
+        // Reconstructed multi-handle esbuild modules carry SYNTHETIC source
+        // (not a slice of the original bundle file). It lives in-memory only:
+        // a synthetic source file is appended to the bundle, and the
+        // per-handle module's span points into it. `module_source_slice` must
+        // return that synthetic text so the planner lowers it like any
+        // single-handle module.
+        let synthetic = "var a, X = st(() => { a = 1; });";
+        let bundle = InputBundle::from_rows(InputRows::new(ProjectInput::new(1, "fixture")))
+            .expect("empty bundle is valid")
+            .with_appended_source_files(vec![SourceFileInput::new(
+                900,
+                "__reverts_synthetic__/esbuild-X.js",
+                Some(synthetic.to_string()),
+            )])
+            .expect("synthetic source file appends")
+            .with_appended_modules(vec![
+                ModuleInput::application(ModuleId(5000), "esbuild:X", "esbuild:X")
+                    .with_source_file(900)
+                    .with_source_span(SourceSpan::new(0, synthetic.len() as u32)),
+            ])
+            .expect("module into synthetic file appends");
+
+        let slice = bundle
+            .module_source_slice(ModuleId(5000))
+            .expect("synthetic module resolves");
+        assert_eq!(slice.source, synthetic);
     }
 
     #[test]
