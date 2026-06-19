@@ -208,40 +208,96 @@ fn synthesize_module_dependency_edges(model: &ProgramModel) -> SynthesizedModule
         })
         .collect();
 
-    let mut pairs: BTreeSet<(ModuleId, ModuleId)> = BTreeSet::new();
-    let mut imports: Vec<(ModuleId, BindingName)> = Vec::new();
+    // Each non-ambient free read paired with its candidate owner modules.
+    let mut pending: Vec<(ModuleId, BindingName, BTreeSet<ModuleId>)> = Vec::new();
     for (module_id, binding) in def_use.unresolved_reads() {
         if is_ambient_binding(binding.as_str()) {
             continue;
         }
-        let mut owners = def_use
+        let owners: BTreeSet<ModuleId> = def_use
             .modules_defining(&binding)
             .into_iter()
-            .filter(|owner| *owner != module_id);
-        let Some(owner) = owners.next() else {
-            continue;
-        };
-        if owners.next().is_some() {
-            // More than one defining module — ambiguous, do not guess.
-            continue;
-        }
-        // The read is now imported from its single owner: record the import
-        // (resolves the def-use audit) and the edge (drives planner wiring).
-        imports.push((module_id, binding));
-        let pair = (module_id, owner);
-        if !existing.contains(&pair) {
-            pairs.insert(pair);
+            .filter(|owner| *owner != module_id)
+            .collect();
+        if !owners.is_empty() {
+            pending.push((module_id, binding, owners));
         }
     }
 
-    let edges = pairs
-        .into_iter()
+    // Resolve to a single owner, growing the dependency graph to a fixed point.
+    // A read with one candidate resolves directly; an ambiguous read (a name
+    // defined by several modules — the minified-collision shape) resolves only
+    // when exactly one candidate is reachable from the reader via the
+    // dependency edges already proven. Edges added this way feed the next
+    // round's reachability. We never pick among equally-reachable candidates.
+    let mut edges: BTreeSet<(ModuleId, ModuleId)> = existing.clone();
+    let mut imports: Vec<(ModuleId, BindingName)> = Vec::new();
+    let mut resolved = vec![false; pending.len()];
+    loop {
+        let reachable = reachable_modules(&edges);
+        let empty = BTreeSet::new();
+        let mut added = false;
+        for (index, (module_id, binding, owners)) in pending.iter().enumerate() {
+            if resolved[index] {
+                continue;
+            }
+            let chosen = if owners.len() == 1 {
+                owners.iter().next().copied()
+            } else {
+                let reach = reachable.get(module_id).unwrap_or(&empty);
+                let mut reachable_owners = owners.iter().filter(|owner| reach.contains(owner));
+                match (reachable_owners.next(), reachable_owners.next()) {
+                    (Some(owner), None) => Some(*owner),
+                    _ => None,
+                }
+            };
+            if let Some(owner) = chosen {
+                imports.push((*module_id, binding.clone()));
+                if edges.insert((*module_id, owner)) {
+                    added = true;
+                }
+                resolved[index] = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    let edges = edges
+        .difference(&existing)
         .map(|(from_module_id, target)| ModuleDependencyInput {
-            from_module_id,
-            target: ModuleDependencyTarget::Module(target),
+            from_module_id: *from_module_id,
+            target: ModuleDependencyTarget::Module(*target),
         })
         .collect();
     SynthesizedModuleWiring { edges, imports }
+}
+
+/// Transitive reachability per source module over the module-dependency edges.
+fn reachable_modules(
+    edges: &BTreeSet<(ModuleId, ModuleId)>,
+) -> BTreeMap<ModuleId, BTreeSet<ModuleId>> {
+    let mut adjacency: BTreeMap<ModuleId, Vec<ModuleId>> = BTreeMap::new();
+    for (from, to) in edges {
+        adjacency.entry(*from).or_default().push(*to);
+    }
+    let mut out: BTreeMap<ModuleId, BTreeSet<ModuleId>> = BTreeMap::new();
+    for source in adjacency.keys().copied() {
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![source];
+        while let Some(node) = stack.pop() {
+            if let Some(targets) = adjacency.get(&node) {
+                for target in targets {
+                    if seen.insert(*target) {
+                        stack.push(*target);
+                    }
+                }
+            }
+        }
+        out.insert(source, seen);
+    }
+    out
 }
 
 fn is_ambient_binding(binding: &str) -> bool {
@@ -1864,6 +1920,49 @@ NativeModuleType();
         assert!(
             !deps.iter().any(|dep| dep.from_module_id == ModuleId(2)),
             "ambiguous owner must not synthesize an edge, got: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn enrich_disambiguates_ambiguous_owner_via_reachable_dependency() {
+        // `X` is defined in both o1 and o2 (ambiguous by name). Module `b`
+        // reads X and already depends on o1. Reachability narrows the owner
+        // set to the single reachable module (o1), so the read resolves —
+        // without guessing among the colliding names.
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "o1.js",
+            Some("function X(){return 1}".to_string()),
+        ));
+        rows.source_files.push(SourceFileInput::new(
+            2,
+            "o2.js",
+            Some("function X(){return 2}".to_string()),
+        ));
+        rows.source_files
+            .push(SourceFileInput::new(3, "b.js", Some("X()".to_string())));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "o1", "o1.ts").with_source_file(1));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(2), "o2", "o2.ts").with_source_file(2));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(3), "b", "b.ts").with_source_file(3));
+        rows.dependencies.push(ModuleDependencyInput {
+            from_module_id: ModuleId(3),
+            target: ModuleDependencyTarget::Module(ModuleId(1)),
+        });
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+        let model = ProgramModel::from_input(input);
+
+        let output = enrich_program(model);
+
+        let unresolved = output.program.model().graph().def_use().unresolved_reads();
+        assert!(
+            !unresolved
+                .iter()
+                .any(|(module, binding)| *module == ModuleId(3) && binding.as_str() == "X"),
+            "b's X must resolve to the reachable owner o1: {unresolved:?}"
         );
     }
 
