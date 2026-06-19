@@ -84,10 +84,13 @@ pub(crate) fn top_level_statement_slices(source: &str) -> Vec<&str> {
 /// Return parser-derived top-level statement byte ranges for a generated module.
 pub(crate) fn top_level_statement_spans(source: &str) -> Vec<(usize, usize)> {
     collect_top_level_statement_facts(source, None, ParseGoal::TypeScript)
-        .expect("planner top-level statement facts require parseable generated TypeScript source")
-        .into_iter()
-        .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
-        .collect()
+        .map(|facts| {
+            facts
+                .into_iter()
+                .map(|fact| (fact.byte_start as usize, fact.byte_end as usize))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// True when an unparenthesized initializer `=` appears after `cursor`.

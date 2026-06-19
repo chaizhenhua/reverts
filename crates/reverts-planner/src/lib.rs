@@ -15,6 +15,7 @@ mod package_runtime;
 mod package_runtime_accumulator;
 mod plan;
 mod plan_error;
+#[cfg(test)]
 mod plan_reachability;
 mod planner_context;
 mod planner_pipeline;

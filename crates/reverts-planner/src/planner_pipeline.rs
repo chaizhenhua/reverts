@@ -8,7 +8,6 @@
 use crate::module_planning_context::ModulePlanningContext;
 use crate::package_runtime::emit_package_runtime_helper_files;
 use crate::package_runtime_accumulator::PackageRuntimeAccumulator;
-use crate::plan_reachability::prune_plan_to_cli_reachable;
 use crate::planner_context::PlannerContext;
 use crate::relative_paths::relative_import_specifier;
 use crate::runtime_helper_usage::RuntimeHelperUsageAccumulator;
@@ -35,7 +34,6 @@ pub(crate) fn run_planner_pipeline(context: &PlannerContext<'_>) -> Result<EmitP
     RerouteRuntimeBarrelImportsPass.run(context, &mut state)?;
     EmitRuntimeHelpersPass.run(context, &mut state)?;
     EmitCliEntrypointPass.run(context, &mut state)?;
-    PruneUnreachableFilesPass.run(context, &mut state)?;
     PruneDeadExportsPass.run(context, &mut state)?;
     PruneInvalidExportsPass.run(context, &mut state)?;
     Ok(state.plan)
@@ -209,19 +207,6 @@ impl PlanningPass for EmitCliEntrypointPass {
             &context.analysis().externalized_packages,
             &mut state.plan,
         );
-        Ok(())
-    }
-}
-
-struct PruneUnreachableFilesPass;
-
-impl PlanningPass for PruneUnreachableFilesPass {
-    fn run(
-        &self,
-        _context: &PlannerContext<'_>,
-        state: &mut PlanningState,
-    ) -> Result<(), PlanError> {
-        prune_plan_to_cli_reachable(&mut state.plan);
         Ok(())
     }
 }

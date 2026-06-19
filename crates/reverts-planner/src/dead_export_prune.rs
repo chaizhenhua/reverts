@@ -8,13 +8,15 @@
 //! binds only some of a module's original export names); this pass removes them
 //! so the emitted program loads.
 //!
-//! `plan_reachability` drops whole files unreachable from `cli.ts`;
-//! `runtime_orphan_prune` drops dead *private* bindings inside a module. The gap
-//! between them is an *exported* binding that no reachable module ever imports.
+//! `runtime_orphan_prune` drops dead *private* bindings inside a module. The
+//! remaining gap is an *exported* binding that no reachable module ever imports.
 //! This pass closes that gap: it builds a whole-program view of which exported
 //! names are actually imported (by name) somewhere, removes the export marking
 //! from the rest, and then re-runs `runtime_orphan_prune` so the now-private,
-//! unreferenced bindings (and their exclusive private closures) drop too.
+//! unreferenced bindings (and their exclusive private closures) drop too. It
+//! does not remove whole source files; full decompilation must preserve every
+//! recovered source module even when it is not statically reachable from
+//! `cli.ts`.
 //!
 //! Semantics-first conservatism: only planner-emitted *static, named* imports
 //! count as "live". A file reached through a namespace import (`import * as ns`)
@@ -162,9 +164,8 @@ fn import_local_names(statement: &str) -> Vec<String> {
 pub(crate) fn prune_dead_exports(plan: &mut EmitPlan) {
     // Only meaningful with a known program entry: without `cli.ts` there is no
     // whole-program closure to compute "imported anywhere" against, so every
-    // export must be conservatively kept (mirrors `plan_reachability`). This also
-    // leaves library-style emit plans — and unit fixtures without an entry —
-    // untouched.
+    // export must be conservatively kept. This also leaves library-style emit
+    // plans — and unit fixtures without an entry — untouched.
     if !plan
         .files
         .iter()
