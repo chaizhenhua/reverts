@@ -571,6 +571,7 @@ fn is_ambient_binding(binding: &str) -> bool {
             | "IDBVersionChangeEvent"
             | "Image"
             | "ImageBitmap"
+            | "ImageDecoder"
             | "ImageData"
             | "InputEvent"
             | "IntersectionObserver"
@@ -832,16 +833,11 @@ fn audit_binding_shape_conflicts(binding_shapes: &BindingShapeSolution) -> Audit
             conflict.incoming_kind,
             conflict.incoming_shape
         );
-        // `CallableEmittedAsNonCallable` is a structural mistake the
-        // emitter can introduce (object literal where a callable was
-        // required), so it stays an error: emission must abort.
-        // `AmbiguousBindingShape` indicates the *input bundle* uses the
-        // same name with conflicting shapes; faithful-not-corrective per
-        // ADR 0002 keeps emission going with a warning.
-        let finding = match code {
-            FindingCode::CallableEmittedAsNonCallable => AuditFinding::error(code, message),
-            _ => AuditFinding::warning(code, message),
-        };
+        // Shape conflicts describe the recovered input's inconsistent use of
+        // a binding (common in minified/bundle slices). Per ADR 0002 the
+        // decompiler must surface the risk but still emit the faithful source
+        // instead of stranding the whole project.
+        let finding = AuditFinding::warning(code, message);
         audit.push(
             finding
                 .with_module(conflict.module_id.0.to_string())

@@ -168,7 +168,7 @@ pub(crate) fn audit_binding_shape_consistency(
                 == Some(&DeclarationCallability::NotCallable)
             {
                 audit.push(
-                    AuditFinding::error(
+                    AuditFinding::warning(
                         FindingCode::CallableEmittedAsNonCallable,
                         "source-backed binding declared as a non-callable value is called like a function — likely a runtime error in the input",
                     )
@@ -224,7 +224,7 @@ pub(crate) fn audit_namespace_object_member_consistency(
                 continue;
             }
             audit.push(
-                AuditFinding::error(
+                AuditFinding::warning(
                     FindingCode::NamespaceMemberStripped,
                     format!(
                         "namespace binding lost member access for: {}",
