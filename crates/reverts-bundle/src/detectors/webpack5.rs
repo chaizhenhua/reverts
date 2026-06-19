@@ -10,7 +10,11 @@ use crate::inner_module::{BundlerKind, InnerModule};
 /// Each property's value is a factory function whose body is the module
 /// implementation; we slice that body as the inner module.
 #[must_use]
-pub fn detect(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+pub fn detect(
+    _source: &str,
+    program: &Program<'_>,
+    parent_module_id: ModuleId,
+) -> Vec<InnerModule> {
     let mut out = Vec::new();
     for stmt in &program.body {
         let Statement::VariableDeclaration(decl) = stmt else {
@@ -75,6 +79,7 @@ fn collect_from_declarator<'a>(
             bundler: BundlerKind::Webpack5,
             source_path_hint,
             parent_module_id,
+            synthetic_source: None,
         });
     }
 }
@@ -94,7 +99,7 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        detect(&parsed.program, ModuleId(7))
+        detect(src, &parsed.program, ModuleId(7))
     }
 
     #[test]

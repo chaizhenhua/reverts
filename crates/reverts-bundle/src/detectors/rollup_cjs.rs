@@ -11,7 +11,11 @@ use crate::inner_module::{BundlerKind, InnerModule};
 /// the bundled code. We slice its body as one `InnerModule` per
 /// top-level function declaration inside the body.
 #[must_use]
-pub fn detect(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+pub fn detect(
+    _source: &str,
+    program: &Program<'_>,
+    parent_module_id: ModuleId,
+) -> Vec<InnerModule> {
     let mut out = Vec::new();
     for stmt in &program.body {
         let Statement::ExpressionStatement(expr) = stmt else {
@@ -93,6 +97,7 @@ fn collect_from_outer_iife<'a>(
                 bundler: BundlerKind::RollupCjs,
                 source_path_hint: None,
                 parent_module_id,
+                synthetic_source: None,
             });
             seq += 1;
         }
@@ -114,7 +119,7 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        detect(&parsed.program, ModuleId(2))
+        detect(src, &parsed.program, ModuleId(2))
     }
 
     #[test]

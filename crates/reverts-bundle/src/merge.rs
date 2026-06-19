@@ -234,6 +234,7 @@ mod tests {
             bundler: BundlerKind::Esbuild,
             source_path_hint: hint.map(str::to_string),
             parent_module_id: ModuleId(0),
+            synthetic_source: None,
         }
     }
 

@@ -1,10 +1,13 @@
 use oxc_ast::Visit;
 use oxc_ast::ast::{
-    Argument, BindingPatternKind, CallExpression, Expression, ObjectPropertyKind, Program,
-    PropertyKey, Statement, VariableDeclarator,
+    Argument, AssignmentExpression, AssignmentTarget, BindingPatternKind, CallExpression,
+    Expression, ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclaration,
+    VariableDeclarator,
 };
+use oxc_ast::visit::walk::walk_assignment_expression;
 use oxc_span::GetSpan;
 use reverts_ir::{ByteRange, ModuleId};
+use std::collections::BTreeSet;
 
 use crate::detectors::esbuild_helpers::discover_aliases;
 use crate::inner_module::{BundlerKind, InnerModule};
@@ -17,10 +20,15 @@ use crate::inner_module::{BundlerKind, InnerModule};
 /// by AST shape (see [`discover_aliases`]) then matches every call/assignment
 /// that uses one of those proven helper names.
 #[must_use]
-pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+pub fn detect_commonjs(
+    source: &str,
+    program: &Program<'_>,
+    parent_module_id: ModuleId,
+) -> Vec<InnerModule> {
     let aliases = discover_aliases(program);
     let mut out = detect_named_registry(program, parent_module_id, &aliases.commonjs);
     out.extend(detect_var_assignment_modules(
+        source,
         program,
         parent_module_id,
         &aliases.commonjs,
@@ -32,10 +40,15 @@ pub fn detect_commonjs(program: &Program<'_>, parent_module_id: ModuleId) -> Vec
 /// un-minified `__esm({"path": fn, ...})` map and the minified
 /// `var <name> = <alias>(fn)` per-module call.
 #[must_use]
-pub fn detect_esm(program: &Program<'_>, parent_module_id: ModuleId) -> Vec<InnerModule> {
+pub fn detect_esm(
+    source: &str,
+    program: &Program<'_>,
+    parent_module_id: ModuleId,
+) -> Vec<InnerModule> {
     let aliases = discover_aliases(program);
     let mut out = detect_named_registry(program, parent_module_id, &aliases.esm);
     out.extend(detect_var_assignment_modules(
+        source,
         program,
         parent_module_id,
         &aliases.esm,
@@ -66,6 +79,7 @@ fn detect_named_registry(
 /// `source_path_hint` is `None` and `virtual_id` derives from the
 /// binding name (`esbuild:<name>`).
 fn detect_var_assignment_modules(
+    source: &str,
     program: &Program<'_>,
     parent_module_id: ModuleId,
     aliases: &[String],
@@ -83,15 +97,36 @@ fn detect_var_assignment_modules(
         // with only initializer code in the arrow body. When the statement has
         // exactly one handle declarator we own the WHOLE statement, so the
         // hoisted sibling declarators and the handle become definitions rather
-        // than free variables. With multiple handles in one statement there is
-        // no single contiguous owning unit, so we fall back to per-handle
-        // arrow-body spans (the hoisted vars stay unowned — a measured residual).
+        // than free variables.
         let handle_count = vd
             .declarations
             .iter()
             .filter(|decl| is_helper_init_declarator(decl, aliases))
             .count();
         let statement_span = ByteRange::new(vd.span().start, vd.span().end);
+        // Multiple handles in one statement (`var a,X=helper(()=>{...}),b,Y=...`)
+        // have no single contiguous owning unit. Reconstruct each handle into
+        // its own `var <hoisted-it-writes>, X=helper(()=>{...});` statement
+        // (synthetic source) so each handle name becomes a real definition /
+        // export — otherwise cross-module `X()`/`Y()` calls dangle.
+        if handle_count > 1
+            && let Some(reconstructed) = reconstruct_multi_handle_statement(source, vd, aliases)
+        {
+            for (handle_name, synthetic) in reconstructed {
+                out.push(InnerModule {
+                    virtual_id: format!("esbuild:{handle_name}"),
+                    body_span: statement_span,
+                    bundler: BundlerKind::Esbuild,
+                    source_path_hint: None,
+                    parent_module_id,
+                    synthetic_source: Some(synthetic),
+                });
+            }
+            continue;
+        }
+        // Multi-handle statements with ambiguous hoisted-var attribution (a bare
+        // var written by >1 handle) fall through to per-arrow-body spans below
+        // (a measured residual; never malformed output).
         for decl in &vd.declarations {
             let BindingPatternKind::BindingIdentifier(binding) = &decl.id.kind else {
                 continue;
@@ -133,10 +168,154 @@ fn detect_var_assignment_modules(
                 bundler: BundlerKind::Esbuild,
                 source_path_hint: None,
                 parent_module_id,
+                synthetic_source: None,
             });
         }
     }
     out
+}
+
+/// Reconstruct a multi-handle `var` statement into one synthetic single-handle
+/// statement per handle. Each bare (init-less) hoisted declarator is attached
+/// to the handle whose arrow body WRITES it; a bare var written by no handle
+/// goes to the nearest following (else preceding) handle — esbuild emits a
+/// module's hoisted vars adjacent to its init. Returns `None` (caller falls
+/// back to per-arrow-body spans) when a bare var is written by more than one
+/// handle (genuinely shared mutable state — ambiguous, never guessed) or the
+/// statement contains a declarator that is neither bare nor a helper init.
+///
+/// Output entries are `(handle_name, "var <bares>, <handle_declarator>;")`,
+/// where `<handle_declarator>` is the original `X=helper(()=>{...})` source
+/// slice so the synthetic statement lowers exactly like a real single-handle
+/// module.
+fn reconstruct_multi_handle_statement(
+    source: &str,
+    vd: &VariableDeclaration<'_>,
+    aliases: &[String],
+) -> Option<Vec<(String, String)>> {
+    // Classify declarators in source order: bare hoisted var, or helper handle.
+    enum Slot<'s> {
+        Bare(&'s str),
+        Handle { name: &'s str, decl_text: &'s str },
+    }
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut handle_order: Vec<usize> = Vec::new(); // indices into `slots` that are handles
+    for decl in &vd.declarations {
+        let BindingPatternKind::BindingIdentifier(binding) = &decl.id.kind else {
+            return None;
+        };
+        let name = binding.name.as_str();
+        if is_helper_init_declarator(decl, aliases) {
+            let span = decl.span();
+            let decl_text = source.get(span.start as usize..span.end as usize)?;
+            handle_order.push(slots.len());
+            slots.push(Slot::Handle { name, decl_text });
+        } else if decl.init.is_none() {
+            slots.push(Slot::Bare(name));
+        } else {
+            // A non-handle initializer (e.g. `z=5`) — not the pure hoist+handle
+            // shape we reconstruct. Bail rather than risk a wrong split.
+            return None;
+        }
+    }
+    if handle_order.len() < 2 {
+        return None;
+    }
+
+    // Which bare names each handle's arrow body writes.
+    let writes_by_handle: Vec<BTreeSet<String>> = handle_order
+        .iter()
+        .map(|&slot_idx| {
+            let Slot::Handle { .. } = &slots[slot_idx] else {
+                unreachable!("handle_order only holds handle slots");
+            };
+            let decl = &vd.declarations[slot_idx];
+            handle_written_identifiers(decl)
+        })
+        .collect();
+
+    // Attribute each bare declarator (by slot index) to one handle (slot index).
+    let mut bares_for_handle: std::collections::BTreeMap<usize, Vec<&str>> =
+        std::collections::BTreeMap::new();
+    for (slot_idx, slot) in slots.iter().enumerate() {
+        let Slot::Bare(name) = slot else {
+            continue;
+        };
+        let writers: Vec<usize> = handle_order
+            .iter()
+            .enumerate()
+            .filter(|(handle_pos, _slot)| writes_by_handle[*handle_pos].contains(*name))
+            .map(|(_handle_pos, &slot)| slot)
+            .collect();
+        let owner = match writers.as_slice() {
+            [single] => *single,
+            [] => nearest_handle(&handle_order, slot_idx)?,
+            _ => return None, // written by >1 handle: ambiguous shared state
+        };
+        bares_for_handle.entry(owner).or_default().push(name);
+    }
+
+    // Emit one synthetic statement per handle, in source order.
+    let mut out = Vec::new();
+    for &handle_slot in &handle_order {
+        let Slot::Handle { name, decl_text } = &slots[handle_slot] else {
+            unreachable!();
+        };
+        let bares = bares_for_handle.remove(&handle_slot).unwrap_or_default();
+        let synthetic = if bares.is_empty() {
+            format!("var {decl_text};")
+        } else {
+            format!("var {}, {decl_text};", bares.join(", "))
+        };
+        out.push(((*name).to_string(), synthetic));
+    }
+    Some(out)
+}
+
+/// The nearest handle slot index to `bare_idx`: the first handle declared after
+/// it, else the last handle declared before it.
+fn nearest_handle(handle_order: &[usize], bare_idx: usize) -> Option<usize> {
+    handle_order
+        .iter()
+        .copied()
+        .find(|&h| h > bare_idx)
+        .or_else(|| handle_order.iter().copied().rfind(|&h| h < bare_idx))
+}
+
+/// Identifier names that are assignment / update targets anywhere inside a
+/// handle declarator's arrow (or function) body — i.e. the hoisted module-scope
+/// vars this module initializes.
+fn handle_written_identifiers(decl: &VariableDeclarator<'_>) -> BTreeSet<String> {
+    let mut visitor = WriteTargetVisitor {
+        writes: BTreeSet::new(),
+    };
+    if let Some(Expression::CallExpression(call)) = decl.init.as_ref()
+        && let Some(arg) = call.arguments.first()
+    {
+        match arg {
+            Argument::ArrowFunctionExpression(a) => visitor.visit_function_body(&a.body),
+            Argument::FunctionExpression(f) => {
+                if let Some(body) = f.body.as_ref() {
+                    visitor.visit_function_body(body);
+                }
+            }
+            _ => {}
+        }
+    }
+    visitor.writes
+}
+
+struct WriteTargetVisitor {
+    writes: BTreeSet<String>,
+}
+
+impl<'a> Visit<'a> for WriteTargetVisitor {
+    fn visit_assignment_expression(&mut self, expression: &AssignmentExpression<'a>) {
+        if let AssignmentTarget::AssignmentTargetIdentifier(id) = &expression.left {
+            self.writes.insert(id.name.as_str().to_string());
+        }
+        walk_assignment_expression(self, expression);
+    }
 }
 
 /// A `var` declarator whose initializer is a call to a proven `__commonJS` /
@@ -195,6 +374,7 @@ impl<'a> Visit<'a> for NamedRegistryVisitor<'_, '_> {
                     bundler: BundlerKind::Esbuild,
                     source_path_hint: Some(key_text),
                     parent_module_id: self.parent_module_id,
+                    synthetic_source: None,
                 });
             }
         }
@@ -217,7 +397,7 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        detect_commonjs(&parsed.program, ModuleId(99))
+        detect_commonjs(src, &parsed.program, ModuleId(99))
     }
 
     fn extract_esm(src: &str) -> Vec<InnerModule> {
@@ -228,7 +408,7 @@ mod tests {
             "parse errors: {:?}",
             parsed.errors
         );
-        detect_esm(&parsed.program, ModuleId(99))
+        detect_esm(src, &parsed.program, ModuleId(99))
     }
 
     #[test]
@@ -353,49 +533,34 @@ var a,b,X=st(()=>{a=1;b=2});"#;
     }
 
     #[test]
-    #[ignore = "KNOWN GAP (reality-based repro): multi-handle esbuild var \
-statements (`var a,X=st(()=>{...}),b,c,Y=st(()=>{...})`) own only per-handle \
-arrow bodies, so handle names X/Y are owned by nobody → cross-module X()/Y() \
-dangle (the oCt/ECt-class residual). NOT fixable by a contained span tweak \
-(InnerModule.body_span must be a parseable unit, not the fragment `X=...`); \
-needs whole-statement ownership done safely or synthetic per-handle source. \
-Supersedes the mis-simplified planner repro. See memory \
-project-finding-clusters-diagnosis."]
-    fn var_assignment_multi_handle_owns_handle_names() {
+    fn var_assignment_multi_handle_reconstructs_per_handle_synthetic_source() {
         // REAL esbuild scope-hoisting shape, grepped from the Claude index.js
         // (`...WLA}),Uu,oCt=st(()=>{HM...`, `...}),coA,n_A,mNe,ECt=st(()=>{Ra...`):
         // INIT-LESS hoisted declarators (`a`,`b`,`c`) interspersed with multiple
         // `st`(=__esm) lazy-init handles (`X`,`Y`) in ONE `var` statement. Each
-        // handle NAME must end up owned by some module so it becomes a
-        // definition/export — otherwise cross-module `X()`/`Y()` calls dangle
-        // with no import (the oCt/ECt-class residual; the emitted `DNe.ts` calls
-        // `oCt()`/`ECt()` that no module defines or exports).
-        //
-        // This currently FAILS: `detect_var_assignment_modules` owns only the
-        // per-handle ARROW BODY for multi-handle statements (handle_count>1),
-        // so the handle names live in the unowned parent `var` shell. A correct
-        // fix cannot carve a per-handle span (`InnerModule.body_span` must be a
-        // parseable program unit, never the mid-expression fragment
-        // `X=st(()=>{...})`), so it requires either owning the whole statement
-        // as one module (a prior attempt regressed single-handle imports
-        // globally — see memory project-finding-clusters-diagnosis) or adding
-        // synthetic per-handle module source. A dedicated, carefully-mapped
-        // effort with emit-verification, NOT a contained tweak.
+        // handle is rebuilt into its own single-handle statement carrying its
+        // handle declarator + the hoisted vars its body WRITES, so the handle
+        // name becomes a real definition/export (otherwise cross-module
+        // `X()`/`Y()` calls dangle — the oCt/ECt-class residual). Write-analysis
+        // attributes `a`→X (writes `a=1`) and `b`,`c`→Y (writes `b=2;c=3`).
         let src = r#"var st=(A,Q)=>()=>(A&&(Q=A(A=0)),Q);
 var a,X=st(()=>{a=1}),b,c,Y=st(()=>{b=2;c=3});"#;
         let modules = extract_esm(src);
-        let owns = |needle: &str| {
+        let synthetic = |vid: &str| {
             modules
                 .iter()
-                .any(|m| src[m.body_span.start as usize..m.body_span.end as usize].contains(needle))
+                .find(|m| m.virtual_id == vid)
+                .and_then(|m| m.synthetic_source.clone())
         };
-        assert!(
-            owns("X="),
-            "handle name X must be owned (a definition): {modules:#?}"
+        assert_eq!(
+            synthetic("esbuild:X").as_deref(),
+            Some("var a, X=st(()=>{a=1});"),
+            "X reconstructs with its written hoisted var: {modules:#?}"
         );
-        assert!(
-            owns("Y="),
-            "handle name Y must be owned (a definition): {modules:#?}"
+        assert_eq!(
+            synthetic("esbuild:Y").as_deref(),
+            Some("var b, c, Y=st(()=>{b=2;c=3});"),
+            "Y reconstructs with its written hoisted vars: {modules:#?}"
         );
     }
 

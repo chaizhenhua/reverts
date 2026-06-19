@@ -44,7 +44,9 @@ pub struct InnerModule {
     /// - rollup / umd / generated ids: `"<bundler>:<seq>"`, e.g. `"rollup_cjs:0"`.
     pub virtual_id: String,
     /// Byte range of the body inside the parent file's source. Always
-    /// slices a parseable JavaScript program unit.
+    /// slices a parseable JavaScript program unit — unless `synthetic_source`
+    /// is `Some`, in which case it is the parent statement span used only for
+    /// overlap/ordering and the real content is `synthetic_source`.
     pub body_span: ByteRange,
     /// Wrapper shape decoded for this module.
     pub bundler: BundlerKind,
@@ -53,6 +55,14 @@ pub struct InnerModule {
     pub source_path_hint: Option<String>,
     /// Parent module that contains this inner.
     pub parent_module_id: ModuleId,
+    /// Reconstructed source when this module's content is generated rather
+    /// than sliced from the parent file. Used for esbuild multi-handle
+    /// statements (`var a,X=st(()=>{…}),b,Y=st(()=>{…})`): each handle is
+    /// rebuilt into its own `var <hoisted>,X=st(()=>{…});` statement so it
+    /// becomes a real single-handle module that declares + exports its handle.
+    /// When `Some`, the merge step routes this module to an in-memory
+    /// synthetic source file instead of a parent-file byte span.
+    pub synthetic_source: Option<String>,
 }
 
 #[cfg(test)]
@@ -79,6 +89,7 @@ mod tests {
             bundler: BundlerKind::Esbuild,
             source_path_hint: Some("node_modules/lodash/index.js".into()),
             parent_module_id: ModuleId(7),
+            synthetic_source: None,
         };
         assert_eq!(m.virtual_id, "esbuild:0");
         assert_eq!(m.body_span.start, 100);

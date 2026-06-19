@@ -9,7 +9,7 @@ use crate::classification::{BundleClassification, MarkedMetadata};
 use crate::inner_module::{BundlerKind, InnerModule};
 
 type DetectorFn =
-    for<'p> fn(&'p oxc_ast::ast::Program<'p>, reverts_ir::ModuleId) -> Vec<InnerModule>;
+    for<'p> fn(&'p str, &'p oxc_ast::ast::Program<'p>, reverts_ir::ModuleId) -> Vec<InnerModule>;
 
 /// Detect which bundler runtime fingerprint dominates a source file.
 /// Returns `CompilerKind::Unknown` when no detector proves a bundled shape.
@@ -17,15 +17,15 @@ pub fn detect_kind_from_source(source: &str) -> Result<CompilerKind, String> {
     let alloc = Allocator::default();
     let parsed = parse_program(&alloc, source)?;
     let parent = reverts_ir::ModuleId(0);
-    if !crate::detectors::webpack5::detect(&parsed.program, parent).is_empty() {
+    if !crate::detectors::webpack5::detect(source, &parsed.program, parent).is_empty() {
         return Ok(CompilerKind::Webpack);
     }
-    if !crate::detectors::esbuild::detect_commonjs(&parsed.program, parent).is_empty()
-        || !crate::detectors::esbuild::detect_esm(&parsed.program, parent).is_empty()
+    if !crate::detectors::esbuild::detect_commonjs(source, &parsed.program, parent).is_empty()
+        || !crate::detectors::esbuild::detect_esm(source, &parsed.program, parent).is_empty()
     {
         return Ok(CompilerKind::Esbuild);
     }
-    if !crate::detectors::rollup_cjs::detect(&parsed.program, parent).is_empty() {
+    if !crate::detectors::rollup_cjs::detect(source, &parsed.program, parent).is_empty() {
         return Ok(CompilerKind::Rollup);
     }
     Ok(CompilerKind::Unknown)
@@ -60,7 +60,7 @@ pub fn classify(_path: &Path, source: &str) -> Result<BundleClassification, Stri
     let mut groups: std::collections::BTreeMap<BundlerKind, Vec<InnerModule>> =
         std::collections::BTreeMap::new();
     for (bundler, detector) in runs {
-        let inner_modules = detector(&parsed.program, parent);
+        let inner_modules = detector(source, &parsed.program, parent);
         if !inner_modules.is_empty() {
             groups.entry(*bundler).or_default().extend(inner_modules);
         }
