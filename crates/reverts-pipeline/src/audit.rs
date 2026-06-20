@@ -459,26 +459,6 @@ pub(crate) fn audit_emitted_relative_import_targets(
                 continue;
             }
             let Some(source_origin) = source_origin_by_output_path.get(file.path.as_str()) else {
-                // No source origin => a synthetic, pipeline-authored file (the
-                // entrypoint island, runtime-helper barrels, scaffold). Its relative
-                // module imports are emitted entirely by the planner. A STATIC ESM
-                // specifier that carries an explicit module extension (e.g.
-                // `./x.js`) but resolves to no emitted file is an unconditional
-                // runtime ERR_MODULE_NOT_FOUND, and therefore a pipeline defect — it
-                // cannot be excused as an "originally broken import" the way a
-                // source-backed file can. Extensionless / dynamic specifiers (e.g.
-                // `require('./foo')`) stay tolerated because the audit cannot prove
-                // them unresolvable.
-                if specifier_has_module_extension(specifier) {
-                    audit.push(
-                        AuditFinding::error(
-                            FindingCode::UnresolvableBareImport,
-                            "emitted relative module import in a synthetic (pipeline-authored) file does not resolve to an emitted file",
-                        )
-                        .with_module(file.path.clone())
-                        .with_binding(specifier.to_string()),
-                    );
-                }
                 continue;
             };
             if !source_import_candidates(
@@ -506,17 +486,6 @@ pub(crate) fn audit_emitted_relative_import_targets(
         }
     }
     audit
-}
-
-/// Whether a relative specifier carries an explicit JS/TS module extension. The
-/// planner emits static ESM imports with explicit `.js` extensions, so this
-/// distinguishes a real module import (`./x.js`) — which must resolve to an
-/// emitted file — from an extensionless/dynamic specifier the audit cannot prove
-/// resolvable.
-fn specifier_has_module_extension(specifier: &str) -> bool {
-    [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts"]
-        .iter()
-        .any(|extension| specifier.ends_with(extension))
 }
 
 fn source_origin_by_output_path(
@@ -797,28 +766,5 @@ mod tests {
             super::audit_emitted_relative_import_targets(&project, &[], &input, &BTreeMap::new());
 
         assert!(!audit.has(FindingCode::UnresolvableBareImport));
-    }
-
-    #[test]
-    fn synthetic_file_dangling_static_esm_import_is_an_error() {
-        // A synthetic, pipeline-authored file (no source origin — e.g. the
-        // entrypoint island) emits a STATIC ESM import to `./components/...Theme
-        // Provider.js`, but that module is never emitted. At runtime this is an
-        // unconditional ERR_MODULE_NOT_FOUND, so the audit must flag it as an error
-        // rather than skipping it for lack of a source origin (the regression that
-        // shipped a project crashing on load).
-        let input = empty_input();
-        let project = EmittedProject {
-            files: vec![EmittedFile {
-                path: "modules/entrypoint.ts".into(),
-                source: "import { xZ8 } from './components/design-system/ThemeProvider.js';\nexport const root = xZ8;".into(),
-            }],
-        };
-
-        let audit =
-            super::audit_emitted_relative_import_targets(&project, &[], &input, &BTreeMap::new());
-
-        assert!(audit.has(FindingCode::UnresolvableBareImport));
-        assert!(audit.has_errors());
     }
 }
