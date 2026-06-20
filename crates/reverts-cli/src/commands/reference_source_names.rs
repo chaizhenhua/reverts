@@ -5108,8 +5108,14 @@ fn match_function_lists_inner(
             .next()
             .expect("exactly one target checked above");
         let reference = &reference_fns[ri];
+        // Param count must agree exactly; statement count may drift by 1 — the body
+        // already drifted past the AST hash, so a one-statement difference is
+        // expected, and the globally-unique anchor is near-decisive on its own.
         if subject.fingerprint.param_count != reference.fingerprint.param_count
-            || subject.fingerprint.statement_count != reference.fingerprint.statement_count
+            || (i64::from(subject.fingerprint.statement_count)
+                - i64::from(reference.fingerprint.statement_count))
+            .abs()
+                > 1
         {
             continue;
         }
@@ -8213,7 +8219,9 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     fn function_match_proposes_via_distinctive_inbody_literal() {
         // Subject and reference functions whose bodies DIFFER structurally (no
         // shared AST hash) but share a unique string literal -> the literal
-        // anchors a proposal that hash matching alone would miss.
+        // anchors a proposal that hash matching alone would miss. The PARAM COUNTS
+        // DISAGREE (1 vs 2), so the unique-anchor accept pass (4b) cannot promote it
+        // to an accept — it stays a proposal, which is what this test pins.
         let subjects = subject_fn(
             7,
             "modules/m.ts",
@@ -8221,7 +8229,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         );
         let references = reference_fn(
             "util/drift.ts",
-            "function realName(y) { return y ? emit(\"uniqueDriftMarker_xyz\") : 0; }",
+            "function realName(y, z) { return y && z ? emit(\"uniqueDriftMarker_xyz\") : 0; }",
         );
         let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
         assert!(
@@ -8374,6 +8382,27 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             rows.iter()
                 .any(|r| r.accepted && r.semantic_name == "sliceWithMarker"),
             "unique anchor + exact arity/stmt should promote: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn unique_anchor_tolerates_one_statement_drift() {
+        // Bodies drifted (subject has one extra statement) but share the decisive
+        // globally-unique anchor and agree on param count -> still promoted (±1 stmt).
+        let subjects = subject_fn(
+            7,
+            "modules/m.ts",
+            r#"function aB(x){ let q = "kSliceMarkerZQX_unique"; let r = q + x; return r; }"#,
+        );
+        let references = reference_fn(
+            "util/slice.ts",
+            r#"function sliceWithMarker(x){ let q = "kSliceMarkerZQX_unique"; return x + q; }"#,
+        );
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            rows.iter()
+                .any(|r| r.accepted && r.semantic_name == "sliceWithMarker"),
+            "one-statement drift should still promote under a unique anchor: {rows:?}"
         );
     }
 
