@@ -10,7 +10,7 @@ use std::time::Instant;
 use clap::{Args, ValueEnum};
 use reverts_graph::{
     FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_anchor_tokens,
-    function_names, identifier_streams,
+    function_callee_names, function_names, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
 use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
@@ -4116,6 +4116,9 @@ struct ReferenceFunction {
     name: String,
     fingerprint: FunctionFingerprint,
     literals: BTreeSet<String>,
+    /// Call targets (`c:name` identifier callees, `m:method` method callees) for
+    /// topology-based propagation.
+    callees: BTreeSet<String>,
 }
 
 /// One subject (emitted) function with a recoverable name.
@@ -4125,6 +4128,7 @@ struct SubjectFunction {
     name: String,
     fingerprint: FunctionFingerprint,
     literals: BTreeSet<String>,
+    callees: BTreeSet<String>,
 }
 
 /// Every named, specifically-named function across the whole reference tree.
@@ -4136,16 +4140,19 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
         let mut literals = function_anchor_tokens(module.source.as_str());
+        let mut callees = function_callee_names(module.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
         {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
+                let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(ReferenceFunction {
                     file: module.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
                     literals: function_literals,
+                    callees: function_callees,
                 });
             }
         }
@@ -4159,18 +4166,21 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
     for subject in subjects {
         let names = function_names(subject.source.as_str());
         let mut literals = function_anchor_tokens(subject.source.as_str());
+        let mut callees = function_callee_names(subject.source.as_str());
         for fingerprint in FunctionExtractor::fingerprint_primary(
             ModuleId(subject.module_id),
             subject.source.as_str(),
         ) {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
+                let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(SubjectFunction {
                     module_id: subject.module_id,
                     subject_path: subject.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
                     literals: function_literals,
+                    callees: function_callees,
                 });
             }
         }
@@ -4809,6 +4819,128 @@ fn match_function_lists(
             statement_count: subject.fingerprint.statement_count,
             score: 4.0,
         });
+    }
+
+    // ACCEPT pass 6: CALL-GRAPH PROPAGATION (topology, not body; iterative).
+    //
+    // The call graph survives minify+decompile even when bodies diverge: which
+    // functions a function calls is a build-invariant. Seeded by the matches
+    // above, a subject function whose RESOLVED call targets — its minified
+    // identifier callees translated through the accepted subject->reference name
+    // map, plus preserved method names — uniquely overlap one reference
+    // function's call targets on >=2 matched FUNCTION callees is the same
+    // function. Each round's new matches grow the map, so matching propagates
+    // outward along call edges (the mechanism that turns matched modules into
+    // matched internal functions, which body fingerprints cannot).
+    const PROPAGATE_MIN_SHARED_FN_CALLEES: usize = 2;
+    const PROPAGATE_MIN_TOTAL_OVERLAP: usize = 3;
+    const PROPAGATE_MAX_ROUNDS: usize = 6;
+    let mut ref_by_callee: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, reference) in reference_fns.iter().enumerate() {
+        for callee in &reference.callees {
+            ref_by_callee
+                .entry(callee.as_str())
+                .or_default()
+                .push(index);
+        }
+    }
+    for _round in 0..PROPAGATE_MAX_ROUNDS {
+        // subject minified name -> reference name, from everything accepted so far.
+        let name_map: BTreeMap<String, String> = rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.original_name.clone(), row.semantic_name.clone()))
+            .collect();
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        let mut round_matches = 0usize;
+        for subject in subject_fns {
+            if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                continue;
+            }
+            // Resolve call targets: translate matched identifier callees to their
+            // reference name; keep method names; drop still-minified callees.
+            let resolved: BTreeSet<String> = subject
+                .callees
+                .iter()
+                .filter_map(|callee| {
+                    if let Some(minified) = callee.strip_prefix("c:") {
+                        name_map.get(minified).map(|real| format!("c:{real}"))
+                    } else {
+                        Some(callee.clone())
+                    }
+                })
+                .collect();
+            if resolved.len() < PROPAGATE_MIN_TOTAL_OVERLAP {
+                continue;
+            }
+            let mut candidates: BTreeSet<usize> = BTreeSet::new();
+            for token in &resolved {
+                if let Some(indices) = ref_by_callee.get(token.as_str()) {
+                    candidates.extend(indices.iter().copied());
+                }
+            }
+            // Score each candidate by total overlap and shared matched-function
+            // callees (the strong signal). Keep the best and the runner-up.
+            let (mut best, mut runner): (Option<(usize, usize, usize)>, (usize, usize)) =
+                (None, (0, 0));
+            for index in candidates {
+                if used_ref.contains(&index) {
+                    continue;
+                }
+                let reference = &reference_fns[index];
+                let shared: BTreeSet<&String> = resolved.intersection(&reference.callees).collect();
+                let total = shared.len();
+                let shared_fns = shared
+                    .iter()
+                    .filter(|token| token.starts_with("c:"))
+                    .count();
+                let score = (shared_fns, total);
+                match best {
+                    Some((b_fns, b_total, _)) if (shared_fns, total) <= (b_fns, b_total) => {
+                        runner = runner.max(score);
+                    }
+                    Some((b_fns, b_total, _)) => {
+                        runner = runner.max((b_fns, b_total));
+                        best = Some((shared_fns, total, index));
+                    }
+                    None => best = Some((shared_fns, total, index)),
+                }
+            }
+            let Some((shared_fns, total, index)) = best else {
+                continue;
+            };
+            // Require enough matched-function overlap, a clear margin over the
+            // runner-up, and arity agreement.
+            if shared_fns < PROPAGATE_MIN_SHARED_FN_CALLEES
+                || total < PROPAGATE_MIN_TOTAL_OVERLAP
+                || (shared_fns, total) <= runner
+            {
+                continue;
+            }
+            let reference = &reference_fns[index];
+            if subject.fingerprint.param_count != reference.fingerprint.param_count {
+                continue;
+            }
+            accepted.insert((subject.module_id, subject.name.clone()));
+            used_ref.insert(index);
+            new_rows.push(BindingNameRow {
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
+                accepted: true,
+                ast_hash: subject.fingerprint.primary.ast,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
+                score: 5.0,
+            });
+            round_matches += 1;
+        }
+        rows.extend(new_rows);
+        if round_matches == 0 {
+            break;
+        }
     }
 
     // PROPOSAL pass: global, for every subject function not auto-accepted.
@@ -5470,15 +5602,18 @@ fn reference_functions_from_source(file: &str, source: &str) -> Vec<ReferenceFun
         .filter(|(_, name)| is_specific_reference_name(name))
         .collect();
     let mut literals = function_anchor_tokens(source);
+    let mut callees = function_callee_names(source);
     let mut out = Vec::new();
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(0), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
             let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
             out.push(ReferenceFunction {
                 file: file.to_string(),
                 name: name.clone(),
                 fingerprint,
                 literals: function_literals,
+                callees: function_callees,
             });
         }
     }
@@ -7366,6 +7501,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
     fn subject_fn(module_id: u32, path: &str, source: &str) -> Vec<SubjectFunction> {
         let names = function_names(source);
         let mut lits = function_anchor_tokens(source);
+        let mut callees = function_callee_names(source);
         FunctionExtractor::fingerprint(ModuleId(module_id), source)
             .into_iter()
             .filter_map(|f| {
@@ -7374,6 +7510,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                     subject_path: path.to_string(),
                     name: name.clone(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
+                    callees: callees.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })
@@ -7386,6 +7523,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
         let mut lits = function_anchor_tokens(source);
+        let mut callees = function_callee_names(source);
         FunctionExtractor::fingerprint(ModuleId(0), source)
             .into_iter()
             .filter_map(|f| {
@@ -7393,6 +7531,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                     file: file.to_string(),
                     name: name.clone(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
+                    callees: callees.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })

@@ -543,6 +543,84 @@ impl<'a> Visit<'a> for FunctionAnchorExtractor {
     }
 }
 
+/// Per-function CALL TARGETS, keyed by the same span as
+/// [`FunctionExtractor::fingerprint`]. For each call, records the callee: a bare
+/// identifier callee `f()` as `c:f` (RAW — any length, including minified local
+/// names, so it can be translated through an accepted name map) and a method
+/// callee `o.m()` as `m:m` (distinctive only). Unlike [`function_anchor_tokens`]
+/// this captures the call GRAPH (who calls whom), which is invariant across
+/// minify/decompile even when function bodies diverge — the basis for
+/// topology-based function-match propagation.
+#[must_use]
+pub fn function_callee_names(
+    source: &str,
+) -> std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut extractor = FunctionCalleeExtractor {
+        stack: Vec::new(),
+        callees: std::collections::BTreeMap::new(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.callees
+}
+
+struct FunctionCalleeExtractor {
+    stack: Vec<ByteRange>,
+    callees: std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>>,
+}
+
+impl FunctionCalleeExtractor {
+    fn record(&mut self, token: String) {
+        if let Some(&top) = self.stack.last() {
+            self.callees.entry(top).or_default().insert(token);
+        }
+    }
+}
+
+impl<'a> Visit<'a> for FunctionCalleeExtractor {
+    fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        let span = func.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_function(self, func, flags);
+        self.stack.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let span = arrow.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_arrow_function_expression(self, arrow);
+        self.stack.pop();
+    }
+
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        match &call.callee {
+            // Bare identifier callee: record RAW so a minified local name can be
+            // resolved through the accepted subject->reference name map.
+            Expression::Identifier(identifier) => {
+                self.record(format!("c:{}", identifier.name.as_str()));
+            }
+            // Method callee `obj.m(...)`: the method name is preserved across
+            // builds, so it anchors directly. Keep only distinctive ones.
+            Expression::StaticMemberExpression(member) => {
+                let name = member.property.name.as_str();
+                if name.len() >= MIN_ANCHOR_NAME_LEN && !is_noise_anchor_name(name) {
+                    self.record(format!("m:{name}"));
+                }
+            }
+            _ => {}
+        }
+        oxc_ast::visit::walk::walk_call_expression(self, call);
+    }
+}
+
 /// Ordered identifier streams for position-aligned symbol propagation. `uses`
 /// are identifier references in AST pre-order; `bindings` are declaration
 /// identifiers (params, var/let/const, function/class names, catch) as
@@ -1321,6 +1399,21 @@ mod tests {
         assert!(set.contains("s:payload-marker"), "string: {set:?}");
         // noise members/short names are excluded
         assert!(!set.iter().any(|t| t == "m:length" || t == "c:JSON"));
+    }
+
+    #[test]
+    fn callee_names_capture_identifier_and_method_calls() {
+        let source = "function f(a){ helperFn(a); return obj.serializeNow(a) + xy(a); }";
+        let callees = function_callee_names(source);
+        let set = callees.values().next().expect("one function");
+        // bare identifier callees recorded RAW (any length, incl. short minified)
+        assert!(set.contains("c:helperFn"), "{set:?}");
+        assert!(
+            set.contains("c:xy"),
+            "short identifier callee kept raw: {set:?}"
+        );
+        // distinctive method callee recorded
+        assert!(set.contains("m:serializeNow"), "{set:?}");
     }
 
     #[test]
