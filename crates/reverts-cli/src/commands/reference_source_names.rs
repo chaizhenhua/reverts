@@ -584,9 +584,13 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     // high-precision accepted function matches point at the same reference file.
     // This is safe for module-only because it writes only module semantic names;
     // generated-output binding/path mutations remain disabled in that mode.
+    // Feed the function passes EVERY module's best-candidate reference file, not
+    // just the tier-gated matches. This is safe: the within-module function passes
+    // require per-pair hard evidence, so a weak/wrong module pair yields no false
+    // function name — it only gives the precise passes more pairs to search. (The
+    // graph-propagation seed below stays tier-gated for its edge-alignment.)
     let module_matched_file: BTreeMap<u32, String> = plans
         .iter()
-        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
         .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
         .collect();
     let mut binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
@@ -608,11 +612,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     // import graph). Expand the confirmed module matches along aligned import
     // edges, then re-run function matching so the precise within-module passes
     // cascade into the newly-aligned modules.
-    let confirmed_modules: BTreeMap<u32, String> = plans
-        .iter()
-        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
-        .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
-        .collect();
+    let confirmed_modules: BTreeMap<u32, String> = module_matched_file.clone();
     let graph_modules = propagate_module_matches_by_graph(&subjects, &index, &confirmed_modules);
     if graph_modules.len() > confirmed_modules.len() {
         binding_rows = match_function_lists(&subject_fns, &reference_fns, &graph_modules);
@@ -5088,11 +5088,18 @@ fn match_function_lists(
             let resolved: BTreeSet<String> = subject
                 .callees
                 .iter()
-                .filter_map(|callee| {
+                .map(|callee| {
+                    // Keep every callee: translate a matched minified name to its
+                    // confirmed real name, and keep already-real callees as-is
+                    // (they match the reference's real callees directly). Method
+                    // callees (`m:`) pass through unchanged.
                     if let Some(minified) = callee.strip_prefix("c:") {
-                        name_map.get(minified).map(|real| format!("c:{real}"))
+                        format!(
+                            "c:{}",
+                            name_map.get(minified).map_or(minified, String::as_str)
+                        )
                     } else {
-                        Some(callee.clone())
+                        callee.clone()
                     }
                 })
                 .collect();
@@ -5462,10 +5469,16 @@ fn propagate_by_reference_topology(
             if accepted.contains(&(subject.module_id, subject.name.clone())) {
                 continue;
             }
+            // Keep EVERY reference: translate matched minified names to their
+            // confirmed real name, and keep names that are already real as-is
+            // (they match the reference's real names directly). Unmatched minified
+            // names are kept too but harmlessly never overlap a real reference
+            // name. (Previously this DROPPED untranslated names, throwing away the
+            // already-confirmed real references — the strongest topology signal.)
             let resolved: BTreeSet<String> = subject
                 .references
                 .iter()
-                .filter_map(|name| name_map.get(name).cloned())
+                .map(|name| name_map.get(name).cloned().unwrap_or_else(|| name.clone()))
                 .collect();
             if resolved.len() < REINFORCE_MIN_SHARED {
                 continue;
