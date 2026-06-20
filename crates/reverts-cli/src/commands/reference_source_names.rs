@@ -5675,6 +5675,153 @@ fn match_function_lists_inner(
         }
     }
 
+    // ACCEPT pass 6c: BIDIRECTIONAL structural agreement (callers AND callees).
+    //
+    // Passes 6 and 6b each use ONE direction of the call graph (who a function
+    // calls / who calls it). A function whose match is ambiguous on EITHER axis
+    // alone — too few or too generic callees, too few callers — can still be
+    // pinned when BOTH directions agree: the unique function in the matched
+    // reference file that is called by the same matched callers AND calls the
+    // same matched callees as the subject function. Requiring agreement on both
+    // axes is strictly higher precision than either single-direction pass, so the
+    // floor on each side is just >=1 (with a combined floor of 3 and a margin).
+    // Confined to confirmed module pairs and seeded by every prior accept.
+    const BIDIR_MIN_EACH: usize = 1;
+    const BIDIR_MIN_COMBINED: usize = 3;
+    const BIDIR_MAX_ROUNDS: usize = 4;
+    let bidir_rounds = if island_mode { 0 } else { BIDIR_MAX_ROUNDS };
+    for _round in 0..bidir_rounds {
+        let name_map: BTreeMap<String, String> = rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.original_name.clone(), row.semantic_name.clone()))
+            .collect();
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        let mut round_matches = 0usize;
+        for (module_id, subject_indices) in &subject_by_module {
+            let Some(file) = module_matched_file.get(module_id) else {
+                continue;
+            };
+            let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+                continue;
+            };
+            // Incoming edges within this confirmed pair: callee → its callers.
+            let mut subject_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &si in subject_indices {
+                let caller = &subject_fns[si];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        subject_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            let mut reference_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &ri in reference_indices {
+                let caller = &reference_fns[ri];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        reference_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            for &si in subject_indices {
+                let subject = &subject_fns[si];
+                if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                    continue;
+                }
+                // Outgoing: real names of this function's MATCHED callees.
+                let out_resolved: BTreeSet<&str> = subject
+                    .callees
+                    .iter()
+                    .filter_map(|callee| callee.strip_prefix("c:"))
+                    .filter_map(|callee| name_map.get(callee).map(String::as_str))
+                    .collect();
+                // Incoming: real names of this function's MATCHED callers.
+                let in_resolved: BTreeSet<&str> = subject_callers
+                    .get(subject.name.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|caller| name_map.get(*caller).map(String::as_str))
+                    .collect();
+                if out_resolved.len() < BIDIR_MIN_EACH || in_resolved.len() < BIDIR_MIN_EACH {
+                    continue;
+                }
+                let mut best: Option<(usize, usize)> = None; // (combined, ref_index)
+                let mut runner = 0usize;
+                for &ri in reference_indices {
+                    if used_ref.contains(&ri) {
+                        continue;
+                    }
+                    let reference = &reference_fns[ri];
+                    if reference.fingerprint.param_count != subject.fingerprint.param_count {
+                        continue;
+                    }
+                    let out_overlap = reference
+                        .callees
+                        .iter()
+                        .filter_map(|callee| callee.strip_prefix("c:"))
+                        .filter(|callee| out_resolved.contains(*callee))
+                        .count();
+                    if out_overlap < BIDIR_MIN_EACH {
+                        continue;
+                    }
+                    let in_overlap = reference_callers
+                        .get(reference.name.as_str())
+                        .into_iter()
+                        .flatten()
+                        .filter(|caller| in_resolved.contains(*caller))
+                        .count();
+                    if in_overlap < BIDIR_MIN_EACH {
+                        continue;
+                    }
+                    let combined = out_overlap + in_overlap;
+                    match best {
+                        Some((best_combined, _)) if combined <= best_combined => {
+                            runner = runner.max(combined);
+                        }
+                        Some((best_combined, _)) => {
+                            runner = runner.max(best_combined);
+                            best = Some((combined, ri));
+                        }
+                        None => best = Some((combined, ri)),
+                    }
+                }
+                let Some((combined, ri)) = best else {
+                    continue;
+                };
+                if combined < BIDIR_MIN_COMBINED || combined <= runner {
+                    continue;
+                }
+                let reference = &reference_fns[ri];
+                accepted.insert((subject.module_id, subject.name.clone()));
+                used_ref.insert(ri);
+                new_rows.push(BindingNameRow {
+                    module_id: subject.module_id,
+                    subject_path: subject.subject_path.clone(),
+                    reference_file: reference.file.clone(),
+                    original_name: subject.name.clone(),
+                    semantic_name: reference.name.clone(),
+                    accepted: true,
+                    ast_hash: subject.fingerprint.primary.ast,
+                    param_count: subject.fingerprint.param_count,
+                    statement_count: subject.fingerprint.statement_count,
+                    score: 5.2,
+                });
+                round_matches += 1;
+            }
+        }
+        rows.extend(new_rows);
+        if round_matches == 0 {
+            break;
+        }
+    }
+
     // PROPOSAL pass: global, for every subject function not auto-accepted.
     // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
     // string literals (the latter recovers functions whose AST drifted across
