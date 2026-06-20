@@ -3996,7 +3996,9 @@ fn looks_like_minified_token(token: &str) -> bool {
     let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
-    (has_upper && has_lower) || (has_digit && (has_upper || has_lower)) || (has_upper && !has_lower)
+    // Any uppercase (mixed-case or all-caps run), or a digit alongside a
+    // lowercase letter — both are minified-identifier shapes, never plain words.
+    has_upper || (has_digit && has_lower)
 }
 
 /// Whether a name is a decompiler path-derived placeholder for a never-named
@@ -4239,6 +4241,21 @@ fn within_pair_similarity(
         if jaccard >= 0.34 {
             hard = true;
         }
+    }
+    // Previously-unused fingerprint evidence. `normalized_cfg` (control flow after
+    // normalization) survives the decompiler's statement reshaping but is coarse
+    // — many functions share a skeleton — so it ranks candidates without alone
+    // making a match `hard`. `expression_shape` (the expression skeleton) is a
+    // finer content signal the composite omits, so a match there counts as hard.
+    if s.primary.normalized_cfg == r.primary.normalized_cfg {
+        score += 120;
+    }
+    if let (Some(subject_shape), Some(reference_shape)) =
+        (s.primary.expression_shape, r.primary.expression_shape)
+        && subject_shape == reference_shape
+    {
+        score += 150;
+        hard = true;
     }
     if s.param_count == r.param_count {
         score += 30;
@@ -4881,8 +4898,10 @@ fn match_function_lists(
             }
             // Score each candidate by total overlap and shared matched-function
             // callees (the strong signal). Keep the best and the runner-up.
-            let (mut best, mut runner): (Option<(usize, usize, usize)>, (usize, usize)) =
-                (None, (0, 0));
+            // Best candidate as (shared_fn_callees, total_overlap, ref_index);
+            // runner-up as (shared_fn_callees, total_overlap) for the margin check.
+            let mut best: Option<(usize, usize, usize)> = None;
+            let mut runner: (usize, usize) = (0, 0);
             for index in candidates {
                 if used_ref.contains(&index) {
                     continue;
@@ -5751,20 +5770,21 @@ const MAX_OWNERSHIP_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 /// packages, so callers can reconstruct each module's reference-file key.
 type ResolvedPackageVersions = BTreeMap<(String, String), String>;
 
+/// Loaded ownership reference corpus: reference functions, per-file source text
+/// (keyed by `{name}@{version}/{entry}`), and resolved package versions.
+type OwnershipReferenceCorpus = (
+    Vec<ReferenceFunction>,
+    BTreeMap<String, String>,
+    ResolvedPackageVersions,
+);
+
 /// Build the reference-function corpus for every owned package, resolving each
 /// requested version to the best available cached version. Returns the corpus
 /// plus the resolved-version map.
 fn load_ownership_reference_corpus(
     cache: &Connection,
     owned: &[OwnershipMatch],
-) -> Result<
-    (
-        Vec<ReferenceFunction>,
-        BTreeMap<String, String>,
-        ResolvedPackageVersions,
-    ),
-    CliRunError,
-> {
+) -> Result<OwnershipReferenceCorpus, CliRunError> {
     let mut requested: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for owner in owned {
         requested
