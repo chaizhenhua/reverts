@@ -5004,6 +5004,66 @@ fn match_function_lists_inner(
         });
     }
 
+    // ACCEPT pass 3b: multi-rare-anchor agreement, Jaccard-free (module-INDEPENDENT).
+    // Pass 3 gates on Jaccard >= 0.6, which blocks a function with many anchors but
+    // few shared (getReport: 3 shared / 10 union -> Jaccard 0.3). But >=3 GLOBALLY
+    // -RARE anchors (each carried by <=2 reference functions) all pointing to the
+    // SAME reference function is decisive identity on its own, regardless of Jaccard.
+    // Gate on a strict count margin over the runner-up + exact arity (the AST
+    // param_count is reliable — see the param-counting finding).
+    const PASS3B_RARE_MAX_REFS: usize = 2;
+    const PASS3B_MIN_RARE_SHARED: usize = 3;
+    for subject in subject_fns {
+        if accepted.contains(&(subject.module_id, subject.name.clone())) {
+            continue;
+        }
+        let mut rare_shared: BTreeMap<usize, usize> = BTreeMap::new();
+        for anchor in &subject.literals {
+            if let Some(indices) = ref_by_literal.get(anchor.as_str())
+                && indices.len() <= PASS3B_RARE_MAX_REFS
+            {
+                for &ri in indices {
+                    if !used_ref.contains(&ri) {
+                        *rare_shared.entry(ri).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let (mut best_count, mut best_ri, mut runner) = (0usize, usize::MAX, 0usize);
+        for (&ri, &count) in &rare_shared {
+            if count > best_count {
+                runner = best_count;
+                best_count = count;
+                best_ri = ri;
+            } else if count > runner {
+                runner = count;
+            }
+        }
+        // Need >=3 globally-rare shared anchors AND a strict margin over any other
+        // reference function (no second contender with as many).
+        if best_count < PASS3B_MIN_RARE_SHARED || best_count <= runner {
+            continue;
+        }
+        let reference = &reference_fns[best_ri];
+        if subject.fingerprint.param_count != reference.fingerprint.param_count {
+            continue;
+        }
+        accepted.insert((subject.module_id, subject.name.clone()));
+        used_ref.insert(best_ri);
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: 3.6,
+        });
+    }
+
     // ACCEPT pass 4: AST-hash + rare-anchor JOINT corroboration (module-INDEPENDENT).
     //
     // A shared AST hash alone is too collision-prone to accept (esbuild helpers,
@@ -8423,6 +8483,54 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         assert!(
             !rows.iter().any(|r| r.accepted),
             "arity mismatch must block the unique-anchor promotion: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn multi_rare_anchor_promotes_low_jaccard_function() {
+        // Bodies diverge structurally (no shared AST/composite) and share only 3 of
+        // many anchors (Jaccard < 0.6, so pass 3 cannot fire), but the 3 shared
+        // anchors are globally rare and all point to ONE reference function -> pass
+        // 3b promotes it.
+        let subjects = subject_fn(
+            8,
+            "modules/m.ts",
+            r#"function aB(){ if (g) { log("alpha_distinct_zzz"); } emit("beta_distinct_zzz"); return foo("gamma_distinct_zzz"); }"#,
+        );
+        let references = reference_fn(
+            "util/multi.ts",
+            r#"function multiAnchor(){ return [k("alpha_distinct_zzz"), k("beta_distinct_zzz"), k("gamma_distinct_zzz")]; }"#,
+        );
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            rows.iter()
+                .any(|r| r.accepted && r.semantic_name == "multiAnchor"),
+            ">=3 rare shared anchors should promote despite low Jaccard: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn multi_rare_anchor_blocks_on_tie() {
+        // TWO reference functions each share all 3 rare anchors -> no clear winner,
+        // so pass 3b must NOT accept (ambiguous). The anchors are in 2 reference
+        // functions so pass 4b (needs globally-unique) also cannot fire.
+        let subjects = subject_fn(
+            8,
+            "modules/m.ts",
+            r#"function aB(){ log("alpha_distinct_zzz"); emit("beta_distinct_zzz"); return foo("gamma_distinct_zzz"); }"#,
+        );
+        let mut references = reference_fn(
+            "util/a.ts",
+            r#"function alphaFn(){ return [k("alpha_distinct_zzz"), k("beta_distinct_zzz"), k("gamma_distinct_zzz")]; }"#,
+        );
+        references.extend(reference_fn(
+            "util/b.ts",
+            r#"function betaFn(){ return j("alpha_distinct_zzz") + j("beta_distinct_zzz") + j("gamma_distinct_zzz"); }"#,
+        ));
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            !rows.iter().any(|r| r.accepted),
+            "a tie on rare-anchor count must block pass 3b: {rows:?}"
         );
     }
 
