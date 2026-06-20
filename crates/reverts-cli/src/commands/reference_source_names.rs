@@ -6103,67 +6103,27 @@ fn ensure_module_path_overrides_table(connection: &Connection) -> Result<(), Cli
         .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))
 }
 
+/// Module-path overrides are UNSOUND and intentionally suppressed. Writing an
+/// override for a module that also carries a semantic name (the common case) gives
+/// the same module two conflicting path intents; the planner then DROPS the module
+/// from emission entirely (no emitted file, no symbol-index entry) while importers
+/// still reference the override path — a dangling ESM import that crashes at load
+/// with `ERR_MODULE_NOT_FOUND` (observed on `components/design-system/ThemeProvider`
+/// and ~216 other component modules for cc-2.1.89). The function/binding-name
+/// recovery — the primary readability win — is written separately and is
+/// unaffected, so suppressing path overrides yields a sound, runnable project.
+/// Re-enable only once the planner reconciles override-vs-semantic-name output
+/// paths so an overridden module is still emitted at its override path.
 fn write_module_path_overrides(
     connection: &Connection,
-    project_id: u32,
-    plans: &[ModulePlan],
-    min_tier: MinTier,
-    origin_prefix: &str,
-    reference_version: &str,
+    _project_id: u32,
+    _plans: &[ModulePlan],
+    _min_tier: MinTier,
+    _origin_prefix: &str,
+    _reference_version: &str,
 ) -> Result<usize, CliRunError> {
     ensure_module_path_overrides_table(connection)?;
-    let mut written = 0usize;
-    let selected = selected_unique_path_plan_indices(plans, min_tier);
-    for index in selected {
-        let plan = &plans[index];
-        if !tier_passes(plan.matched.tier, min_tier) {
-            continue;
-        }
-        let origin = format!(
-            "{origin_prefix}:{reference_version}:{}",
-            plan.matched.file_path
-        );
-        validate_module_path_acceptance(plan.matched.file_path.as_str(), origin.as_str())
-            .map_err(|error| CliRunError::ReferenceSourceNames(error.message()))?;
-        let evidence = format!(
-            "{{\"tier\":\"{}\",\"anchor\":{},\"weighted_anchor\":{:.3},\"normalized_anchor\":{:.3},\"asset\":{},\"export\":{},\"function\":{},\"structural\":{:.3},\"graph\":{},\"reciprocal\":{}}}",
-            tier_str(plan.matched.tier),
-            plan.matched.anchor_overlap,
-            plan.matched.weighted_anchor,
-            plan.matched.normalized_anchor,
-            plan.matched.asset_overlap,
-            plan.matched.export_overlap,
-            plan.matched.function_overlap,
-            plan.matched.structural_score,
-            plan.matched.graph_support,
-            if plan.matched.reciprocal_best {
-                "true"
-            } else {
-                "false"
-            },
-        );
-        written += connection
-            .execute(
-                r"
-                INSERT INTO module_path_overrides (
-                    project_id, module_id, path, origin, evidence, accepted, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, 1, datetime('now'), datetime('now'))
-                ON CONFLICT(project_id, module_id, origin, path) DO UPDATE SET
-                    evidence = excluded.evidence,
-                    accepted = excluded.accepted,
-                    updated_at = datetime('now')
-                ",
-                params![
-                    i64::from(project_id),
-                    i64::from(plan.module_id),
-                    plan.matched.file_path,
-                    origin,
-                    evidence,
-                ],
-            )
-            .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
-    }
-    Ok(written)
+    Ok(0)
 }
 
 // ---------------------------------------------------------------------------
