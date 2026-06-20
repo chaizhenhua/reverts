@@ -976,13 +976,85 @@ fn binding_shape_conflict_code(
     }
 }
 
+/// Recover a real layout path from a `modules/<id>-<slug>.ts` namespaced path by
+/// stripping the `modules/<id>-` prefix — but only when what remains is a
+/// multi-segment directory path. A bare `modules/<id>-Ov6.ts` minified name yields
+/// `Ov6.ts`, which has no directory and must NOT be hoisted to the project root.
+fn clean_module_layout_path(module_id: ModuleId, semantic_path: &str) -> Option<String> {
+    let prefix = format!("modules/{}-", module_id.0);
+    let remainder = semantic_path.strip_prefix(prefix.as_str())?;
+    if remainder.contains('/') && is_safe_ts_module_path(remainder) {
+        Some(remainder.to_string())
+    } else {
+        None
+    }
+}
+
+/// A POSIX-relative `.ts`/`.tsx` path whose every segment is a safe filename
+/// (alphanumeric / `_` / `-` / `.`, never empty or `.`/`..`).
+fn is_safe_ts_module_path(path: &str) -> bool {
+    if !path.ends_with(".ts") && !path.ends_with(".tsx") {
+        return false;
+    }
+    path.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment != "."
+            && segment != ".."
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    })
+}
+
 fn assign_semantic_names(model: &ProgramModel) -> SemanticNameMap {
     let mut semantic_names = SemanticNameMap::default();
     let mut used_by_module: BTreeMap<ModuleId, BTreeSet<String>> = BTreeMap::new();
     let mut mapped_originals = BTreeSet::<(ModuleId, String)>::new();
 
+    // Module output paths arrive namespaced as `modules/<id>-<slug>.ts` to
+    // guarantee uniqueness, which buries an otherwise-meaningful agent/reference
+    // layout path (e.g. `modules/228340-smithy/http-request-handler.ts`). Recover
+    // the clean layout path by dropping the `modules/<id>-` prefix when (a) what
+    // remains is a real multi-segment directory path and (b) it is globally unique.
+    // Uniqueness is the only thing the prefix guaranteed, so dropping it where
+    // uniqueness already holds restores the intended layout WITHOUT risking a path
+    // collision (which would drop a module). Bare/minified names and any collision
+    // keep the namespaced form. This map is the single source BOTH the planner
+    // (emission + cross-file import rewrites) and the pipeline (symbol index) read,
+    // so a module rename / path adjustment stays consistent end to end.
+    // Modules that own co-located assets must NOT be moved: an asset's emitted
+    // `output_path` is a fixed value (`modules/<id>-<dir>/<asset>`) that encodes the
+    // module's namespaced directory, and the module's `require('./asset')` is
+    // relative to that directory. Cleaning the module path without re-rooting the
+    // asset would dangle the asset reference. Detect asset owners by the shared
+    // `modules/<id>-` prefix and keep them namespaced.
+    let asset_owner_modules: BTreeSet<u32> = model
+        .input()
+        .assets
+        .iter()
+        .filter_map(|asset| asset.output_path.strip_prefix("modules/"))
+        .filter_map(|rest| rest.split_once('-'))
+        .filter_map(|(id, _)| id.parse::<u32>().ok())
+        .collect();
+
+    let mut clean_layout_paths: BTreeMap<ModuleId, String> = BTreeMap::new();
+    let mut clean_path_counts: BTreeMap<String, usize> = BTreeMap::new();
     for module in model.modules() {
-        semantic_names.insert_module_path(module.id, module.semantic_path.clone());
+        if asset_owner_modules.contains(&module.id.0) {
+            continue;
+        }
+        if let Some(clean) = clean_module_layout_path(module.id, module.semantic_path.as_str()) {
+            clean_layout_paths.insert(module.id, clean.clone());
+            *clean_path_counts.entry(clean).or_default() += 1;
+        }
+    }
+    for module in model.modules() {
+        let path = clean_layout_paths
+            .get(&module.id)
+            .filter(|clean| clean_path_counts.get(*clean) == Some(&1))
+            .cloned()
+            .unwrap_or_else(|| module.semantic_path.clone());
+        semantic_names.insert_module_path(module.id, path);
     }
 
     for symbol in model.symbols() {
@@ -2208,5 +2280,46 @@ NativeModuleType();
             fps.iter().any(|fp| fp.param_count == 2),
             "expected the 2-param `add` fn to be fingerprinted",
         );
+    }
+
+    #[test]
+    fn clean_module_layout_path_recovers_multi_segment_path() {
+        // A namespaced `modules/<id>-<layout>.ts` recovers its clean layout path
+        // when the remainder is a real multi-segment directory path.
+        assert_eq!(
+            super::clean_module_layout_path(
+                ModuleId(228340),
+                "modules/228340-smithy/http-request-handler.ts"
+            ),
+            Some("smithy/http-request-handler.ts".to_string())
+        );
+        assert_eq!(
+            super::clean_module_layout_path(ModuleId(7), "modules/7-utils/git/gitFilesystem.ts"),
+            Some("utils/git/gitFilesystem.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_module_layout_path_keeps_bare_minified_names_namespaced() {
+        // A bare/minified name (no directory) must NOT be hoisted to the project
+        // root — it stays namespaced.
+        assert_eq!(
+            super::clean_module_layout_path(ModuleId(229374), "modules/229374-Ov6.ts"),
+            None
+        );
+        // A path with a different module id in the prefix is not stripped.
+        assert_eq!(
+            super::clean_module_layout_path(ModuleId(1), "modules/2-utils/foo.ts"),
+            None
+        );
+    }
+
+    #[test]
+    fn is_safe_ts_module_path_validates_segments_and_extension() {
+        assert!(super::is_safe_ts_module_path("utils/git/gitFilesystem.ts"));
+        assert!(super::is_safe_ts_module_path("a.tsx"));
+        assert!(!super::is_safe_ts_module_path("utils/git/gitFilesystem")); // no extension
+        assert!(!super::is_safe_ts_module_path("utils/../escape.ts")); // traversal
+        assert!(!super::is_safe_ts_module_path("utils//empty.ts")); // empty segment
     }
 }
