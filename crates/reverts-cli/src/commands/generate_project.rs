@@ -243,7 +243,19 @@ fn validate_active_symbol_names_have_passed_gates(
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     let rows = collect_sqlite_rows(rows)
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
-    if rows.is_empty() {
+    // A name with no `semantic_name_source` is a pre-gate / legacy name (applied
+    // before the proposal-provenance system existed, e.g. a project imported and
+    // agent-named under an older schema). It makes no provenance claim and no
+    // matching proposal can exist (proposals join on `origin`), so HARD-blocking
+    // generation on it would make every legacy project ungeneratable — a regression,
+    // not a safety win. Grandfather those by enforcing only names that DO claim a
+    // source: properly gate-applied names stay fully validated, and a name that
+    // fakes a source without a matching proposal is still caught below.
+    let provenanced: Vec<_> = rows
+        .into_iter()
+        .filter(|(_, _, _, origin)| origin.is_some())
+        .collect();
+    if provenanced.is_empty() {
         return Ok(());
     }
     if !sqlite_table_exists(connection, "symbol_name_proposals")
@@ -255,12 +267,8 @@ fn validate_active_symbol_names_have_passed_gates(
             "active symbols.semantic_name rows require matching symbol_name_proposals rows with gate_status='passed'".to_string(),
         ));
     }
-    for (module_id, original_name, semantic_name, origin) in rows {
-        let Some(origin) = origin else {
-            return Err(CliRunError::GenerateProject(format!(
-                "active semantic name {module_id}:{original_name} -> {semantic_name} has no semantic_name_source"
-            )));
-        };
+    for (module_id, original_name, semantic_name, origin) in provenanced {
+        let origin = origin.expect("filtered to provenanced (origin = Some) rows above");
         let proposal_evidence = connection
             .query_row(
                 r"
@@ -527,6 +535,36 @@ mod tests {
                 .to_string()
                 .contains("no matching accepted gate-passed proposal")
         );
+    }
+
+    #[test]
+    fn generate_project_grandfathers_legacy_symbol_name_without_source() {
+        // A legacy project: an active module symbol name with NO
+        // `semantic_name_source` (applied before the proposal-provenance system).
+        // There is no proposal table for it and none can match. The gate must
+        // grandfather it (allow generation) rather than hard-block, otherwise every
+        // pre-gate project becomes ungeneratable.
+        let (_temp, path) = gate_db();
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        // Drop the proposals table to mimic a genuinely legacy DB.
+        connection
+            .execute("DROP TABLE symbol_name_proposals", [])
+            .expect("drop proposals");
+        connection
+            .execute(
+                r"
+                INSERT INTO symbols (
+                    module_id, original_name, semantic_name, semantic_name_source,
+                    export_name, scope_level
+                ) VALUES (10, '$F1', 'createClient', NULL, NULL, 'module')
+                ",
+                [],
+            )
+            .expect("insert symbol");
+        drop(connection);
+
+        validate_accepted_naming_gate_records(path.as_path(), 1)
+            .expect("legacy un-provenanced names must be grandfathered, not blocked");
     }
 
     #[test]
