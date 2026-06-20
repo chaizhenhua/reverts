@@ -68,14 +68,20 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("bundle_extract_enrich");
 
     let mut source_import_audit = AuditReport::default();
-    let mut requested_package_names = args.package_names.clone();
-    requested_package_names.extend(package_names_from_reference_source_roots(
+    let reference_package_names = package_names_from_reference_source_roots(
         &args.reference_source_roots,
         &mut source_import_audit,
-    )?);
-    let package_names =
-        package_source_load_scope(&rows, &requested_package_names, &mut source_import_audit);
-    let package_filter = (!requested_package_names.is_empty()).then_some(&package_names);
+    )?;
+    let package_names = if args.package_names.is_empty() {
+        let mut package_names = package_source_load_scope(&rows, &[], &mut source_import_audit);
+        package_names.extend(reference_package_names);
+        package_names
+    } else {
+        let mut requested_package_names = args.package_names.clone();
+        requested_package_names.extend(reference_package_names);
+        package_source_load_scope(&rows, &requested_package_names, &mut source_import_audit)
+    };
+    let package_filter = (!args.package_names.is_empty()).then_some(&package_names);
     remove_package_attributions_for_revalidation(&mut rows, &package_names);
     let loaded_package_sources = load_package_sources_with_fingerprint_stats(
         connection,
