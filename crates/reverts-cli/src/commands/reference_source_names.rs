@@ -10,7 +10,7 @@ use std::time::Instant;
 use clap::{Args, ValueEnum};
 use reverts_graph::{
     FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_anchor_tokens,
-    function_callee_names, function_names, identifier_streams,
+    function_callee_names, function_names, function_referenced_names, identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
 use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
@@ -462,6 +462,85 @@ fn tier_rank(tier: MatchTier) -> u8 {
     }
 }
 
+/// Propagate module matches along the import graph. Prior knowledge that the two
+/// builds are the SAME app makes their module import graphs near-isomorphic, so
+/// from the confirmed module matches we align import edges: if confirmed module
+/// M↔R, and after removing M's already-matched imports (which must all map into
+/// R's imports — a consistency check) exactly one subject import and one
+/// reference import remain unmatched, that residual edge identifies the pair.
+/// Iterates to a fixpoint. Returns the seed expanded with the new matches.
+///
+/// Safe by construction: even a wrong propagated module pair cannot produce a
+/// false FUNCTION name, because the within-module function passes still require
+/// per-pair hard evidence — this only widens the set of module pairs they search.
+fn propagate_module_matches_by_graph(
+    subjects: &[SubjectModule],
+    index: &ReferenceSourceIndex,
+    seed: &BTreeMap<u32, String>,
+) -> BTreeMap<u32, String> {
+    const MAX_ROUNDS: usize = 8;
+    let edges = build_source_graph_edges(subjects, index);
+    let mut matched = seed.clone();
+    let mut used_reference: BTreeSet<String> = seed.values().cloned().collect();
+    for _ in 0..MAX_ROUNDS {
+        let mut votes: BTreeMap<u32, BTreeMap<String, usize>> = BTreeMap::new();
+        for (subject_module, reference_file) in &matched {
+            let (Some(subject_deps), Some(reference_deps)) = (
+                edges.subject_deps.get(subject_module),
+                edges.reference_deps.get(reference_file),
+            ) else {
+                continue;
+            };
+            // Consistency: every already-matched import of M must map to an
+            // import of R, else this pair's alignment is unreliable.
+            let consistent = subject_deps
+                .iter()
+                .filter_map(|dep| matched.get(dep))
+                .all(|mapped| reference_deps.contains(mapped));
+            if !consistent {
+                continue;
+            }
+            let unmatched_subject: Vec<u32> = subject_deps
+                .iter()
+                .copied()
+                .filter(|dep| !matched.contains_key(dep))
+                .collect();
+            let unmatched_reference: Vec<&String> = reference_deps
+                .iter()
+                .filter(|dep| !used_reference.contains(*dep))
+                .collect();
+            if unmatched_subject.len() == 1 && unmatched_reference.len() == 1 {
+                *votes
+                    .entry(unmatched_subject[0])
+                    .or_default()
+                    .entry(unmatched_reference[0].clone())
+                    .or_default() += 1;
+            }
+        }
+        // Accept modules whose residual edge points unanimously at one reference.
+        let mut round: Vec<(u32, String)> = votes
+            .into_iter()
+            .filter(|(module, _)| !matched.contains_key(module))
+            .filter_map(|(module, candidates)| {
+                (candidates.len() == 1)
+                    .then(|| (module, candidates.into_keys().next().unwrap_or_default()))
+            })
+            .collect();
+        round.sort();
+        let mut applied = 0usize;
+        for (subject_module, reference_file) in round {
+            if used_reference.insert(reference_file.clone()) {
+                matched.insert(subject_module, reference_file);
+                applied += 1;
+            }
+        }
+        if applied == 0 {
+            break;
+        }
+    }
+    matched
+}
+
 pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     let trace_start = Instant::now();
     let index = build_reference_source_index(&args.reference_source_root, &args.reference_version)
@@ -525,6 +604,22 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
         trace_reference_source_names(trace_start, "module_promotions");
     }
 
+    // Module dependency-graph propagation (prior: same app -> near-isomorphic
+    // import graph). Expand the confirmed module matches along aligned import
+    // edges, then re-run function matching so the precise within-module passes
+    // cascade into the newly-aligned modules.
+    let confirmed_modules: BTreeMap<u32, String> = plans
+        .iter()
+        .filter(|plan| tier_passes(plan.matched.tier, args.min_tier))
+        .map(|plan| (plan.module_id, plan.matched.file_path.clone()))
+        .collect();
+    let graph_modules = propagate_module_matches_by_graph(&subjects, &index, &confirmed_modules);
+    if graph_modules.len() > confirmed_modules.len() {
+        binding_rows = match_function_lists(&subject_fns, &reference_fns, &graph_modules);
+        trace_reference_source_names(trace_start, "module_graph_propagation");
+    }
+    drop_real_name_remaps(&mut binding_rows);
+
     write_match_summary_if_requested(&args, subjects.len(), &plans)?;
     write_match_diagnostics_if_requested(&args, subjects.len(), &plans)?;
 
@@ -584,6 +679,11 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     );
     binding_rows.extend(propagated);
     trace_reference_source_names(trace_start, "propagate_symbols");
+
+    // Cross-evidence reinforcement: confirmed functions AND symbols become anchors
+    // to match more functions by reference topology, iterated to a fixpoint.
+    propagate_by_reference_topology(&subject_fns, &reference_fns, &mut binding_rows);
+    trace_reference_source_names(trace_start, "reference_topology_reinforcement");
 
     println!(
         "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\ttop_decl\tsurface\tmember\tstmt_win\tblock_branch\tpq_gram\twl\tgranular\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
@@ -767,6 +867,20 @@ fn generate_subject_modules(
     bundle: InputBundle,
     include_module: impl Fn(u32) -> bool,
 ) -> Result<Vec<SubjectModule>, CliRunError> {
+    // Subject module dependency edges (module_id -> imported module_ids), captured
+    // before the bundle is consumed, for graph-based module-match propagation.
+    let mut dependency_map: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for dependency in &bundle.dependencies {
+        let from = dependency.from_module_id.0;
+        if !include_module(from) {
+            continue;
+        }
+        if let ModuleDependencyTarget::Module(to) = dependency.target
+            && include_module(to.0)
+        {
+            dependency_map.entry(from).or_default().insert(to.0);
+        }
+    }
     let prepared = prepare_and_enrich(bundle)
         .map_err(|error| CliRunError::ReferenceSourceNames(format!("prepare: {error}")))?;
     let run = generate_project_from_prepared(prepared)
@@ -812,7 +926,7 @@ fn generate_subject_modules(
             source: file.source.clone(),
             fingerprint,
             profile,
-            dependencies: BTreeSet::new(),
+            dependencies: dependency_map.get(&module_id).cloned().unwrap_or_default(),
             bindings: bindings_for_path
                 .remove(file.path.as_str())
                 .unwrap_or_default(),
@@ -4121,6 +4235,10 @@ struct ReferenceFunction {
     /// Call targets (`c:name` identifier callees, `m:method` method callees) for
     /// topology-based propagation.
     callees: BTreeSet<String>,
+    /// All identifier references (raw names) — calls plus module-level
+    /// variable/const/class references. Translated through the confirmed
+    /// function+symbol name map, these are cross-evidence reinforcement anchors.
+    references: BTreeSet<String>,
 }
 
 /// One subject (emitted) function with a recoverable name.
@@ -4131,6 +4249,7 @@ struct SubjectFunction {
     fingerprint: FunctionFingerprint,
     literals: BTreeSet<String>,
     callees: BTreeSet<String>,
+    references: BTreeSet<String>,
 }
 
 /// Every named, specifically-named function across the whole reference tree.
@@ -4143,18 +4262,22 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
             .collect();
         let mut literals = function_anchor_tokens(module.source.as_str());
         let mut callees = function_callee_names(module.source.as_str());
+        let mut references = function_referenced_names(module.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
         {
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+                let function_references =
+                    references.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(ReferenceFunction {
                     file: module.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
                     literals: function_literals,
                     callees: function_callees,
+                    references: function_references,
                 });
             }
         }
@@ -4169,6 +4292,7 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
         let names = function_names(subject.source.as_str());
         let mut literals = function_anchor_tokens(subject.source.as_str());
         let mut callees = function_callee_names(subject.source.as_str());
+        let mut references = function_referenced_names(subject.source.as_str());
         for fingerprint in FunctionExtractor::fingerprint_primary(
             ModuleId(subject.module_id),
             subject.source.as_str(),
@@ -4176,6 +4300,8 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
             if let Some(name) = names.get(&fingerprint.id.span) {
                 let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+                let function_references =
+                    references.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(SubjectFunction {
                     module_id: subject.module_id,
                     subject_path: subject.file_path.clone(),
@@ -4183,6 +4309,7 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
                     fingerprint,
                     literals: function_literals,
                     callees: function_callees,
+                    references: function_references,
                 });
             }
         }
@@ -5180,6 +5307,150 @@ fn propagate_symbols(
     rows
 }
 
+/// Drop accepted renames that would overwrite a function's already-real
+/// (non-minified, esbuild-preserved) name with a DIFFERENT name. A preserved
+/// name IS the correct name, so a structural/anchor/topology coincidence must
+/// not overturn it (e.g. `setRegion` -> `setMcpAuthCacheEntry`). Self-renames and
+/// renames of minified names are kept.
+fn drop_real_name_remaps(binding_rows: &mut Vec<BindingNameRow>) {
+    binding_rows.retain(|row| {
+        // A preserved real name is a genuine word/identifier esbuild did NOT
+        // minify: >= 6 chars with a lowercase letter (e.g. `setRegion`,
+        // `getBitsLength`, `isValid`). Those are already correct, so never
+        // overwrite them with a different match. Short minified names (`XCK`,
+        // `GYK`, `Ju8` — <= 4 chars) are NOT protected, so genuine minified->real
+        // renames are kept. (Using `is_specific_reference_name` here was a bug: it
+        // treats `XCK` as "specific" and dropped every real recovered name.)
+        let original_is_preserved_real = row.original_name.chars().count() >= 6
+            && row.original_name.chars().any(|c| c.is_ascii_lowercase());
+        !(row.accepted && row.semantic_name != row.original_name && original_is_preserved_real)
+    });
+}
+
+/// Minimum CONFIRMED references a subject function must share with a unique
+/// reference function to accept it by cross-evidence reinforcement.
+const REINFORCE_MIN_SHARED: usize = 3;
+/// Bound the reinforcement fixpoint iterations.
+const REINFORCE_MAX_ROUNDS: usize = 6;
+
+/// Iterative cross-evidence reinforcement (the "confirmed matches ARE evidence"
+/// loop). Uses ALL confirmed matches so far — functions AND module-level symbols
+/// — as anchors: a subject function's minified identifier references are
+/// translated through the accepted `original -> semantic` name map, and a
+/// function whose CONFIRMED references overlap exactly one reference function on
+/// at least [`REINFORCE_MIN_SHARED`] names (clear margin, matching arity) is the
+/// same function. This is build-invariant (it rests on WHICH confirmed
+/// entities a function uses, not on its body shape), so it reaches functions the
+/// fingerprint passes miss. Each round's new matches grow the map; iterate to a
+/// fixpoint. Appends accepted rows to `binding_rows`.
+fn propagate_by_reference_topology(
+    subject_fns: &[SubjectFunction],
+    reference_fns: &[ReferenceFunction],
+    binding_rows: &mut Vec<BindingNameRow>,
+) {
+    let mut ref_by_reference: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (index, reference) in reference_fns.iter().enumerate() {
+        for name in &reference.references {
+            ref_by_reference
+                .entry(name.as_str())
+                .or_default()
+                .push(index);
+        }
+    }
+    let mut accepted: BTreeSet<(u32, String)> = binding_rows
+        .iter()
+        .filter(|row| row.accepted)
+        .map(|row| (row.module_id, row.original_name.clone()))
+        .collect();
+    for _round in 0..REINFORCE_MAX_ROUNDS {
+        let name_map: BTreeMap<String, String> = binding_rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.original_name.clone(), row.semantic_name.clone()))
+            .collect();
+        // A reference function already claimed by any accepted row is off-limits,
+        // so a single reference isn't assigned to two subjects.
+        let mut used_reference: BTreeSet<(&str, &str)> = binding_rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.reference_file.as_str(), row.semantic_name.as_str()))
+            .collect();
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        for subject in subject_fns {
+            if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                continue;
+            }
+            let resolved: BTreeSet<String> = subject
+                .references
+                .iter()
+                .filter_map(|name| name_map.get(name).cloned())
+                .collect();
+            if resolved.len() < REINFORCE_MIN_SHARED {
+                continue;
+            }
+            let mut shared_by_reference: BTreeMap<usize, usize> = BTreeMap::new();
+            for token in &resolved {
+                if let Some(indices) = ref_by_reference.get(token.as_str()) {
+                    for &index in indices {
+                        *shared_by_reference.entry(index).or_default() += 1;
+                    }
+                }
+            }
+            let (mut best, mut runner_up): (Option<(usize, usize)>, usize) = (None, 0);
+            for (index, shared) in shared_by_reference {
+                let reference = &reference_fns[index];
+                if used_reference.contains(&(reference.file.as_str(), reference.name.as_str())) {
+                    continue;
+                }
+                match best {
+                    Some((best_shared, _)) if shared <= best_shared => {
+                        runner_up = runner_up.max(shared);
+                    }
+                    Some((best_shared, _)) => {
+                        runner_up = runner_up.max(best_shared);
+                        best = Some((shared, index));
+                    }
+                    None => best = Some((shared, index)),
+                }
+            }
+            let Some((shared, index)) = best else {
+                continue;
+            };
+            if shared < REINFORCE_MIN_SHARED || shared <= runner_up {
+                continue;
+            }
+            let reference = &reference_fns[index];
+            if subject.fingerprint.param_count != reference.fingerprint.param_count {
+                continue;
+            }
+            // Never rename a function that already carries a real (non-minified)
+            // name to a DIFFERENT name — topology overlap is not strong enough to
+            // overturn a preserved name (e.g. `setRegion` -> `setMcpAuthCacheEntry`).
+            if reference.name != subject.name && is_specific_reference_name(&subject.name) {
+                continue;
+            }
+            accepted.insert((subject.module_id, subject.name.clone()));
+            used_reference.insert((reference.file.as_str(), reference.name.as_str()));
+            new_rows.push(BindingNameRow {
+                module_id: subject.module_id,
+                subject_path: subject.subject_path.clone(),
+                reference_file: reference.file.clone(),
+                original_name: subject.name.clone(),
+                semantic_name: reference.name.clone(),
+                accepted: true,
+                ast_hash: subject.fingerprint.primary.ast,
+                param_count: subject.fingerprint.param_count,
+                statement_count: subject.fingerprint.statement_count,
+                score: 6.0,
+            });
+        }
+        if new_rows.is_empty() {
+            break;
+        }
+        binding_rows.extend(new_rows);
+    }
+}
+
 /// Minimum accepted function renames pointing at one reference file for the
 /// function track to *promote* an otherwise-unmatched module to that file.
 const MODULE_PROMOTE_MIN_FUNCTIONS: usize = 2;
@@ -5622,17 +5893,20 @@ fn reference_functions_from_source(file: &str, source: &str) -> Vec<ReferenceFun
         .collect();
     let mut literals = function_anchor_tokens(source);
     let mut callees = function_callee_names(source);
+    let mut references = function_referenced_names(source);
     let mut out = Vec::new();
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(0), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
             let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
             let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_references = references.remove(&fingerprint.id.span).unwrap_or_default();
             out.push(ReferenceFunction {
                 file: file.to_string(),
                 name: name.clone(),
                 fingerprint,
                 literals: function_literals,
                 callees: function_callees,
+                references: function_references,
             });
         }
     }
@@ -5909,6 +6183,8 @@ pub(crate) fn run_ownership_source_names(
         &binding_rows,
     );
     binding_rows.extend(propagated);
+    propagate_by_reference_topology(&subject_fns, &reference_fns, &mut binding_rows);
+    drop_real_name_remaps(&mut binding_rows);
 
     let accepted = binding_rows.iter().filter(|row| row.accepted).count();
     let proposed = binding_rows.len() - accepted;
@@ -7522,6 +7798,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let names = function_names(source);
         let mut lits = function_anchor_tokens(source);
         let mut callees = function_callee_names(source);
+        let mut refs = function_referenced_names(source);
         FunctionExtractor::fingerprint(ModuleId(module_id), source)
             .into_iter()
             .filter_map(|f| {
@@ -7531,6 +7808,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                     name: name.clone(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
                     callees: callees.remove(&f.id.span).unwrap_or_default(),
+                    references: refs.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })
@@ -7544,6 +7822,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             .collect();
         let mut lits = function_anchor_tokens(source);
         let mut callees = function_callee_names(source);
+        let mut refs = function_referenced_names(source);
         FunctionExtractor::fingerprint(ModuleId(0), source)
             .into_iter()
             .filter_map(|f| {
@@ -7552,6 +7831,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                     name: name.clone(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
                     callees: callees.remove(&f.id.span).unwrap_or_default(),
+                    references: refs.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })

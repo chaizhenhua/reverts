@@ -621,6 +621,64 @@ impl<'a> Visit<'a> for FunctionCalleeExtractor {
     }
 }
 
+/// Per-function identifier references (every `IdentifierReference`, RAW), keyed by
+/// the same span as [`FunctionExtractor::fingerprint`]. Unlike
+/// [`function_callee_names`] (call targets only) this also captures references to
+/// module-level variables/constants/classes. Translated through an accepted
+/// subject->reference name map (functions AND symbols), the set of CONFIRMED
+/// names a function references is build-invariant evidence for matching it —
+/// the basis of iterative cross-evidence reinforcement.
+#[must_use]
+pub fn function_referenced_names(
+    source: &str,
+) -> std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut extractor = FunctionReferenceExtractor {
+        stack: Vec::new(),
+        references: std::collections::BTreeMap::new(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.references
+}
+
+struct FunctionReferenceExtractor {
+    stack: Vec<ByteRange>,
+    references: std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>>,
+}
+
+impl<'a> Visit<'a> for FunctionReferenceExtractor {
+    fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        let span = func.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_function(self, func, flags);
+        self.stack.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let span = arrow.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_arrow_function_expression(self, arrow);
+        self.stack.pop();
+    }
+
+    fn visit_identifier_reference(&mut self, identifier: &IdentifierReference<'a>) {
+        if let Some(&top) = self.stack.last() {
+            self.references
+                .entry(top)
+                .or_default()
+                .insert(identifier.name.to_string());
+        }
+    }
+}
+
 /// Ordered identifier streams for position-aligned symbol propagation. `uses`
 /// are identifier references in AST pre-order; `bindings` are declaration
 /// identifiers (params, var/let/const, function/class names, catch) as
