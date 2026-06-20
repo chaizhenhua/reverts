@@ -1,9 +1,13 @@
 pub mod fingerprint;
 pub use fingerprint::{
     ExtractedFunction, FunctionExtractor, IdentifierStreams, extract_import_specifiers,
-    extract_property_names, function_anchor_tokens, function_callee_names, function_names,
-    function_param_names, function_referenced_names, function_string_literals, identifier_streams,
+    extract_property_names, function_anchor_tokens, function_call_edges, function_callee_names,
+    function_names, function_param_names, function_referenced_names, function_string_literals,
+    identifier_streams,
 };
+
+mod function_call_graph;
+pub use function_call_graph::FunctionCallGraph;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -53,6 +57,7 @@ pub struct RevertsGraph {
     def_use: DefUseGraph,
     control_flow: ControlFlowGraph,
     import_export: ImportExportGraph,
+    function_calls: FunctionCallGraph,
     runtime_preludes: BTreeMap<u32, RuntimePrelude>,
     runtime_imports: BTreeMap<ModuleId, BTreeSet<RuntimePreludeImport>>,
     ast_facts: Vec<AstFact>,
@@ -514,6 +519,36 @@ impl RevertsGraph {
                 }),
             }
         }
+        // Build the intra-module function call graph after `definitions` is
+        // complete: resolve each module's `function_call_edges` (top-level
+        // caller→callee names) against that module's own defined bindings, so
+        // every node is a real graph binding and minified names never conflate
+        // across modules.
+        let mut function_calls = FunctionCallGraph::default();
+        for module in &input.modules {
+            if module.kind == ModuleKind::Package {
+                continue;
+            }
+            let Some(source) = input.module_source_slice(module.id) else {
+                continue;
+            };
+            let Some(module_definitions) = definitions.get(&module.id) else {
+                continue;
+            };
+            for (caller, callees) in function_call_edges(source.source) {
+                let caller = BindingName::new(caller);
+                if !module_definitions.contains(&caller) {
+                    continue;
+                }
+                for callee in callees {
+                    let callee = BindingName::new(callee);
+                    if module_definitions.contains(&callee) {
+                        function_calls.record(module.id, caller.clone(), callee);
+                    }
+                }
+            }
+        }
+
         let source_paths_by_id = input
             .source_files
             .iter()
@@ -532,6 +567,7 @@ impl RevertsGraph {
             def_use,
             control_flow,
             import_export,
+            function_calls,
             runtime_preludes,
             runtime_imports,
             ast_facts,
@@ -581,6 +617,11 @@ impl RevertsGraph {
     #[must_use]
     pub fn import_export(&self) -> &ImportExportGraph {
         &self.import_export
+    }
+
+    #[must_use]
+    pub fn function_calls(&self) -> &FunctionCallGraph {
+        &self.function_calls
     }
 
     #[must_use]
@@ -2756,6 +2797,58 @@ mod tests {
 
         assert!(definitions.iter().any(|binding| binding.as_str() == "_a"));
         assert!(!definitions.iter().any(|binding| binding.as_str() == "_b"));
+    }
+
+    #[test]
+    fn from_input_builds_intra_module_function_call_graph() {
+        // Real population path: source-backed module, definitions recovered from
+        // AST facts, call edges resolved + intersected against those definitions.
+        let source = "\
+function a() { b(); c(); }
+function b() { c(); }
+function c() { return 1; }
+function d() { a(); externalThing(); }
+";
+        let mut rows = InputRows::new(ProjectInput::new(1, "fixture"));
+        rows.source_files.push(SourceFileInput::new(
+            1,
+            "bundle.js",
+            Some(source.to_string()),
+        ));
+        rows.modules
+            .push(ModuleInput::application(ModuleId(1), "m1", "src/module.ts").with_source_file(1));
+        let input = InputBundle::from_rows(rows).expect("fixture rows should be valid");
+
+        let graph = RevertsGraph::from_input(&input);
+        let calls = graph.function_calls();
+
+        assert_eq!(
+            calls.callees_of(ModuleId(1), &BindingName::new("a")),
+            std::collections::BTreeSet::from([BindingName::new("b"), BindingName::new("c")]),
+        );
+        assert_eq!(
+            calls.callees_of(ModuleId(1), &BindingName::new("b")),
+            std::collections::BTreeSet::from([BindingName::new("c")]),
+        );
+        assert_eq!(
+            calls.callers_of(ModuleId(1), &BindingName::new("c")),
+            std::collections::BTreeSet::from([BindingName::new("a"), BindingName::new("b")]),
+        );
+        // `externalThing` is not a module definition → dropped by the intersection.
+        assert_eq!(
+            calls.callees_of(ModuleId(1), &BindingName::new("d")),
+            std::collections::BTreeSet::from([BindingName::new("a")]),
+        );
+        // Transitive reachability over the resolved edges.
+        assert_eq!(
+            calls.reachable_from(ModuleId(1), [&BindingName::new("d")]),
+            std::collections::BTreeSet::from([
+                BindingName::new("d"),
+                BindingName::new("a"),
+                BindingName::new("b"),
+                BindingName::new("c"),
+            ]),
+        );
     }
 
     #[test]

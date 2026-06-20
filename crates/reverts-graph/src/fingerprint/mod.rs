@@ -15,8 +15,8 @@ pub mod throw_set;
 
 pub use extractor::{
     ExtractedFunction, FunctionExtractor, IdentifierStreams, function_anchor_tokens,
-    function_callee_names, function_names, function_param_names, function_referenced_names,
-    function_string_literals, identifier_streams,
+    function_call_edges, function_callee_names, function_names, function_param_names,
+    function_referenced_names, function_string_literals, identifier_streams,
 };
 
 pub mod import_specifiers;

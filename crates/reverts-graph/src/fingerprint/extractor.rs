@@ -620,6 +620,78 @@ pub fn function_callee_names(
     extractor.callees
 }
 
+/// Intra-module function call edges: for each TOP-LEVEL (outermost) named
+/// function in `source`, the set of OTHER top-level function names it calls —
+/// directly or from a nested closure — resolved by name within this source's
+/// own top-level function universe. Bare-identifier callees (`c:name`) that
+/// resolve to a top-level function become edges; method calls (`m:…`) and
+/// free/global callees are dropped (they have no local definition to point at).
+///
+/// This is the resolved caller→callee adjacency that the per-function
+/// `callee_set` feature and the textual reachability closures only approximate.
+/// It is the build-invariant core of an explicit function call graph: joined
+/// from the SAME `function_names`/`function_callee_names` spans (which parse
+/// identically), so a caller and its callees are located by byte span and
+/// resolved purely by name — minification-stable for cross-build use and
+/// scope-correct for in-project graph population.
+#[must_use]
+pub fn function_call_edges(
+    source: &str,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let names = function_names(source);
+    if names.is_empty() {
+        return BTreeMap::new();
+    }
+    // `function_names` records every named function at any depth; the call-DAG
+    // nodes are only the module-top-level ones. Sweep the spans (sorted by start,
+    // longer first on ties) keeping the outermost — disjoint, sorted by start.
+    let mut spans: Vec<ByteRange> = names.keys().copied().collect();
+    spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    let mut top_level: Vec<ByteRange> = Vec::new();
+    let mut open_end = 0u32;
+    for span in spans {
+        if span.start >= open_end {
+            top_level.push(span);
+            open_end = span.end;
+        }
+    }
+    let node_names: BTreeSet<&str> = top_level
+        .iter()
+        .filter_map(|span| names.get(span).map(String::as_str))
+        .collect();
+
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (callee_span, tokens) in function_callee_names(source) {
+        // Attribute each call site to the top-level function that contains it:
+        // the last disjoint top-level span whose start is at or before it.
+        let idx = top_level.partition_point(|span| span.start <= callee_span.start);
+        if idx == 0 {
+            continue;
+        }
+        let owner = top_level[idx - 1];
+        if !owner.contains(callee_span) {
+            continue;
+        }
+        let Some(caller) = names.get(&owner) else {
+            continue;
+        };
+        for token in &tokens {
+            let Some(callee) = token.strip_prefix("c:") else {
+                continue;
+            };
+            if node_names.contains(callee) {
+                edges
+                    .entry(caller.clone())
+                    .or_default()
+                    .insert(callee.to_string());
+            }
+        }
+    }
+    edges
+}
+
 struct FunctionCalleeExtractor {
     stack: Vec<ByteRange>,
     callees: std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>>,
@@ -1605,6 +1677,43 @@ ns.prototype.protoMethod = (h) => h;
         assert!(
             !names.contains("map"),
             "anonymous callback must not be named: {names:?}"
+        );
+    }
+
+    #[test]
+    fn function_call_edges_resolve_top_level_callees_and_attribute_nested_calls() {
+        let source = "\
+function a() { b(); c(); }
+function b() { c(); external(); }
+function c() { return 1; }
+function d() { helper(); function inner() { b(); } inner(); }
+const e = () => { a(); };
+";
+        let edges = function_call_edges(source);
+        // `a` calls top-level `b` and `c`; `external` is free → dropped.
+        assert_eq!(
+            edges.get("a").cloned().unwrap_or_default(),
+            std::collections::BTreeSet::from(["b".to_string(), "c".to_string()]),
+        );
+        // `b` calls `c`; `external` not a top-level function → dropped.
+        assert_eq!(
+            edges.get("b").cloned().unwrap_or_default(),
+            std::collections::BTreeSet::from(["c".to_string()]),
+        );
+        // `c` calls nothing local.
+        assert!(edges.get("c").is_none());
+        // `d`'s call to `b` lives inside a NESTED function `inner` — it must be
+        // attributed to the enclosing top-level `d`, and `inner` is not itself a
+        // node (`helper` is free → dropped).
+        assert_eq!(
+            edges.get("d").cloned().unwrap_or_default(),
+            std::collections::BTreeSet::from(["b".to_string()]),
+        );
+        assert!(edges.get("inner").is_none());
+        // A top-level arrow bound to a const is a node and resolves its callee.
+        assert_eq!(
+            edges.get("e").cloned().unwrap_or_default(),
+            std::collections::BTreeSet::from(["a".to_string()]),
         );
     }
 
