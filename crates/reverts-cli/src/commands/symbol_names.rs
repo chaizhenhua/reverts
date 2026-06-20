@@ -13,10 +13,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
-use reverts_js::{is_generated_placeholder_identifier, sanitize_identifier};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
+use crate::commands::naming_gates::{
+    NamingGateError, NamingGateMode, is_automated_name_origin, validate_name_acceptance,
+};
 use crate::errors::{CliError, CliRunError, SymbolNamesError};
 use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 
@@ -57,6 +59,7 @@ pub struct SymbolNameSpec {
     pub module_id: u32,
     pub original_name: String,
     pub semantic_name: String,
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +110,8 @@ pub struct SymbolNameProposalRow {
     pub origin: String,
     pub accepted: bool,
     pub evidence: Option<String>,
+    pub gate_status: Option<String>,
+    pub gate_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +220,7 @@ pub fn symbol_names_from_connection(
     }
 
     let operations = collect_operations(args)?;
+    validate_naming_gates(&operations, args.origin.as_str(), args.evidence.as_deref())?;
 
     let written_changes = if args.apply {
         ensure_semantic_name_source_column(connection)?;
@@ -223,6 +229,13 @@ pub fn symbol_names_from_connection(
             .transaction()
             .map_err(SymbolNamesError::ConfigureDatabase)?;
         validate_operation_targets(&transaction, args.project_id, &operations)?;
+        validate_public_surface_policy(
+            &transaction,
+            args.project_id,
+            &operations,
+            args.origin.as_str(),
+            args.evidence.as_deref(),
+        )?;
         ensure_operation_symbol_rows(&transaction, &operations)?;
         validate_final_names(&transaction, args.project_id, &operations)?;
         let mut written = 0_usize;
@@ -241,6 +254,13 @@ pub fn symbol_names_from_connection(
         written
     } else {
         validate_operation_targets(connection, args.project_id, &operations)?;
+        validate_public_surface_policy(
+            connection,
+            args.project_id,
+            &operations,
+            args.origin.as_str(),
+            args.evidence.as_deref(),
+        )?;
         validate_final_names(connection, args.project_id, &operations)?;
         0
     };
@@ -271,6 +291,7 @@ fn parse_name_spec(value: &str) -> Result<SymbolNameSpec, String> {
         module_id: clear.module_id,
         original_name: clear.original_name,
         semantic_name: semantic_name.to_string(),
+        evidence: None,
     })
 }
 
@@ -348,6 +369,18 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     module_id,
                     original_name,
                     semantic_name,
+                    None,
+                    line_number,
+                    "propose",
+                )?));
+            }
+            ["propose", module_id, original_name, semantic_name, evidence]
+            | ["add", module_id, original_name, semantic_name, evidence] => {
+                operations.push(SymbolNameOperation::Propose(batch_name_spec(
+                    module_id,
+                    original_name,
+                    semantic_name,
+                    Some(*evidence),
                     line_number,
                     "propose",
                 )?));
@@ -358,6 +391,18 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
                     module_id,
                     original_name,
                     semantic_name,
+                    None,
+                    line_number,
+                    "accept",
+                )?));
+            }
+            ["accept", module_id, original_name, semantic_name, evidence]
+            | ["set", module_id, original_name, semantic_name, evidence] => {
+                operations.push(SymbolNameOperation::Accept(batch_name_spec(
+                    module_id,
+                    original_name,
+                    semantic_name,
+                    Some(*evidence),
                     line_number,
                     "accept",
                 )?));
@@ -377,7 +422,7 @@ fn parse_batch_operations(content: &str) -> Result<Vec<SymbolNameOperation>, Sym
             _ => {
                 return Err(SymbolNamesError::InvalidBatchLine {
                     line: line_number,
-                    message: "expected tab-separated propose|accept MODULE_ID ORIGINAL SEMANTIC or clear-active MODULE_ID ORIGINAL".to_string(),
+                    message: "expected tab-separated propose|accept MODULE_ID ORIGINAL SEMANTIC [EVIDENCE] or clear-active MODULE_ID ORIGINAL".to_string(),
                 });
             }
         }
@@ -389,6 +434,7 @@ fn batch_name_spec(
     module_id: &str,
     original_name: &str,
     semantic_name: &str,
+    evidence: Option<&str>,
     line: usize,
     action: &str,
 ) -> Result<SymbolNameSpec, SymbolNamesError> {
@@ -402,6 +448,10 @@ fn batch_name_spec(
         module_id: parse_batch_u32(module_id, line)?,
         original_name: original_name.to_string(),
         semantic_name: semantic_name.to_string(),
+        evidence: evidence
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
     })
 }
 
@@ -432,7 +482,6 @@ fn validate_unique_operations(operations: &[SymbolNameOperation]) -> Result<(), 
                         original_name: spec.original_name.clone(),
                     });
                 }
-                validate_semantic_identifier(spec.semantic_name.as_str())?;
             }
             SymbolNameOperation::Accept(spec) => {
                 if !active_targets.insert((spec.module_id, spec.original_name.as_str())) {
@@ -441,7 +490,6 @@ fn validate_unique_operations(operations: &[SymbolNameOperation]) -> Result<(), 
                         original_name: spec.original_name.clone(),
                     });
                 }
-                validate_semantic_identifier(spec.semantic_name.as_str())?;
             }
             SymbolNameOperation::ClearActive(spec) => {
                 if !active_targets.insert((spec.module_id, spec.original_name.as_str())) {
@@ -456,18 +504,138 @@ fn validate_unique_operations(operations: &[SymbolNameOperation]) -> Result<(), 
     Ok(())
 }
 
-fn validate_semantic_identifier(name: &str) -> Result<(), SymbolNamesError> {
-    if sanitize_identifier(name) != name {
-        return Err(SymbolNamesError::InvalidSemanticName {
-            semantic_name: name.to_string(),
-        });
+fn validate_naming_gates(
+    operations: &[SymbolNameOperation],
+    origin: &str,
+    evidence: Option<&str>,
+) -> Result<(), SymbolNamesError> {
+    for operation in operations {
+        let (original_name, semantic_name) = match operation {
+            SymbolNameOperation::Propose(spec) | SymbolNameOperation::Accept(spec) => {
+                (spec.original_name.as_str(), spec.semantic_name.as_str())
+            }
+            SymbolNameOperation::ClearActive(_) => continue,
+        };
+        let row_evidence = operation_evidence(operation).or(evidence);
+        validate_name_acceptance(
+            original_name,
+            semantic_name,
+            origin,
+            row_evidence,
+            NamingGateMode::Symbol,
+        )
+        .map_err(symbol_names_error_from_gate)?;
     }
-    if is_generated_placeholder_identifier(name) {
-        return Err(SymbolNamesError::PlaceholderSemanticName {
-            semantic_name: name.to_string(),
+    Ok(())
+}
+
+fn operation_evidence(operation: &SymbolNameOperation) -> Option<&str> {
+    match operation {
+        SymbolNameOperation::Propose(spec) | SymbolNameOperation::Accept(spec) => {
+            spec.evidence.as_deref()
+        }
+        SymbolNameOperation::ClearActive(_) => None,
+    }
+}
+
+fn validate_public_surface_policy(
+    connection: &Connection,
+    project_id: u32,
+    operations: &[SymbolNameOperation],
+    origin: &str,
+    global_evidence: Option<&str>,
+) -> Result<(), SymbolNamesError> {
+    if !is_automated_name_origin(origin) {
+        return Ok(());
+    }
+    for operation in operations {
+        let SymbolNameOperation::Accept(spec) = operation else {
+            continue;
+        };
+        if spec.semantic_name == spec.original_name {
+            continue;
+        }
+        if !is_public_surface_symbol(connection, project_id, spec.module_id, &spec.original_name)? {
+            continue;
+        }
+        let evidence = spec
+            .evidence
+            .as_deref()
+            .or(global_evidence)
+            .unwrap_or_default();
+        if has_public_surface_structural_evidence(evidence) {
+            continue;
+        }
+        return Err(SymbolNamesError::NamingGate {
+            message: format!(
+                "automated origin {origin} cannot auto-accept public-surface rename {}:{} -> {} without export/import/property structural evidence",
+                spec.module_id, spec.original_name, spec.semantic_name
+            ),
         });
     }
     Ok(())
+}
+
+fn is_public_surface_symbol(
+    connection: &Connection,
+    project_id: u32,
+    module_id: u32,
+    original_name: &str,
+) -> Result<bool, SymbolNamesError> {
+    connection
+        .query_row(
+            r"
+            SELECT 1
+            FROM symbols s
+            JOIN modules m ON m.id = s.module_id
+            JOIN project_files pf ON pf.file_id = m.file_id
+            WHERE pf.project_id = ?1
+              AND s.module_id = ?2
+              AND s.original_name = ?3
+              AND s.scope_level = 'module'
+              AND NULLIF(TRIM(s.export_name), '') IS NOT NULL
+            LIMIT 1
+            ",
+            params![i64::from(project_id), i64::from(module_id), original_name,],
+            |_row| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+        .map_err(SymbolNamesError::QuerySymbolNames)
+}
+
+fn has_public_surface_structural_evidence(evidence: &str) -> bool {
+    let normalized = evidence.to_ascii_lowercase();
+    [
+        "export:",
+        "export_name",
+        "export-name",
+        "import:",
+        "import_name",
+        "import-name",
+        "property:",
+        "property_key",
+        "property-key",
+        "object_key",
+        "object-key",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+}
+fn symbol_names_error_from_gate(error: NamingGateError) -> SymbolNamesError {
+    match error {
+        NamingGateError::InvalidIdentifier { name } => SymbolNamesError::InvalidSemanticName {
+            semantic_name: name,
+        },
+        NamingGateError::PlaceholderIdentifier { name } => {
+            SymbolNamesError::PlaceholderSemanticName {
+                semantic_name: name,
+            }
+        }
+        other => SymbolNamesError::NamingGate {
+            message: other.message(),
+        },
+    }
 }
 
 fn ensure_project_exists(connection: &Connection, project_id: u32) -> Result<(), SymbolNamesError> {
@@ -724,6 +892,8 @@ pub(crate) fn ensure_symbol_name_proposals_table(
                 origin TEXT NOT NULL,
                 accepted INTEGER NOT NULL DEFAULT 0,
                 evidence TEXT,
+                gate_status TEXT NOT NULL DEFAULT 'legacy',
+                gate_reason TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (project_id, module_id, original_name, origin, semantic_name)
             );
@@ -731,7 +901,30 @@ pub(crate) fn ensure_symbol_name_proposals_table(
                 ON symbol_name_proposals(project_id, module_id, original_name);
             ",
         )
-        .map_err(SymbolNamesError::WriteSymbolName)
+        .map_err(SymbolNamesError::WriteSymbolName)?;
+    ensure_symbol_name_proposals_gate_columns(connection)
+}
+
+fn ensure_symbol_name_proposals_gate_columns(
+    connection: &Connection,
+) -> Result<(), SymbolNamesError> {
+    if !sqlite_table_has_column(connection, "symbol_name_proposals", "gate_status")
+        .map_err(SymbolNamesError::QuerySymbolNames)?
+    {
+        connection
+            .execute_batch(
+                "ALTER TABLE symbol_name_proposals ADD COLUMN gate_status TEXT NOT NULL DEFAULT 'legacy';",
+            )
+            .map_err(SymbolNamesError::WriteSymbolName)?;
+    }
+    if !sqlite_table_has_column(connection, "symbol_name_proposals", "gate_reason")
+        .map_err(SymbolNamesError::QuerySymbolNames)?
+    {
+        connection
+            .execute_batch("ALTER TABLE symbol_name_proposals ADD COLUMN gate_reason TEXT;")
+            .map_err(SymbolNamesError::WriteSymbolName)?;
+    }
+    Ok(())
 }
 
 fn apply_operation(
@@ -743,11 +936,25 @@ fn apply_operation(
 ) -> Result<usize, SymbolNamesError> {
     match operation {
         SymbolNameOperation::Propose(spec) => {
-            upsert_proposal(connection, project_id, spec, origin, evidence, false)?;
+            upsert_proposal(
+                connection,
+                project_id,
+                spec,
+                origin,
+                spec.evidence.as_deref().or(evidence),
+                false,
+            )?;
             Ok(1)
         }
         SymbolNameOperation::Accept(spec) => {
-            upsert_proposal(connection, project_id, spec, origin, evidence, true)?;
+            upsert_proposal(
+                connection,
+                project_id,
+                spec,
+                origin,
+                spec.evidence.as_deref().or(evidence),
+                true,
+            )?;
             deactivate_other_proposals(connection, project_id, spec, origin)?;
             connection
                 .execute(
@@ -816,12 +1023,14 @@ fn upsert_proposal(
             r"
             INSERT INTO symbol_name_proposals (
                 project_id, module_id, original_name, semantic_name,
-                origin, accepted, evidence
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                origin, accepted, evidence, gate_status, gate_reason
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'passed', 'deterministic-gates-passed')
             ON CONFLICT(project_id, module_id, original_name, origin, semantic_name)
             DO UPDATE SET
                 accepted = excluded.accepted,
-                evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence)
+                evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence),
+                gate_status = excluded.gate_status,
+                gate_reason = excluded.gate_reason
             ",
             params![
                 i64::from(project_id),
@@ -928,15 +1137,32 @@ fn load_symbol_name_proposals(
     {
         return Ok(Vec::new());
     }
+    let gate_status_expr =
+        if sqlite_table_has_column(connection, "symbol_name_proposals", "gate_status")
+            .map_err(SymbolNamesError::QuerySymbolNames)?
+        {
+            "NULLIF(TRIM(gate_status), '') AS gate_status"
+        } else {
+            "NULL AS gate_status"
+        };
+    let gate_reason_expr =
+        if sqlite_table_has_column(connection, "symbol_name_proposals", "gate_reason")
+            .map_err(SymbolNamesError::QuerySymbolNames)?
+        {
+            "NULLIF(TRIM(gate_reason), '') AS gate_reason"
+        } else {
+            "NULL AS gate_reason"
+        };
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             r"
-            SELECT module_id, original_name, semantic_name, origin, accepted, evidence
+            SELECT module_id, original_name, semantic_name, origin, accepted, evidence,
+                   {gate_status_expr}, {gate_reason_expr}
             FROM symbol_name_proposals
             WHERE project_id = ?1
             ORDER BY module_id, original_name, accepted DESC, origin, semantic_name
             ",
-        )
+        ))
         .map_err(SymbolNamesError::QuerySymbolNames)?;
     let rows = statement
         .query_map(params![i64::from(project_id)], |row| {
@@ -954,6 +1180,8 @@ fn load_symbol_name_proposals(
                 origin: row.get(3)?,
                 accepted: row.get::<_, i64>(4)? != 0,
                 evidence: row.get(5)?,
+                gate_status: row.get(6)?,
+                gate_reason: row.get(7)?,
             })
         })
         .map_err(SymbolNamesError::QuerySymbolNames)?;
@@ -978,16 +1206,20 @@ fn print_symbol_rows(rows: &[SymbolNameRow]) {
 }
 
 fn print_symbol_name_proposals(rows: &[SymbolNameProposalRow]) {
-    println!("module_id\toriginal_name\tsemantic_name\torigin\taccepted\tevidence");
+    println!(
+        "module_id\toriginal_name\tsemantic_name\torigin\taccepted\tevidence\tgate_status\tgate_reason"
+    );
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.module_id,
             row.original_name,
             row.semantic_name,
             row.origin,
             u8::from(row.accepted),
-            row.evidence.as_deref().unwrap_or("")
+            row.evidence.as_deref().unwrap_or(""),
+            row.gate_status.as_deref().unwrap_or(""),
+            row.gate_reason.as_deref().unwrap_or("")
         );
     }
 }
@@ -997,8 +1229,9 @@ mod tests {
     use rusqlite::{Connection, params};
 
     use super::{
-        SYMBOL_NAME_ORIGIN_AGENT, SymbolNameClearSpec, SymbolNameSpec, SymbolNamesArgs,
-        SymbolNamesError, SymbolNamesOutcome, parse_batch_operations, symbol_names_from_connection,
+        SYMBOL_NAME_ORIGIN_AGENT, SymbolNameClearSpec, SymbolNameOperation, SymbolNameSpec,
+        SymbolNamesArgs, SymbolNamesError, SymbolNamesOutcome, parse_batch_operations,
+        symbol_names_from_connection,
     };
 
     fn args_with_accept(apply: bool) -> SymbolNamesArgs {
@@ -1008,12 +1241,13 @@ mod tests {
             list: false,
             apply,
             origin: SYMBOL_NAME_ORIGIN_AGENT.to_string(),
-            evidence: None,
+            evidence: Some("calls:create client".to_string()),
             proposals: Vec::new(),
             accepts: vec![SymbolNameSpec {
                 module_id: 10,
                 original_name: "$F1".to_string(),
                 semantic_name: "createClient".to_string(),
+                evidence: None,
             }],
             clear_active: Vec::new(),
             batch: None,
@@ -1066,11 +1300,15 @@ mod tests {
     #[test]
     fn batch_parser_accepts_propose_accept_clear_and_legacy_aliases() {
         let operations = parse_batch_operations(
-            "action\tmodule_id\toriginal_name\tsemantic_name\npropose\t10\t$F1\tmaybeClient\naccept\t10\ta\tsettings\nclear\t10\toldName\n",
+            "action\tmodule_id\toriginal_name\tsemantic_name\tevidence\npropose\t10\t$F1\tmaybeClient\tcandidate:maybe client\naccept\t10\ta\tsettings\tconfig:settings\nclear\t10\toldName\n",
         )
         .expect("batch should parse");
 
         assert_eq!(operations.len(), 3);
+        let SymbolNameOperation::Propose(spec) = &operations[0] else {
+            panic!("first op should be propose");
+        };
+        assert_eq!(spec.evidence.as_deref(), Some("candidate:maybe client"));
     }
 
     #[test]
@@ -1140,6 +1378,7 @@ mod tests {
             module_id: 10,
             original_name: "_a".to_string(),
             semantic_name: "workerMessage".to_string(),
+            evidence: None,
         }];
 
         let outcome = symbol_names_from_connection(&mut connection, &args)
@@ -1163,10 +1402,12 @@ mod tests {
         let mut connection = create_fixture();
         let mut args = args_with_accept(true);
         args.accepts.clear();
+        args.evidence = Some("candidate:maybe client".to_string());
         args.proposals.push(SymbolNameSpec {
             module_id: 10,
             original_name: "$F1".to_string(),
             semantic_name: "maybeClient".to_string(),
+            evidence: None,
         });
 
         let outcome = symbol_names_from_connection(&mut connection, &args).expect("propose writes");
@@ -1224,11 +1465,39 @@ mod tests {
     fn rejects_name_collision_with_existing_original() {
         let mut connection = create_fixture();
         let mut args = args_with_accept(false);
+        args.evidence = Some("existing:other_name".to_string());
         args.accepts[0].semantic_name = "otherName".to_string();
 
         let error = symbol_names_from_connection(&mut connection, &args)
             .expect_err("collision should be rejected");
         assert!(matches!(error, SymbolNamesError::NameCollision { .. }));
+    }
+
+    #[test]
+    fn automated_public_surface_accept_requires_structural_evidence() {
+        let mut connection = create_fixture();
+        connection
+            .execute(
+                "INSERT INTO symbols (module_id, semantic_name, export_name, original_name, scope_level) VALUES (?1, NULL, 'x', 'x', 'module')",
+                params![10_i64],
+            )
+            .expect("insert public symbol");
+        let mut args = args_with_accept(false);
+        args.evidence = Some("handler".to_string());
+        args.accepts = vec![SymbolNameSpec {
+            module_id: 10,
+            original_name: "x".to_string(),
+            semantic_name: "handler".to_string(),
+            evidence: None,
+        }];
+
+        let error = symbol_names_from_connection(&mut connection, &args)
+            .expect_err("public surface needs structural evidence");
+        assert!(matches!(error, SymbolNamesError::NamingGate { .. }));
+
+        args.evidence = Some("export:handler".to_string());
+        symbol_names_from_connection(&mut connection, &args)
+            .expect("export evidence should satisfy public surface policy");
     }
 
     #[test]

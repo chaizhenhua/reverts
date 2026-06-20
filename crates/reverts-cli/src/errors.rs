@@ -575,6 +575,9 @@ pub enum SymbolNamesError {
         owner: &'static str,
         value: i64,
     },
+    NamingGate {
+        message: String,
+    },
 }
 
 impl fmt::Display for SymbolNamesError {
@@ -644,6 +647,7 @@ impl fmt::Display for SymbolNamesError {
             Self::InvalidDatabaseId { owner, value } => {
                 write!(formatter, "invalid database id {value} for {owner}")
             }
+            Self::NamingGate { message } => write!(formatter, "{message}"),
         }
     }
 }
@@ -664,7 +668,8 @@ impl Error for SymbolNamesError {
             | Self::ConflictingOperation { .. }
             | Self::NameCollision { .. }
             | Self::InvalidBatchLine { .. }
-            | Self::InvalidDatabaseId { .. } => None,
+            | Self::InvalidDatabaseId { .. }
+            | Self::NamingGate { .. } => None,
         }
     }
 }

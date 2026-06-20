@@ -584,16 +584,16 @@ fn import_alias_local_bindings(source: &str) -> BTreeSet<BindingName> {
             }
         }
         // Namespace clause `* as ns` / `*as ns`.
-        if let Some((_, after_star)) = rest.split_once('*') {
-            if let Some(after_as) = after_star.trim_start().strip_prefix("as") {
-                let name: String = after_as
-                    .trim_start()
-                    .chars()
-                    .take_while(|c| is_ident_continue(*c))
-                    .collect();
-                if is_ident(&name) {
-                    bindings.insert(BindingName::new(name));
-                }
+        if let Some((_, after_star)) = rest.split_once('*')
+            && let Some(after_as) = after_star.trim_start().strip_prefix("as")
+        {
+            let name: String = after_as
+                .trim_start()
+                .chars()
+                .take_while(|c| is_ident_continue(*c))
+                .collect();
+            if is_ident(&name) {
+                bindings.insert(BindingName::new(name));
             }
         }
         // Default import `d` (followed by `from` or `,`).

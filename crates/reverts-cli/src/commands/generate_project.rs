@@ -5,23 +5,20 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use reverts_js::{
-    CompilerLowering, GeneratedRename, ParseGoal, format_source_with_module_items_and_renames,
-};
 use reverts_pipeline::{
-    EmittedAsset, GenerateProjectOptions, LocalBindingRename,
-    generate_project_from_input_with_options,
+    GenerateProjectOptions, LocalBindingRename, generate_project_from_input_with_options,
 };
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
+use crate::commands::naming_gates::{NamingGateMode, validate_name_acceptance};
 use crate::errors::{CliError, CliRunError};
 use crate::format_audit_findings;
 use crate::input_externalization::{
     load_materialized_package_manifests, load_project_bundle_with_package_externalization,
 };
 use crate::runtime_dependency_coherence::prune_transitively_provided_scope_incoherent_dependencies;
-use crate::{collect_sqlite_rows, sqlite_table_exists};
+use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -48,6 +45,7 @@ impl GenerateProjectV2Args {
 }
 
 pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
+    validate_accepted_naming_gate_records(&args.input, args.project_id)?;
     let input = load_project_bundle_with_package_externalization(&args.input, args.project_id)
         .map_err(CliRunError::LoadInput)?;
     let local_binding_renames = load_local_binding_renames(&args.input, args.project_id)?;
@@ -77,7 +75,6 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
 
     let accepted_project = run
         .accepted_project
-        .as_ref()
         .ok_or_else(|| CliRunError::AuditRejected(format_audit_findings(&run.audit)))?;
     // Drop scope-incoherent root pins (e.g. a mis-matched off-major `@smithy/*`
     // sibling) that npm would otherwise install transitively at a coherent
@@ -90,13 +87,10 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
         run.runtime_dependencies.clone(),
         &manifests,
     );
-    let mut assets = apply_local_binding_renames_to_code_assets(
-        run.assets.as_slice(),
-        local_binding_renames.as_slice(),
-    )?;
+    let mut assets = run.assets.clone();
     assets.extend(run.source_mirror_assets.clone());
     let written = write_accepted_project(
-        accepted_project,
+        &accepted_project,
         assets.as_slice(),
         &args.output,
         &runtime_dependencies,
@@ -128,81 +122,6 @@ pub(crate) fn run(args: GenerateProjectV2Args) -> Result<(), CliRunError> {
     Ok(())
 }
 
-fn apply_local_binding_renames_to_code_assets(
-    assets: &[EmittedAsset],
-    renames: &[LocalBindingRename],
-) -> Result<Vec<EmittedAsset>, CliRunError> {
-    if renames.is_empty() {
-        return Ok(assets.to_vec());
-    }
-    let mut renames_by_path = std::collections::BTreeMap::<&str, Vec<GeneratedRename>>::new();
-    for rename in renames {
-        renames_by_path
-            .entry(rename.file_path.as_str())
-            .or_default()
-            .push(if let Some(binding_index) = rename.binding_index {
-                GeneratedRename::new_binding_index(
-                    rename.original_name.as_str(),
-                    rename.semantic_name.as_str(),
-                    binding_index,
-                )
-            } else {
-                GeneratedRename::new_all_scopes(
-                    rename.original_name.as_str(),
-                    rename.semantic_name.as_str(),
-                )
-            });
-    }
-    let mut transformed = Vec::with_capacity(assets.len());
-    for asset in assets {
-        let Some(asset_renames) = renames_by_path.get(asset.path.as_str()) else {
-            transformed.push(asset.clone());
-            continue;
-        };
-        if !is_code_output_path(asset.path.as_str()) {
-            transformed.push(asset.clone());
-            continue;
-        }
-        let source = std::str::from_utf8(asset.bytes.as_slice()).map_err(|error| {
-            CliRunError::GenerateProject(format!(
-                "failed to read code asset {} as UTF-8 for binding renames: {error}",
-                asset.path
-            ))
-        })?;
-        let formatted = format_source_with_module_items_and_renames(
-            source,
-            &[],
-            &[],
-            asset_renames,
-            Some(std::path::Path::new(asset.path.as_str())),
-            ParseGoal::TypeScript,
-            CompilerLowering::None,
-        )
-        .map_err(|error| {
-            CliRunError::GenerateProject(format!(
-                "failed to apply binding renames to asset {}: {error}",
-                asset.path
-            ))
-        })?;
-        let mut asset = asset.clone();
-        asset.bytes = formatted.into_bytes();
-        transformed.push(asset);
-    }
-    Ok(transformed)
-}
-
-fn is_code_output_path(path: &str) -> bool {
-    std::path::Path::new(path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .is_some_and(|extension| {
-            matches!(
-                extension,
-                "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts"
-            )
-        })
-}
-
 fn load_local_binding_renames(
     input: &Path,
     project_id: u32,
@@ -216,6 +135,21 @@ fn load_local_binding_renames(
     }
     let has_binding_key =
         sqlite_column_exists(&connection, "semantic_binding_names", "binding_key")?;
+    if !sqlite_column_exists(&connection, "semantic_binding_names", "gate_status")? {
+        let accepted_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM semantic_binding_names WHERE project_id = ?1 AND accepted = 1",
+                params![i64::from(project_id)],
+                |row| row.get(0),
+            )
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        if accepted_count == 0 {
+            return Ok(Vec::new());
+        }
+        return Err(CliRunError::GenerateProject(
+            "semantic_binding_names has accepted rows but no gate_status column; re-accept names through binding-names or reference-source-names".to_string(),
+        ));
+    }
     let mut statement = connection
         .prepare(if has_binding_key {
             r"
@@ -223,6 +157,7 @@ fn load_local_binding_renames(
             FROM semantic_binding_names
             WHERE project_id = ?1
               AND accepted = 1
+              AND gate_status = 'passed'
               AND TRIM(file_path) != ''
               AND TRIM(original_name) != ''
               AND TRIM(semantic_name) != ''
@@ -234,6 +169,7 @@ fn load_local_binding_renames(
             FROM semantic_binding_names
             WHERE project_id = ?1
               AND accepted = 1
+              AND gate_status = 'passed'
               AND TRIM(file_path) != ''
               AND TRIM(original_name) != ''
               AND TRIM(semantic_name) != ''
@@ -254,6 +190,198 @@ fn load_local_binding_renames(
         })
         .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
     collect_sqlite_rows(rows).map_err(|source| CliRunError::GenerateProject(source.to_string()))
+}
+
+fn validate_accepted_naming_gate_records(input: &Path, project_id: u32) -> Result<(), CliRunError> {
+    let connection = Connection::open_with_flags(input, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    validate_active_symbol_names_have_passed_gates(&connection, project_id)?;
+    validate_accepted_binding_names_have_passed_gates(&connection, project_id)
+}
+
+fn validate_active_symbol_names_have_passed_gates(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<(), CliRunError> {
+    if !sqlite_table_exists(connection, "symbols")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(());
+    }
+    let has_source_column = sqlite_table_has_column(connection, "symbols", "semantic_name_source")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let source_expr = if has_source_column {
+        "NULLIF(TRIM(s.semantic_name_source), '') AS semantic_name_source"
+    } else {
+        "NULL AS semantic_name_source"
+    };
+    let sql = format!(
+        r"
+        SELECT s.module_id, s.original_name, NULLIF(TRIM(s.semantic_name), '') AS semantic_name,
+               {source_expr}
+        FROM symbols s
+        JOIN modules m ON m.id = s.module_id
+        JOIN project_files pf ON pf.file_id = m.file_id
+        WHERE pf.project_id = ?1
+          AND s.scope_level = 'module'
+          AND NULLIF(TRIM(s.semantic_name), '') IS NOT NULL
+        ORDER BY s.module_id, s.original_name
+        "
+    );
+    let mut statement = connection
+        .prepare(sql.as_str())
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = collect_sqlite_rows(rows)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if !sqlite_table_exists(connection, "symbol_name_proposals")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+        || !sqlite_table_has_column(connection, "symbol_name_proposals", "gate_status")
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Err(CliRunError::GenerateProject(
+            "active symbols.semantic_name rows require matching symbol_name_proposals rows with gate_status='passed'".to_string(),
+        ));
+    }
+    for (module_id, original_name, semantic_name, origin) in rows {
+        let Some(origin) = origin else {
+            return Err(CliRunError::GenerateProject(format!(
+                "active semantic name {module_id}:{original_name} -> {semantic_name} has no semantic_name_source"
+            )));
+        };
+        let proposal_evidence = connection
+            .query_row(
+                r"
+                SELECT evidence
+                FROM symbol_name_proposals
+                WHERE project_id = ?1
+                  AND module_id = ?2
+                  AND original_name = ?3
+                  AND semantic_name = ?4
+                  AND origin = ?5
+                  AND accepted = 1
+                  AND gate_status = 'passed'
+                LIMIT 1
+                ",
+                params![
+                    i64::from(project_id),
+                    module_id,
+                    original_name.as_str(),
+                    semantic_name.as_str(),
+                    origin.as_str(),
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        let Some(evidence) = proposal_evidence else {
+            return Err(CliRunError::GenerateProject(format!(
+                "active semantic name {module_id}:{original_name} -> {semantic_name} has no matching accepted gate-passed proposal"
+            )));
+        };
+        validate_name_acceptance(
+            original_name.as_str(),
+            semantic_name.as_str(),
+            origin.as_str(),
+            evidence.as_deref(),
+            NamingGateMode::Symbol,
+        )
+        .map_err(|error| CliRunError::GenerateProject(error.message()))?;
+    }
+    Ok(())
+}
+
+fn validate_accepted_binding_names_have_passed_gates(
+    connection: &Connection,
+    project_id: u32,
+) -> Result<(), CliRunError> {
+    if !sqlite_table_exists(connection, "semantic_binding_names")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        return Ok(());
+    }
+    if !sqlite_table_has_column(connection, "semantic_binding_names", "gate_status")
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        let accepted_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM semantic_binding_names WHERE project_id = ?1 AND accepted = 1",
+                params![i64::from(project_id)],
+                |row| row.get(0),
+            )
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+        if accepted_count > 0 {
+            return Err(CliRunError::GenerateProject(
+                "accepted semantic_binding_names require gate_status='passed'".to_string(),
+            ));
+        }
+        return Ok(());
+    }
+    let has_binding_key =
+        sqlite_table_has_column(connection, "semantic_binding_names", "binding_key")
+            .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let mut statement = connection
+        .prepare(if has_binding_key {
+            r"
+            SELECT file_path, original_name, binding_index, semantic_name, origin, evidence, gate_status
+            FROM semantic_binding_names
+            WHERE project_id = ?1 AND accepted = 1
+            ORDER BY file_path, original_name, binding_key
+            "
+        } else {
+            r"
+            SELECT file_path, original_name, NULL AS binding_index, semantic_name, origin, evidence, gate_status
+            FROM semantic_binding_names
+            WHERE project_id = ?1 AND accepted = 1
+            ORDER BY file_path, original_name
+            "
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    let rows = statement
+        .query_map(params![i64::from(project_id)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?;
+    for row in collect_sqlite_rows(rows)
+        .map_err(|source| CliRunError::GenerateProject(source.to_string()))?
+    {
+        let (file_path, original_name, _binding_index, semantic_name, origin, evidence, status) =
+            row;
+        if status != "passed" {
+            return Err(CliRunError::GenerateProject(format!(
+                "accepted binding name {file_path}:{original_name} -> {semantic_name} has gate_status={status}, expected passed"
+            )));
+        }
+        validate_name_acceptance(
+            original_name.as_str(),
+            semantic_name.as_str(),
+            origin.as_str(),
+            evidence.as_deref(),
+            NamingGateMode::LocalBinding,
+        )
+        .map_err(|error| CliRunError::GenerateProject(error.message()))?;
+    }
+    Ok(())
 }
 
 fn sqlite_column_exists(
@@ -313,3 +441,170 @@ pub(crate) use crate::project_writer::write_accepted_project;
 
 #[cfg(test)]
 pub(crate) use crate::project_writer::{checked_output_path, write_emitted_project};
+
+#[cfg(test)]
+mod tests {
+    use super::validate_accepted_naming_gate_records;
+
+    use rusqlite::{Connection, params};
+    use tempfile::TempDir;
+
+    fn gate_db() -> (TempDir, std::path::PathBuf) {
+        let temp = TempDir::new().expect("tempdir");
+        let path = temp.path().join("input.sqlite");
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute_batch(
+                r"
+                CREATE TABLE project_files (
+                    project_id INTEGER NOT NULL,
+                    file_id INTEGER NOT NULL
+                );
+                CREATE TABLE modules (
+                    id INTEGER PRIMARY KEY,
+                    file_id INTEGER NOT NULL
+                );
+                CREATE TABLE symbols (
+                    module_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT,
+                    semantic_name_source TEXT,
+                    export_name TEXT,
+                    scope_level TEXT
+                );
+                CREATE TABLE symbol_name_proposals (
+                    project_id INTEGER NOT NULL,
+                    module_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL,
+                    semantic_name TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    accepted INTEGER NOT NULL,
+                    evidence TEXT,
+                    gate_status TEXT NOT NULL
+                );
+                CREATE TABLE semantic_binding_names (
+                    project_id INTEGER NOT NULL,
+                    file_path TEXT NOT NULL,
+                    original_name TEXT NOT NULL,
+                    binding_index INTEGER,
+                    binding_key TEXT NOT NULL,
+                    semantic_name TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    evidence TEXT,
+                    accepted INTEGER NOT NULL,
+                    gate_status TEXT NOT NULL
+                );
+                INSERT INTO project_files (project_id, file_id) VALUES (1, 100);
+                INSERT INTO modules (id, file_id) VALUES (10, 100);
+                ",
+            )
+            .expect("create gate schema");
+        drop(connection);
+        (temp, path)
+    }
+
+    #[test]
+    fn generate_project_rejects_active_symbol_name_without_gate_passed_proposal() {
+        let (_temp, path) = gate_db();
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute(
+                r"
+                INSERT INTO symbols (
+                    module_id, original_name, semantic_name, semantic_name_source,
+                    export_name, scope_level
+                ) VALUES (10, '$F1', 'createClient', 'agent', NULL, 'module')
+                ",
+                [],
+            )
+            .expect("insert symbol");
+        drop(connection);
+
+        let error = validate_accepted_naming_gate_records(path.as_path(), 1)
+            .expect_err("ungated active symbol names must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("no matching accepted gate-passed proposal")
+        );
+    }
+
+    #[test]
+    fn generate_project_revalidates_gate_passed_symbol_proposal_content() {
+        let (_temp, path) = gate_db();
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute(
+                r"
+                INSERT INTO symbols (
+                    module_id, original_name, semantic_name, semantic_name_source,
+                    export_name, scope_level
+                ) VALUES (10, '$F1', 'billingInvoiceHandler', 'agent', NULL, 'module')
+                ",
+                [],
+            )
+            .expect("insert symbol");
+        connection
+            .execute(
+                r"
+                INSERT INTO symbol_name_proposals (
+                    project_id, module_id, original_name, semantic_name, origin,
+                    accepted, evidence, gate_status
+                ) VALUES (1, 10, '$F1', 'billingInvoiceHandler', 'agent',
+                          1, 'route:/api/session handler', 'passed')
+                ",
+                [],
+            )
+            .expect("insert proposal");
+        drop(connection);
+
+        let error = validate_accepted_naming_gate_records(path.as_path(), 1)
+            .expect_err("passed status is not enough if deterministic gates fail");
+        assert!(error.to_string().contains("absent from evidence"));
+    }
+
+    #[test]
+    fn generate_project_rejects_accepted_binding_name_without_passed_gate() {
+        let (_temp, path) = gate_db();
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute(
+                r"
+                INSERT INTO semantic_binding_names (
+                    project_id, file_path, original_name, binding_index, binding_key,
+                    semantic_name, origin, evidence, accepted, gate_status
+                ) VALUES (1, 'src/index.ts', 'a', NULL, '', 'refreshAccessToken',
+                          'agent', 'string:refresh_token string:access_token', 1, 'legacy')
+                ",
+                [],
+            )
+            .expect("insert binding name");
+        drop(connection);
+
+        let error = validate_accepted_naming_gate_records(path.as_path(), 1)
+            .expect_err("accepted binding names require passed gates");
+        assert!(error.to_string().contains("expected passed"));
+    }
+
+    #[test]
+    fn generate_project_accepts_binding_name_with_passed_revalidated_gate() {
+        let (_temp, path) = gate_db();
+        let connection = Connection::open(path.as_path()).expect("open sqlite");
+        connection
+            .execute(
+                r"
+                INSERT INTO semantic_binding_names (
+                    project_id, file_path, original_name, binding_index, binding_key,
+                    semantic_name, origin, evidence, accepted, gate_status
+                ) VALUES (?1, 'src/index.ts', 'a', NULL, '', 'refreshAccessToken',
+                          'agent', 'string:refresh_token string:access_token', 1, 'passed')
+                ",
+                params![1_i64],
+            )
+            .expect("insert binding name");
+        drop(connection);
+
+        validate_accepted_naming_gate_records(path.as_path(), 1)
+            .expect("gate-passed accepted binding name should pass preflight");
+    }
+}

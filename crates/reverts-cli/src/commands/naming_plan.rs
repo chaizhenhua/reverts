@@ -13,6 +13,7 @@ use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 
 use crate::args::{NamingPlanArgs, NamingProgressTier};
 use crate::commands::module_classify::excluded_module_ids_from_sqlite;
+use crate::commands::naming_gates::evidence_tokens;
 use crate::commands::naming_progress::{Tier, classify_emitted_entry, emitted_universe};
 use crate::errors::{CliRunError, NamingProgressError};
 use crate::input_externalization::load_project_bundle_with_package_externalization;
@@ -53,6 +54,10 @@ pub fn naming_plan_json(args: &NamingPlanArgs) -> Result<String, NamingProgressE
             "original_name": entry.original_name,
             "emitted_name": entry.emitted_name,
             "tier": tier_str(detail.tier),
+            "global_api_surface": detail.global_api_surface,
+            "internal_module_surface": detail.internal_module_surface,
+            "evidence": naming_evidence(entry, &detail),
+            "evidence_tokens": naming_evidence_tokens(entry, &detail),
         }));
         target_count += 1;
     }
@@ -116,6 +121,28 @@ fn target_label(target: NamingProgressTier) -> &'static str {
         NamingProgressTier::Declarations => "declarations",
         NamingProgressTier::Full => "full",
     }
+}
+
+fn naming_evidence(
+    entry: &reverts_pipeline::SymbolIndexEntry,
+    detail: &crate::commands::naming_progress::SymbolDetail,
+) -> String {
+    format!(
+        "file_path:{} original:{} emitted:{} tier:{} global_api_surface:{} internal_module_surface:{}",
+        entry.file_path,
+        entry.original_name,
+        entry.emitted_name,
+        tier_str(detail.tier),
+        detail.global_api_surface,
+        detail.internal_module_surface,
+    )
+}
+
+fn naming_evidence_tokens(
+    entry: &reverts_pipeline::SymbolIndexEntry,
+    detail: &crate::commands::naming_progress::SymbolDetail,
+) -> Vec<String> {
+    evidence_tokens(naming_evidence(entry, detail).as_str())
 }
 
 #[cfg(test)]

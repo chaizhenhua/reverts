@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use reverts_graph::{FunctionExtractor, extract_import_specifiers, function_names};
 use reverts_input::PackageAttributionStatus;
-use reverts_ir::{FunctionFingerprint, ModuleId};
+use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
 use reverts_package_matcher::{
     GraphNeighborhoodEvidence, SourceFingerprint, build_structural_bag, fingerprint_source,
     graph_neighborhood_support, score_structural_bags,
@@ -18,6 +18,9 @@ use reverts_pipeline::{generate_project_from_prepared, prepare_and_enrich};
 use rusqlite::{Connection, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
+use crate::commands::naming_gates::{
+    NamingGateMode, validate_module_path_acceptance, validate_name_acceptance,
+};
 use crate::commands::symbol_names::{
     ensure_semantic_name_source_column, ensure_symbol_name_proposals_table,
 };
@@ -1154,6 +1157,8 @@ fn write_export_names(
     subject_bindings: &[(String, String)],
     origin: &str,
 ) -> Result<usize, CliRunError> {
+    ensure_symbol_name_proposals_table(connection)
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.to_string()))?;
     let subject_originals: BTreeSet<&str> = subject_bindings
         .iter()
         .map(|(orig, _)| orig.as_str())
@@ -1163,15 +1168,27 @@ fn write_export_names(
         if !subject_originals.contains(export.as_str()) {
             continue; // not an unambiguous 1:1 - leave for agent
         }
+        let evidence = "{\"tier\":\"export-exact\"}";
+        validate_name_acceptance(
+            export.as_str(),
+            export.as_str(),
+            origin,
+            Some(evidence),
+            NamingGateMode::Symbol,
+        )
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.message()))?;
         connection
             .execute(
                 r"
                 INSERT INTO symbol_name_proposals (
-                    project_id, module_id, original_name, semantic_name, origin, accepted, evidence
-                ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
+                    project_id, module_id, original_name, semantic_name, origin, accepted,
+                    evidence, gate_status, gate_reason
+                ) VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 'passed', 'deterministic-gates-passed')
                 ON CONFLICT(project_id, module_id, original_name, origin, semantic_name)
                 DO UPDATE SET accepted = excluded.accepted,
-                    evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence)
+                    evidence = COALESCE(excluded.evidence, symbol_name_proposals.evidence),
+                    gate_status = excluded.gate_status,
+                    gate_reason = excluded.gate_reason
                 ",
                 params![
                     i64::from(project_id),
@@ -1179,7 +1196,7 @@ fn write_export_names(
                     export.as_str(),
                     export.as_str(),
                     origin,
-                    "{\"tier\":\"export-exact\"}",
+                    evidence,
                 ],
             )
             .map_err(|e| CliRunError::ReferenceSourceNames(e.to_string()))?;
@@ -1305,6 +1322,43 @@ fn function_ast_hashes(fingerprint: &FunctionFingerprint) -> BTreeSet<u64> {
     hashes
 }
 
+/// Composite signature folding ALL of a function's structural axes (control
+/// flow, return/effect/throw patterns, callee set, binding/access shapes, …),
+/// not just the `ast` axis. Two functions with an identical composite are
+/// byte-for-byte structurally the same across every axis — strong enough to
+/// auto-accept WITHOUT a module match, because the structural collisions that
+/// plague single-axis `ast` matching (`resolve` vs `isFollowUpDigit`) differ on
+/// the other axes and so get distinct composites.
+fn composite_signature(axes: &AxisHashes) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    axes.ast.hash(&mut hasher);
+    axes.cfg.hash(&mut hasher);
+    axes.return_pattern.hash(&mut hasher);
+    axes.effect_pattern.hash(&mut hasher);
+    axes.structural_anchor.hash(&mut hasher);
+    axes.binding_pattern.hash(&mut hasher);
+    axes.literal_anchor.hash(&mut hasher);
+    axes.access_pattern.hash(&mut hasher);
+    axes.literal_shape.hash(&mut hasher);
+    axes.access_shape.hash(&mut hasher);
+    axes.callee_set.hash(&mut hasher);
+    axes.throw_set.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// All composite signatures a function carries (primary + every normalization
+/// alternate). Lets a function match across builds that a normalization pass
+/// canonicalizes differently.
+fn function_composites(fingerprint: &FunctionFingerprint) -> BTreeSet<u64> {
+    let mut sigs = BTreeSet::new();
+    sigs.insert(composite_signature(&fingerprint.primary));
+    for alternate in &fingerprint.alternates {
+        sigs.insert(composite_signature(&alternate.axes));
+    }
+    sigs
+}
+
 /// Proposal score for pairing subject function `subject` with reference
 /// function `reference`. Returns `None` when they share no AST hash — pure
 /// param/statement similarity is too weak to propose a name from.
@@ -1416,11 +1470,63 @@ fn match_function_lists(
             .push(index);
     }
 
+    // Composite-signature indices for the corroboration-free accept path.
+    let mut ref_by_composite: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    for (index, r) in reference_fns.iter().enumerate() {
+        for sig in function_composites(&r.fingerprint) {
+            ref_by_composite.entry(sig).or_default().push(index);
+        }
+    }
+    let mut subject_composite_freq: BTreeMap<u64, usize> = BTreeMap::new();
+    for s in subject_fns {
+        for sig in function_composites(&s.fingerprint) {
+            *subject_composite_freq.entry(sig).or_default() += 1;
+        }
+    }
+
     let mut rows = Vec::new();
-    // (module_id, original_name) accepted so the proposal pass skips them.
+    // (module_id, original_name) accepted so later passes skip them.
     let mut accepted: BTreeSet<(u32, String)> = BTreeSet::new();
 
-    // ACCEPT pass: module-corroborated, unique within the matched file pair.
+    // ACCEPT pass 0: globally-unique COMPOSITE signature — identical across every
+    // structural axis and one-of-a-kind in both corpora. Strong enough to accept
+    // with no module match, so it names functions in unmatched modules too.
+    for (subject_index, subject) in subject_fns.iter().enumerate() {
+        let _ = subject_index;
+        let Some(sig) = function_composites(&subject.fingerprint)
+            .into_iter()
+            .find(|sig| {
+                subject_composite_freq.get(sig).copied().unwrap_or(0) == 1
+                    && ref_by_composite.get(sig).is_some_and(|v| v.len() == 1)
+            })
+        else {
+            continue;
+        };
+        let reference = &reference_fns[ref_by_composite[&sig][0]];
+        if subject.fingerprint.param_count != reference.fingerprint.param_count
+            || subject.fingerprint.statement_count != reference.fingerprint.statement_count
+        {
+            continue;
+        }
+        accepted.insert((subject.module_id, subject.name.clone()));
+        if subject.name == reference.name {
+            continue;
+        }
+        rows.push(BindingNameRow {
+            module_id: subject.module_id,
+            subject_path: subject.subject_path.clone(),
+            reference_file: reference.file.clone(),
+            original_name: subject.name.clone(),
+            semantic_name: reference.name.clone(),
+            accepted: true,
+            ast_hash: subject.fingerprint.primary.ast,
+            param_count: subject.fingerprint.param_count,
+            statement_count: subject.fingerprint.statement_count,
+            score: 2.0,
+        });
+    }
+
+    // ACCEPT pass 1: module-corroborated, unique within the matched file pair.
     for (module_id, subject_indices) in &subject_by_module {
         let Some(file) = module_matched_file.get(module_id) else {
             continue; // module didn't match a reference file - no corroboration
@@ -1454,6 +1560,9 @@ fn match_function_lists(
             }
             let subject = &subject_fns[sis[0]];
             let reference = &reference_fns[ris[0]];
+            if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                continue; // already accepted by the composite pass
+            }
             if subject.fingerprint.param_count != reference.fingerprint.param_count
                 || subject.fingerprint.statement_count != reference.fingerprint.statement_count
             {
@@ -1529,7 +1638,47 @@ fn match_functions_globally(
 ) -> Vec<BindingNameRow> {
     let reference_fns = collect_reference_functions(index);
     let subject_fns = collect_subject_functions(subjects);
+    report_normalize_effect(&subject_fns, &reference_fns);
     match_function_lists(&subject_fns, &reference_fns, module_matched_file)
+}
+
+/// Measure whether the `reverts_js::normalize` passes (which produce the
+/// per-function `alternates`) actually buy any matches: how many subject
+/// functions gain extra hashes from normalization, and how many would match a
+/// reference function ONLY via an alternate hash (primary differs). Printed to
+/// stderr so it doesn't pollute the TSV.
+fn report_normalize_effect(subject_fns: &[SubjectFunction], reference_fns: &[ReferenceFunction]) {
+    let mut ref_primary: BTreeSet<u64> = BTreeSet::new();
+    let mut ref_any: BTreeSet<u64> = BTreeSet::new();
+    for r in reference_fns {
+        ref_primary.insert(r.fingerprint.primary.ast);
+        ref_any.extend(function_ast_hashes(&r.fingerprint));
+    }
+    let with_alternates = subject_fns
+        .iter()
+        .filter(|s| !s.fingerprint.alternates.is_empty())
+        .count();
+    let mut matchable_primary = 0usize; // primary.ast hits some reference primary
+    let mut matchable_only_via_alternate = 0usize; // no primary hit, but an alternate hits
+    for s in subject_fns {
+        let primary_hit = ref_any.contains(&s.fingerprint.primary.ast);
+        let any_hit = function_ast_hashes(&s.fingerprint)
+            .iter()
+            .any(|h| ref_any.contains(h));
+        if primary_hit {
+            matchable_primary += 1;
+        } else if any_hit {
+            matchable_only_via_alternate += 1;
+        }
+    }
+    let _ = ref_primary;
+    eprintln!(
+        "[normalize] subject fns={} with_alternates={} matchable_via_primary={} matchable_ONLY_via_alternate={}",
+        subject_fns.len(),
+        with_alternates,
+        matchable_primary,
+        matchable_only_via_alternate
+    );
 }
 
 /// Write binding-level naming rows into `semantic_binding_names`
@@ -1544,20 +1693,31 @@ fn write_binding_names(
     origin_prefix: &str,
     reference_version: &str,
 ) -> Result<(usize, usize), CliRunError> {
+    crate::commands::binding_names::ensure_binding_names_table_if_writable(connection, true)?;
     let (mut accepted, mut proposed) = (0usize, 0usize);
     for row in rows {
         let binding_key = row.original_name.clone(); // no binding_index -> key on original
         let origin = format!("{origin_prefix}:{reference_version}:{}", row.reference_file);
+        let evidence = row.evidence();
+        validate_name_acceptance(
+            row.original_name.as_str(),
+            row.semantic_name.as_str(),
+            origin.as_str(),
+            Some(evidence.as_str()),
+            NamingGateMode::LocalBinding,
+        )
+        .map_err(|error| CliRunError::ReferenceSourceNames(error.message()))?;
         connection
             .execute(
                 r"
                 INSERT INTO semantic_binding_names (
                     project_id, file_path, original_name, binding_index, binding_key, semantic_name,
-                    origin, evidence, accepted, created_at, updated_at
-                ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'))
+                    origin, evidence, accepted, created_at, updated_at, gate_status, gate_reason
+                ) VALUES (?1, ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8, datetime('now'), datetime('now'), 'passed', 'deterministic-gates-passed')
                 ON CONFLICT(project_id, file_path, original_name, binding_key) DO UPDATE SET
                     semantic_name = excluded.semantic_name, origin = excluded.origin,
                     evidence = excluded.evidence, accepted = excluded.accepted,
+                    gate_status = excluded.gate_status, gate_reason = excluded.gate_reason,
                     updated_at = datetime('now')
                 ",
                 params![
@@ -1567,7 +1727,7 @@ fn write_binding_names(
                     binding_key,
                     row.semantic_name,
                     origin,
-                    row.evidence(),
+                    evidence,
                     i64::from(row.accepted),
                 ],
             )
@@ -1599,6 +1759,8 @@ fn write_module_names(
             "{origin_prefix}:{reference_version}:{}",
             plan.matched.file_path
         );
+        validate_module_path_acceptance(plan.module_semantic_name.as_str(), _origin.as_str())
+            .map_err(|error| CliRunError::ReferenceSourceNames(error.message()))?;
         written += connection
             .execute(
                 "UPDATE modules SET semantic_name = ?1 WHERE id = ?2",
@@ -2432,35 +2594,44 @@ mod tests {
     }
 
     #[test]
-    fn function_match_demotes_without_module_corroboration() {
-        // No module match (empty map) -> the same hash match is only a proposal,
-        // never auto-accepted. This is what stops false positives like
-        // `resolve -> isFollowUpDigit` in unmatched modules.
-        let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
+    fn function_match_accepts_unique_composite_without_corroboration() {
+        // Identical across every structural axis AND one-of-a-kind in both
+        // corpora -> the multi-axis composite pass accepts even with NO module
+        // match, naming functions in otherwise-unmatched modules.
+        let subjects = subject_fn(
+            99,
+            "modules/unmatched.ts",
+            "function aB(x) { return x + 1; }",
+        );
         let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
         let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
         assert!(
-            !rows.iter().any(|r| r.accepted),
-            "no accept w/o corroboration: {rows:?}"
-        );
-        assert!(
             rows.iter()
-                .any(|r| !r.accepted && r.semantic_name == "increment")
+                .any(|r| r.accepted && r.semantic_name == "increment"),
+            "unique composite should accept without corroboration: {rows:?}"
         );
     }
 
     #[test]
-    fn function_match_demotes_when_module_matched_a_different_file() {
-        // Module matched a DIFFERENT file than the hash twin lives in -> the two
-        // signals disagree -> proposal, not accept.
+    fn function_match_composite_collision_needs_corroboration() {
+        // Two structurally-identical reference functions in DIFFERENT files share
+        // a composite -> not globally unique -> the composite pass cannot accept;
+        // the module match then disambiguates which file is right.
         let subjects = subject_fn(1, "modules/m.ts", "function aB(x) { return x + 1; }");
-        let references = reference_fn("util/inc.ts", "function increment(x) { return x + 1; }");
-        let rows = match_function_lists(
-            &subjects,
-            &references,
-            &corroborate(1, "other/elsewhere.ts"),
+        let mut references = reference_fn("util/a.ts", "function alpha(x) { return x + 1; }");
+        references.extend(reference_fn(
+            "util/b.ts",
+            "function beta(x) { return x + 1; }",
+        ));
+        let ambiguous = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            !ambiguous.iter().any(|r| r.accepted),
+            "ambiguous composite must not auto-accept: {ambiguous:?}"
         );
-        assert!(!rows.iter().any(|r| r.accepted), "{rows:?}");
+        let rows = match_function_lists(&subjects, &references, &corroborate(1, "util/a.ts"));
+        let accept = rows.iter().find(|r| r.accepted);
+        assert!(accept.is_some(), "corroboration should accept: {rows:?}");
+        assert_eq!(accept.unwrap().semantic_name, "alpha");
     }
 
     #[test]

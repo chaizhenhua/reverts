@@ -8,12 +8,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Args;
-use reverts_js::{is_generated_placeholder_identifier, sanitize_identifier};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::args::{parse_args_with_name, parse_project_id};
+use crate::commands::naming_gates::{NamingGateMode, validate_name_acceptance};
 use crate::errors::{CliError, CliRunError};
-use crate::{collect_sqlite_rows, sqlite_table_exists};
+use crate::{collect_sqlite_rows, sqlite_table_exists, sqlite_table_has_column};
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 #[command(disable_help_flag = true, disable_version_flag = true)]
@@ -42,6 +42,7 @@ pub struct BindingNameSpec {
     pub original_name: String,
     pub binding_index: Option<u32>,
     pub semantic_name: String,
+    pub evidence: Option<String>,
 }
 
 impl BindingNamesArgs {
@@ -73,10 +74,12 @@ pub fn validate_args(args: BindingNamesArgs) -> Result<BindingNamesArgs, CliErro
 pub(crate) fn run(args: BindingNamesArgs) -> Result<(), CliRunError> {
     let outcome = binding_names_from_sqlite(&args)?;
     if args.list {
-        println!("file_path\toriginal_name\tbinding_index\tsemantic_name\torigin\tevidence");
+        println!(
+            "file_path\toriginal_name\tbinding_index\tsemantic_name\torigin\tevidence\tgate_status\tgate_reason"
+        );
         for row in outcome.listed {
             println!(
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 row.file_path,
                 row.original_name,
                 row.binding_index
@@ -84,7 +87,9 @@ pub(crate) fn run(args: BindingNamesArgs) -> Result<(), CliRunError> {
                     .unwrap_or_default(),
                 row.semantic_name,
                 row.origin,
-                row.evidence.unwrap_or_default()
+                row.evidence.unwrap_or_default(),
+                row.gate_status.unwrap_or_default(),
+                row.gate_reason.unwrap_or_default()
             );
         }
     } else if args.apply {
@@ -116,6 +121,8 @@ pub struct BindingNameRow {
     pub semantic_name: String,
     pub origin: String,
     pub evidence: Option<String>,
+    pub gate_status: Option<String>,
+    pub gate_reason: Option<String>,
 }
 
 pub fn binding_names_from_sqlite(
@@ -145,7 +152,7 @@ pub fn binding_names_from_sqlite(
     }
 
     let specs = collect_specs(args)?;
-    validate_specs(&specs)?;
+    validate_specs(&specs, args.origin.as_str(), args.evidence.as_deref())?;
     if args.apply {
         ensure_binding_names_table_if_writable(&connection, true)?;
     }
@@ -162,15 +169,20 @@ pub fn binding_names_from_sqlite(
                     r"
                     INSERT INTO semantic_binding_names (
                         project_id, file_path, original_name, binding_index, binding_key, semantic_name,
-                        origin, evidence, accepted, created_at, updated_at
+                        origin, evidence, accepted, created_at, updated_at, gate_status, gate_reason
                     )
-                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, datetime('now'), datetime('now'))
+                    VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1,
+                        datetime('now'), datetime('now'), 'passed', 'deterministic-gates-passed'
+                    )
                     ON CONFLICT(project_id, file_path, original_name, binding_key) DO UPDATE SET
                         binding_index = excluded.binding_index,
                         semantic_name = excluded.semantic_name,
                         origin = excluded.origin,
                         evidence = excluded.evidence,
                         accepted = 1,
+                        gate_status = excluded.gate_status,
+                        gate_reason = excluded.gate_reason,
                         updated_at = datetime('now')
                     ",
                     params![
@@ -181,7 +193,7 @@ pub fn binding_names_from_sqlite(
                         binding_key,
                         spec.semantic_name,
                         args.origin,
-                        args.evidence,
+                        spec.evidence.as_deref().or(args.evidence.as_deref()),
                     ],
                 )
                 .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
@@ -214,6 +226,7 @@ fn parse_binding_name_spec(value: &str) -> Result<BindingNameSpec, String> {
         original_name,
         binding_index,
         semantic_name: semantic_name.to_string(),
+        evidence: None,
     })
 }
 
@@ -250,32 +263,42 @@ fn collect_specs(args: &BindingNamesArgs) -> Result<Vec<BindingNameSpec>, CliRun
             let columns = line.split('\t').collect::<Vec<_>>();
             if columns.len() < 4 || columns[0] != "accept" {
                 return Err(CliRunError::BindingNames(format!(
-                    "invalid batch row {}: expected accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>SEMANTIC_NAME or accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>BINDING_INDEX<TAB>SEMANTIC_NAME",
+                    "invalid batch row {}: expected accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>SEMANTIC_NAME<TAB>[EVIDENCE] or accept<TAB>FILE_PATH<TAB>ORIGINAL_NAME<TAB>BINDING_INDEX<TAB>SEMANTIC_NAME<TAB>[EVIDENCE]",
                     index + 1
                 )));
             }
             let file_path = columns[1].to_string();
             let original_name = columns[2].to_string();
-            let (binding_index, semantic_name) = if columns.len() >= 5 {
+            let (binding_index, semantic_name, evidence_column) = if columns.len() >= 5 {
                 match columns[3].parse::<u32>() {
-                    Ok(index) if index > 0 => (Some(index), columns[4].to_string()),
-                    _ => (None, columns[3].to_string()),
+                    Ok(index) if index > 0 => {
+                        (Some(index), columns[4].to_string(), columns.get(5).copied())
+                    }
+                    _ => (None, columns[3].to_string(), columns.get(4).copied()),
                 }
             } else {
-                (None, columns[3].to_string())
+                (None, columns[3].to_string(), None)
             };
             specs.push(BindingNameSpec {
                 file_path,
                 original_name,
                 binding_index,
                 semantic_name,
+                evidence: evidence_column
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned),
             });
         }
     }
     Ok(specs)
 }
 
-fn validate_specs(specs: &[BindingNameSpec]) -> Result<(), CliRunError> {
+fn validate_specs(
+    specs: &[BindingNameSpec],
+    origin: &str,
+    evidence: Option<&str>,
+) -> Result<(), CliRunError> {
     for spec in specs {
         if spec.file_path.trim().is_empty()
             || spec.original_name.trim().is_empty()
@@ -290,14 +313,14 @@ fn validate_specs(specs: &[BindingNameSpec]) -> Result<(), CliRunError> {
                 "binding_index must be a positive integer when supplied".to_string(),
             ));
         }
-        if is_generated_placeholder_identifier(&spec.semantic_name)
-            || sanitize_identifier(&spec.semantic_name) != spec.semantic_name
-        {
-            return Err(CliRunError::BindingNames(format!(
-                "invalid semantic name {} for {}:{}",
-                spec.semantic_name, spec.file_path, spec.original_name
-            )));
-        }
+        validate_name_acceptance(
+            spec.original_name.as_str(),
+            spec.semantic_name.as_str(),
+            origin,
+            spec.evidence.as_deref().or(evidence),
+            NamingGateMode::LocalBinding,
+        )
+        .map_err(|error| CliRunError::BindingNames(error.message()))?;
     }
     Ok(())
 }
@@ -427,6 +450,8 @@ pub(crate) fn ensure_binding_names_table_if_writable(
                 origin TEXT NOT NULL,
                 evidence TEXT,
                 accepted INTEGER NOT NULL DEFAULT 1,
+                gate_status TEXT NOT NULL DEFAULT 'legacy',
+                gate_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (project_id, file_path, original_name, binding_key)
@@ -447,6 +472,7 @@ fn migrate_binding_names_table(connection: &Connection) -> Result<(), CliRunErro
         })
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
     if columns.iter().any(|column| column == "binding_key") {
+        ensure_binding_names_gate_columns(connection)?;
         return Ok(());
     }
     connection
@@ -463,6 +489,8 @@ fn migrate_binding_names_table(connection: &Connection) -> Result<(), CliRunErro
                 origin TEXT NOT NULL,
                 evidence TEXT,
                 accepted INTEGER NOT NULL DEFAULT 1,
+                gate_status TEXT NOT NULL DEFAULT 'legacy',
+                gate_reason TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (project_id, file_path, original_name, binding_key)
@@ -483,6 +511,26 @@ fn migrate_binding_names_table(connection: &Connection) -> Result<(), CliRunErro
         .map_err(|source| CliRunError::BindingNames(source.to_string()))
 }
 
+fn ensure_binding_names_gate_columns(connection: &Connection) -> Result<(), CliRunError> {
+    if !sqlite_table_has_column(connection, "semantic_binding_names", "gate_status")
+        .map_err(|source| CliRunError::BindingNames(source.to_string()))?
+    {
+        connection
+            .execute_batch(
+                "ALTER TABLE semantic_binding_names ADD COLUMN gate_status TEXT NOT NULL DEFAULT 'legacy';",
+            )
+            .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
+    }
+    if !sqlite_table_has_column(connection, "semantic_binding_names", "gate_reason")
+        .map_err(|source| CliRunError::BindingNames(source.to_string()))?
+    {
+        connection
+            .execute_batch("ALTER TABLE semantic_binding_names ADD COLUMN gate_reason TEXT;")
+            .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
+    }
+    Ok(())
+}
+
 fn load_binding_name_rows(
     connection: &Connection,
     project_id: u32,
@@ -493,21 +541,43 @@ fn load_binding_name_rows(
         return Ok(Vec::new());
     }
     let has_binding_key = binding_names_table_has_binding_key(connection)?;
+    let gate_status_expr =
+        if sqlite_table_has_column(connection, "semantic_binding_names", "gate_status")
+            .map_err(|source| CliRunError::BindingNames(source.to_string()))?
+        {
+            "NULLIF(TRIM(gate_status), '') AS gate_status"
+        } else {
+            "NULL AS gate_status"
+        };
+    let gate_reason_expr =
+        if sqlite_table_has_column(connection, "semantic_binding_names", "gate_reason")
+            .map_err(|source| CliRunError::BindingNames(source.to_string()))?
+        {
+            "NULLIF(TRIM(gate_reason), '') AS gate_reason"
+        } else {
+            "NULL AS gate_reason"
+        };
     let mut statement = connection
-        .prepare(if has_binding_key {
-            r"
-            SELECT file_path, original_name, binding_index, semantic_name, origin, evidence
+        .prepare(&if has_binding_key {
+            format!(
+                r"
+            SELECT file_path, original_name, binding_index, semantic_name, origin, evidence,
+                   {gate_status_expr}, {gate_reason_expr}
             FROM semantic_binding_names
             WHERE project_id = ?1 AND accepted = 1
             ORDER BY file_path, original_name, binding_key
             "
+            )
         } else {
-            r"
-            SELECT file_path, original_name, NULL AS binding_index, semantic_name, origin, evidence
+            format!(
+                r"
+            SELECT file_path, original_name, NULL AS binding_index, semantic_name, origin, evidence,
+                   {gate_status_expr}, {gate_reason_expr}
             FROM semantic_binding_names
             WHERE project_id = ?1 AND accepted = 1
             ORDER BY file_path, original_name
             "
+            )
         })
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
     let rows = statement
@@ -521,6 +591,8 @@ fn load_binding_name_rows(
                 semantic_name: row.get(3)?,
                 origin: row.get(4)?,
                 evidence: row.get(5)?,
+                gate_status: row.get(6)?,
+                gate_reason: row.get(7)?,
             })
         })
         .map_err(|source| CliRunError::BindingNames(source.to_string()))?;
@@ -565,6 +637,7 @@ mod tests {
                 original_name: "a".to_string(),
                 binding_index: None,
                 semantic_name: "requestOptions".to_string(),
+                evidence: None,
             }],
             batch: None,
         };
@@ -600,12 +673,13 @@ mod tests {
             list: false,
             apply: true,
             origin: "agent".to_string(),
-            evidence: Some("test".to_string()),
+            evidence: Some("binding:second input".to_string()),
             accepts: vec![BindingNameSpec {
                 file_path: "modules/entrypoint.ts".to_string(),
                 original_name: "a".to_string(),
                 binding_index: Some(2),
                 semantic_name: "secondInput".to_string(),
+                evidence: None,
             }],
             batch: None,
         };
@@ -634,8 +708,9 @@ mod tests {
             original_name: "a".to_string(),
             binding_index: None,
             semantic_name: "semanticValue1".to_string(),
+            evidence: None,
         };
 
-        assert!(validate_specs(&[spec]).is_err());
+        assert!(validate_specs(&[spec], "human", None).is_err());
     }
 }
