@@ -232,6 +232,54 @@ pub fn function_names(source: &str) -> std::collections::BTreeMap<ByteRange, Str
     extractor.names
 }
 
+/// Ordered top-level parameter names of every function, keyed by the SAME
+/// `ByteRange` span that [`FunctionExtractor::fingerprint_primary`] records in
+/// `FunctionFingerprint::id.span` (it parses identically and locates each
+/// function by that span), so callers can join param names onto a fingerprint
+/// directly. Each entry is one slot per formal parameter in source order:
+/// `Some(name)` for a plain identifier param (the transferable case — these are
+/// the minified `q`/`K`/`_` names), `None` for a destructured/rest/pattern param
+/// (no single name to transfer; object-pattern params already carry real keys).
+#[must_use]
+pub fn function_param_names(
+    source: &str,
+) -> std::collections::BTreeMap<ByteRange, Vec<Option<String>>> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for extracted in FunctionExtractor::new(ModuleId(0)).extract(&parsed.program) {
+        if let Some((params, _body)) = locate_function(&parsed.program, extracted.id.span) {
+            let names = params
+                .items
+                .iter()
+                .map(|param| simple_param_name(&param.pattern.kind))
+                .collect::<Vec<_>>();
+            out.insert(extracted.id.span, names);
+        }
+    }
+    out
+}
+
+/// The transferable name of a single formal parameter: a plain identifier
+/// (optionally with a default value, e.g. `q = 1`) yields its name; destructured
+/// (`{ a }`), array (`[a]`), and rest (`...a`) patterns yield `None`.
+fn simple_param_name(kind: &BindingPatternKind<'_>) -> Option<String> {
+    match kind {
+        BindingPatternKind::BindingIdentifier(ident) => Some(ident.name.to_string()),
+        BindingPatternKind::AssignmentPattern(assignment) => {
+            simple_param_name(&assignment.left.kind)
+        }
+        BindingPatternKind::ObjectPattern(_) | BindingPatternKind::ArrayPattern(_) => None,
+    }
+}
+
 struct FunctionNameExtractor {
     names: std::collections::BTreeMap<ByteRange, String>,
 }
@@ -1557,6 +1605,52 @@ ns.prototype.protoMethod = (h) => h;
         assert!(
             !names.contains("map"),
             "anonymous callback must not be named: {names:?}"
+        );
+    }
+
+    #[test]
+    fn function_param_names_extract_ordered_simple_params_and_skip_patterns() {
+        let source = "\
+function decl(q, K, _) { return q; }
+const arrow = (a, { mode: m }, ...rest) => a;
+function defaulted(x = 1, y) { return x + y; }
+";
+        let params = function_param_names(source);
+        // Join param slots onto the same fingerprint spans the matcher uses.
+        let fingerprints = FunctionExtractor::fingerprint_primary(ModuleId(0), source);
+        let by_count: std::collections::BTreeMap<u32, Vec<Option<String>>> = fingerprints
+            .iter()
+            .filter_map(|fp| params.get(&fp.id.span).map(|p| (fp.param_count, p.clone())))
+            .collect();
+        // `decl(q, K, _)` — three transferable identifier params in order.
+        assert_eq!(
+            by_count.get(&3).cloned().unwrap_or_default(),
+            vec![
+                Some("q".to_string()),
+                Some("K".to_string()),
+                Some("_".to_string())
+            ]
+        );
+        // arrow `(a, { mode: m }, ...rest)` — `FormalParameters.items` holds only
+        // `a` and the destructured `{ mode }`; the `...rest` lives in a separate
+        // `rest` field and is excluded (matching `param_count = items.len()`).
+        let arrow = params
+            .values()
+            .find(|slots| slots.len() == 2 && slots[1].is_none())
+            .expect("arrow params");
+        assert_eq!(arrow[0], Some("a".to_string()));
+        assert_eq!(
+            arrow[1], None,
+            "destructured param has no transferable name"
+        );
+        // `defaulted(x = 1, y)` — default value still yields the identifier name.
+        let defaulted = params
+            .values()
+            .find(|slots| slots.first() == Some(&Some("x".to_string())))
+            .expect("defaulted params");
+        assert_eq!(
+            defaulted,
+            &vec![Some("x".to_string()), Some("y".to_string())]
         );
     }
 

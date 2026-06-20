@@ -10,7 +10,8 @@ use std::time::Instant;
 use clap::{Args, ValueEnum};
 use reverts_graph::{
     FunctionExtractor, IdentifierStreams, extract_import_specifiers, function_anchor_tokens,
-    function_callee_names, function_names, function_referenced_names, identifier_streams,
+    function_callee_names, function_names, function_param_names, function_referenced_names,
+    identifier_streams,
 };
 use reverts_input::sqlite::{load_project_rows_from_connection, load_project_rows_from_sqlite};
 use reverts_input::{InputBundle, InputRows, ModuleDependencyTarget, PackageAttributionStatus};
@@ -606,6 +607,15 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             .collect();
         binding_rows = match_function_lists(&subject_fns, &reference_fns, &module_matched_file);
         trace_reference_source_names(trace_start, "module_promotions");
+    }
+
+    if !args.module_only {
+        let (fns, params) =
+            measure_param_name_transfer(&binding_rows, &subject_fns, &reference_fns);
+        eprintln!(
+            "param-name-transfer ceiling: {params} minified params across {fns} matched functions could take real reference names"
+        );
+        trace_reference_source_names(trace_start, "measure_param_name_transfer");
     }
 
     // Module dependency-graph propagation (prior: same app -> near-isomorphic
@@ -4268,6 +4278,10 @@ struct ReferenceFunction {
     file: String,
     name: String,
     fingerprint: FunctionFingerprint,
+    /// Ordered formal-parameter names (the real, un-minified source names);
+    /// `None` for destructured/rest params. Joined onto a matched subject for
+    /// parameter-name transfer. See [`function_param_names`].
+    param_names: Vec<Option<String>>,
     literals: BTreeSet<String>,
     /// Call targets (`c:name` identifier callees, `m:method` method callees) for
     /// topology-based propagation.
@@ -4284,6 +4298,10 @@ struct SubjectFunction {
     subject_path: String,
     name: String,
     fingerprint: FunctionFingerprint,
+    /// Ordered formal-parameter names (minified `q`/`K`/`_`); `None` for
+    /// destructured/rest params. Positionally paired with the matched
+    /// reference's `param_names` to recover real parameter names.
+    param_names: Vec<Option<String>>,
     literals: BTreeSet<String>,
     callees: BTreeSet<String>,
     references: BTreeSet<String>,
@@ -4300,6 +4318,7 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
         let mut literals = function_anchor_tokens(module.source.as_str());
         let mut callees = function_callee_names(module.source.as_str());
         let mut references = function_referenced_names(module.source.as_str());
+        let mut param_names = function_param_names(module.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint_primary(ModuleId(0), module.source.as_str())
         {
@@ -4308,10 +4327,13 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
                 let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
                 let function_references =
                     references.remove(&fingerprint.id.span).unwrap_or_default();
+                let function_param_names =
+                    param_names.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(ReferenceFunction {
                     file: module.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
+                    param_names: function_param_names,
                     literals: function_literals,
                     callees: function_callees,
                     references: function_references,
@@ -4320,6 +4342,92 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
         }
     }
     out
+}
+
+/// Whether a subject parameter name looks minified — i.e. worth replacing with a
+/// real reference name. Bundlers emit single/double-character locals (`q`, `K`,
+/// `_`, `q1`) and `_`-prefixed shorts; anything longer is already meaningful.
+fn is_minified_param_name(name: &str) -> bool {
+    let trimmed = name.trim_start_matches('_');
+    if trimmed.is_empty() {
+        return true; // bare `_`, `__`
+    }
+    name.len() <= 2
+}
+
+/// Upper bound on parameter-name transfer: over every ACCEPTED function match,
+/// count the positions where the subject parameter is a minified identifier and
+/// the matched reference parameter is a specific real name. Returns
+/// `(functions_with_transferable_params, total_transferable_params)`. Pure
+/// measurement — no DB writes — to size the feature before building the
+/// emit-side rename channel.
+fn measure_param_name_transfer(
+    rows: &[BindingNameRow],
+    subject_fns: &[SubjectFunction],
+    reference_fns: &[ReferenceFunction],
+) -> (usize, usize) {
+    let mut subjects_by_key: BTreeMap<(u32, &str), Vec<&SubjectFunction>> = BTreeMap::new();
+    for function in subject_fns {
+        subjects_by_key
+            .entry((function.module_id, function.name.as_str()))
+            .or_default()
+            .push(function);
+    }
+    let mut references_by_key: BTreeMap<(&str, &str), Vec<&ReferenceFunction>> = BTreeMap::new();
+    for function in reference_fns {
+        references_by_key
+            .entry((function.file.as_str(), function.name.as_str()))
+            .or_default()
+            .push(function);
+    }
+
+    let mut functions = 0usize;
+    let mut params = 0usize;
+    for row in rows {
+        if !row.accepted {
+            continue;
+        }
+        let Some(subject) = subjects_by_key
+            .get(&(row.module_id, row.original_name.as_str()))
+            .and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|s| s.fingerprint.param_count == row.param_count)
+            })
+        else {
+            continue;
+        };
+        let Some(reference) = references_by_key
+            .get(&(row.reference_file.as_str(), row.semantic_name.as_str()))
+            .and_then(|candidates| {
+                candidates
+                    .iter()
+                    .find(|r| r.fingerprint.param_count == row.param_count)
+            })
+        else {
+            continue;
+        };
+        let transferable = subject
+            .param_names
+            .iter()
+            .zip(reference.param_names.iter())
+            .filter(
+                |(subject_param, reference_param)| match (subject_param, reference_param) {
+                    (Some(subject_name), Some(reference_name)) => {
+                        subject_name != reference_name
+                            && is_minified_param_name(subject_name)
+                            && is_specific_reference_name(reference_name)
+                    }
+                    _ => false,
+                },
+            )
+            .count();
+        if transferable > 0 {
+            functions += 1;
+            params += transferable;
+        }
+    }
+    (functions, params)
 }
 
 /// Synthetic module id for entrypoint-island functions. Real module ids are small
@@ -4379,16 +4487,19 @@ fn push_subject_functions_from_source(
     let mut literals = function_anchor_tokens(source);
     let mut callees = function_callee_names(source);
     let mut references = function_referenced_names(source);
+    let mut param_names = function_param_names(source);
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(module_id), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
             let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
             let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
             let function_references = references.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_param_names = param_names.remove(&fingerprint.id.span).unwrap_or_default();
             out.push(SubjectFunction {
                 module_id,
                 subject_path: subject_path.to_string(),
                 name: name.clone(),
                 fingerprint,
+                param_names: function_param_names,
                 literals: function_literals,
                 callees: function_callees,
                 references: function_references,
@@ -6177,16 +6288,19 @@ fn reference_functions_from_source(file: &str, source: &str) -> Vec<ReferenceFun
     let mut literals = function_anchor_tokens(source);
     let mut callees = function_callee_names(source);
     let mut references = function_referenced_names(source);
+    let mut param_names = function_param_names(source);
     let mut out = Vec::new();
     for fingerprint in FunctionExtractor::fingerprint_primary(ModuleId(0), source) {
         if let Some(name) = names.get(&fingerprint.id.span) {
             let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
             let function_callees = callees.remove(&fingerprint.id.span).unwrap_or_default();
             let function_references = references.remove(&fingerprint.id.span).unwrap_or_default();
+            let function_param_names = param_names.remove(&fingerprint.id.span).unwrap_or_default();
             out.push(ReferenceFunction {
                 file: file.to_string(),
                 name: name.clone(),
                 fingerprint,
+                param_names: function_param_names,
                 literals: function_literals,
                 callees: function_callees,
                 references: function_references,
@@ -8082,6 +8196,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let mut lits = function_anchor_tokens(source);
         let mut callees = function_callee_names(source);
         let mut refs = function_referenced_names(source);
+        let mut params = function_param_names(source);
         FunctionExtractor::fingerprint(ModuleId(module_id), source)
             .into_iter()
             .filter_map(|f| {
@@ -8089,6 +8204,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
                     module_id,
                     subject_path: path.to_string(),
                     name: name.clone(),
+                    param_names: params.remove(&f.id.span).unwrap_or_default(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
                     callees: callees.remove(&f.id.span).unwrap_or_default(),
                     references: refs.remove(&f.id.span).unwrap_or_default(),
@@ -8106,12 +8222,14 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
         let mut lits = function_anchor_tokens(source);
         let mut callees = function_callee_names(source);
         let mut refs = function_referenced_names(source);
+        let mut params = function_param_names(source);
         FunctionExtractor::fingerprint(ModuleId(0), source)
             .into_iter()
             .filter_map(|f| {
                 names.get(&f.id.span).map(|name| ReferenceFunction {
                     file: file.to_string(),
                     name: name.clone(),
+                    param_names: params.remove(&f.id.span).unwrap_or_default(),
                     literals: lits.remove(&f.id.span).unwrap_or_default(),
                     callees: callees.remove(&f.id.span).unwrap_or_default(),
                     references: refs.remove(&f.id.span).unwrap_or_default(),

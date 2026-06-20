@@ -2,7 +2,7 @@ pub mod fingerprint;
 pub use fingerprint::{
     ExtractedFunction, FunctionExtractor, IdentifierStreams, extract_import_specifiers,
     extract_property_names, function_anchor_tokens, function_callee_names, function_names,
-    function_referenced_names, function_string_literals, identifier_streams,
+    function_param_names, function_referenced_names, function_string_literals, identifier_streams,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
