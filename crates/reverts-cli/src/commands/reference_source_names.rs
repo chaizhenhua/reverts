@@ -283,8 +283,9 @@ fn calibrate_global_reference_uniqueness(
         for &index in &ordered {
             let anchors = &shared_anchors[index];
             let matched = &plans[index].matched;
-            let independently_strong =
-                matched.reciprocal_best || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR;
+            let independently_strong = matched.reciprocal_best
+                || matched.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR
+                || guarded_graph_placement_promotion(matched);
             let covers_distinct_part =
                 !anchors.is_empty() && kept_anchors.iter().all(|kept| kept.is_disjoint(anchors));
             if kept_anchors.is_empty() {
@@ -2631,7 +2632,28 @@ fn guarded_graph_placement_promotion(matched: &ModuleMatch) -> bool {
     let complete_small_neighborhood = matched.graph_known_edges >= 2
         && matched.graph_support == matched.graph_known_edges
         && matched.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR;
-    anchored_graph_match || strong_graph_match || complete_small_neighborhood
+    let complete_tiny_neighborhood = matched.graph_known_edges <= 2
+        && matched.graph_support == matched.graph_known_edges
+        && matched.weighted_anchor >= 6.0
+        && matched.normalized_anchor >= 0.10
+        && matched.margin >= AMBIGUOUS_PROMOTION_MIN_MARGIN;
+    let graph_with_granular_context = matched.graph_support >= 2
+        && matched_neighbor_ratio(matched) >= 0.25
+        && matched.weighted_anchor >= 12.0
+        && matched.normalized_anchor >= 0.04
+        && granular_match_overlap(matched) >= 12
+        && matched.margin >= AMBIGUOUS_PROMOTION_MIN_MARGIN;
+    let high_ratio_graph_content = matched.graph_support >= 3
+        && matched_neighbor_ratio(matched) >= 0.40
+        && matched.weighted_anchor >= 6.0
+        && matched.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR
+        && matched.margin >= AMBIGUOUS_PROMOTION_MIN_MARGIN;
+    anchored_graph_match
+        || strong_graph_match
+        || complete_small_neighborhood
+        || complete_tiny_neighborhood
+        || graph_with_granular_context
+        || high_ratio_graph_content
 }
 
 fn has_ambiguous_promotion_content(matched: &ModuleMatch) -> bool {

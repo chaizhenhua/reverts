@@ -11,17 +11,18 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind, Visit,
     ast::{
-        ArrowFunctionExpression, BindingPattern, BlockStatement, CallExpression, Class,
+        Argument, ArrowFunctionExpression, BindingPattern, BlockStatement, CallExpression, Class,
         ClassElement, Declaration, ExportAllDeclaration, ExportDefaultDeclaration,
         ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, FunctionBody,
-        ImportDeclaration, ImportDeclarationSpecifier, MethodDefinitionKind, ObjectExpression,
-        Program, Statement, SwitchStatement, TemplateElement,
+        ImportDeclaration, ImportDeclarationSpecifier, ImportExpression, MethodDefinitionKind,
+        ObjectExpression, Program, Statement, SwitchStatement, TemplateElement,
     },
     visit::walk::{
         walk_assignment_expression, walk_block_statement, walk_call_expression, walk_class,
         walk_export_all_declaration, walk_export_default_declaration,
         walk_export_named_declaration, walk_function_body, walk_import_declaration,
-        walk_object_expression, walk_switch_statement, walk_template_element,
+        walk_import_expression, walk_object_expression, walk_switch_statement,
+        walk_template_element,
     },
 };
 use oxc_parser::Parser;
@@ -232,11 +233,14 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
         if expression.operator.is_assign() {
             if let Some(exported) = commonjs_export_property_name(&expression.left) {
                 self.record_export_member_anchor(exported.as_str());
+                self.record_commonjs_export_surface_anchor(exported.as_str());
             }
             if commonjs_module_exports_target(&expression.left)
                 && let Expression::ObjectExpression(object) = &expression.right
             {
-                for member in object_expression_static_keys(object) {
+                let members = object_expression_static_keys(object);
+                self.record_commonjs_module_exports_object_surface_anchor(&members);
+                for member in members {
                     self.record_export_member_anchor(member.as_str());
                 }
             }
@@ -248,13 +252,27 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
     }
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if expression_identifier(&call.callee) == Some("require")
+            && let Some(Argument::StringLiteral(source)) = call.arguments.first()
+        {
+            self.record_require_surface_anchor(source.value.as_str(), "require");
+        }
         if let Some(exported) = object_define_property_export_member(call) {
             self.record_export_member_anchor(exported.as_str());
+            self.record_commonjs_export_surface_anchor(exported.as_str());
         }
         if let Some(exported) = commonjs_create_binding_export_member(call) {
             self.record_export_member_anchor(exported.as_str());
+            self.record_commonjs_export_surface_anchor(exported.as_str());
         }
         walk_call_expression(self, call);
+    }
+
+    fn visit_import_expression(&mut self, expression: &ImportExpression<'a>) {
+        if let Expression::StringLiteral(source) = &expression.source {
+            self.record_require_surface_anchor(source.value.as_str(), "dynamic-import");
+        }
+        walk_import_expression(self, expression);
     }
 
     fn visit_function_body(&mut self, body: &FunctionBody<'a>) {
@@ -409,6 +427,9 @@ impl FingerprintVisitor<'_> {
                 "import-surface:{}:side-effect",
                 declaration.source.value
             ));
+            self.fingerprint
+                .surface_anchors
+                .insert("import-surface-shape:side-effect".to_string());
             return;
         };
         let mut parts = BTreeSet::<String>::new();
@@ -428,11 +449,15 @@ impl FingerprintVisitor<'_> {
             }
         }
         if !parts.is_empty() {
+            let shape = import_surface_shape(&parts);
             self.fingerprint.surface_anchors.insert(format!(
                 "import-surface:{}:{}",
                 declaration.source.value,
                 parts.into_iter().collect::<Vec<_>>().join(",")
             ));
+            self.fingerprint
+                .surface_anchors
+                .insert(format!("import-surface-shape:{shape}"));
         }
     }
 
@@ -444,6 +469,7 @@ impl FingerprintVisitor<'_> {
             }
         }
         if !parts.is_empty() {
+            let shape = export_surface_shape(&parts);
             let source = declaration
                 .source
                 .as_ref()
@@ -452,6 +478,9 @@ impl FingerprintVisitor<'_> {
                 "export-surface:{source}:{}",
                 parts.into_iter().collect::<Vec<_>>().join(",")
             ));
+            self.fingerprint
+                .surface_anchors
+                .insert(format!("export-surface-shape:{shape}"));
         }
     }
 
@@ -462,6 +491,9 @@ impl FingerprintVisitor<'_> {
         self.fingerprint
             .surface_anchors
             .insert("export-surface:local:default".to_string());
+        self.fingerprint
+            .surface_anchors
+            .insert("export-surface-shape:default".to_string());
     }
 
     fn record_export_all_surface_anchor(&mut self, declaration: &ExportAllDeclaration<'_>) {
@@ -476,6 +508,56 @@ impl FingerprintVisitor<'_> {
             "export-all-surface:{}:{export_kind}",
             declaration.source.value
         ));
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("export-surface-shape:{export_kind}"));
+    }
+
+    fn record_require_surface_anchor(&mut self, source: &str, kind: &str) {
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("import-surface:{source}:{kind}"));
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("import-surface-shape:{kind}"));
+    }
+
+    fn record_commonjs_export_surface_anchor(&mut self, member: &str) {
+        if !is_usable_export_member(member) {
+            return;
+        }
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("export-surface:local:{member}"));
+        self.fingerprint
+            .surface_anchors
+            .insert("export-surface-shape:named:1".to_string());
+    }
+
+    fn record_commonjs_module_exports_object_surface_anchor(&mut self, members: &[String]) {
+        let parts = members
+            .iter()
+            .filter(|member| is_usable_export_member(member.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if parts.is_empty() {
+            self.fingerprint
+                .surface_anchors
+                .insert("export-surface-shape:commonjs-default".to_string());
+            return;
+        }
+        let shape = export_surface_shape(&parts);
+        self.fingerprint.surface_anchors.insert(format!(
+            "export-surface:local:{}",
+            parts
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        self.fingerprint
+            .surface_anchors
+            .insert(format!("export-surface-shape:{shape}"));
     }
 
     fn record_export_member_anchor(&mut self, member: &str) {
@@ -1374,6 +1456,27 @@ fn module_source_hash_alternate_pass_enabled(pass: NormalizationPassId) -> bool 
     )
 }
 
+fn expression_identifier<'a>(expression: &'a Expression<'a>) -> Option<&'a str> {
+    match expression {
+        Expression::Identifier(identifier) => Some(identifier.name.as_str()),
+        _ => None,
+    }
+}
+
+fn import_surface_shape(parts: &BTreeSet<String>) -> String {
+    let default = usize::from(parts.contains("default"));
+    let namespace = usize::from(parts.contains("namespace"));
+    let named = parts
+        .iter()
+        .filter(|part| part.starts_with("named:"))
+        .count();
+    format!("default:{default};namespace:{namespace};named:{named}")
+}
+
+fn export_surface_shape(parts: &BTreeSet<String>) -> String {
+    format!("named:{}", parts.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1443,6 +1546,49 @@ mod tests {
             right.import_export_surface_hashes
         );
         assert!(!left.import_export_surface_hashes.is_empty());
+    }
+
+    #[test]
+    fn surface_hashes_capture_cjs_require_and_exports() {
+        let fingerprint = fingerprint_source(
+            "a.cjs",
+            "const fs = require('fs'); exports.read = () => fs.readFileSync; module.exports.extra = 1;",
+        )
+        .expect("fingerprint");
+        let ast = ast_fingerprint(
+            "a.cjs",
+            "const fs = require('fs'); exports.read = () => fs.readFileSync; module.exports.extra = 1;",
+        )
+        .expect("ast fingerprint");
+
+        assert!(
+            ast.surface_anchors.contains("import-surface:fs:require"),
+            "require calls should participate in import/export surface"
+        );
+        assert!(
+            ast.surface_anchors.contains("export-surface:local:read"),
+            "exports.member should participate in export surface"
+        );
+        assert!(
+            ast.surface_anchors.contains("export-surface:local:extra"),
+            "module.exports.member should participate in export surface"
+        );
+        assert!(!fingerprint.import_export_surface_hashes.is_empty());
+    }
+
+    #[test]
+    fn surface_shape_hashes_abstract_over_source_and_order() {
+        let left = fingerprint_source("a.ts", "import { a, b } from './local'; export { a, b };")
+            .expect("left fingerprint");
+        let right = fingerprint_source("b.ts", "import { y, x } from 'pkg'; export { x, y };")
+            .expect("right fingerprint");
+
+        assert!(
+            !left
+                .import_export_surface_hashes
+                .is_disjoint(&right.import_export_surface_hashes),
+            "weak import/export surface shape should survive specifier source/name differences"
+        );
     }
 
     #[test]
