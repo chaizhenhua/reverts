@@ -50,6 +50,7 @@ fn serialize_fingerprint(fingerprint: &SourceFingerprint) -> String {
         "h": fingerprint.normalized_source_hash,
         "hs": fingerprint.normalized_source_hashes,
         "fs": fingerprint.function_signature_hashes,
+        "td": fingerprint.top_level_declaration_hashes,
         "sa": fingerprint.string_anchors,
     })
     .to_string()
@@ -73,6 +74,7 @@ fn deserialize_fingerprint(json: &str) -> Option<SourceFingerprint> {
         normalized_source_hash: value.get("h")?.as_str()?.to_string(),
         normalized_source_hashes: string_set("hs"),
         function_signature_hashes: string_set("fs"),
+        top_level_declaration_hashes: string_set("td"),
         string_anchors: string_set("sa"),
     })
 }
@@ -222,6 +224,7 @@ mod tests {
             normalized_source_hash: tag.to_string(),
             normalized_source_hashes: BTreeSet::from([tag.to_string(), format!("{tag}-alt")]),
             function_signature_hashes: BTreeSet::from([format!("{tag}-sig")]),
+            top_level_declaration_hashes: BTreeSet::from([format!("{tag}-decl")]),
             string_anchors: BTreeSet::from([format!("{tag}-anchor")]),
         }
     }

@@ -20,6 +20,8 @@ pub struct ModuleMatchFingerprint {
     pub normalized_source_hashes: BTreeSet<String>,
     /// AST-derived function signature hashes.
     pub function_signature_hashes: BTreeSet<String>,
+    /// Order-insensitive hashes of normalized top-level declaration statements.
+    pub top_level_declaration_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.
@@ -40,6 +42,8 @@ pub struct PackageSourceFingerprint<'a> {
     pub normalized_source_hashes: BTreeSet<String>,
     /// AST-derived function signature hashes.
     pub function_signature_hashes: BTreeSet<String>,
+    /// Order-insensitive hashes of normalized top-level declaration statements.
+    pub top_level_declaration_hashes: BTreeSet<String>,
     /// string literal anchors collected from the AST.
     pub string_anchors: BTreeSet<String>,
     /// Multi-axis function structure anchors shared by package and cross-version matching.

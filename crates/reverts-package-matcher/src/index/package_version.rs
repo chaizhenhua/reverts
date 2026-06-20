@@ -306,6 +306,7 @@ pub(crate) fn module_match_fingerprint(
         normalized_source_hash: source_fingerprint.normalized_source_hash,
         normalized_source_hashes: source_fingerprint.normalized_source_hashes,
         function_signature_hashes: source_fingerprint.function_signature_hashes,
+        top_level_declaration_hashes: source_fingerprint.top_level_declaration_hashes,
         string_anchors: source_fingerprint.string_anchors,
         function_axis_anchors: profile.function_axis_anchors,
         jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -329,6 +330,7 @@ pub(crate) fn package_source_fingerprint<'a>(
             normalized_source_hash: cached.normalized_source_hash.clone(),
             normalized_source_hashes: cached.normalized_source_hashes.clone(),
             function_signature_hashes: cached.function_signature_hashes.clone(),
+            top_level_declaration_hashes: cached.top_level_declaration_hashes.clone(),
             string_anchors: cached.string_anchors.clone(),
             function_axis_anchors: profile.function_axis_anchors,
             jsx_react_shape_anchors: profile.jsx_react_shape_anchors,
@@ -355,6 +357,7 @@ pub(crate) fn package_source_fingerprint_from_source<'a>(
         normalized_source_hash: fingerprint.normalized_source_hash,
         normalized_source_hashes: fingerprint.normalized_source_hashes,
         function_signature_hashes: fingerprint.function_signature_hashes,
+        top_level_declaration_hashes: fingerprint.top_level_declaration_hashes,
         string_anchors: fingerprint.string_anchors,
         function_axis_anchors,
         jsx_react_shape_anchors,
@@ -378,6 +381,7 @@ mod fingerprint_cache_tests {
             normalized_source_hash: "deadbeef".to_string(),
             normalized_source_hashes: anchors(&["deadbeef", "alt"]),
             function_signature_hashes: anchors(&["sig1"]),
+            top_level_declaration_hashes: anchors(&["decl1"]),
             string_anchors: anchors(&["anchor"]),
         };
         // Deliberately unparseable body: if the matcher reused the cache it
@@ -393,6 +397,10 @@ mod fingerprint_cache_tests {
         assert_eq!(
             fp.function_signature_hashes,
             cached.function_signature_hashes
+        );
+        assert_eq!(
+            fp.top_level_declaration_hashes,
+            cached.top_level_declaration_hashes
         );
         assert_eq!(fp.string_anchors, cached.string_anchors);
     }

@@ -11,10 +11,11 @@ use oxc_allocator::Allocator;
 use oxc_ast::{
     AstKind, Visit,
     ast::{
-        ArrowFunctionExpression, CallExpression, Class, ClassElement, ExportAllDeclaration,
-        ExportDefaultDeclaration, ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression,
-        ImportDeclaration, ImportDeclarationSpecifier, MethodDefinitionKind, ObjectExpression,
-        SwitchStatement, TemplateElement,
+        ArrowFunctionExpression, BindingPattern, CallExpression, Class, ClassElement, Declaration,
+        ExportAllDeclaration, ExportDefaultDeclaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, ImportDeclaration, ImportDeclarationSpecifier,
+        MethodDefinitionKind, ObjectExpression, Program, Statement, SwitchStatement,
+        TemplateElement,
     },
     visit::walk::{
         walk_assignment_expression, walk_call_expression, walk_class, walk_export_all_declaration,
@@ -23,6 +24,7 @@ use oxc_ast::{
     },
 };
 use oxc_parser::Parser;
+use oxc_span::GetSpan;
 use reverts_ir::NormalizationPassId;
 use reverts_ir::hash::{
     FNV_OFFSET_BASIS, fnv1a_hex as stable_hash, update_fnv1a as update_stable_hash,
@@ -49,6 +51,7 @@ pub struct SourceFingerprint {
     pub normalized_source_hash: String,
     pub normalized_source_hashes: BTreeSet<String>,
     pub function_signature_hashes: BTreeSet<String>,
+    pub top_level_declaration_hashes: BTreeSet<String>,
     pub string_anchors: BTreeSet<String>,
 }
 
@@ -76,6 +79,7 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
         normalized_source_hash,
         normalized_source_hashes,
         function_signature_hashes: ast.function_signature_hashes,
+        top_level_declaration_hashes: ast.top_level_declaration_hashes,
         string_anchors: ast.string_anchors,
     })
 }
@@ -83,6 +87,7 @@ pub fn fingerprint_source(path: &str, source: &str) -> Result<SourceFingerprint,
 #[derive(Debug, Default)]
 struct AstFingerprint {
     function_signature_hashes: BTreeSet<String>,
+    top_level_declaration_hashes: BTreeSet<String>,
     string_anchors: BTreeSet<String>,
     surface_anchors: BTreeSet<String>,
     prototype_members: BTreeSet<String>,
@@ -100,6 +105,7 @@ fn ast_fingerprint(path: &str, normalized_source: &str) -> Result<AstFingerprint
                 source: normalized_source,
                 fingerprint: AstFingerprint::default(),
             };
+            visitor.record_top_level_declaration_hashes(&parsed.program);
             visitor.visit_program(&parsed.program);
             return Ok(visitor.finish());
         }
@@ -243,6 +249,28 @@ impl<'a> Visit<'a> for FingerprintVisitor<'_> {
 }
 
 impl FingerprintVisitor<'_> {
+    fn record_top_level_declaration_hashes(&mut self, program: &Program<'_>) {
+        for statement in &program.body {
+            let Some(kind) = top_level_declaration_hash_kind(statement) else {
+                continue;
+            };
+            let span = statement.span();
+            let Some(source_slice) = self.source.get(span.start as usize..span.end as usize) else {
+                continue;
+            };
+            let hash = stable_hash(source_slice.trim().as_bytes());
+            self.fingerprint
+                .top_level_declaration_hashes
+                .insert(format!("top-level-decl:{kind}:{hash}"));
+            if let Some(shape) = top_level_declaration_shape(statement) {
+                let shape_hash = stable_hash(shape.as_bytes());
+                self.fingerprint
+                    .top_level_declaration_hashes
+                    .insert(format!("top-level-decl-shape:{kind}:{shape_hash}"));
+            }
+        }
+    }
+
     fn record_arrow_function(&mut self, arrow: &ArrowFunctionExpression<'_>) {
         self.record_function(
             "arrow",
@@ -447,6 +475,192 @@ impl FingerprintVisitor<'_> {
                 .insert(format!("prototype-shape:{members}"));
         }
         self.fingerprint
+    }
+}
+
+fn top_level_declaration_hash_kind(statement: &Statement<'_>) -> Option<&'static str> {
+    match statement {
+        Statement::FunctionDeclaration(_) => Some("function"),
+        Statement::ClassDeclaration(_) => Some("class"),
+        Statement::VariableDeclaration(_) => Some("variable"),
+        Statement::TSTypeAliasDeclaration(_) => Some("type_alias"),
+        Statement::TSInterfaceDeclaration(_) => Some("interface"),
+        Statement::TSEnumDeclaration(_) => Some("enum"),
+        Statement::TSModuleDeclaration(_) => Some("module"),
+        Statement::TSImportEqualsDeclaration(_) => Some("import_equals"),
+        Statement::ExportNamedDeclaration(declaration) if declaration.declaration.is_some() => {
+            Some("export_named_decl")
+        }
+        Statement::ExportDefaultDeclaration(_) => Some("export_default_decl"),
+        _ => None,
+    }
+}
+
+fn top_level_declaration_shape(statement: &Statement<'_>) -> Option<String> {
+    match statement {
+        Statement::FunctionDeclaration(function) => Some(function_shape(function)),
+        Statement::ClassDeclaration(class) => Some(class_declaration_shape(class)),
+        Statement::VariableDeclaration(declaration) => Some(format!(
+            "variable:{:?}:{}",
+            declaration.kind,
+            declaration
+                .declarations
+                .iter()
+                .map(|declarator| {
+                    let binding = binding_pattern_shape(&declarator.id);
+                    let init = declarator
+                        .init
+                        .as_ref()
+                        .map(expression_shape)
+                        .unwrap_or("none");
+                    format!("{binding}={init}")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        )),
+        Statement::TSTypeAliasDeclaration(_) => Some("type_alias".to_string()),
+        Statement::TSInterfaceDeclaration(_) => Some("interface".to_string()),
+        Statement::TSEnumDeclaration(declaration) => {
+            Some(format!("enum:members={}", declaration.members.len()))
+        }
+        Statement::TSModuleDeclaration(_) => Some("module".to_string()),
+        Statement::TSImportEqualsDeclaration(_) => Some("import_equals".to_string()),
+        Statement::ExportNamedDeclaration(declaration) => declaration
+            .declaration
+            .as_ref()
+            .map(|declaration| format!("export_named:{}", declaration_shape(declaration))),
+        Statement::ExportDefaultDeclaration(declaration) => Some(match &declaration.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(function) => {
+                format!("export_default:{}", function_shape(function))
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                format!("export_default:{}", class_declaration_shape(class))
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {
+                "export_default:interface".to_string()
+            }
+            declaration => declaration.as_expression().map_or_else(
+                || "export_default:other".to_string(),
+                |expression| format!("export_default:expr:{}", expression_shape(expression)),
+            ),
+        }),
+        _ => None,
+    }
+}
+
+fn declaration_shape(declaration: &Declaration<'_>) -> String {
+    match declaration {
+        Declaration::VariableDeclaration(declaration) => format!(
+            "variable:{:?}:{}",
+            declaration.kind,
+            declaration
+                .declarations
+                .iter()
+                .map(|declarator| {
+                    let binding = binding_pattern_shape(&declarator.id);
+                    let init = declarator
+                        .init
+                        .as_ref()
+                        .map(expression_shape)
+                        .unwrap_or("none");
+                    format!("{binding}={init}")
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Declaration::FunctionDeclaration(function) => function_shape(function),
+        Declaration::ClassDeclaration(class) => class_declaration_shape(class),
+        Declaration::TSTypeAliasDeclaration(_) => "type_alias".to_string(),
+        Declaration::TSInterfaceDeclaration(_) => "interface".to_string(),
+        Declaration::TSEnumDeclaration(declaration) => {
+            format!("enum:members={}", declaration.members.len())
+        }
+        Declaration::TSModuleDeclaration(_) => "module".to_string(),
+        Declaration::TSImportEqualsDeclaration(_) => "import_equals".to_string(),
+    }
+}
+
+fn function_shape(function: &oxc_ast::ast::Function<'_>) -> String {
+    let body_statement_count = function
+        .body
+        .as_ref()
+        .map(|body| body.statements.len())
+        .unwrap_or_default();
+    format!(
+        "function:async={}:generator={}:params={}:body={body_statement_count}",
+        u8::from(function.r#async),
+        u8::from(function.generator),
+        function.params.items.len()
+    )
+}
+
+fn class_declaration_shape(class: &Class<'_>) -> String {
+    let method_count = class
+        .body
+        .body
+        .iter()
+        .filter(|element| matches!(element, ClassElement::MethodDefinition(_)))
+        .count();
+    let property_count = class.body.body.len().saturating_sub(method_count);
+    format!(
+        "class:members={}:methods={method_count}:properties={property_count}",
+        class.body.body.len()
+    )
+}
+
+fn binding_pattern_shape(pattern: &BindingPattern<'_>) -> &'static str {
+    match &pattern.kind {
+        oxc_ast::ast::BindingPatternKind::BindingIdentifier(_) => "id",
+        oxc_ast::ast::BindingPatternKind::ObjectPattern(_) => "object",
+        oxc_ast::ast::BindingPatternKind::ArrayPattern(_) => "array",
+        oxc_ast::ast::BindingPatternKind::AssignmentPattern(_) => "assignment",
+    }
+}
+
+fn expression_shape(expression: &Expression<'_>) -> &'static str {
+    match expression {
+        Expression::BooleanLiteral(_) => "boolean",
+        Expression::NullLiteral(_) => "null",
+        Expression::NumericLiteral(_) => "number",
+        Expression::BigIntLiteral(_) => "bigint",
+        Expression::RegExpLiteral(_) => "regexp",
+        Expression::StringLiteral(_) => "string",
+        Expression::TemplateLiteral(_) => "template",
+        Expression::Identifier(_) => "identifier",
+        Expression::ArrayExpression(_) => "array",
+        Expression::ArrowFunctionExpression(_) => "arrow",
+        Expression::AssignmentExpression(_) => "assignment",
+        Expression::AwaitExpression(_) => "await",
+        Expression::BinaryExpression(_) => "binary",
+        Expression::CallExpression(_) => "call",
+        Expression::ChainExpression(_) => "chain",
+        Expression::ClassExpression(_) => "class",
+        Expression::ConditionalExpression(_) => "conditional",
+        Expression::FunctionExpression(_) => "function",
+        Expression::ImportExpression(_) => "import",
+        Expression::LogicalExpression(_) => "logical",
+        Expression::NewExpression(_) => "new",
+        Expression::ObjectExpression(_) => "object",
+        Expression::ParenthesizedExpression(expression) => expression_shape(&expression.expression),
+        Expression::SequenceExpression(_) => "sequence",
+        Expression::TaggedTemplateExpression(_) => "tagged_template",
+        Expression::ThisExpression(_) => "this",
+        Expression::UnaryExpression(_) => "unary",
+        Expression::UpdateExpression(_) => "update",
+        Expression::YieldExpression(_) => "yield",
+        Expression::JSXElement(_) => "jsx_element",
+        Expression::JSXFragment(_) => "jsx_fragment",
+        Expression::TSAsExpression(expression) => expression_shape(&expression.expression),
+        Expression::TSSatisfiesExpression(expression) => expression_shape(&expression.expression),
+        Expression::TSTypeAssertion(expression) => expression_shape(&expression.expression),
+        Expression::TSNonNullExpression(expression) => expression_shape(&expression.expression),
+        Expression::TSInstantiationExpression(expression) => {
+            expression_shape(&expression.expression)
+        }
+        Expression::StaticMemberExpression(_) => "static_member",
+        Expression::ComputedMemberExpression(_) => "computed_member",
+        Expression::PrivateFieldExpression(_) => "private_field",
+        _ => "other",
     }
 }
 
@@ -680,5 +894,24 @@ mod tests {
             .expect("right fingerprint");
         assert!(left.surface_anchors.contains("export-surface:local:a,b"));
         assert_eq!(left.surface_anchors, right.surface_anchors);
+    }
+
+    #[test]
+    fn top_level_declaration_hashes_ignore_statement_order() {
+        let left = fingerprint_source(
+            "a.ts",
+            "const a = 1;\nfunction run() { return a; }\nexport class Widget {}\n",
+        )
+        .expect("left fingerprint");
+        let right = fingerprint_source(
+            "b.ts",
+            "export class Widget {}\nfunction run() { return a; }\nconst a = 1;\n",
+        )
+        .expect("right fingerprint");
+        assert_eq!(
+            left.top_level_declaration_hashes,
+            right.top_level_declaration_hashes
+        );
+        assert_eq!(left.top_level_declaration_hashes.len(), 6);
     }
 }

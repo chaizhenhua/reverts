@@ -396,11 +396,11 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
     trace_reference_source_names(trace_start, "propagate_symbols");
 
     println!(
-        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
+        "module_id\tsubject_path\tref_version\tref_file\ttier\tsemantic_name\tasset\texport\tfn\ttop_decl\tstruct\tgraph\tgraph_known\tanchor\twanchor\tnanchor\tmargin\treciprocal"
     );
     for plan in &plans {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.3}\t{:.3}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{}\t{}\t{}\t{:.1}\t{:.3}\t{:.3}\t{}",
             plan.module_id,
             plan.subject_path,
             plan.reference_version,
@@ -410,6 +410,7 @@ pub(crate) fn run(args: ReferenceSourceNamesArgs) -> Result<(), CliRunError> {
             plan.matched.asset_overlap,
             plan.matched.export_overlap,
             plan.matched.function_overlap,
+            plan.matched.top_level_declaration_overlap,
             plan.matched.structural_score,
             plan.matched.graph_support,
             plan.matched.graph_known_edges,
@@ -920,6 +921,7 @@ fn low_boundary_row_json(
             "asset_overlap": matched.asset_overlap,
             "export_overlap": matched.export_overlap,
             "function_overlap": matched.function_overlap,
+            "top_level_declaration_overlap": matched.top_level_declaration_overlap,
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
@@ -1218,6 +1220,7 @@ fn candidate_diagnostic_json(relevance: f64, matched: &ModuleMatch) -> serde_jso
             "asset_overlap": matched.asset_overlap,
             "export_overlap": matched.export_overlap,
             "function_overlap": matched.function_overlap,
+            "top_level_declaration_overlap": matched.top_level_declaration_overlap,
             "structural_score": matched.structural_score,
             "graph_support": matched.graph_support,
             "graph_known_edges": matched.graph_known_edges,
@@ -1477,6 +1480,7 @@ pub(crate) struct ReferenceSourceIndex {
 struct ReferenceCandidateIndex {
     normalized_source_hashes: BTreeMap<String, BTreeSet<usize>>,
     function_signature_hashes: BTreeMap<String, BTreeSet<usize>>,
+    top_level_declaration_hashes: BTreeMap<String, BTreeSet<usize>>,
     string_anchors: BTreeMap<String, BTreeSet<usize>>,
     asset_literals: BTreeMap<String, BTreeSet<usize>>,
     export_names: BTreeMap<String, BTreeSet<usize>>,
@@ -1568,6 +1572,13 @@ fn build_candidate_index(modules: &[ReferenceSourceModule]) -> ReferenceCandidat
         for hash in &module.fingerprint.function_signature_hashes {
             index
                 .function_signature_hashes
+                .entry(hash.clone())
+                .or_default()
+                .insert(module_index);
+        }
+        for hash in &module.fingerprint.top_level_declaration_hashes {
+            index
+                .top_level_declaration_hashes
                 .entry(hash.clone())
                 .or_default()
                 .insert(module_index);
@@ -2130,6 +2141,7 @@ const MEDIUM_RECIPROCAL_NEAR_WEIGHTED_ANCHOR: f64 = 18.0;
 const MEDIUM_RECIPROCAL_NEAR_NORMALIZED_ANCHOR: f64 = 0.13;
 const SOURCE_STRUCTURAL_CANDIDATE_LIMIT: usize = 12;
 const SOURCE_CANDIDATE_MAX_ANCHOR_FANOUT: usize = 64;
+const SOURCE_CANDIDATE_MAX_GRANULAR_HASH_FANOUT: usize = 96;
 const SOURCE_CANDIDATE_MIN_ANCHOR_IDF: f64 = 1.0;
 // Structural score is now cosine-normalized to [0,1] (see source_structural_support).
 // Used as ranking evidence and as a Medium criterion only WITH anchor
@@ -2163,6 +2175,7 @@ pub(crate) struct ModuleMatch {
     pub asset_overlap: usize,
     pub export_overlap: usize,
     pub function_overlap: usize,
+    pub top_level_declaration_overlap: usize,
     /// Aggregate structural-bag score produced by the shared package matcher
     /// scorer. This reuses package matcher matching mechanics for first-party
     /// source matching instead of maintaining a separate, weaker source-only
@@ -2227,6 +2240,7 @@ struct MatchEvidence {
     asset_overlap: usize,
     export_overlap: usize,
     function_overlap: usize,
+    top_level_declaration_overlap: usize,
     source_score: SourceEvidenceScore,
     structural_score: f64,
     graph: GraphEvidence,
@@ -2282,6 +2296,7 @@ fn candidate_relevance(evidence: MatchEvidence) -> f64 {
         + evidence.weighted_anchor
         + (evidence.export_overlap as f64) * 8.0
         + (evidence.function_overlap as f64) * 4.0
+        + (evidence.top_level_declaration_overlap as f64) * 18.0
         + evidence.source_score.function_axis_jaccard * 120.0
         + evidence.source_score.function_axis_containment * 60.0
         + evidence.source_score.jsx_react_shape_jaccard * 80.0
@@ -2321,6 +2336,13 @@ fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
             && (evidence.normalized_anchor >= 0.08
                 || evidence.source_score.unique_string_anchor_overlap >= 1
                 || evidence.source_score.function_axis_containment >= 0.35))
+        || (evidence.top_level_declaration_overlap >= 2
+            && (evidence.normalized_anchor >= 0.03
+                || evidence.source_score.unique_string_anchor_overlap >= 1
+                || evidence.source_score.function_axis_containment >= 0.25))
+        || (evidence.top_level_declaration_overlap >= 1
+            && evidence.normalized_anchor >= MEDIUM_CONTENT_NORMALIZED_FLOOR
+            && evidence.source_score.function_axis_containment >= 0.35)
         || (evidence.weighted_anchor >= MEDIUM_WEIGHTED_ANCHOR
             && evidence.normalized_anchor >= MEDIUM_NORMALIZED_ANCHOR)
         || evidence.normalized_anchor >= MEDIUM_STRONG_NANCHOR
@@ -2421,6 +2443,10 @@ fn ranked_module_matches(
             &fingerprint.function_signature_hashes,
             &module.fingerprint.function_signature_hashes,
         );
+        let top_level_declaration_overlap = overlap_len(
+            &fingerprint.top_level_declaration_hashes,
+            &module.fingerprint.top_level_declaration_hashes,
+        );
         let anchor_overlap = overlap_len(
             &fingerprint.string_anchors,
             &module.fingerprint.string_anchors,
@@ -2453,6 +2479,7 @@ fn ranked_module_matches(
             && asset_overlap == 0
             && export_overlap == 0
             && function_overlap == 0
+            && top_level_declaration_overlap == 0
             && structural_score < 1.0
             && graph.matched_edges == 0
             && weighted_anchor < 1.0
@@ -2465,6 +2492,7 @@ fn ranked_module_matches(
             asset_overlap,
             export_overlap,
             function_overlap,
+            top_level_declaration_overlap,
             source_score,
             structural_score,
             graph,
@@ -2481,6 +2509,7 @@ fn ranked_module_matches(
                 asset_overlap,
                 export_overlap,
                 function_overlap,
+                top_level_declaration_overlap,
                 structural_score,
                 graph_support: graph.matched_edges,
                 graph_known_edges: graph.known_edges,
@@ -2522,6 +2551,12 @@ fn candidate_module_indices(
         &index.candidate_index.function_signature_hashes,
         &subject.function_signature_hashes,
     );
+    extend_candidates_with_fanout_limit(
+        &mut candidates,
+        &index.candidate_index.top_level_declaration_hashes,
+        &subject.top_level_declaration_hashes,
+        SOURCE_CANDIDATE_MAX_GRANULAR_HASH_FANOUT,
+    );
     extend_candidates(
         &mut candidates,
         &index.candidate_index.asset_literals,
@@ -2562,6 +2597,23 @@ fn extend_candidates(
         if let Some(indices) = postings.get(key) {
             candidates.extend(indices.iter().copied());
         }
+    }
+}
+
+fn extend_candidates_with_fanout_limit(
+    candidates: &mut BTreeSet<usize>,
+    postings: &BTreeMap<String, BTreeSet<usize>>,
+    keys: &BTreeSet<String>,
+    max_fanout: usize,
+) {
+    for key in keys {
+        let Some(indices) = postings.get(key) else {
+            continue;
+        };
+        if indices.len() > max_fanout {
+            continue;
+        }
+        candidates.extend(indices.iter().copied());
     }
 }
 
@@ -3467,6 +3519,7 @@ fn apply_module_promotions(
                 asset_overlap: 0,
                 export_overlap: 0,
                 function_overlap: *count,
+                top_level_declaration_overlap: 0,
                 structural_score: 0.0,
                 graph_support: 0,
                 graph_known_edges: 0,
@@ -3934,6 +3987,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             normalized_source_hash: String::new(),
             normalized_source_hashes: BTreeSet::new(),
             function_signature_hashes: BTreeSet::new(),
+            top_level_declaration_hashes: BTreeSet::new(),
             string_anchors: anchors.iter().map(|s| (*s).to_string()).collect(),
         }
     }
@@ -4114,6 +4168,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             asset_overlap: 0,
             export_overlap: 0,
             function_overlap: 2,
+            top_level_declaration_overlap: 0,
             source_score: SourceEvidenceScore::default(),
             structural_score: 0.0,
             graph: GraphEvidence::default(),
@@ -4139,6 +4194,7 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             asset_overlap: if tier == MatchTier::High { 1 } else { 0 },
             export_overlap: 0,
             function_overlap: 0,
+            top_level_declaration_overlap: 0,
             structural_score: 0.0,
             graph_support: 0,
             graph_known_edges: 0,
