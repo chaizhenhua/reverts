@@ -4549,8 +4549,7 @@ fn hungarian_max(sim: &[Vec<i64>]) -> Vec<Option<usize>> {
         }
     }
     let mut assign = vec![None; n];
-    for j in 1..=k {
-        let i = p[j];
+    for (j, &i) in p.iter().enumerate().take(k + 1).skip(1) {
         if i >= 1 && i <= n && j <= m {
             assign[i - 1] = Some(j - 1);
         }

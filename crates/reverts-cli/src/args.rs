@@ -25,6 +25,8 @@ pub struct MatchPackagesArgs {
     pub package_names: Vec<String>,
     #[arg(long = "package-source-root")]
     pub package_source_roots: Vec<PathBuf>,
+    #[arg(long = "reference-source-root")]
+    pub reference_source_roots: Vec<PathBuf>,
     #[arg(long)]
     pub materialize_package_sources: bool,
 }
@@ -50,6 +52,8 @@ pub struct MatchPackagesReportArgs {
     pub package_names: Vec<String>,
     #[arg(long = "package-source-root")]
     pub package_source_roots: Vec<PathBuf>,
+    #[arg(long = "reference-source-root")]
+    pub reference_source_roots: Vec<PathBuf>,
     #[arg(long)]
     pub materialize_package_sources: bool,
 }
@@ -72,6 +76,8 @@ pub struct PackageVersionDiagnosticsArgs {
     pub package_names: Vec<String>,
     #[arg(long = "package-source-root")]
     pub package_source_roots: Vec<PathBuf>,
+    #[arg(long = "reference-source-root")]
+    pub reference_source_roots: Vec<PathBuf>,
     #[arg(long)]
     pub materialize_package_sources: bool,
     #[arg(long, default_value_t = 5, value_parser = parse_limit)]

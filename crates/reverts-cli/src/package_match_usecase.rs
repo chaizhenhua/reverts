@@ -24,7 +24,8 @@ use crate::{
     MatchPackagesOutcome, dedup_audit_report, enrich_package_modules_from_source_units,
     filter_package_sources_to_referenced_package_versions,
     load_package_sources_with_fingerprint_stats, package_module_source_quality_counts,
-    package_source_load_scope, package_version_resolution_evidence, package_versions_by_module,
+    package_names_from_reference_source_roots, package_source_load_scope,
+    package_version_resolution_evidence, package_versions_by_module,
     remove_package_attributions_for_revalidation,
     resolve_package_version_hints_to_available_sources,
 };
@@ -67,8 +68,14 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("bundle_extract_enrich");
 
     let mut source_import_audit = AuditReport::default();
+    let mut requested_package_names = args.package_names.clone();
+    requested_package_names.extend(package_names_from_reference_source_roots(
+        &args.reference_source_roots,
+        &mut source_import_audit,
+    )?);
     let package_names =
-        package_source_load_scope(&rows, &args.package_names, &mut source_import_audit);
+        package_source_load_scope(&rows, &requested_package_names, &mut source_import_audit);
+    let package_filter = (!requested_package_names.is_empty()).then_some(&package_names);
     remove_package_attributions_for_revalidation(&mut rows, &package_names);
     let loaded_package_sources = load_package_sources_with_fingerprint_stats(
         connection,
@@ -92,16 +99,9 @@ pub(crate) fn match_packages_from_connection(
     mark_timing!("resolve_versions");
     filter_package_sources_to_referenced_package_versions(&rows, &mut package_sources);
     mark_timing!("filter_referenced_versions");
-    let source_quality_counts = package_module_source_quality_counts(
-        &rows,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
+    let source_quality_counts = package_module_source_quality_counts(&rows, package_filter);
     mark_timing!("source_quality_counts");
-    let pipeline_report = match_packages_with_pipeline(
-        &rows,
-        &package_sources,
-        (!args.package_names.is_empty()).then_some(&package_names),
-    );
+    let pipeline_report = match_packages_with_pipeline(&rows, &package_sources, package_filter);
     mark_timing!("match_pipeline");
     let mut report = pipeline_report.package_report;
     report.audit.extend(source_import_audit);

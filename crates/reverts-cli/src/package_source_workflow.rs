@@ -14,7 +14,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use reverts_input::{InputRows, ModuleDependencyTarget, PackageEmissionMode};
+use reverts_input::{
+    InputRows, ModuleDependencyTarget, PackageEmissionMode, ProjectInput, SourceFileInput,
+};
 use reverts_ir::{ModuleKind, is_valid_package_name};
 use reverts_observe::{AuditFinding, AuditReport, FindingCode};
 use reverts_package_matcher::{
@@ -315,6 +317,165 @@ pub(crate) fn package_source_load_scope(
         }
     }
     package_names
+}
+
+pub(crate) fn package_names_from_reference_source_roots(
+    roots: &[PathBuf],
+    audit: &mut AuditReport,
+) -> Result<BTreeSet<String>, MatchPackagesError> {
+    let mut package_names = BTreeSet::new();
+    for root in roots {
+        collect_reference_package_names(root.as_path(), &mut package_names, audit)?;
+    }
+    Ok(package_names)
+}
+
+fn collect_reference_package_names(
+    path: &Path,
+    package_names: &mut BTreeSet<String>,
+    audit: &mut AuditReport,
+) -> Result<(), MatchPackagesError> {
+    let metadata =
+        fs::metadata(path).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if metadata.is_file() {
+        collect_reference_package_names_from_file(path, package_names, audit)?;
+        return Ok(());
+    }
+    if !metadata.is_dir() {
+        return Ok(());
+    }
+
+    let entries =
+        fs::read_dir(path).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let entry_path = entry.path();
+        if should_skip_reference_dir(entry_path.as_path()) {
+            continue;
+        }
+        collect_reference_package_names(entry_path.as_path(), package_names, audit)?;
+    }
+    Ok(())
+}
+
+fn collect_reference_package_names_from_file(
+    path: &Path,
+    package_names: &mut BTreeSet<String>,
+    audit: &mut AuditReport,
+) -> Result<(), MatchPackagesError> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("package.json") {
+        collect_reference_package_names_from_package_json(path, package_names, audit)?;
+        return Ok(());
+    }
+    if !is_reference_source_file(path) {
+        return Ok(());
+    }
+    let source =
+        fs::read_to_string(path).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let mut rows = InputRows::new(ProjectInput::new(1, "reference-source"));
+    rows.source_files.push(SourceFileInput::new(
+        1,
+        path.to_string_lossy().into_owned(),
+        Some(source),
+    ));
+    match package_import_names_from_sources(&rows) {
+        Ok(import_package_names) => package_names.extend(import_package_names),
+        Err(source) => {
+            audit.push(
+                AuditFinding::warning(
+                    FindingCode::AstFactExtractionFailed,
+                    format!(
+                        "failed to parse reference source package import sites: {}",
+                        source.source
+                    ),
+                )
+                .with_module(source.source_file_path),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn collect_reference_package_names_from_package_json(
+    path: &Path,
+    package_names: &mut BTreeSet<String>,
+    audit: &mut AuditReport,
+) -> Result<(), MatchPackagesError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| MatchPackagesError::ReadPackageSourceRoot {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let value = match serde_json::from_str::<serde_json::Value>(content.as_str()) {
+        Ok(value) => value,
+        Err(source) => {
+            audit.push(
+                AuditFinding::warning(
+                    FindingCode::UnparseablePackageSource,
+                    format!("failed to parse reference package metadata: {source}"),
+                )
+                .with_module(path.to_string_lossy()),
+            );
+            return Ok(());
+        }
+    };
+    for field in [
+        "dependencies",
+        "devDependencies",
+        "optionalDependencies",
+        "peerDependencies",
+    ] {
+        let Some(dependencies) = value.get(field).and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for package_name in dependencies.keys() {
+            let package_name = package_name.trim();
+            if is_valid_package_name(package_name) {
+                package_names.insert(package_name.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_reference_dir(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(
+            "node_modules"
+                | ".git"
+                | ".hg"
+                | ".svn"
+                | "target"
+                | "dist"
+                | "build"
+                | "coverage"
+                | ".next"
+                | ".turbo"
+        )
+    )
+}
+
+fn is_reference_source_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "mts" | "cts")
+    )
 }
 
 pub(crate) fn package_graph_component_scope(
@@ -713,5 +874,67 @@ mod tests {
                 "seed".to_string()
             ])
         );
+    }
+
+    #[test]
+    fn reference_source_roots_discover_imports_and_package_json_dependencies() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let src_dir = tempdir.path().join("src");
+        std::fs::create_dir_all(src_dir.as_path()).expect("src dir");
+        std::fs::write(
+            src_dir.join("app.ts"),
+            r#"
+import React from "react";
+import memoize from "lodash-es/memoize.js";
+import scoped from "@scope/pkg/sub/path.js";
+import fs from "node:fs";
+const dynamic = import("zod");
+const required = require("semver/functions/valid");
+export { scoped };
+void React;
+void memoize;
+void fs;
+void dynamic;
+void required;
+"#,
+        )
+        .expect("source");
+        std::fs::write(
+            tempdir.path().join("package.json"),
+            r#"{
+  "dependencies": {"chalk": "^5.0.0"},
+  "devDependencies": {"@types/node": "*"},
+  "peerDependencies": {"react": "^18.0.0"},
+  "optionalDependencies": {"left-pad": "^1.3.0"}
+}"#,
+        )
+        .expect("package json");
+        let skipped_dir = tempdir.path().join("node_modules").join("ignored");
+        std::fs::create_dir_all(skipped_dir.as_path()).expect("skipped dir");
+        std::fs::write(
+            skipped_dir.join("index.js"),
+            r#"import ignored from "should-not-scan"; void ignored;"#,
+        )
+        .expect("skipped source");
+
+        let mut audit = AuditReport::default();
+        let package_names =
+            package_names_from_reference_source_roots(&[tempdir.path().into()], &mut audit)
+                .expect("package names");
+
+        assert_eq!(
+            package_names,
+            BTreeSet::from([
+                "@scope/pkg".to_string(),
+                "@types/node".to_string(),
+                "chalk".to_string(),
+                "left-pad".to_string(),
+                "lodash-es".to_string(),
+                "react".to_string(),
+                "semver".to_string(),
+                "zod".to_string()
+            ])
+        );
+        assert!(audit.findings().is_empty());
     }
 }

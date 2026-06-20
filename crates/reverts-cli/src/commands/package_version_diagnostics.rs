@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use reverts_input::{InputRows, ModuleInput, PackageAttributionStatus};
 use reverts_ir::ModuleId;
+use reverts_observe::AuditReport;
 use reverts_package_matcher::{
     BestVersionMatch, ModulePackageMatch, PackageSource, VersionMatchScore,
     VersionedPackageMatcher, VersionedPackageMatcherConfig, package_source_normalized_hash,
@@ -18,7 +19,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::args::PackageVersionDiagnosticsArgs;
 use crate::errors::{CliRunError, MatchPackagesError};
-use crate::{load_package_sources, pct};
+use crate::{load_package_sources, package_names_from_reference_source_roots, pct};
 
 const VERSION_MISMATCH_REJECTION_REASON: &str =
     "selected package version did not match this module source";
@@ -119,7 +120,12 @@ pub fn package_version_diagnostics_from_connection(
     rows: &InputRows,
     args: &PackageVersionDiagnosticsArgs,
 ) -> Result<PackageVersionDiagnosticsOutcome, MatchPackagesError> {
-    let package_filter = args.package_names.iter().cloned().collect::<BTreeSet<_>>();
+    let mut audit = AuditReport::default();
+    let mut package_filter = args.package_names.iter().cloned().collect::<BTreeSet<_>>();
+    package_filter.extend(package_names_from_reference_source_roots(
+        &args.reference_source_roots,
+        &mut audit,
+    )?);
     let rejected_by_package = rejected_version_mismatch_modules(rows, &package_filter);
     let rejected_modules = rejected_by_package.values().map(Vec::len).sum::<usize>();
     let package_names = rejected_by_package.keys().cloned().collect::<BTreeSet<_>>();

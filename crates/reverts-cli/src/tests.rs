@@ -149,6 +149,8 @@ fn parses_match_packages_command_without_version_suffix() {
         "pkg".to_string(),
         "--package-source-root".to_string(),
         "node_modules".to_string(),
+        "--reference-source-root".to_string(),
+        "Codes/claude-code/src".to_string(),
         "--materialize-package-sources".to_string(),
         "--apply".to_string(),
     ])
@@ -160,6 +162,10 @@ fn parses_match_packages_command_without_version_suffix() {
     assert_eq!(
         args.package_source_roots,
         vec![PathBuf::from("node_modules")]
+    );
+    assert_eq!(
+        args.reference_source_roots,
+        vec![PathBuf::from("Codes/claude-code/src")]
     );
     assert!(args.materialize_package_sources);
     assert!(args.apply);
@@ -291,6 +297,8 @@ fn parses_package_version_diagnostics_command() {
         "@opentelemetry/api".to_string(),
         "--package-source-root".to_string(),
         "node_modules".to_string(),
+        "--reference-source-root".to_string(),
+        "Codes/claude-code/src".to_string(),
         "--materialize-package-sources".to_string(),
         "--top".to_string(),
         "3".to_string(),
@@ -303,6 +311,10 @@ fn parses_package_version_diagnostics_command() {
     assert_eq!(
         args.package_source_roots,
         vec![PathBuf::from("node_modules")]
+    );
+    assert_eq!(
+        args.reference_source_roots,
+        vec![PathBuf::from("Codes/claude-code/src")]
     );
     assert!(args.materialize_package_sources);
     assert_eq!(args.top, 3);
@@ -472,6 +484,7 @@ fn help_text_documents_commands_and_options() {
     assert!(help_text(HelpTopic::GenerateProjectV2).contains("--output <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-name <NAME>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--package-source-root <DIR>"));
+    assert!(help_text(HelpTopic::MatchPackages).contains("--reference-source-root <DIR>"));
     assert!(help_text(HelpTopic::MatchPackages).contains("--materialize-package-sources"));
     assert!(help_text(HelpTopic::MatchPackagesReport).contains("source_eliminated"));
     assert!(help_text(HelpTopic::PackageVersionDiagnostics).contains("--top <N>"));
@@ -3333,6 +3346,7 @@ fn match_packages_runs_bundle_extraction_before_matcher() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
     let outcome = match_packages_from_connection(&mut connection, &args).expect("match should run");
@@ -3369,6 +3383,7 @@ fn match_packages_skips_cache_and_pipeline_when_no_package_scope_exists() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3400,6 +3415,7 @@ fn match_packages_dry_run_does_not_write_attribution() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3450,6 +3466,7 @@ fn match_packages_revalidates_requested_existing_accepted_attribution() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3530,6 +3547,7 @@ fn match_packages_without_filter_revalidates_existing_accepted_attribution() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3586,6 +3604,7 @@ fn match_packages_reports_and_skips_invalid_package_module_slice() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3624,6 +3643,7 @@ fn match_packages_rejects_trailing_garbage_package_module_slice() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3680,6 +3700,7 @@ fn match_packages_externalizes_unrestricted_subpath_from_package_source_root() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3753,6 +3774,7 @@ fn match_packages_externalizes_public_export_from_package_source_root() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3814,6 +3836,7 @@ fn match_packages_externalizes_exported_package_json_from_package_source_root() 
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -3890,6 +3913,7 @@ fn match_packages_externalizes_package_needed_by_different_package_consumer() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4426,6 +4450,7 @@ fn match_packages_externalizes_wildcard_export_from_package_source_root() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4493,6 +4518,7 @@ fn match_packages_externalizes_conditional_wildcard_export_from_package_source_r
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4545,6 +4571,7 @@ fn match_packages_forces_require_only_conditional_export_external() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4616,6 +4643,7 @@ fn match_packages_forces_ambiguous_wildcard_export_external() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4680,6 +4708,7 @@ fn match_packages_uses_package_source_root_without_cache_table() {
         apply: false,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().to_path_buf()],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4715,6 +4744,7 @@ fn match_packages_promotes_full_cascade_function_coverage_to_module_attribution(
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4775,6 +4805,7 @@ fn match_packages_forces_source_only_cascade_ownership_external() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: vec![tempdir.path().join("project")],
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4868,6 +4899,7 @@ fn match_packages_persists_anonymous_bundle_package_ownership() {
         apply: true,
         package_names: vec!["pkg".to_string()],
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -4946,6 +4978,7 @@ fn match_packages_forces_structural_bag_ownership_external() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5054,6 +5087,7 @@ fn match_packages_promotes_dependency_closure_ownership_for_wrapper() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5136,6 +5170,7 @@ fn match_packages_resolves_weak_unversioned_hint_to_forced_external() {
         apply: true,
         package_names: vec!["rxjs".to_string()],
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5229,6 +5264,7 @@ fn match_packages_forces_partial_cascade_coverage_external() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5313,6 +5349,7 @@ fn match_packages_scopes_cascade_by_module_package_version_hint() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5379,6 +5416,7 @@ fn match_packages_package_name_filter_skips_unrequested_modules() {
         apply: false,
         package_names: vec!["pkg".to_string()],
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5422,6 +5460,7 @@ fn match_packages_apply_writes_best_version_from_binary_matcher() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5467,6 +5506,7 @@ fn match_packages_apply_writes_function_attribution() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5537,6 +5577,7 @@ fn match_packages_dry_run_does_not_persist_function_attributions() {
         apply: false,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5585,6 +5626,7 @@ fn unversioned_package_versions_resolve_to_latest_cached_version() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5672,6 +5714,7 @@ fn match_packages_apply_replaces_proposed_rows_with_forced_external_decisions() 
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5732,6 +5775,7 @@ fn match_packages_apply_writes_source_import_package_surface() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
@@ -5785,6 +5829,7 @@ fn match_packages_respects_agent_rejected_package_surface_decision() {
         apply: true,
         package_names: Vec::new(),
         package_source_roots: Vec::new(),
+        reference_source_roots: Vec::new(),
         materialize_package_sources: false,
     };
 
