@@ -156,10 +156,10 @@ impl<'a> Visit<'a> for BindsUndefined {
     fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
         // Record the function's own name (a binding in the enclosing
         // scope) but do not descend into its params/body (inner scope).
-        if let Some(id) = &func.id {
-            if id.name == "undefined" {
-                self.found = true;
-            }
+        if let Some(id) = &func.id
+            && id.name == "undefined"
+        {
+            self.found = true;
         }
     }
 
@@ -187,14 +187,14 @@ where
 fn function_binds_undefined(func: &Function<'_>) -> bool {
     let mut scan = BindsUndefined { found: false };
     scan.visit_formal_parameters(&func.params);
-    if !scan.found {
-        if let Some(body) = &func.body {
-            for stmt in &body.statements {
-                if scan.found {
-                    break;
-                }
-                scan.visit_statement(stmt);
+    if !scan.found
+        && let Some(body) = &func.body
+    {
+        for stmt in &body.statements {
+            if scan.found {
+                break;
             }
+            scan.visit_statement(stmt);
         }
     }
     scan.found

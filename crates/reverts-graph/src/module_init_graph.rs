@@ -206,6 +206,33 @@ impl ModuleInitGraph {
         tarjan_scc(&adjacency)
     }
 
+    /// Node indices reachable from `roots` by following RAW import edges
+    /// (forward, transitive). The roots themselves are included. This is the
+    /// emitted module-import closure — e.g. the files an entrypoint statically
+    /// pulls in. Roots absent from the graph are skipped.
+    #[must_use]
+    pub fn import_reachable_from<'a>(
+        &self,
+        roots: impl IntoIterator<Item = &'a str>,
+    ) -> BTreeSet<usize> {
+        let mut reachable = BTreeSet::new();
+        let mut stack: Vec<usize> = roots
+            .into_iter()
+            .filter_map(|path| self.index.get(path).copied())
+            .collect();
+        while let Some(node) = stack.pop() {
+            if !reachable.insert(node) {
+                continue;
+            }
+            for &target in &self.imports[node] {
+                if !reachable.contains(&target) {
+                    stack.push(target);
+                }
+            }
+        }
+        reachable
+    }
+
     /// Node indices in a non-trivial import cycle.
     #[must_use]
     pub fn import_cyclic_modules(&self) -> BTreeSet<usize> {
@@ -262,7 +289,10 @@ fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
                 on_stack[v] = true;
             }
             if child_pos < adj[v].len() {
-                call_stack.last_mut().unwrap().1 += 1;
+                call_stack
+                    .last_mut()
+                    .expect("call_stack is non-empty inside the `while let Some(last)` loop")
+                    .1 += 1;
                 let w = adj[v][child_pos];
                 if index[w] == usize::MAX {
                     call_stack.push((w, 0));
@@ -273,7 +303,9 @@ fn tarjan_scc(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
                 if low[v] == index[v] {
                     let mut component = Vec::new();
                     loop {
-                        let w = stack.pop().unwrap();
+                        let w = stack
+                            .pop()
+                            .expect("root `v` was pushed onto stack, so the SCC drain reaches it");
                         on_stack[w] = false;
                         component.push(w);
                         if w == v {
@@ -331,8 +363,16 @@ fn extract_module_edges(
         return (BTreeSet::new(), BTreeMap::new());
     }
     let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+    // Raw import adjacency is the over-approximate eval-order superset: every
+    // relative module this file depends on for evaluation, including bare
+    // side-effect imports (`import './x'`) and re-exports (`export … from`)
+    // that bind no local name. Cyclic-init consumers (de-lazification) read
+    // `import_cyclic_modules` off this, where a missed edge could only cause an
+    // UNSAFE de-lazification — so the import set must never under-approximate.
+    let import_targets = relative_import_targets(&parsed.program, dir, index);
+    // Init edges, by contrast, are keyed by the local bindings a module imports
+    // and references at init time — only named/default/namespace imports qualify.
     let imports = import_bindings(&parsed.program, dir, index);
-    let import_targets: BTreeSet<usize> = imports.values().copied().collect();
     if imports.is_empty() {
         return (import_targets, BTreeMap::new());
     }
@@ -369,6 +409,37 @@ fn extract_module_edges(
         }
     }
     (import_targets, visitor.edges)
+}
+
+/// Every relative module this source depends on for evaluation: named, default,
+/// namespace, and bare side-effect imports, plus `export … from` / `export *
+/// from` re-exports. Broader than [`import_bindings`] (which keys on local
+/// binding names) — this is the raw eval-order superset, so the import-cycle SCC
+/// never under-approximates. Only relative specifiers present in `index` count.
+fn relative_import_targets(
+    program: &Program<'_>,
+    dir: &str,
+    index: &BTreeMap<String, usize>,
+) -> BTreeSet<usize> {
+    let mut targets = BTreeSet::new();
+    for statement in &program.body {
+        let specifier = match statement {
+            Statement::ImportDeclaration(import) => Some(import.source.value.as_str()),
+            Statement::ExportNamedDeclaration(export) => {
+                export.source.as_ref().map(|source| source.value.as_str())
+            }
+            Statement::ExportAllDeclaration(export) => Some(export.source.value.as_str()),
+            _ => None,
+        };
+        let Some(specifier) = specifier else { continue };
+        if !(specifier.starts_with("./") || specifier.starts_with("../")) {
+            continue;
+        }
+        if let Some(&node) = index.get(&normalize_module_path(dir, specifier)) {
+            targets.insert(node);
+        }
+    }
+    targets
 }
 
 /// Map every imported local binding name to the node index of the module it is
@@ -566,6 +637,53 @@ mod tests {
             !deps.contains_key(&late),
             "deferred-only references are not init dependencies"
         );
+    }
+
+    #[test]
+    fn import_reachable_from_follows_imports_and_reexports_transitively() {
+        // cli → entry (named) → used (named) and entry → side (bare); used → deep
+        // (re-export). `dead` is imported by nobody. Reachable closure from cli
+        // must be {cli, entry, used, side, deep}, excluding dead.
+        let cli = "import { main } from './entry.js';\n";
+        let entry = "import { v } from './used.js';\nimport './side.js';\nexport var main = 1;\n";
+        let used = "export { w } from './deep.js';\nexport var v = 2;\n";
+        let side = "export var s = 3;\n";
+        let deep = "export var w = 4;\n";
+        let dead = "export var d = 5;\n";
+        let graph = ModuleInitGraph::from_emitted_modules([
+            ("cli.ts", cli),
+            ("entry.ts", entry),
+            ("used.ts", used),
+            ("side.ts", side),
+            ("deep.ts", deep),
+            ("dead.ts", dead),
+        ]);
+        let reachable: BTreeSet<&str> = graph
+            .import_reachable_from(["cli.ts"])
+            .into_iter()
+            .map(|n| graph.path(n).unwrap())
+            .collect();
+        assert_eq!(
+            reachable,
+            BTreeSet::from(["cli.ts", "entry.ts", "used.ts", "side.ts", "deep.ts"])
+        );
+    }
+
+    #[test]
+    fn raw_import_graph_includes_bare_imports_and_reexports() {
+        // a → b via a BARE side-effect import (binds no local name); b → a via a
+        // re-export (`export … from`). Neither form creates an init-edge binding,
+        // but both are genuine eval-order dependencies, so the RAW import graph
+        // must see the a↔b cycle (the over-approximate superset de-lazification
+        // relies on to never under-approximate).
+        let a = "import './b.js';\nexport var x = 1;\n";
+        let b = "export { x } from './a.js';\n";
+        let graph = ModuleInitGraph::from_emitted_modules([("a.ts", a), ("b.ts", b)]);
+        let ai = graph.index_of("a.ts").unwrap();
+        let bi = graph.index_of("b.ts").unwrap();
+        assert_eq!(graph.import_cyclic_modules(), BTreeSet::from([ai, bi]));
+        // No init-time binding references exist, so the refined init graph is acyclic.
+        assert!(graph.cyclic_modules(InitEdgeFilter::All).is_empty());
     }
 
     #[test]

@@ -269,120 +269,6 @@ fn imported_lazy_value_names(source: &str) -> BTreeSet<String> {
     names
 }
 
-/// Normalize a `/`-separated path, resolving `.`/`..`, and map a trailing `.js`
-/// to `.ts` (the emitted module extension).
-fn normalize_module_path(dir: &str, specifier: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in dir.split('/').chain(specifier.split('/')) {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            other => parts.push(other),
-        }
-    }
-    let mut path = parts.join("/");
-    if let Some(stripped) = path.strip_suffix(".js") {
-        path = format!("{stripped}.ts");
-    } else if !path.ends_with(".ts") {
-        path.push_str(".ts");
-    }
-    path
-}
-
-/// Resolved file paths this source imports, from every `from '…'` and bare
-/// `import '…'` relative specifier.
-fn imported_files(source: &str, file_path: &str) -> BTreeSet<String> {
-    let dir = file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-    let bytes = source.as_bytes();
-    let mut out = BTreeSet::new();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if !source.is_char_boundary(i) {
-            i += 1;
-            continue;
-        }
-        // Look for `from` or `import` immediately preceding a quoted specifier.
-        let matched = (source[i..].starts_with("from") && i + 4 < bytes.len())
-            || (source[i..].starts_with("import") && i + 6 < bytes.len());
-        if matched {
-            let kw_len = if bytes[i] == b'f' { 4 } else { 6 };
-            let mut j = skip_ws(bytes, i + kw_len);
-            if matches!(bytes.get(j), Some(b'\'') | Some(b'"')) {
-                let quote = bytes[j];
-                if let Some(rel) = source[j + 1..].find(quote as char) {
-                    let spec = &source[j + 1..j + 1 + rel];
-                    if spec.starts_with("./") || spec.starts_with("../") {
-                        out.insert(normalize_module_path(dir, spec));
-                    }
-                    j = j + 1 + rel + 1;
-                }
-            }
-            i = j.max(i + 1);
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
-/// Tarjan SCC; returns the set of node indices that are in a non-trivial SCC
-/// (size > 1) or have a self-edge — the cyclic nodes.
-fn cyclic_indices(n: usize, adj: &[Vec<usize>]) -> BTreeSet<usize> {
-    let mut index = vec![usize::MAX; n];
-    let mut low = vec![0usize; n];
-    let mut on_stack = vec![false; n];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut next_index = 0usize;
-    let mut cyclic = BTreeSet::new();
-    for start in 0..n {
-        if index[start] != usize::MAX {
-            continue;
-        }
-        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
-        while let Some(&(v, child_pos)) = call_stack.last() {
-            if child_pos == 0 {
-                index[v] = next_index;
-                low[v] = next_index;
-                next_index += 1;
-                stack.push(v);
-                on_stack[v] = true;
-            }
-            if child_pos < adj[v].len() {
-                call_stack.last_mut().unwrap().1 += 1;
-                let w = adj[v][child_pos];
-                if index[w] == usize::MAX {
-                    call_stack.push((w, 0));
-                } else if on_stack[w] {
-                    low[v] = low[v].min(index[w]);
-                }
-            } else {
-                if low[v] == index[v] {
-                    let mut members = Vec::new();
-                    loop {
-                        let w = stack.pop().unwrap();
-                        on_stack[w] = false;
-                        members.push(w);
-                        if w == v {
-                            break;
-                        }
-                    }
-                    let self_loop = adj[v].contains(&v);
-                    if members.len() > 1 || self_loop {
-                        cyclic.extend(members);
-                    }
-                }
-                call_stack.pop();
-                if let Some(&(parent, _)) = call_stack.last() {
-                    low[parent] = low[parent].min(low[v]);
-                }
-            }
-        }
-    }
-    cyclic
-}
-
 /// True if `body` (a thunk factory's block body) contains a `return` at the
 /// factory's own statement level — i.e. NOT inside a nested function/arrow block.
 /// The memoizer returns the factory's return value, so a body with no top-level
@@ -432,14 +318,12 @@ fn called_names(joined: &[String]) -> BTreeSet<String> {
                 && (cursor == 0
                     || (!is_ascii_identifier_continue(bytes[cursor - 1])
                         && bytes[cursor - 1] != b'.'));
-            if at_word_boundary {
-                if let Some((name, after)) = parse_identifier(source, cursor) {
-                    if bytes.get(skip_ws(bytes, after)) == Some(&b'(') {
-                        names.insert(name.to_string());
-                    }
-                    cursor = after;
-                    continue;
+            if at_word_boundary && let Some((name, after)) = parse_identifier(source, cursor) {
+                if bytes.get(skip_ws(bytes, after)) == Some(&b'(') {
+                    names.insert(name.to_string());
                 }
+                cursor = after;
+                continue;
             }
             cursor += 1;
         }
@@ -451,22 +335,24 @@ fn called_names(joined: &[String]) -> BTreeSet<String> {
 pub(crate) fn delazify_init_chains(plan: &mut EmitPlan) -> usize {
     let joined: Vec<String> = plan.files.iter().map(|f| f.body.join("\n")).collect();
     let paths: Vec<String> = plan.files.iter().map(|f| f.path.clone()).collect();
-    let path_index: BTreeMap<&str, usize> = paths
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.as_str(), i))
-        .collect();
 
-    // Module IMPORT graph (the eval-order graph).
-    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); plan.files.len()];
-    for (i, source) in joined.iter().enumerate() {
-        for dep in imported_files(source, &paths[i]) {
-            if let Some(&j) = path_index.get(dep.as_str()) {
-                adj[i].push(j);
-            }
-        }
-    }
-    let cyclic = cyclic_indices(plan.files.len(), &adj);
+    // Module IMPORT graph cyclicity, via the first-class `ModuleInitGraph`. Its
+    // raw import adjacency is the AST-derived over-approximate eval-order
+    // superset (named/bare imports + `export … from` re-exports), so a missed
+    // edge can only ADD a false cycle and skip a candidate — never de-lazify an
+    // unsafe one, the soundness invariant this pass requires. A thunk is
+    // de-lazified only in an ACYCLIC file (singleton SCC, no self-import).
+    let init_graph = reverts_graph::ModuleInitGraph::from_emitted_modules(
+        paths.iter().cloned().zip(joined.iter().cloned()),
+    );
+    let cyclic_nodes = init_graph.import_cyclic_modules();
+    let cyclic: BTreeSet<usize> = (0..plan.files.len())
+        .filter(|&i| {
+            init_graph
+                .index_of(&paths[i])
+                .is_some_and(|node| cyclic_nodes.contains(&node))
+        })
+        .collect();
 
     // Whole-program set of invoked names (return-value-use gate companion).
     let called = called_names(&joined);
