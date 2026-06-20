@@ -5536,6 +5536,145 @@ fn match_function_lists_inner(
         }
     }
 
+    // ACCEPT pass 6b: CALLER-GRAPH PROPAGATION (incoming edges; iterative).
+    //
+    // The dual of pass 6. Pass 6 matches a function by WHO IT CALLS; this matches
+    // by WHO CALLS IT — two functions invoked by the same already-matched
+    // functions are the same function. This recovers the functions pass 6 misses:
+    // leaf/utility functions with few or generic callees of their own, but a
+    // distinctive caller context. Restricted to CONFIRMED MODULE PAIRS (subject
+    // module ↔ reference file) so a caller token resolves within one scope and the
+    // 0-false-positive discipline holds; a caller is only counted once it is an
+    // ACCEPTED match (translated through `name_map`). Iterates so newly matched
+    // callers seed the next round, exactly like pass 6.
+    const CALLER_PROPAGATE_MIN_SHARED: usize = 2;
+    const CALLER_PROPAGATE_MAX_ROUNDS: usize = 4;
+    let caller_rounds = if island_mode {
+        0
+    } else {
+        CALLER_PROPAGATE_MAX_ROUNDS
+    };
+    for _round in 0..caller_rounds {
+        let name_map: BTreeMap<String, String> = rows
+            .iter()
+            .filter(|row| row.accepted)
+            .map(|row| (row.original_name.clone(), row.semantic_name.clone()))
+            .collect();
+        let mut new_rows: Vec<BindingNameRow> = Vec::new();
+        let mut round_matches = 0usize;
+        for (module_id, subject_indices) in &subject_by_module {
+            let Some(file) = module_matched_file.get(module_id) else {
+                continue;
+            };
+            let Some(reference_indices) = ref_by_file.get(file.as_str()) else {
+                continue;
+            };
+            // Within this confirmed pair: callee name → the functions that call it.
+            let mut subject_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &si in subject_indices {
+                let caller = &subject_fns[si];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        subject_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            let mut reference_callers: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+            for &ri in reference_indices {
+                let caller = &reference_fns[ri];
+                for callee in &caller.callees {
+                    if let Some(callee_name) = callee.strip_prefix("c:") {
+                        reference_callers
+                            .entry(callee_name)
+                            .or_default()
+                            .insert(caller.name.as_str());
+                    }
+                }
+            }
+            for &si in subject_indices {
+                let subject = &subject_fns[si];
+                if accepted.contains(&(subject.module_id, subject.name.clone())) {
+                    continue;
+                }
+                // Resolved callers of this subject function: the real names of the
+                // ACCEPTED functions that call it. Unmatched callers contribute
+                // nothing — only confirmed edges count.
+                let resolved: BTreeSet<&str> = subject_callers
+                    .get(subject.name.as_str())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|caller| name_map.get(*caller).map(String::as_str))
+                    .collect();
+                if resolved.len() < CALLER_PROPAGATE_MIN_SHARED {
+                    continue;
+                }
+                // Best reference function in this file by shared-caller overlap,
+                // with a clear margin over the runner-up and arity agreement.
+                let mut best: Option<(usize, usize)> = None;
+                let mut runner = 0usize;
+                for &ri in reference_indices {
+                    if used_ref.contains(&ri) {
+                        continue;
+                    }
+                    let reference = &reference_fns[ri];
+                    if reference.fingerprint.param_count != subject.fingerprint.param_count {
+                        continue;
+                    }
+                    let Some(reference_caller_set) = reference_callers.get(reference.name.as_str())
+                    else {
+                        continue;
+                    };
+                    let overlap = resolved
+                        .iter()
+                        .filter(|caller| reference_caller_set.contains(*caller))
+                        .count();
+                    if overlap == 0 {
+                        continue;
+                    }
+                    match best {
+                        Some((best_overlap, _)) if overlap <= best_overlap => {
+                            runner = runner.max(overlap);
+                        }
+                        Some((best_overlap, _)) => {
+                            runner = runner.max(best_overlap);
+                            best = Some((overlap, ri));
+                        }
+                        None => best = Some((overlap, ri)),
+                    }
+                }
+                let Some((overlap, ri)) = best else {
+                    continue;
+                };
+                if overlap < CALLER_PROPAGATE_MIN_SHARED || overlap <= runner {
+                    continue;
+                }
+                let reference = &reference_fns[ri];
+                accepted.insert((subject.module_id, subject.name.clone()));
+                used_ref.insert(ri);
+                new_rows.push(BindingNameRow {
+                    module_id: subject.module_id,
+                    subject_path: subject.subject_path.clone(),
+                    reference_file: reference.file.clone(),
+                    original_name: subject.name.clone(),
+                    semantic_name: reference.name.clone(),
+                    accepted: true,
+                    ast_hash: subject.fingerprint.primary.ast,
+                    param_count: subject.fingerprint.param_count,
+                    statement_count: subject.fingerprint.statement_count,
+                    score: 5.1,
+                });
+                round_matches += 1;
+            }
+        }
+        rows.extend(new_rows);
+        if round_matches == 0 {
+            break;
+        }
+    }
+
     // PROPOSAL pass: global, for every subject function not auto-accepted.
     // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
     // string literals (the latter recovers functions whose AST drifted across
