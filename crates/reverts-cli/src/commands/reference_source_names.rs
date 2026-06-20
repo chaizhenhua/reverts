@@ -2940,43 +2940,53 @@ fn normalized_anchor_overlap(
 }
 
 fn candidate_relevance(evidence: MatchEvidence) -> f64 {
+    // Hub-resistant signals rank candidates on their own: content anchors
+    // (IDF-weighted / normalized) and Jaccard similarities (union-normalized, so
+    // a large reference file does NOT score high against a small module).
     (if evidence.hash_match { 1.0e9 } else { 0.0 })
         + (evidence.asset_overlap as f64) * 1.0e6
         + evidence.normalized_anchor * 150.0
         + evidence.weighted_anchor
         + (evidence.export_overlap as f64) * 8.0
         + (evidence.function_overlap as f64) * 4.0
-        + (evidence.top_level_declaration_overlap as f64) * 18.0
+        + evidence.source_score.function_axis_jaccard * 120.0
+        + evidence.source_score.jsx_react_shape_jaccard * 80.0
+        + evidence.source_score.anchor_cooccurrence_jaccard * 70.0
+        + (evidence.graph.matched_edges as f64) * 35.0
+        + evidence.graph.coverage() * 75.0
+        + corroborated_structural_relevance(evidence)
+}
+
+/// Raw-count and containment structural/shape overlaps reward reference-file
+/// MAGNITUDE: a large hub file (`services/mcp/client.ts`, `screens/REPL.tsx`)
+/// shares many declarations / members / grams with any small module by chance,
+/// and `function_axis_containment` is ~1.0 whenever a small module's generic
+/// functions are a subset of a big file. Added un-gated, these let hubs out-rank
+/// and DISPLACE genuine content matches (observed: 161 of 166 lost modules were
+/// displaced onto a few hub files). So they count only when corroborated by real
+/// content (anchors), the dependency graph, or a unique string anchor — the same
+/// "structural is corroborating, not standalone" rule the pre-refactor matcher
+/// documented and relied on. Jaccard similarities (above) stay standalone
+/// because union normalization already makes them hub-resistant.
+fn corroborated_structural_relevance(evidence: MatchEvidence) -> f64 {
+    let corroborated = evidence.weighted_anchor >= MEDIUM_STRUCTURAL_WEIGHTED_ANCHOR
+        || evidence.normalized_anchor >= MEDIUM_STRUCTURAL_NORMALIZED_ANCHOR
+        || evidence.source_score.unique_string_anchor_overlap >= 1
+        || evidence.graph.matched_edges >= 1;
+    if !corroborated {
+        return 0.0;
+    }
+    (evidence.top_level_declaration_overlap as f64) * 18.0
         + (evidence.import_export_surface_overlap as f64) * 16.0
         + (evidence.class_member_overlap as f64) * 18.0
         + (evidence.statement_window_overlap as f64) * 10.0
         + (evidence.block_branch_overlap as f64) * 8.0
         + (evidence.pq_gram_overlap as f64) * 6.0
         + (evidence.wl_overlap as f64) * 5.0
-        + evidence.source_score.function_axis_jaccard * 120.0
         + evidence.source_score.function_axis_containment * 60.0
-        + evidence.source_score.jsx_react_shape_jaccard * 80.0
         + (evidence.source_score.jsx_react_shape_overlap as f64) * 8.0
-        + evidence.source_score.anchor_cooccurrence_jaccard * 70.0
         + (evidence.source_score.anchor_cooccurrence_overlap as f64) * 4.0
-        + structural_relevance_score(evidence)
-        + (evidence.graph.matched_edges as f64) * 35.0
-        + evidence.graph.coverage() * 75.0
-}
-
-fn structural_relevance_score(evidence: MatchEvidence) -> f64 {
-    if evidence.weighted_anchor >= AMBIGUOUS_PROMOTION_MIN_WEIGHTED_ANCHOR
-        || evidence.normalized_anchor >= AMBIGUOUS_PROMOTION_MIN_NANCHOR
-        || evidence.source_score.unique_string_anchor_overlap >= 1
-        || evidence.graph.matched_edges >= 1
-        || evidence.top_level_declaration_overlap >= 1
-        || evidence.import_export_surface_overlap >= 1
-        || evidence.class_member_overlap >= 1
-    {
-        evidence.structural_score * 60.0
-    } else {
-        0.0
-    }
+        + evidence.structural_score * 60.0
 }
 
 fn raw_match_tier(evidence: MatchEvidence) -> MatchTier {
@@ -5228,6 +5238,63 @@ var localValue,initFeature=E(()=>{localValue="distinct-anchor";});"#;
             ..base
         };
         assert_eq!(raw_match_tier(corroborated), MatchTier::Medium);
+    }
+
+    #[test]
+    fn structural_hub_does_not_outrank_content_match_in_ranking() {
+        // Regression: large hub files (e.g. services/mcp/client.ts) accumulated
+        // raw-count structural overlaps + containment ~1.0 and DISPLACED genuine
+        // content matches in candidate ranking (161 of 166 lost modules). A
+        // content candidate must out-rank a structural-only hub, and an
+        // uncorroborated hub's structural terms must not score at all.
+        let hub = MatchEvidence {
+            hash_match: false,
+            asset_overlap: 0,
+            export_overlap: 0,
+            function_overlap: 0,
+            top_level_declaration_overlap: 20,
+            import_export_surface_overlap: 20,
+            class_member_overlap: 20,
+            statement_window_overlap: 20,
+            block_branch_overlap: 20,
+            pq_gram_overlap: 20,
+            wl_overlap: 20,
+            source_score: SourceEvidenceScore {
+                function_axis_containment: 1.0,
+                ..SourceEvidenceScore::default()
+            },
+            structural_score: 0.6,
+            graph: GraphEvidence::default(),
+            weighted_anchor: 0.0, // NO content corroboration
+            normalized_anchor: 0.0,
+        };
+        let content = MatchEvidence {
+            hash_match: false,
+            asset_overlap: 0,
+            export_overlap: 0,
+            function_overlap: 0,
+            top_level_declaration_overlap: 0,
+            import_export_surface_overlap: 0,
+            class_member_overlap: 0,
+            statement_window_overlap: 0,
+            block_branch_overlap: 0,
+            pq_gram_overlap: 0,
+            wl_overlap: 0,
+            source_score: SourceEvidenceScore::default(),
+            structural_score: 0.0,
+            graph: GraphEvidence::default(),
+            weighted_anchor: 12.0,
+            normalized_anchor: 0.35, // genuine content overlap
+        };
+        assert_eq!(
+            candidate_relevance(hub),
+            0.0,
+            "uncorroborated hub structural terms must not score"
+        );
+        assert!(
+            candidate_relevance(content) > candidate_relevance(hub),
+            "content match must out-rank structural-only hub"
+        );
     }
 
     #[test]
