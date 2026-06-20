@@ -3,7 +3,7 @@ use oxc_ast::Visit;
 use oxc_ast::ast::{
     ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPatternKind,
     Expression, FormalParameters, Function, FunctionBody, MethodDefinition, ObjectProperty,
-    Program, PropertyDefinition, PropertyKey, VariableDeclarator,
+    Program, PropertyDefinition, PropertyKey, StringLiteral, VariableDeclarator,
 };
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
@@ -288,6 +288,69 @@ impl<'a> Visit<'a> for FunctionNameExtractor {
             self.record(&assignment.right, &name);
         }
         oxc_ast::visit::walk::walk_assignment_expression(self, assignment);
+    }
+}
+
+/// Minimum string-literal length to count as a distinctive function anchor.
+/// Short strings (`"id"`, `"ok"`, `","`) are too common to identify a function.
+const MIN_LITERAL_LEN: usize = 5;
+
+/// Per-function distinctive string literals, keyed by the same (stripped-source)
+/// span as [`FunctionExtractor::fingerprint`]'s [`FunctionId`]. Each literal is
+/// attributed to its INNERMOST enclosing function. A literal that occurs in
+/// exactly one reference function is a strong cross-build match anchor even when
+/// the function's AST hash has drifted across versions.
+#[must_use]
+pub fn function_string_literals(
+    source: &str,
+) -> std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>> {
+    let source = strip_outer_block_braces(source);
+    let alloc = Allocator::default();
+    let source_type = SourceType::default().with_typescript(true).with_jsx(true);
+    let parsed = Parser::new(&alloc, source, source_type)
+        .with_options(parse_options_for(source_type))
+        .parse();
+    if parsed.panicked || !parsed.errors.is_empty() {
+        return std::collections::BTreeMap::new();
+    }
+    let mut extractor = FunctionLiteralExtractor {
+        stack: Vec::new(),
+        literals: std::collections::BTreeMap::new(),
+    };
+    extractor.visit_program(&parsed.program);
+    extractor.literals
+}
+
+struct FunctionLiteralExtractor {
+    stack: Vec<ByteRange>,
+    literals: std::collections::BTreeMap<ByteRange, std::collections::BTreeSet<String>>,
+}
+
+impl<'a> Visit<'a> for FunctionLiteralExtractor {
+    fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        let span = func.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_function(self, func, flags);
+        self.stack.pop();
+    }
+
+    fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let span = arrow.span();
+        self.stack.push(ByteRange::new(span.start, span.end));
+        oxc_ast::visit::walk::walk_arrow_function_expression(self, arrow);
+        self.stack.pop();
+    }
+
+    fn visit_string_literal(&mut self, literal: &StringLiteral<'a>) {
+        if let Some(&top) = self.stack.last() {
+            let value = literal.value.as_str();
+            if value.len() >= MIN_LITERAL_LEN {
+                self.literals
+                    .entry(top)
+                    .or_default()
+                    .insert(value.to_string());
+            }
+        }
     }
 }
 
@@ -1069,6 +1132,31 @@ ns.prototype.protoMethod = (h) => h;
         assert!(
             !names.contains("map"),
             "anonymous callback must not be named: {names:?}"
+        );
+    }
+
+    #[test]
+    fn function_string_literals_attributes_to_innermost_function_and_skips_short() {
+        let source = "\
+function outer() {
+  const m = \"distinctiveOuterMessage\";
+  return (x) => \"innerArrowToken\" + x + \"ok\";
+}";
+        let lits = function_string_literals(source);
+        let fns = FunctionExtractor::fingerprint(ModuleId(1), source);
+        // outer fn owns the >=5-char outer message; the arrow owns its token.
+        let all: std::collections::BTreeSet<&str> =
+            lits.values().flatten().map(String::as_str).collect();
+        assert!(all.contains("distinctiveOuterMessage"), "{all:?}");
+        assert!(all.contains("innerArrowToken"), "{all:?}");
+        assert!(
+            !all.contains("ok"),
+            "short literal must be skipped: {all:?}"
+        );
+        // spans align with fingerprint function ids
+        assert!(
+            fns.iter().any(|f| lits.contains_key(&f.id.span)),
+            "literal spans should match function ids"
         );
     }
 

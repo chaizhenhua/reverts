@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
-use reverts_graph::{FunctionExtractor, extract_import_specifiers, function_names};
+use reverts_graph::{
+    FunctionExtractor, extract_import_specifiers, function_names, function_string_literals,
+};
 use reverts_input::PackageAttributionStatus;
 use reverts_ir::{AxisHashes, FunctionFingerprint, ModuleId};
 use reverts_package_matcher::{
@@ -1423,6 +1425,7 @@ struct ReferenceFunction {
     file: String,
     name: String,
     fingerprint: FunctionFingerprint,
+    literals: BTreeSet<String>,
 }
 
 /// One subject (emitted) function with a recoverable name.
@@ -1431,6 +1434,7 @@ struct SubjectFunction {
     subject_path: String,
     name: String,
     fingerprint: FunctionFingerprint,
+    literals: BTreeSet<String>,
 }
 
 /// Every named, specifically-named function across the whole reference tree.
@@ -1441,12 +1445,15 @@ fn collect_reference_functions(index: &ReferenceSourceIndex) -> Vec<ReferenceFun
             .into_iter()
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
+        let mut literals = function_string_literals(module.source.as_str());
         for fingerprint in FunctionExtractor::fingerprint(ModuleId(0), module.source.as_str()) {
             if let Some(name) = names.get(&fingerprint.id.span) {
+                let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(ReferenceFunction {
                     file: module.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
+                    literals: function_literals,
                 });
             }
         }
@@ -1459,15 +1466,18 @@ fn collect_subject_functions(subjects: &[SubjectModule]) -> Vec<SubjectFunction>
     let mut out = Vec::new();
     for subject in subjects {
         let names = function_names(subject.source.as_str());
+        let mut literals = function_string_literals(subject.source.as_str());
         for fingerprint in
             FunctionExtractor::fingerprint(ModuleId(subject.module_id), subject.source.as_str())
         {
             if let Some(name) = names.get(&fingerprint.id.span) {
+                let function_literals = literals.remove(&fingerprint.id.span).unwrap_or_default();
                 out.push(SubjectFunction {
                     module_id: subject.module_id,
                     subject_path: subject.file_path.clone(),
                     name: name.clone(),
                     fingerprint,
+                    literals: function_literals,
                 });
             }
         }
@@ -1493,10 +1503,19 @@ fn match_function_lists(
 ) -> Vec<BindingNameRow> {
     let mut ref_by_file: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     let mut ref_by_any: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+    // Distinctive in-body string literal -> reference functions containing it.
+    // A literal in exactly ONE reference function anchors AST-drifted matches.
+    let mut ref_by_literal: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, r) in reference_fns.iter().enumerate() {
         ref_by_file.entry(r.file.as_str()).or_default().push(index);
         for hash in function_ast_hashes(&r.fingerprint) {
             ref_by_any.entry(hash).or_default().push(index);
+        }
+        for literal in &r.literals {
+            ref_by_literal
+                .entry(literal.as_str())
+                .or_default()
+                .push(index);
         }
     }
     let mut subject_by_module: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
@@ -1625,23 +1644,43 @@ fn match_function_lists(
     }
 
     // PROPOSAL pass: global, for every subject function not auto-accepted.
+    // Candidates come from shared AST hashes AND shared DISTINCTIVE in-body
+    // string literals (the latter recovers functions whose AST drifted across
+    // versions but kept a unique error message / URL / config key).
     for subject in subject_fns {
         if accepted.contains(&(subject.module_id, subject.name.clone())) {
             continue;
         }
-        let mut candidates = BTreeSet::<usize>::new();
+        let mut scores = BTreeMap::<usize, f64>::new();
         for h in function_ast_hashes(&subject.fingerprint) {
             if let Some(indices) = ref_by_any.get(&h) {
-                candidates.extend(indices.iter().copied());
+                for &ri in indices {
+                    if let Some(score) =
+                        binding_proposal_score(&subject.fingerprint, &reference_fns[ri].fingerprint)
+                    {
+                        let entry = scores.entry(ri).or_insert(0.0);
+                        *entry = entry.max(score);
+                    }
+                }
             }
         }
-        let mut scored: Vec<(f64, usize)> = candidates
-            .iter()
-            .filter_map(|&ri| {
-                binding_proposal_score(&subject.fingerprint, &reference_fns[ri].fingerprint)
-                    .map(|score| (score, ri))
-            })
-            .collect();
+        for literal in &subject.literals {
+            // Only literals that are distinctive on the reference side (present
+            // in exactly one reference function) carry identifying signal.
+            if let Some(indices) = ref_by_literal.get(literal.as_str())
+                && indices.len() == 1
+            {
+                let ri = indices[0];
+                let reference = &reference_fns[ri];
+                let mut score = 60.0; // a unique shared literal is strong evidence
+                if subject.fingerprint.param_count == reference.fingerprint.param_count {
+                    score += 5.0;
+                }
+                let entry = scores.entry(ri).or_insert(0.0);
+                *entry = entry.max(score);
+            }
+        }
+        let mut scored: Vec<(f64, usize)> = scores.into_iter().map(|(ri, s)| (s, ri)).collect();
         scored.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
         for (score, ri) in scored.into_iter().take(BINDING_PROPOSAL_TOP_K) {
             let reference = &reference_fns[ri];
@@ -2619,6 +2658,7 @@ mod tests {
 
     fn subject_fn(module_id: u32, path: &str, source: &str) -> Vec<SubjectFunction> {
         let names = function_names(source);
+        let mut lits = function_string_literals(source);
         FunctionExtractor::fingerprint(ModuleId(module_id), source)
             .into_iter()
             .filter_map(|f| {
@@ -2626,6 +2666,7 @@ mod tests {
                     module_id,
                     subject_path: path.to_string(),
                     name: name.clone(),
+                    literals: lits.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })
@@ -2637,16 +2678,40 @@ mod tests {
             .into_iter()
             .filter(|(_, name)| is_specific_reference_name(name))
             .collect();
+        let mut lits = function_string_literals(source);
         FunctionExtractor::fingerprint(ModuleId(0), source)
             .into_iter()
             .filter_map(|f| {
                 names.get(&f.id.span).map(|name| ReferenceFunction {
                     file: file.to_string(),
                     name: name.clone(),
+                    literals: lits.remove(&f.id.span).unwrap_or_default(),
                     fingerprint: f,
                 })
             })
             .collect()
+    }
+
+    #[test]
+    fn function_match_proposes_via_distinctive_inbody_literal() {
+        // Subject and reference functions whose bodies DIFFER structurally (no
+        // shared AST hash) but share a unique string literal -> the literal
+        // anchors a proposal that hash matching alone would miss.
+        let subjects = subject_fn(
+            7,
+            "modules/m.ts",
+            "function aB(x) { if (x) { log(\"uniqueDriftMarker_xyz\"); } return x; }",
+        );
+        let references = reference_fn(
+            "util/drift.ts",
+            "function realName(y) { return y ? emit(\"uniqueDriftMarker_xyz\") : 0; }",
+        );
+        let rows = match_function_lists(&subjects, &references, &BTreeMap::new());
+        assert!(
+            rows.iter()
+                .any(|r| !r.accepted && r.semantic_name == "realName"),
+            "distinctive shared literal should anchor a proposal: {rows:?}"
+        );
     }
 
     fn corroborate(module_id: u32, file: &str) -> BTreeMap<u32, String> {
